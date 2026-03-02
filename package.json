@@ -33,6 +33,7 @@
     "trichat:smoke": "./scripts/trichat_smoke.sh",
     "trichat:dogfood": "./scripts/trichat_dogfood.sh",
     "trichat:dogfood:smoke": "./scripts/trichat_dogfood_smoke.sh",
+    "trichat:soak:gate": "node ./scripts/trichat_soak_gate.mjs",
     "trichat:reliability:run_once": "./scripts/trichat_reliability_run_once.sh",
     "trichat:reliability:status": "./scripts/trichat_reliability_ctl.sh status",
     "trichat:reliability:start": "./scripts/trichat_reliability_ctl.sh start",

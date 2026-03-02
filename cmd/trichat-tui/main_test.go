@@ -527,3 +527,219 @@ func TestFanoutResponseCountsTowardQuorumSkipsDegraded(t *testing.T) {
 		t.Fatalf("expected degraded response to be excluded from quorum")
 	}
 }
+
+func TestPickMissingFanoutAgent(t *testing.T) {
+	expected := []string{"codex", "cursor", "local-imprint"}
+	responses := []agentResponse{
+		{agentID: "codex", content: "done"},
+		{agentID: "cursor", content: "done"},
+	}
+	missing := pickMissingFanoutAgent(expected, responses)
+	if missing != "local-imprint" {
+		t.Fatalf("expected local-imprint missing, got %q", missing)
+	}
+}
+
+func TestProposalResponsesDisagreeForTiebreak(t *testing.T) {
+	thresholds := deriveAdaptiveTiebreakThresholds(reliabilitySnapshot{})
+	responses := []agentResponse{
+		{
+			agentID: "codex",
+			content: `{"strategy":"Patch implementation immediately and run targeted tests","plan_steps":["patch","test"],"commands":["npm test"],"confidence":0.71}`,
+		},
+		{
+			agentID: "cursor",
+			content: `{"strategy":"Write architecture RFC first then queue implementation tasks","plan_steps":["rfc","review"],"commands":["npm run lint"],"confidence":0.66}`,
+		},
+	}
+	disagree, similarity := proposalResponsesDisagreeForTiebreak(responses, thresholds)
+	if !disagree {
+		t.Fatalf("expected disagreement for materially different proposals (similarity=%.3f)", similarity)
+	}
+}
+
+func TestProposalResponsesDisagreeForTiebreakSimilar(t *testing.T) {
+	thresholds := deriveAdaptiveTiebreakThresholds(reliabilitySnapshot{})
+	responses := []agentResponse{
+		{
+			agentID: "codex",
+			content: `{"strategy":"Ship patch with staged rollout and targeted tests","plan_steps":["patch","test"],"commands":["npm test","npm run build"],"confidence":0.74}`,
+		},
+		{
+			agentID: "cursor",
+			content: `{"strategy":"Ship patch with staged rollout and targeted tests","plan_steps":["patch","test"],"commands":["npm run build","npm test"],"confidence":0.70}`,
+		},
+	}
+	disagree, similarity := proposalResponsesDisagreeForTiebreak(responses, thresholds)
+	if disagree {
+		t.Fatalf("expected agreement for near-identical proposals (similarity=%.3f)", similarity)
+	}
+}
+
+func TestDeriveAdaptiveTiebreakThresholdsPressureFromLiveTelemetry(t *testing.T) {
+	base := deriveAdaptiveTiebreakThresholds(reliabilitySnapshot{})
+	disagreementRate := 0.42
+	reliability := reliabilitySnapshot{
+		consensus: triChatConsensusResp{
+			DisagreementRate: &disagreementRate,
+		},
+		novelty: triChatNoveltyResp{
+			Found:         true,
+			RetryRequired: true,
+			Disagreement:  true,
+			NoveltyScore:  0.29,
+		},
+	}
+	pressured := deriveAdaptiveTiebreakThresholds(reliability)
+	if pressured.strategyNoTiebreak <= base.strategyNoTiebreak {
+		t.Fatalf("expected strategy no-tiebreak threshold to increase under disagreement pressure")
+	}
+	if pressured.strategyForceTiebreak <= base.strategyForceTiebreak {
+		t.Fatalf("expected force-tiebreak threshold to increase under disagreement pressure")
+	}
+	if pressured.addendumMinConfidence >= base.addendumMinConfidence {
+		t.Fatalf("expected addendum confidence floor to relax under disagreement pressure")
+	}
+	if !strings.Contains(pressured.reason, "consensus_disagreement_rate") {
+		t.Fatalf("expected disagreement reason marker, got %q", pressured.reason)
+	}
+}
+
+func TestLateAddendumIsHighSignal(t *testing.T) {
+	thresholds := deriveAdaptiveTiebreakThresholds(reliabilitySnapshot{})
+	baseline := []agentResponse{
+		{
+			agentID: "codex",
+			content: `{"strategy":"Patch implementation and run targeted tests before merge","plan_steps":["patch","test"],"risks":["rollout regression"],"commands":["npm test"],"confidence":0.72}`,
+		},
+		{
+			agentID: "cursor",
+			content: `{"strategy":"Patch implementation with staged rollout and focused tests","plan_steps":["patch","rollout"],"risks":["staging drift"],"commands":["npm test","npm run build"],"confidence":0.7}`,
+		},
+	}
+	candidate := agentResponse{
+		agentID: "local-imprint",
+		content: `{"strategy":"Add rollback preflight lock checks and smoke verification before any deploy command","plan_steps":["preflight lock","smoke verify","deploy"],"risks":["lock starvation"],"commands":["npm run mvp:smoke","npm test"],"confidence":0.84}`,
+	}
+	highSignal, confidence, similarity := lateAddendumIsHighSignal(candidate, baseline, thresholds)
+	if !highSignal {
+		t.Fatalf("expected high-signal addendum to pass (confidence=%.2f similarity=%.2f)", confidence, similarity)
+	}
+}
+
+func TestLateAddendumRejectsNearDuplicate(t *testing.T) {
+	thresholds := deriveAdaptiveTiebreakThresholds(reliabilitySnapshot{})
+	baseline := []agentResponse{
+		{
+			agentID: "codex",
+			content: `{"strategy":"Ship patch with staged rollout and targeted tests","plan_steps":["patch","test"],"risks":["rollback drift"],"commands":["npm test","npm run build"],"confidence":0.74}`,
+		},
+	}
+	candidate := agentResponse{
+		agentID: "local-imprint",
+		content: `{"strategy":"Ship patch with staged rollout and targeted tests","plan_steps":["patch","test"],"risks":["rollback drift"],"commands":["npm run build","npm test"],"confidence":0.92}`,
+	}
+	highSignal, confidence, similarity := lateAddendumIsHighSignal(candidate, baseline, thresholds)
+	if highSignal {
+		t.Fatalf("expected duplicate addendum to be rejected (confidence=%.2f similarity=%.2f)", confidence, similarity)
+	}
+}
+
+func TestFanoutSingleWithBudgetCancelsSlowTiebreak(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "mock_bridge_slow.py")
+	script := `#!/usr/bin/env python3
+import json
+import sys
+import time
+
+delay = 0.0
+if len(sys.argv) > 1:
+    delay = float(sys.argv[1])
+
+payload = json.loads(sys.stdin.read() or "{}")
+request_id = str(payload.get("request_id", ""))
+agent_id = str(payload.get("agent_id", ""))
+op = str(payload.get("op", "ask"))
+
+if op == "ask":
+    time.sleep(delay)
+    content_obj = {
+        "strategy": f"{agent_id} strategy",
+        "plan_steps": ["step-a", "step-b"],
+        "risks": ["latency"],
+        "commands": ["npm test"],
+        "confidence": 0.62,
+        "role_lane": "implementer",
+        "coordination_handoff": "handoff"
+    }
+    envelope = {
+        "kind": "trichat.adapter.response",
+        "protocol_version": "trichat-bridge-v1",
+        "request_id": request_id,
+        "agent_id": agent_id,
+        "bridge": "mock-bridge",
+        "content": json.dumps(content_obj),
+        "meta": {"mock": True}
+    }
+else:
+    envelope = {
+        "kind": "trichat.adapter.pong",
+        "protocol_version": "trichat-bridge-v1",
+        "request_id": request_id,
+        "agent_id": agent_id,
+        "bridge": "mock-bridge",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "meta": {"mock": True}
+    }
+
+sys.stdout.write(json.dumps(envelope))
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write mock bridge script: %v", err)
+	}
+
+	cfg := appConfig{
+		repoRoot:                     tmpDir,
+		codexCommand:                 fmt.Sprintf("python3 %s 2.50", shellQuote(scriptPath)),
+		model:                        defaultModel,
+		modelTimeoutSeconds:          10,
+		bridgeTimeoutSeconds:         10,
+		adapterFailoverTimeoutSecond: 10,
+		adapterCircuitThreshold:      2,
+		adapterCircuitRecoverySecond: 45,
+	}
+	settings := runtimeSettings{
+		model:                        defaultModel,
+		consensusMinAgents:           1,
+		modelTimeoutSeconds:          1,
+		bridgeTimeoutSeconds:         1,
+		adapterFailoverTimeoutSecond: 1,
+		adapterCircuitThreshold:      2,
+		adapterCircuitRecoverySecond: 45,
+	}
+	orch := newOrchestrator(cfg)
+
+	startedAt := time.Now()
+	response, _, ok := orch.fanoutSingleWithBudget(
+		"codex",
+		"TRICHAT_TURN_PHASE=propose_tiebreak\nReturn JSON only.",
+		nil,
+		nil,
+		cfg,
+		settings,
+		"trichat-test-thread",
+		"",
+		900*time.Millisecond,
+	)
+	duration := time.Since(startedAt)
+	if duration >= 2*time.Second {
+		t.Fatalf("expected slow tiebreak to cancel under 2s, got %s", duration)
+	}
+	if ok {
+		t.Fatalf("expected canceled tiebreak response not to count toward quorum")
+	}
+	if fanoutResponseCountsTowardQuorum(response) {
+		t.Fatalf("expected canceled tiebreak response to be excluded from quorum")
+	}
+}

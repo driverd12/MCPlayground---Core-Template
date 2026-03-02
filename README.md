@@ -183,6 +183,18 @@ Dogfood loop (uses real bridge adapters + turn orchestration):
 npm run trichat:dogfood
 ```
 
+Soak gate (release criteria: long-run fanout stability with leak/timeout/breaker assertions):
+
+```bash
+npm run trichat:soak:gate -- --hours 1 --interval-seconds 60
+```
+
+Fast local validation (non-release short run):
+
+```bash
+npm run trichat:soak:gate -- --hours 1 --max-cycles 2 --allow-short true
+```
+
 Agent lifecycle:
 
 ```bash

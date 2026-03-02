@@ -1018,6 +1018,111 @@ func breakerToStatePayload(
 	return payload
 }
 
+type tiebreakThresholds struct {
+	strategyNoTiebreak    float64
+	strategyForceTiebreak float64
+	commandForceTiebreak  float64
+	addendumMinConfidence float64
+	addendumMaxSimilarity float64
+	reason                string
+}
+
+type lateAddendumInput struct {
+	caller            mcpCaller
+	mutation          *mutationFactory
+	orch              *orchestrator
+	cfg               appConfig
+	settings          runtimeSettings
+	threadID          string
+	turnID            string
+	userMessageID     string
+	agentID           string
+	prompt            string
+	history           []triChatMessage
+	baselineResponses []agentResponse
+	peerContext       string
+	thresholds        tiebreakThresholds
+	budget            time.Duration
+}
+
+func deriveAdaptiveTiebreakThresholds(reliability reliabilitySnapshot) tiebreakThresholds {
+	thresholds := tiebreakThresholds{
+		strategyNoTiebreak:    0.72,
+		strategyForceTiebreak: 0.46,
+		commandForceTiebreak:  0.34,
+		addendumMinConfidence: 0.62,
+		addendumMaxSimilarity: 0.74,
+		reason:                "base",
+	}
+	pressure := 0.0
+	reasons := make([]string, 0, 8)
+
+	if reliability.consensus.DisagreementRate != nil {
+		disagreementRate := clampFloat(*reliability.consensus.DisagreementRate, 0, 1)
+		switch {
+		case disagreementRate >= 0.4:
+			pressure += 0.12
+			reasons = append(reasons, fmt.Sprintf("consensus_disagreement_rate=%.2f", disagreementRate))
+		case disagreementRate >= 0.25:
+			pressure += 0.07
+			reasons = append(reasons, fmt.Sprintf("consensus_disagreement_rate=%.2f", disagreementRate))
+		case disagreementRate <= 0.1:
+			pressure -= 0.06
+			reasons = append(reasons, fmt.Sprintf("consensus_stable_rate=%.2f", disagreementRate))
+		}
+	}
+
+	if reliability.novelty.Found {
+		if reliability.novelty.RetryRequired {
+			pressure += 0.07
+			reasons = append(reasons, "novelty_retry_required")
+		}
+		if reliability.novelty.Disagreement {
+			pressure += 0.05
+			reasons = append(reasons, "novelty_disagreement")
+		}
+		if reliability.novelty.RetrySuppressed {
+			pressure += 0.03
+			reasons = append(reasons, "novelty_retry_suppressed")
+		}
+		switch {
+		case reliability.novelty.NoveltyScore <= 0.32:
+			pressure += 0.05
+			reasons = append(reasons, fmt.Sprintf("novelty_low=%.2f", reliability.novelty.NoveltyScore))
+		case reliability.novelty.NoveltyScore >= 0.58:
+			pressure -= 0.05
+			reasons = append(reasons, fmt.Sprintf("novelty_strong=%.2f", reliability.novelty.NoveltyScore))
+		}
+	}
+
+	adapterErrorRate := clampFloat(reliability.slo.Metrics.Adapter.ErrorRate, 0, 1)
+	turnFailureRate := clampFloat(reliability.slo.Metrics.Turns.FailureRate, 0, 1)
+	if adapterErrorRate >= 0.2 || turnFailureRate >= 0.18 {
+		pressure -= 0.05
+		reasons = append(reasons, "stability_guard_high_error")
+	}
+
+	pressure = clampFloat(pressure, -0.14, 0.18)
+	noTiebreak := clampFloat(0.72+pressure, 0.60, 0.88)
+	force := clampFloat(0.46+pressure*0.9, 0.28, 0.74)
+	if force >= noTiebreak-0.06 {
+		force = clampFloat(noTiebreak-0.06, 0.28, 0.74)
+	}
+	commandForce := clampFloat(0.34+pressure*0.8, 0.18, 0.72)
+	addendumConfidence := clampFloat(0.62-pressure*0.15, 0.50, 0.78)
+	addendumSimilarity := clampFloat(0.74+pressure*0.2, 0.55, 0.90)
+
+	thresholds.strategyNoTiebreak = noTiebreak
+	thresholds.strategyForceTiebreak = force
+	thresholds.commandForceTiebreak = commandForce
+	thresholds.addendumMinConfidence = addendumConfidence
+	thresholds.addendumMaxSimilarity = addendumSimilarity
+	if len(reasons) > 0 {
+		thresholds.reason = strings.Join(reasons, ",")
+	}
+	return thresholds
+}
+
 func (o *orchestrator) fanout(
 	prompt string,
 	promptOverrides map[string]string,
@@ -1095,11 +1200,56 @@ func (o *orchestrator) fanout(
 		}
 	}
 
-	order := map[string]int{"codex": 0, "cursor": 1, "local-imprint": 2}
-	sort.SliceStable(responses, func(i, j int) bool {
-		return order[responses[i].agentID] < order[responses[j].agentID]
-	})
+	sortAgentResponsesStable(responses)
 	return responses, events
+}
+
+func (o *orchestrator) fanoutSingleWithBudget(
+	agentID string,
+	prompt string,
+	promptOverrides map[string]string,
+	history []triChatMessage,
+	cfg appConfig,
+	settings runtimeSettings,
+	threadID string,
+	peerContext string,
+	budget time.Duration,
+) (agentResponse, []map[string]any, bool) {
+	normalizedAgent := strings.ToLower(strings.TrimSpace(agentID))
+	if normalizedAgent == "" {
+		return agentResponse{}, nil, false
+	}
+	runtime := o.agents[normalizedAgent]
+	if runtime == nil {
+		return agentResponse{}, nil, false
+	}
+	agentPrompt := strings.TrimSpace(prompt)
+	if override, ok := promptOverrides[normalizedAgent]; ok && strings.TrimSpace(override) != "" {
+		agentPrompt = strings.TrimSpace(override)
+	}
+	if agentPrompt == "" {
+		return agentResponse{}, nil, false
+	}
+	command := commandForAgent(runtime.agentID, cfg)
+	timeoutBudget := budget
+	if timeoutBudget <= 0 {
+		timeoutBudget = 900 * time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeoutBudget)
+	defer cancel()
+	response := runtime.respond(
+		ctx,
+		agentPrompt,
+		history,
+		o.bootstrapText(),
+		command,
+		cfg,
+		settings,
+		o.ollamaAPI,
+		threadID,
+		peerContext,
+	)
+	return response, response.telemetryEvents, fanoutResponseCountsTowardQuorum(response)
 }
 
 func fanoutResponseCountsTowardQuorum(response agentResponse) bool {
@@ -1119,6 +1269,297 @@ func fanoutResponseCountsTowardQuorum(response agentResponse) bool {
 	default:
 		return true
 	}
+}
+
+func sortAgentResponsesStable(responses []agentResponse) {
+	order := map[string]int{"codex": 0, "cursor": 1, "local-imprint": 2}
+	sort.SliceStable(responses, func(i, j int) bool {
+		left := strings.ToLower(strings.TrimSpace(responses[i].agentID))
+		right := strings.ToLower(strings.TrimSpace(responses[j].agentID))
+		leftRank, leftOK := order[left]
+		rightRank, rightOK := order[right]
+		if !leftOK {
+			leftRank = len(order) + 1
+		}
+		if !rightOK {
+			rightRank = len(order) + 1
+		}
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		return left < right
+	})
+}
+
+func pickMissingFanoutAgent(expectedAgents []string, responses []agentResponse) string {
+	seen := make(map[string]struct{}, len(responses))
+	for _, response := range responses {
+		agentID := strings.ToLower(strings.TrimSpace(response.agentID))
+		if agentID == "" {
+			continue
+		}
+		seen[agentID] = struct{}{}
+	}
+	for _, expected := range expectedAgents {
+		agentID := strings.ToLower(strings.TrimSpace(expected))
+		if agentID == "" {
+			continue
+		}
+		if _, ok := seen[agentID]; !ok {
+			return agentID
+		}
+	}
+	return ""
+}
+
+func proposalResponsesDisagreeForTiebreak(
+	responses []agentResponse,
+	thresholds tiebreakThresholds,
+) (bool, float64) {
+	if len(responses) < 2 {
+		return false, 1
+	}
+	left := responses[0]
+	right := responses[1]
+	leftStructured := parseProposalStructured(left.content, left.agentID, false)
+	rightStructured := parseProposalStructured(right.content, right.agentID, false)
+	leftStrategy := normalizeProposalCompareText(fmt.Sprint(leftStructured["strategy"]))
+	rightStrategy := normalizeProposalCompareText(fmt.Sprint(rightStructured["strategy"]))
+	if leftStrategy == "" || rightStrategy == "" {
+		leftStrategy = normalizeProposalCompareText(left.content)
+		rightStrategy = normalizeProposalCompareText(right.content)
+	}
+	strategySimilarity := proposalJaccardSimilarity(leftStrategy, rightStrategy)
+	if strategySimilarity >= thresholds.strategyNoTiebreak {
+		return false, strategySimilarity
+	}
+
+	leftCommands := proposalStructuredCommands(leftStructured)
+	rightCommands := proposalStructuredCommands(rightStructured)
+	commandSimilarity := proposalJaccardSimilarity(
+		strings.Join(leftCommands, " "),
+		strings.Join(rightCommands, " "),
+	)
+	if strategySimilarity <= thresholds.strategyForceTiebreak {
+		return true, strategySimilarity
+	}
+	if commandSimilarity < thresholds.commandForceTiebreak {
+		return true, strategySimilarity
+	}
+	return false, strategySimilarity
+}
+
+func proposalStructuredCommands(structured map[string]any) []string {
+	if len(structured) == 0 {
+		return nil
+	}
+	raw := structured["commands"]
+	switch typed := raw.(type) {
+	case []string:
+		out := make([]string, 0, len(typed))
+		for _, entry := range typed {
+			normalized := normalizeProposalCompareText(entry)
+			if normalized != "" {
+				out = append(out, normalized)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, entry := range typed {
+			normalized := normalizeProposalCompareText(fmt.Sprint(entry))
+			if normalized != "" {
+				out = append(out, normalized)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func normalizeProposalCompareText(value string) string {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	if lower == "" {
+		return ""
+	}
+	var b strings.Builder
+	lastSpace := false
+	for _, r := range lower {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+			lastSpace = false
+			continue
+		}
+		if !lastSpace {
+			b.WriteByte(' ')
+			lastSpace = true
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func proposalJaccardSimilarity(left string, right string) float64 {
+	leftTokens := strings.Fields(left)
+	rightTokens := strings.Fields(right)
+	if len(leftTokens) == 0 || len(rightTokens) == 0 {
+		return 0
+	}
+	leftSet := make(map[string]struct{}, len(leftTokens))
+	for _, token := range leftTokens {
+		if len(token) < 3 {
+			continue
+		}
+		leftSet[token] = struct{}{}
+	}
+	rightSet := make(map[string]struct{}, len(rightTokens))
+	for _, token := range rightTokens {
+		if len(token) < 3 {
+			continue
+		}
+		rightSet[token] = struct{}{}
+	}
+	if len(leftSet) == 0 || len(rightSet) == 0 {
+		return 0
+	}
+	overlap := 0
+	for token := range leftSet {
+		if _, ok := rightSet[token]; ok {
+			overlap += 1
+		}
+	}
+	union := len(leftSet) + len(rightSet) - overlap
+	if union <= 0 {
+		return 1
+	}
+	return float64(overlap) / float64(union)
+}
+
+func lateAddendumIsHighSignal(
+	response agentResponse,
+	baseline []agentResponse,
+	thresholds tiebreakThresholds,
+) (bool, float64, float64) {
+	structured := parseProposalStructured(response.content, response.agentID, false)
+	confidence := proposalConfidence(structured)
+	if confidence < thresholds.addendumMinConfidence {
+		return false, confidence, 1
+	}
+
+	candidateStrategy := normalizeProposalCompareText(fmt.Sprint(structured["strategy"]))
+	if candidateStrategy == "" {
+		candidateStrategy = normalizeProposalCompareText(response.content)
+	}
+	if candidateStrategy == "" {
+		return false, confidence, 1
+	}
+
+	maxSimilarity := 0.0
+	for _, peer := range baseline {
+		peerStructured := parseProposalStructured(peer.content, peer.agentID, false)
+		peerStrategy := normalizeProposalCompareText(fmt.Sprint(peerStructured["strategy"]))
+		if peerStrategy == "" {
+			peerStrategy = normalizeProposalCompareText(peer.content)
+		}
+		if peerStrategy == "" {
+			continue
+		}
+		similarity := proposalJaccardSimilarity(candidateStrategy, peerStrategy)
+		if similarity > maxSimilarity {
+			maxSimilarity = similarity
+		}
+	}
+	if len(baseline) > 0 && maxSimilarity > thresholds.addendumMaxSimilarity {
+		return false, confidence, maxSimilarity
+	}
+
+	commands := proposalStructuredCommands(structured)
+	if len(commands) == 0 && confidence < thresholds.addendumMinConfidence+0.06 {
+		return false, confidence, maxSimilarity
+	}
+	return true, confidence, maxSimilarity
+}
+
+func captureLateProposalAddendum(input lateAddendumInput) {
+	if strings.TrimSpace(input.agentID) == "" || input.orch == nil || input.mutation == nil {
+		return
+	}
+	addendumPrompt := buildProposalAddendumPromptForAgent(input.prompt, input.agentID, input.baselineResponses)
+	if strings.TrimSpace(addendumPrompt) == "" {
+		return
+	}
+	addendumSettings := input.settings
+	addendumSettings.consensusMinAgents = 1
+	addendumSettings.modelTimeoutSeconds = minInt(addendumSettings.modelTimeoutSeconds, 2)
+	addendumSettings.bridgeTimeoutSeconds = minInt(addendumSettings.bridgeTimeoutSeconds, 2)
+	addendumSettings.adapterFailoverTimeoutSecond = minInt(addendumSettings.adapterFailoverTimeoutSecond, 3)
+	response, _, ok := input.orch.fanoutSingleWithBudget(
+		input.agentID,
+		addendumPrompt,
+		nil,
+		input.history,
+		input.cfg,
+		addendumSettings,
+		input.threadID,
+		input.peerContext,
+		input.budget,
+	)
+	if !ok {
+		return
+	}
+	highSignal, confidence, maxSimilarity := lateAddendumIsHighSignal(response, input.baselineResponses, input.thresholds)
+	if !highSignal {
+		return
+	}
+	structured := parseProposalStructured(response.content, response.agentID, false)
+	messagePayload := map[string]any{
+		"mutation":            input.mutation.next("trichat.message_post"),
+		"thread_id":           input.threadID,
+		"agent_id":            response.agentID,
+		"role":                "assistant",
+		"content":             response.content,
+		"reply_to_message_id": input.userMessageID,
+		"metadata": map[string]any{
+			"kind":                    "fanout-proposal-addendum",
+			"source":                  "trichat-tui",
+			"phase":                   "propose",
+			"late_addendum":           true,
+			"addendum_agent":          response.agentID,
+			"addendum_for_turn":       input.turnID,
+			"high_signal":             true,
+			"addendum_confidence":     confidence,
+			"addendum_max_similarity": maxSimilarity,
+			"addendum_budget_msec":    int(input.budget / time.Millisecond),
+			"structured_v":            1,
+			"structured":              structured,
+			"adapter":                 response.adapterMeta,
+		},
+	}
+	if _, err := input.caller.callTool("trichat.message_post", messagePayload); err != nil {
+		return
+	}
+
+	if strings.TrimSpace(input.turnID) == "" {
+		return
+	}
+	_, _ = input.caller.callTool("trichat.turn_artifact", map[string]any{
+		"mutation":      input.mutation.next("trichat.turn_artifact"),
+		"turn_id":       input.turnID,
+		"phase":         "propose",
+		"artifact_type": "proposal_addendum",
+		"agent_id":      response.agentID,
+		"content":       response.content,
+		"structured":    structured,
+		"score":         proposalConfidence(structured),
+		"metadata": map[string]any{
+			"source":                  "trichat-tui",
+			"late_addendum":           true,
+			"high_signal":             true,
+			"addendum_confidence":     confidence,
+			"addendum_max_similarity": maxSimilarity,
+			"addendum_budget_msec":    int(input.budget / time.Millisecond),
+		},
+	})
 }
 
 func fanoutTargets(target string) []string {
@@ -3055,6 +3496,7 @@ func (m model) fanoutCmd(prompt string, target string) tea.Cmd {
 	baseSettings := m.settings
 	settings, timeoutTuning := deriveAdaptiveTimeouts(baseSettings, m.reliability.slo)
 	adaptiveSummary := adaptiveTimeoutSummary(timeoutTuning)
+	adaptiveTiebreak := deriveAdaptiveTiebreakThresholds(m.reliability)
 	runtimeCoordinationContext := buildRuntimeCoordinationContext(settings, timeoutTuning)
 	threadID := m.threadID
 	mutation := m.mutation
@@ -3151,6 +3593,10 @@ func (m model) fanoutCmd(prompt string, target string) tea.Cmd {
 			minAgents = len(expectedAgents)
 		}
 		minAgents = maxInt(1, minAgents)
+		proposalFastQuorum := strings.EqualFold(target, "all") && len(expectedAgents) >= 3
+		if proposalFastQuorum {
+			minAgents = minInt(minAgents, 2)
+		}
 		turnStartPayload, err := caller.callTool("trichat.turn_start", map[string]any{
 			"mutation":        mutation.next("trichat.turn_start"),
 			"thread_id":       threadID,
@@ -3172,6 +3618,14 @@ func (m model) fanoutCmd(prompt string, target string) tea.Cmd {
 					"failover_timeout_s":      settings.adapterFailoverTimeoutSecond,
 					"p95_ms":                  timeoutTuning.P95LatencyMS,
 					"latency_samples":         timeoutTuning.SampleCount,
+				},
+				"adaptive_tiebreak": map[string]any{
+					"strategy_no_tiebreak":    adaptiveTiebreak.strategyNoTiebreak,
+					"strategy_force_tiebreak": adaptiveTiebreak.strategyForceTiebreak,
+					"command_force_tiebreak":  adaptiveTiebreak.commandForceTiebreak,
+					"addendum_min_confidence": adaptiveTiebreak.addendumMinConfidence,
+					"addendum_max_similarity": adaptiveTiebreak.addendumMaxSimilarity,
+					"reason":                  adaptiveTiebreak.reason,
 				},
 			},
 		})
@@ -3205,16 +3659,57 @@ func (m model) fanoutCmd(prompt string, target string) tea.Cmd {
 
 		proposalPrompt := buildProposalPrompt(prompt, target)
 		proposalPromptOverrides := buildProposalPromptOverrides(prompt, target, expectedAgents)
+		proposalSettings := settings
+		if proposalFastQuorum {
+			proposalSettings.consensusMinAgents = minInt(proposalSettings.consensusMinAgents, 2)
+		}
 		responses, events := orch.fanout(
 			proposalPrompt,
 			proposalPromptOverrides,
 			history.Messages,
 			cfg,
-			settings,
+			proposalSettings,
 			target,
 			threadID,
 			mergeCoordinationContext(runtimeCoordinationContext, ""),
 		)
+		tiebreakTriggered := false
+		tiebreakSimilarity := 1.0
+		lateAddendumScheduled := false
+		lateAddendumAgent := ""
+		lateAddendumBudget := 2200 * time.Millisecond
+		if proposalFastQuorum && len(responses) >= 2 {
+			disagree, similarity := proposalResponsesDisagreeForTiebreak(responses, adaptiveTiebreak)
+			tiebreakSimilarity = similarity
+			tiebreakTriggered = disagree
+			candidate := pickMissingFanoutAgent(expectedAgents, responses)
+			if candidate != "" {
+				lateAddendumAgent = candidate
+				lateAddendumScheduled = true
+				baselineResponses := append([]agentResponse{}, responses...)
+				addendumHistory := append([]triChatMessage{}, history.Messages...)
+				go captureLateProposalAddendum(lateAddendumInput{
+					caller:            caller,
+					mutation:          mutation,
+					orch:              orch,
+					cfg:               cfg,
+					settings:          settings,
+					threadID:          threadID,
+					turnID:            turnID,
+					userMessageID:     userMessageID,
+					agentID:           candidate,
+					prompt:            prompt,
+					history:           addendumHistory,
+					baselineResponses: baselineResponses,
+					peerContext: mergeCoordinationContext(
+						runtimeCoordinationContext,
+						buildPeerContextFromResponses(baselineResponses),
+					),
+					thresholds: adaptiveTiebreak,
+					budget:     lateAddendumBudget,
+				})
+			}
+		}
 		for _, response := range responses {
 			structured := parseProposalStructured(response.content, response.agentID, false)
 			postArgs := map[string]any{
@@ -3225,12 +3720,17 @@ func (m model) fanoutCmd(prompt string, target string) tea.Cmd {
 				"content":             response.content,
 				"reply_to_message_id": userMessageID,
 				"metadata": map[string]any{
-					"kind":         "fanout-proposal",
-					"source":       "trichat-tui",
-					"adapter":      response.adapterMeta,
-					"phase":        "propose",
-					"structured_v": 1,
-					"structured":   structured,
+					"kind":                      "fanout-proposal",
+					"source":                    "trichat-tui",
+					"adapter":                   response.adapterMeta,
+					"phase":                     "propose",
+					"structured_v":              1,
+					"structured":                structured,
+					"tiebreak_triggered":        tiebreakTriggered,
+					"tiebreak_similarity":       tiebreakSimilarity,
+					"tiebreak_threshold_reason": adaptiveTiebreak.reason,
+					"addendum_scheduled":        lateAddendumScheduled,
+					"addendum_candidate_agent":  lateAddendumAgent,
 				},
 			}
 			if _, err := caller.callTool("trichat.message_post", postArgs); err != nil {
@@ -3247,8 +3747,19 @@ func (m model) fanoutCmd(prompt string, target string) tea.Cmd {
 					"structured":    structured,
 					"score":         proposalConfidence(structured),
 					"metadata": map[string]any{
-						"source": "trichat-tui",
-						"target": target,
+						"source":              "trichat-tui",
+						"target":              target,
+						"tiebreak_triggered":  tiebreakTriggered,
+						"tiebreak_similarity": tiebreakSimilarity,
+						"tiebreak_reason":     adaptiveTiebreak.reason,
+						"tiebreak_thresholds": map[string]any{
+							"strategy_no_tiebreak":    adaptiveTiebreak.strategyNoTiebreak,
+							"strategy_force_tiebreak": adaptiveTiebreak.strategyForceTiebreak,
+							"command_force_tiebreak":  adaptiveTiebreak.commandForceTiebreak,
+						},
+						"late_addendum_scheduled": lateAddendumScheduled,
+						"late_addendum_agent":     lateAddendumAgent,
+						"late_addendum_budget_ms": int(lateAddendumBudget / time.Millisecond),
 					},
 				})
 			}
@@ -3846,13 +4357,25 @@ func (m model) fanoutCmd(prompt string, target string) tea.Cmd {
 		if totalCouncilQuestions > 0 {
 			councilStatus = fmt.Sprintf(" council_q=%d", totalCouncilQuestions)
 		}
+		tiebreakStatus := ""
+		if tiebreakTriggered {
+			tiebreakStatus = fmt.Sprintf(" tiebreak=%s:deferred(sim=%.2f)", nullCoalesce(lateAddendumAgent, "n/a"), tiebreakSimilarity)
+		}
+		addendumStatus := ""
+		if lateAddendumScheduled {
+			addendumStatus = fmt.Sprintf(
+				" addendum=%s:pending(%dms)",
+				nullCoalesce(lateAddendumAgent, "n/a"),
+				int(lateAddendumBudget/time.Millisecond),
+			)
+		}
 		adaptiveStatus := ""
 		if adaptiveSummary != "" {
 			adaptiveStatus = " " + adaptiveSummary
 		}
 		if target == "all" {
 			return actionDoneMsg{
-				status:            "fanout complete: codex, cursor, local-imprint" + turnStatus + noveltyStatus + decisionStatus + interopStatus + councilStatus + warningStatus + adaptiveStatus,
+				status:            "fanout complete: codex, cursor, local-imprint" + turnStatus + noveltyStatus + decisionStatus + interopStatus + councilStatus + tiebreakStatus + addendumStatus + warningStatus + adaptiveStatus,
 				refresh:           true,
 				adaptiveEvaluated: true,
 				adaptiveApplied:   timeoutTuning.Applied,
@@ -3865,7 +4388,7 @@ func (m model) fanoutCmd(prompt string, target string) tea.Cmd {
 			}
 		}
 		return actionDoneMsg{
-			status:            "response complete: " + target + turnStatus + noveltyStatus + decisionStatus + interopStatus + councilStatus + warningStatus + adaptiveStatus,
+			status:            "response complete: " + target + turnStatus + noveltyStatus + decisionStatus + interopStatus + councilStatus + tiebreakStatus + addendumStatus + warningStatus + adaptiveStatus,
 			refresh:           true,
 			adaptiveEvaluated: true,
 			adaptiveApplied:   timeoutTuning.Applied,
@@ -4025,6 +4548,106 @@ Execution target:
 			profile.DistinctiveMove,
 			profile.CoordinationTip,
 			strings.TrimSpace(target),
+		),
+	)
+}
+
+func buildProposalTiebreakPromptForAgent(userPrompt string, agentID string, peerResponses []agentResponse) string {
+	profile := proposalRoleForAgent(agentID)
+	peerLines := make([]string, 0, len(peerResponses))
+	for _, response := range peerResponses {
+		peerAgent := strings.ToLower(strings.TrimSpace(response.agentID))
+		if peerAgent == "" || peerAgent == strings.ToLower(strings.TrimSpace(agentID)) {
+			continue
+		}
+		peerLines = append(peerLines, fmt.Sprintf("- %s: %s", peerAgent, compactSingleLine(response.content, 220)))
+	}
+	peerSnapshot := "(peer conflict snapshot unavailable)"
+	if len(peerLines) > 0 {
+		peerSnapshot = strings.Join(peerLines, "\n")
+	}
+	return strings.TrimSpace(
+		fmt.Sprintf(
+			`TRICHAT_TURN_PHASE=propose_tiebreak
+TRICHAT_RESPONSE_MODE=json
+TRICHAT_ROLE=%s
+TRICHAT_ROLE_OBJECTIVE=%s
+TRICHAT_AGENT=%s
+User objective:
+%s
+
+Tiebreak context:
+Two peer proposals disagree. Resolve the conflict quickly with one decisive strategy.
+
+Peer proposals:
+%s
+
+Output contract:
+- Return ONLY JSON with keys: strategy, plan_steps, risks, commands, confidence, role_lane, coordination_handoff.
+- "plan_steps", "risks", and "commands" must be arrays of short strings.
+- confidence must be a number from 0 to 1.
+- role_lane and coordination_handoff must be short strings.
+- Prefer an executable synthesis with explicit risk controls.`,
+			profile.RoleID,
+			profile.PrimaryFocus,
+			strings.TrimSpace(agentID),
+			strings.TrimSpace(userPrompt),
+			peerSnapshot,
+		),
+	)
+}
+
+func buildProposalAddendumPromptForAgent(userPrompt string, agentID string, baseline []agentResponse) string {
+	profile := proposalRoleForAgent(agentID)
+	peerLines := make([]string, 0, len(baseline))
+	for _, response := range baseline {
+		peerAgent := strings.ToLower(strings.TrimSpace(response.agentID))
+		if peerAgent == "" || peerAgent == strings.ToLower(strings.TrimSpace(agentID)) {
+			continue
+		}
+		structured := parseProposalStructured(response.content, response.agentID, false)
+		peerStrategy := compactSingleLine(fmt.Sprint(structured["strategy"]), 160)
+		if peerStrategy == "" {
+			peerStrategy = compactSingleLine(response.content, 160)
+		}
+		peerConfidence := proposalConfidence(structured)
+		peerLines = append(
+			peerLines,
+			fmt.Sprintf("- %s (confidence %.2f): %s", peerAgent, peerConfidence, peerStrategy),
+		)
+	}
+	peerSnapshot := "(no baseline proposal snapshot available)"
+	if len(peerLines) > 0 {
+		peerSnapshot = strings.Join(peerLines, "\n")
+	}
+	return strings.TrimSpace(
+		fmt.Sprintf(
+			`TRICHAT_TURN_PHASE=propose_addendum
+TRICHAT_RESPONSE_MODE=json
+TRICHAT_ROLE=%s
+TRICHAT_ROLE_OBJECTIVE=%s
+TRICHAT_AGENT=%s
+User objective:
+%s
+
+Late addendum mode:
+The router already finalized an initial quorum response without your lane.
+Respond with a concise, high-signal addendum only if you can materially improve plan quality.
+
+Baseline proposals:
+%s
+
+Output contract:
+- Return ONLY JSON with keys: strategy, plan_steps, risks, commands, confidence, role_lane, coordination_handoff.
+- "plan_steps", "risks", and "commands" must be arrays of short strings.
+- confidence must be a number from 0 to 1.
+- strategy should focus on one differential contribution (risk, command, or sequencing correction).
+- Keep the addendum crisp and execution-oriented.`,
+			profile.RoleID,
+			profile.PrimaryFocus,
+			strings.TrimSpace(agentID),
+			strings.TrimSpace(userPrompt),
+			peerSnapshot,
 		),
 	)
 }
