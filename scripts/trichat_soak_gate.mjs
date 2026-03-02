@@ -45,6 +45,9 @@ function printHelp() {
     "  --interval-seconds <n>           Seconds between cycle starts (default: 60)",
     "  --max-cycles <n>                 Optional hard cap for cycles (default: derived from hours)",
     "  --allow-short <true|false>       Allow runtime below --hours budget (default: false)",
+    "  --cycle-retry-limit <n>          Retry attempts per cycle on transient failures (default: 2)",
+    "  --cycle-retry-backoff-seconds <n>Backoff between cycle retries (default: 15)",
+    "  --adaptive-cycle-timeouts <bool> Adapt cycle timeout budget from live runtimes (default: true)",
     "  --thread-id <id>                 Existing/new thread id (default: trichat-soak-gate-<epoch>)",
     "  --prompt <text>                  Base user prompt for each cycle",
     "  --require-success-agents <n>     Minimum successful agents per cycle (default: 2)",
@@ -60,6 +63,7 @@ function printHelp() {
     "  --slo-window-minutes <n>         SLO lookback window (default: 120)",
     "  --workboard-settle-seconds <n>   Wait for active turn finalize before leak checks (default: 12)",
     "  --cycle-timeout-seconds <n>      Timeout for one dogfood cycle process (default: 420)",
+    "  --cycle-timeout-max-seconds <n>  Max adaptive cycle timeout ceiling (default: 1800)",
     "  --transport stdio|http           MCP transport for telemetry checks (default: stdio)",
     "  --url <http_url>                 MCP HTTP URL (default: http://127.0.0.1:8787/)",
     "  --origin <origin>                MCP HTTP Origin (default: http://127.0.0.1)",
@@ -94,6 +98,14 @@ function parseBoundedInt(value, fallback, min, max) {
     return fallback;
   }
   return Math.max(min, Math.min(max, parsed));
+}
+
+function clampInt(value, min, max) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return min;
+  }
+  return Math.max(min, Math.min(max, Math.round(numeric)));
 }
 
 function parseBoundedFloat(value, fallback, min, max) {
@@ -243,7 +255,7 @@ function buildDogfoodArgs(options, cyclePrompt) {
   return args;
 }
 
-async function runDogfoodCycle(options, cycle, cyclePrompt) {
+async function runDogfoodCycle(options, cycle, cyclePrompt, cycleTimeoutSeconds) {
   const args = buildDogfoodArgs(options, cyclePrompt);
   const env = {
     ...process.env,
@@ -261,7 +273,7 @@ async function runDogfoodCycle(options, cycle, cyclePrompt) {
     const timeout = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
-    }, Math.max(30, options.cycleTimeoutSeconds) * 1000);
+    }, Math.max(30, cycleTimeoutSeconds) * 1000);
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -278,7 +290,7 @@ async function runDogfoodCycle(options, cycle, cyclePrompt) {
     child.on("close", (code, signal) => {
       clearTimeout(timeout);
       if (timedOut) {
-        reject(new Error(`dogfood cycle ${cycle} exceeded ${options.cycleTimeoutSeconds}s`));
+        reject(new Error(`dogfood cycle ${cycle} exceeded ${cycleTimeoutSeconds}s`));
         return;
       }
       if (code !== 0) {
@@ -298,6 +310,77 @@ async function runDogfoodCycle(options, cycle, cyclePrompt) {
       }
     });
   });
+}
+
+function isTimeoutLikeError(reason) {
+  const normalized = String(reason ?? "").toLowerCase();
+  return (
+    normalized.includes("exceeded") ||
+    normalized.includes("timed out") ||
+    normalized.includes("timeout") ||
+    normalized.includes("deadline exceeded") ||
+    normalized.includes("context deadline")
+  );
+}
+
+function isRetryableCycleError(reason) {
+  const normalized = String(reason ?? "").toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (isTimeoutLikeError(normalized)) {
+    return true;
+  }
+  return (
+    normalized.includes("dogfood cycle") ||
+    normalized.includes("success_agents=") ||
+    normalized.includes("bridge command failed") ||
+    normalized.includes("adapter handshake failed") ||
+    normalized.includes("connection refused") ||
+    normalized.includes("ollama timeout") ||
+    normalized.includes("context deadline exceeded")
+  );
+}
+
+function isRetryableGateReasons(reasons) {
+  if (!Array.isArray(reasons) || reasons.length === 0) {
+    return false;
+  }
+  return reasons.every((reason) => {
+    const normalized = String(reason ?? "").toLowerCase();
+    return (
+      normalized.includes("success_agents") ||
+      normalized.includes("active turn still running")
+    );
+  });
+}
+
+function bumpAdaptiveCycleTimeout(currentSeconds, options, timeoutLike) {
+  const multiplier = timeoutLike ? 1.35 : 1.18;
+  const additive = timeoutLike ? 45 : 20;
+  return clampInt(
+    Math.ceil(currentSeconds * multiplier + additive),
+    options.cycleTimeoutSeconds,
+    options.cycleTimeoutMaxSeconds
+  );
+}
+
+function updateAdaptiveCycleTimeoutOnSuccess(currentSeconds, ewmaSeconds, observedSeconds, options) {
+  const baselineObserved = Math.max(1, observedSeconds);
+  const nextEwma = ewmaSeconds > 0
+    ? ewmaSeconds * 0.7 + baselineObserved * 0.3
+    : baselineObserved;
+  const target = clampInt(
+    Math.ceil(nextEwma * 1.65 + 45),
+    options.cycleTimeoutSeconds,
+    options.cycleTimeoutMaxSeconds
+  );
+  const blended = clampInt(
+    Math.round(currentSeconds * 0.6 + target * 0.4),
+    options.cycleTimeoutSeconds,
+    options.cycleTimeoutMaxSeconds
+  );
+  return { timeoutSeconds: blended, ewmaSeconds: nextEwma };
 }
 
 function isActiveTurnRunning(activeTurn) {
@@ -441,6 +524,18 @@ function parseOptions(cli) {
     1,
     20_000
   );
+  const baseCycleTimeoutSeconds = parseBoundedInt(
+    cli["cycle-timeout-seconds"] ?? process.env.TRICHAT_SOAK_CYCLE_TIMEOUT_SECONDS,
+    420,
+    30,
+    7200
+  );
+  const cycleTimeoutMaxSeconds = parseBoundedInt(
+    cli["cycle-timeout-max-seconds"] ?? process.env.TRICHAT_SOAK_CYCLE_TIMEOUT_MAX_SECONDS,
+    1800,
+    baseCycleTimeoutSeconds,
+    7200
+  );
   return {
     transport,
     url: String(cli.url ?? process.env.TRICHAT_SOAK_URL ?? "http://127.0.0.1:8787/"),
@@ -451,6 +546,22 @@ function parseOptions(cli) {
     intervalSeconds,
     maxCycles,
     allowShort: parseBool(cli["allow-short"] ?? process.env.TRICHAT_SOAK_ALLOW_SHORT, false),
+    cycleRetryLimit: parseBoundedInt(
+      cli["cycle-retry-limit"] ?? process.env.TRICHAT_SOAK_CYCLE_RETRY_LIMIT,
+      2,
+      0,
+      6
+    ),
+    cycleRetryBackoffSeconds: parseBoundedInt(
+      cli["cycle-retry-backoff-seconds"] ?? process.env.TRICHAT_SOAK_CYCLE_RETRY_BACKOFF_SECONDS,
+      15,
+      0,
+      600
+    ),
+    adaptiveCycleTimeouts: parseBool(
+      cli["adaptive-cycle-timeouts"] ?? process.env.TRICHAT_SOAK_ADAPTIVE_CYCLE_TIMEOUTS,
+      true
+    ),
     execute: parseBool(cli.execute ?? process.env.TRICHAT_SOAK_EXECUTE, false),
     bridgeDryRun: parseBool(cli["bridge-dry-run"] ?? process.env.TRICHAT_SOAK_BRIDGE_DRY_RUN, true),
     prompt: String(cli.prompt ?? process.env.TRICHAT_SOAK_PROMPT ?? DEFAULT_PROMPT).trim() || DEFAULT_PROMPT,
@@ -518,12 +629,8 @@ function parseOptions(cli) {
       0,
       300
     ),
-    cycleTimeoutSeconds: parseBoundedInt(
-      cli["cycle-timeout-seconds"] ?? process.env.TRICHAT_SOAK_CYCLE_TIMEOUT_SECONDS,
-      420,
-      30,
-      7200
-    ),
+    cycleTimeoutSeconds: baseCycleTimeoutSeconds,
+    cycleTimeoutMaxSeconds,
   };
 }
 
@@ -553,6 +660,9 @@ async function main() {
       hours: options.hours,
       interval_seconds: options.intervalSeconds,
       max_cycles: options.maxCycles,
+      cycle_retry_limit: options.cycleRetryLimit,
+      cycle_retry_backoff_seconds: options.cycleRetryBackoffSeconds,
+      adaptive_cycle_timeouts: options.adaptiveCycleTimeouts,
       require_success_agents: options.requireSuccessAgents,
       bridge_timeout_seconds: options.bridgeTimeoutSeconds,
       execute: options.execute,
@@ -566,13 +676,18 @@ async function main() {
       event_limit: options.eventLimit,
       slo_window_minutes: options.sloWindowMinutes,
       workboard_settle_seconds: options.workboardSettleSeconds,
+      cycle_timeout_seconds: options.cycleTimeoutSeconds,
+      cycle_timeout_max_seconds: options.cycleTimeoutMaxSeconds,
     },
     cycles: [],
+    retry_events: [],
     failures: [],
   };
 
   try {
     await client.connect(createTransport(options));
+    let adaptiveCycleTimeoutSeconds = options.cycleTimeoutSeconds;
+    let cycleRuntimeEwmaSeconds = 0;
     let cycle = 1;
     for (; cycle <= options.maxCycles; cycle += 1) {
       if (Date.now() >= deadlineMs && cycle > 1) {
@@ -583,76 +698,197 @@ async function main() {
         options.maxCycles > 1
           ? `${options.prompt}\n\nSoak cycle marker: ${cycle}/${options.maxCycles}`
           : options.prompt;
+      let acceptedSnapshot = null;
+      let cycleFailedReason = "";
+      let elapsedMs = 0;
+      const maxAttempts = options.cycleRetryLimit + 1;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const attemptStartedMs = Date.now();
+        const requestedBudget = options.adaptiveCycleTimeouts
+          ? adaptiveCycleTimeoutSeconds
+          : options.cycleTimeoutSeconds;
+        const attemptTimeoutSeconds = clampInt(
+          requestedBudget,
+          options.cycleTimeoutSeconds,
+          options.cycleTimeoutMaxSeconds
+        );
+        try {
+          const dogfoodReport = await runDogfoodCycle(options, cycle, cyclePrompt, attemptTimeoutSeconds);
+          const cycleResult =
+            Array.isArray(dogfoodReport?.cycles) && dogfoodReport.cycles.length > 0
+              ? dogfoodReport.cycles[dogfoodReport.cycles.length - 1]
+              : {};
+          const turnId = String(cycleResult?.turn_id ?? "").trim();
+          if (!options.execute && turnId) {
+            await callTool(client, "trichat.turn_orchestrate", {
+              mutation: mutation("trichat.turn_orchestrate.verify_finalize"),
+              turn_id: turnId,
+              action: "verify_finalize",
+              verify_status: "skipped",
+              verify_summary: "soak gate finalize (execute disabled)",
+              verify_details: {
+                source: "scripts/trichat_soak_gate.mjs",
+                cycle,
+                execute_enabled: false,
+              },
+            });
+          }
 
-      const dogfoodReport = await runDogfoodCycle(options, cycle, cyclePrompt);
-      const cycleResult =
-        Array.isArray(dogfoodReport?.cycles) && dogfoodReport.cycles.length > 0
-          ? dogfoodReport.cycles[dogfoodReport.cycles.length - 1]
-          : {};
-      const turnId = String(cycleResult?.turn_id ?? "").trim();
-      if (!options.execute && turnId) {
-        await callTool(client, "trichat.turn_orchestrate", {
-          mutation: mutation("trichat.turn_orchestrate.verify_finalize"),
-          turn_id: turnId,
-          action: "verify_finalize",
-          verify_status: "skipped",
-          verify_summary: "soak gate finalize (execute disabled)",
-          verify_details: {
-            source: "scripts/trichat_soak_gate.mjs",
+          const adapterTelemetry = await callTool(client, "trichat.adapter_telemetry", {
+            action: "status",
+            event_limit: options.eventLimit,
+          });
+          const slo = await callTool(client, "trichat.slo", {
+            action: "status",
+            window_minutes: options.sloWindowMinutes,
+            event_limit: options.eventLimit * 20,
+          });
+          const workboard = await waitForWorkboardSettled(
+            client,
+            options.threadId,
+            options.workboardSettleSeconds
+          );
+          const taskSummary = await callTool(client, "task.summary", {
+            running_limit: Math.max(10, options.maxRunningTasks * 2),
+          });
+
+          const evaluated = evaluateCycleHealth({
             cycle,
-            execute_enabled: false,
-          },
-        });
+            cycleStartedMs: attemptStartedMs,
+            cycleResult,
+            adapterTelemetry,
+            slo,
+            workboard,
+            taskSummary,
+            options,
+          });
+          const observedAttemptSeconds = Math.max(1, Math.round((Date.now() - attemptStartedMs) / 1000));
+          const statusLine =
+            `[soak] cycle=${cycle} attempt=${attempt}/${maxAttempts} ` +
+            `success=${evaluated.snapshot.success_agents}/${evaluated.snapshot.total_agents} ` +
+            `open=${evaluated.snapshot.open_channels} trips=${evaluated.snapshot.trip_events} ` +
+            `timeout_trips=${evaluated.snapshot.timeout_trip_events} ` +
+            `adapter_err=${evaluated.snapshot.adapter_error_rate.toFixed(3)} ` +
+            `turn_fail=${evaluated.snapshot.turn_failure_rate.toFixed(3)} ` +
+            `active_turn_running=${evaluated.snapshot.active_turn_running} ` +
+            `timeout_budget=${attemptTimeoutSeconds}s`;
+
+          if (evaluated.ok) {
+            if (options.adaptiveCycleTimeouts) {
+              const updatedBudget = updateAdaptiveCycleTimeoutOnSuccess(
+                adaptiveCycleTimeoutSeconds,
+                cycleRuntimeEwmaSeconds,
+                observedAttemptSeconds,
+                options
+              );
+              adaptiveCycleTimeoutSeconds = updatedBudget.timeoutSeconds;
+              cycleRuntimeEwmaSeconds = updatedBudget.ewmaSeconds;
+            }
+            acceptedSnapshot = {
+              ...evaluated.snapshot,
+              attempt,
+              retries_used: attempt - 1,
+              attempt_timeout_seconds: attemptTimeoutSeconds,
+              observed_attempt_seconds: observedAttemptSeconds,
+              adaptive_cycle_timeout_seconds: adaptiveCycleTimeoutSeconds,
+            };
+            elapsedMs = Date.now() - cycleStartedMs;
+            process.stderr.write(`${statusLine}\n`);
+            break;
+          }
+
+          const gateReason = evaluated.reasons.join("; ");
+          const retryableGate = isRetryableGateReasons(evaluated.reasons);
+          if (attempt < maxAttempts && retryableGate) {
+            if (options.adaptiveCycleTimeouts) {
+              adaptiveCycleTimeoutSeconds = bumpAdaptiveCycleTimeout(
+                adaptiveCycleTimeoutSeconds,
+                options,
+                false
+              );
+            }
+            report.retry_events.push({
+              cycle,
+              attempt,
+              type: "gate",
+              reason: gateReason,
+              timeout_budget_seconds: attemptTimeoutSeconds,
+              next_timeout_budget_seconds: adaptiveCycleTimeoutSeconds,
+              retry_backoff_seconds: options.cycleRetryBackoffSeconds,
+            });
+            process.stderr.write(
+              `${statusLine} retry=on reason="${compactSingleLine(gateReason, 180)}" ` +
+              `next_timeout=${adaptiveCycleTimeoutSeconds}s backoff=${options.cycleRetryBackoffSeconds}s\n`
+            );
+            if (options.cycleRetryBackoffSeconds > 0) {
+              await sleep(options.cycleRetryBackoffSeconds * 1000);
+            }
+            continue;
+          }
+
+          cycleFailedReason = gateReason;
+          const terminalSnapshot = {
+            ...evaluated.snapshot,
+            attempt,
+            retries_used: attempt - 1,
+            attempt_timeout_seconds: attemptTimeoutSeconds,
+            observed_attempt_seconds: observedAttemptSeconds,
+            adaptive_cycle_timeout_seconds: adaptiveCycleTimeoutSeconds,
+          };
+          report.cycles.push(terminalSnapshot);
+          process.stderr.write(`${statusLine} retry=off reason="${compactSingleLine(gateReason, 180)}"\n`);
+          break;
+        } catch (error) {
+          const errorReason = error instanceof Error ? error.message : String(error);
+          const timeoutLike = isTimeoutLikeError(errorReason);
+          const retryableError = isRetryableCycleError(errorReason);
+          if (options.adaptiveCycleTimeouts) {
+            adaptiveCycleTimeoutSeconds = bumpAdaptiveCycleTimeout(
+              adaptiveCycleTimeoutSeconds,
+              options,
+              timeoutLike
+            );
+          }
+          if (attempt < maxAttempts && retryableError) {
+            report.retry_events.push({
+              cycle,
+              attempt,
+              type: "error",
+              reason: compactSingleLine(errorReason, 220),
+              timeout_like: timeoutLike,
+              timeout_budget_seconds: attemptTimeoutSeconds,
+              next_timeout_budget_seconds: adaptiveCycleTimeoutSeconds,
+              retry_backoff_seconds: options.cycleRetryBackoffSeconds,
+            });
+            process.stderr.write(
+              `[soak] cycle=${cycle} attempt=${attempt}/${maxAttempts} error="${compactSingleLine(errorReason, 180)}" ` +
+              `retry=on timeout_like=${timeoutLike} next_timeout=${adaptiveCycleTimeoutSeconds}s ` +
+              `backoff=${options.cycleRetryBackoffSeconds}s\n`
+            );
+            if (options.cycleRetryBackoffSeconds > 0) {
+              await sleep(options.cycleRetryBackoffSeconds * 1000);
+            }
+            continue;
+          }
+          cycleFailedReason = errorReason;
+          process.stderr.write(
+            `[soak] cycle=${cycle} attempt=${attempt}/${maxAttempts} error="${compactSingleLine(errorReason, 180)}" retry=off\n`
+          );
+          break;
+        }
       }
 
-      const adapterTelemetry = await callTool(client, "trichat.adapter_telemetry", {
-        action: "status",
-        event_limit: options.eventLimit,
-      });
-      const slo = await callTool(client, "trichat.slo", {
-        action: "status",
-        window_minutes: options.sloWindowMinutes,
-        event_limit: options.eventLimit * 20,
-      });
-      const workboard = await waitForWorkboardSettled(
-        client,
-        options.threadId,
-        options.workboardSettleSeconds
-      );
-      const taskSummary = await callTool(client, "task.summary", {
-        running_limit: Math.max(10, options.maxRunningTasks * 2),
-      });
-
-      const evaluated = evaluateCycleHealth({
-        cycle,
-        cycleStartedMs,
-        cycleResult,
-        adapterTelemetry,
-        slo,
-        workboard,
-        taskSummary,
-        options,
-      });
-      report.cycles.push(evaluated.snapshot);
-      process.stderr.write(
-        `[soak] cycle=${cycle} success=${evaluated.snapshot.success_agents}/${evaluated.snapshot.total_agents} ` +
-          `open=${evaluated.snapshot.open_channels} trips=${evaluated.snapshot.trip_events} ` +
-          `timeout_trips=${evaluated.snapshot.timeout_trip_events} ` +
-          `adapter_err=${evaluated.snapshot.adapter_error_rate.toFixed(3)} ` +
-          `turn_fail=${evaluated.snapshot.turn_failure_rate.toFixed(3)} ` +
-          `active_turn_running=${evaluated.snapshot.active_turn_running}\n`
-      );
-
-      if (!evaluated.ok) {
+      if (acceptedSnapshot) {
+        report.cycles.push(acceptedSnapshot);
+      } else {
         report.ok = false;
         report.failures.push({
           cycle,
-          reason: evaluated.reasons.join("; "),
+          reason: cycleFailedReason || `cycle ${cycle} failed without a terminal reason`,
         });
         break;
       }
 
-      const elapsedMs = Date.now() - cycleStartedMs;
       const remainingToDeadlineMs = deadlineMs - Date.now();
       if (remainingToDeadlineMs <= 0) {
         break;
