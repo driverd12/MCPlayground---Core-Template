@@ -1031,23 +1031,34 @@ func (o *orchestrator) fanout(
 	agents := fanoutTargets(target)
 	responses := make([]agentResponse, 0, len(agents))
 	events := make([]map[string]any, 0, 16)
-	results := make(chan agentResponse, len(agents))
-	var wg sync.WaitGroup
+	if len(agents) == 0 {
+		return responses, events
+	}
+	minSuccessAgents := clampInt(settings.consensusMinAgents, 1, len(agents))
+
+	type fanoutResult struct {
+		response       agentResponse
+		countsAsQuorum bool
+	}
+	results := make(chan fanoutResult, len(agents))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	launched := 0
 
 	for _, agentID := range agents {
 		agent := o.agents[agentID]
 		if agent == nil {
 			continue
 		}
-		wg.Add(1)
+		launched += 1
 		go func(runtime *agentRuntime) {
-			defer wg.Done()
 			command := commandForAgent(runtime.agentID, cfg)
 			agentPrompt := prompt
 			if override, ok := promptOverrides[runtime.agentID]; ok && strings.TrimSpace(override) != "" {
 				agentPrompt = strings.TrimSpace(override)
 			}
 			response := runtime.respond(
+				ctx,
 				agentPrompt,
 				history,
 				o.bootstrapText(),
@@ -1058,22 +1069,56 @@ func (o *orchestrator) fanout(
 				threadID,
 				peerContext,
 			)
-			results <- response
+			results <- fanoutResult{
+				response:       response,
+				countsAsQuorum: fanoutResponseCountsTowardQuorum(response),
+			}
 		}(agent)
 	}
+	if launched == 0 {
+		return responses, events
+	}
 
-	wg.Wait()
-	close(results)
+	successCount := 0
+	completed := 0
+	for completed < launched {
+		result := <-results
+		completed += 1
+		responses = append(responses, result.response)
+		events = append(events, result.response.telemetryEvents...)
+		if result.countsAsQuorum {
+			successCount += 1
+		}
+		if successCount >= minSuccessAgents {
+			cancel()
+			break
+		}
+	}
 
 	order := map[string]int{"codex": 0, "cursor": 1, "local-imprint": 2}
-	for response := range results {
-		responses = append(responses, response)
-		events = append(events, response.telemetryEvents...)
-	}
 	sort.SliceStable(responses, func(i, j int) bool {
 		return order[responses[i].agentID] < order[responses[j].agentID]
 	})
 	return responses, events
+}
+
+func fanoutResponseCountsTowardQuorum(response agentResponse) bool {
+	if strings.TrimSpace(response.agentID) == "" || strings.TrimSpace(response.content) == "" {
+		return false
+	}
+	if len(response.adapterMeta) == 0 {
+		return true
+	}
+	if degraded, ok := parseAnyBool(response.adapterMeta["degraded"]); ok && degraded {
+		return false
+	}
+	adapter := strings.ToLower(strings.TrimSpace(fmt.Sprint(response.adapterMeta["adapter"])))
+	switch adapter {
+	case "degraded", "aborted", "cancelled", "canceled":
+		return false
+	default:
+		return true
+	}
 }
 
 func fanoutTargets(target string) []string {
@@ -1100,6 +1145,7 @@ func commandForAgent(agentID string, cfg appConfig) string {
 }
 
 func (a *agentRuntime) respond(
+	ctx context.Context,
 	prompt string,
 	history []triChatMessage,
 	bootstrapText string,
@@ -1110,6 +1156,9 @@ func (a *agentRuntime) respond(
 	threadID string,
 	peerContext string,
 ) agentResponse {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	start := time.Now()
 	deadline := start.Add(time.Duration(maxInt(1, settings.adapterFailoverTimeoutSecond)) * time.Second)
 	attempts := make([]string, 0, 4)
@@ -1132,7 +1181,12 @@ func (a *agentRuntime) respond(
 
 	messages := buildOllamaMessages(a.systemPrompt, prompt, history, bootstrapText, peerContext)
 
+channelLoop:
 	for _, channel := range channels {
+		if ctx.Err() != nil {
+			attempts = append(attempts, "fanout:aborted(quorum-finalize)")
+			break channelLoop
+		}
 		now := time.Now()
 		if !now.Before(deadline) {
 			attempts = append(attempts, "deadline-exceeded")
@@ -1185,7 +1239,7 @@ func (a *agentRuntime) respond(
 				}
 				pingTimeout := minDuration(remaining, 5*time.Second)
 				handshakeStarted := time.Now()
-				pingErr := pingCommandAdapter(command, pingPayload, pingTimeout)
+				pingErr := pingCommandAdapter(ctx, command, pingPayload, pingTimeout)
 				handshakeLatencyMS := time.Since(handshakeStarted).Milliseconds()
 				a.mu.Lock()
 				a.lastCommandHandshakeAt = time.Now().UTC()
@@ -1193,6 +1247,10 @@ func (a *agentRuntime) respond(
 				a.lastCommandHandshakeOK = pingErr == nil
 				a.mu.Unlock()
 				if pingErr != nil {
+					if isFanoutAbortError(pingErr) || ctx.Err() != nil {
+						attempts = append(attempts, "command:aborted(quorum-finalize)")
+						break channelLoop
+					}
 					errText := fmt.Sprintf("RuntimeError: adapter handshake failed: %v", pingErr)
 					errClass := classifyCommandAdapterError(errText)
 					events = append(events, telemetryEvent(a.agentID, "command", "handshake_failed", errText, "", map[string]any{
@@ -1259,10 +1317,14 @@ func (a *agentRuntime) respond(
 				"response_mode":          responseMode,
 				"collaboration_contract": "coordinate with other agents and avoid duplicate strategy",
 			}
-			envelope, err := callCommandAdapter(command, requestPayload, timeout)
+			envelope, err := callCommandAdapter(ctx, command, requestPayload, timeout)
 			commandLatencyMS := time.Since(commandAttemptStarted).Milliseconds()
 			retryAttempt := 0
 			if err != nil {
+				if isFanoutAbortError(err) || ctx.Err() != nil {
+					attempts = append(attempts, "command:aborted(quorum-finalize)")
+					break channelLoop
+				}
 				retryPayload := map[string]any{
 					"op":                     "ask",
 					"protocol_version":       adapterProtocol,
@@ -1282,7 +1344,7 @@ func (a *agentRuntime) respond(
 					"retry_attempt":          1,
 					"collaboration_contract": "coordinate with other agents and avoid duplicate strategy",
 				}
-				for retryAttempt < maxRetries {
+				for retryAttempt < maxRetries && ctx.Err() == nil {
 					errText := fmt.Sprintf("%T: %v", err, err)
 					errClass := classifyCommandAdapterError(errText)
 					if !errClass.Retryable || !time.Now().Add(minRetryBudget).Before(deadline) {
@@ -1302,12 +1364,19 @@ func (a *agentRuntime) respond(
 						break
 					}
 					retryStart := time.Now()
-					envelope, err = callCommandAdapter(command, retryPayload, retryTimeout)
+					envelope, err = callCommandAdapter(ctx, command, retryPayload, retryTimeout)
 					commandLatencyMS = time.Since(retryStart).Milliseconds()
 					if err == nil {
 						break
 					}
+					if isFanoutAbortError(err) || ctx.Err() != nil {
+						break
+					}
 				}
+			}
+			if err != nil && (isFanoutAbortError(err) || ctx.Err() != nil) {
+				attempts = append(attempts, "command:aborted(quorum-finalize)")
+				break channelLoop
 			}
 			if err == nil {
 				events = append(events, telemetryEvent(a.agentID, "command", "response_ok", "", "", map[string]any{
@@ -1412,10 +1481,14 @@ func (a *agentRuntime) respond(
 
 		timeout := minDuration(remaining, time.Duration(maxInt(1, settings.modelTimeoutSeconds))*time.Second)
 		modelAttemptStarted := time.Now()
-		content, err := callOllama(ollamaAPI, settings.model, messages, timeout)
+		content, err := callOllama(ctx, ollamaAPI, settings.model, messages, timeout)
 		modelLatencyMS := time.Since(modelAttemptStarted).Milliseconds()
 		retryAttempt := 0
 		if err != nil {
+			if isFanoutAbortError(err) || ctx.Err() != nil {
+				attempts = append(attempts, "ollama:aborted(quorum-finalize)")
+				break channelLoop
+			}
 			retryMessages := buildOllamaMessages(
 				a.systemPrompt,
 				compactRetryPrompt(prompt),
@@ -1423,7 +1496,7 @@ func (a *agentRuntime) respond(
 				truncate(strings.TrimSpace(bootstrapText), 420),
 				truncate(compactSingleLine(peerContext, 420), 420),
 			)
-			for retryAttempt < maxRetries {
+			for retryAttempt < maxRetries && ctx.Err() == nil {
 				errText := fmt.Sprintf("%T: %v", err, err)
 				errClass := classifyModelAdapterError(errText)
 				if !errClass.Retryable || !time.Now().Add(minRetryBudget).Before(deadline) {
@@ -1443,12 +1516,19 @@ func (a *agentRuntime) respond(
 					break
 				}
 				retryStart := time.Now()
-				content, err = callOllama(ollamaAPI, settings.model, retryMessages, retryTimeout)
+				content, err = callOllama(ctx, ollamaAPI, settings.model, retryMessages, retryTimeout)
 				modelLatencyMS = time.Since(retryStart).Milliseconds()
 				if err == nil {
 					break
 				}
+				if isFanoutAbortError(err) || ctx.Err() != nil {
+					break
+				}
 			}
+		}
+		if err != nil && (isFanoutAbortError(err) || ctx.Err() != nil) {
+			attempts = append(attempts, "ollama:aborted(quorum-finalize)")
+			break channelLoop
 		}
 		if err == nil {
 			events = append(events, telemetryEvent(a.agentID, "model", "response_ok", "", "", map[string]any{
@@ -1517,6 +1597,27 @@ func (a *agentRuntime) respond(
 			}))
 		}
 		attempts = append(attempts, "ollama:failed("+compactSingleLine(errText, 120)+")")
+	}
+
+	if ctx.Err() != nil {
+		reason := "quorum-finalize"
+		if len(attempts) > 0 {
+			reason = compactSingleLine(attempts[len(attempts)-1], 160)
+		}
+		events = append(events, telemetryEvent(a.agentID, "command", "fanout_aborted", "", "", map[string]any{
+			"reason": reason,
+		}))
+		return agentResponse{
+			agentID: a.agentID,
+			content: fmt.Sprintf("[fanout-aborted] %s skipped after quorum finalize.", a.agentID),
+			adapterMeta: map[string]any{
+				"adapter":  "aborted",
+				"degraded": true,
+				"reason":   reason,
+				"attempts": attempts,
+			},
+			telemetryEvents: events,
+		}
 	}
 
 	a.mu.Lock()
@@ -1727,14 +1828,31 @@ func inferAdapterResponseMode(prompt string) string {
 	return "plain"
 }
 
-func runCommandAdapterRaw(command string, payload map[string]any, timeout time.Duration) (string, string, error) {
+func isFanoutAbortError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	normalized := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(normalized, "bridge command canceled") ||
+		strings.Contains(normalized, "ollama request canceled") ||
+		strings.Contains(normalized, "quorum-finalize")
+}
+
+func runCommandAdapterRaw(ctx context.Context, command string, payload map[string]any, timeout time.Duration) (string, string, error) {
 	parts := splitCommand(command)
 	if len(parts) == 0 {
 		return "", "", errors.New("empty command adapter")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), maxDuration(time.Second, timeout))
+	baseCtx := ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	callCtx, cancel := context.WithTimeout(baseCtx, maxDuration(time.Second, timeout))
 	defer cancel()
-	cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
+	cmd := exec.CommandContext(callCtx, parts[0], parts[1:]...)
 	input, _ := json.Marshal(payload)
 	cmd.Stdin = bytes.NewReader(input)
 	var stdout bytes.Buffer
@@ -1742,7 +1860,10 @@ func runCommandAdapterRaw(command string, payload map[string]any, timeout time.D
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if errors.Is(callCtx.Err(), context.Canceled) {
+			return "", strings.TrimSpace(stderr.String()), fmt.Errorf("bridge command canceled")
+		}
+		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
 			return "", strings.TrimSpace(stderr.String()), fmt.Errorf("bridge timeout")
 		}
 		errText := strings.TrimSpace(stderr.String())
@@ -1790,7 +1911,7 @@ func parseJSONLineFallback[T any](output string) (T, bool, error) {
 	return zero, false, fmt.Errorf("invalid JSON envelope")
 }
 
-func callCommandAdapter(command string, payload map[string]any, timeout time.Duration) (commandAdapterResponse, error) {
+func callCommandAdapter(ctx context.Context, command string, payload map[string]any, timeout time.Duration) (commandAdapterResponse, error) {
 	expectedRequestID := asTrimmedString(payload["request_id"])
 	expectedAgentID := asTrimmedString(payload["agent_id"])
 	if expectedRequestID == "" {
@@ -1799,7 +1920,7 @@ func callCommandAdapter(command string, payload map[string]any, timeout time.Dur
 	if expectedAgentID == "" {
 		return commandAdapterResponse{}, errors.New("adapter payload missing agent_id")
 	}
-	output, stderr, err := runCommandAdapterRaw(command, payload, timeout)
+	output, stderr, err := runCommandAdapterRaw(ctx, command, payload, timeout)
 	if err != nil {
 		return commandAdapterResponse{}, err
 	}
@@ -1849,10 +1970,10 @@ func callCommandAdapter(command string, payload map[string]any, timeout time.Dur
 	return envelope, nil
 }
 
-func pingCommandAdapter(command string, payload map[string]any, timeout time.Duration) error {
+func pingCommandAdapter(ctx context.Context, command string, payload map[string]any, timeout time.Duration) error {
 	expectedRequestID := asTrimmedString(payload["request_id"])
 	expectedAgentID := asTrimmedString(payload["agent_id"])
-	output, stderr, err := runCommandAdapterRaw(command, payload, timeout)
+	output, stderr, err := runCommandAdapterRaw(ctx, command, payload, timeout)
 	if err != nil {
 		return err
 	}
@@ -1892,7 +2013,13 @@ func pingCommandAdapter(command string, payload map[string]any, timeout time.Dur
 	return nil
 }
 
-func callOllama(apiBase, model string, messages []map[string]string, timeout time.Duration) (string, error) {
+func callOllama(ctx context.Context, apiBase, model string, messages []map[string]string, timeout time.Duration) (string, error) {
+	baseCtx := ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	callCtx, cancel := context.WithTimeout(baseCtx, maxDuration(time.Second, timeout))
+	defer cancel()
 	endpoint := strings.TrimRight(strings.TrimSpace(apiBase), "/") + "/api/chat"
 	body := map[string]any{
 		"model":    model,
@@ -1901,14 +2028,20 @@ func callOllama(apiBase, model string, messages []map[string]string, timeout tim
 		"options":  map[string]any{"temperature": 0.2},
 	}
 	buf, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, endpoint, bytes.NewReader(buf))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: maxDuration(time.Second, timeout)}
+	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
+		if errors.Is(callCtx.Err(), context.Canceled) {
+			return "", fmt.Errorf("ollama request canceled")
+		}
+		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("ollama request failed on /api/chat: context deadline exceeded")
+		}
 		return "", fmt.Errorf("ollama request failed on /api/chat: %w", err)
 	}
 	defer resp.Body.Close()

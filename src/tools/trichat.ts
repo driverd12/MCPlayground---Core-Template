@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { z } from "zod";
 import { Storage } from "../storage.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
@@ -2607,18 +2607,15 @@ async function runAutopilotCouncil(
   const successAgents = new Set<string>();
   let targetAgents: string[] = [...DEFAULT_CONSENSUS_AGENT_IDS];
   for (let round = 1; round <= input.config.max_rounds; round += 1) {
-    for (const rawAgentId of targetAgents) {
-      const agentId = normalizeConsensusAgentId(rawAgentId);
-      const lane = AUTOPILOT_AGENT_ROLE_LANES[agentId] ?? "collaborator";
-      const askResult = await runAutopilotBridgeAsk(storage, {
-        session_key: input.session_key,
-        config: input.config,
-        thread_id: input.intake.thread_id,
-        objective: input.intake.objective,
-        round,
-        agent_id: agentId,
-        lane,
-      });
+    const roundOutcome = await runAutopilotCouncilRoundParallel(storage, {
+      session_key: input.session_key,
+      config: input.config,
+      intake: input.intake,
+      round,
+      target_agents: targetAgents,
+    });
+    for (const settled of roundOutcome.settled) {
+      const { agent_id: agentId, lane, result: askResult } = settled;
       if (!askResult.ok || !askResult.content) {
         continue;
       }
@@ -2647,6 +2644,7 @@ async function runAutopilotCouncil(
               round,
               lane,
               confidence: askResult.confidence,
+              quorum_reached: roundOutcome.quorum_reached,
             },
           }),
       });
@@ -2676,6 +2674,8 @@ async function runAutopilotCouncil(
               commands: askResult.commands,
               confidence: askResult.confidence,
               mentorship_note: askResult.mentorship_note,
+              quorum_reached: roundOutcome.quorum_reached,
+              aborted_agents: roundOutcome.aborted_agents,
             },
             score: askResult.confidence,
             metadata: {
@@ -2754,6 +2754,114 @@ async function runAutopilotCouncil(
     decision_score: decisionScore,
     council_confidence: clamp(adjustedConfidence, 0.05, 0.99),
     success_agents: [...successAgents].sort(),
+  };
+}
+
+async function runAutopilotCouncilRoundParallel(
+  storage: Storage,
+  input: {
+    session_key: string;
+    config: TriChatAutopilotConfig;
+    intake: AutopilotGoalIntakeResult;
+    round: number;
+    target_agents: string[];
+  }
+): Promise<{
+  settled: Array<{
+    agent_id: string;
+    lane: string;
+    result: Awaited<ReturnType<typeof runAutopilotBridgeAsk>>;
+  }>;
+  quorum_reached: boolean;
+  aborted_agents: string[];
+}> {
+  const minSuccessAgents = Math.max(1, input.config.min_success_agents);
+  const abortController = new AbortController();
+  const pending = new Map<
+    string,
+    Promise<{
+      agent_id: string;
+      lane: string;
+      result: Awaited<ReturnType<typeof runAutopilotBridgeAsk>>;
+    }>
+  >();
+  for (const rawAgentId of input.target_agents) {
+    const agentId = normalizeConsensusAgentId(rawAgentId);
+    if (!agentId) {
+      continue;
+    }
+    const lane = AUTOPILOT_AGENT_ROLE_LANES[agentId] ?? "collaborator";
+    const task = runAutopilotBridgeAsk(storage, {
+      session_key: input.session_key,
+      config: input.config,
+      thread_id: input.intake.thread_id,
+      objective: input.intake.objective,
+      round: input.round,
+      agent_id: agentId,
+      lane,
+      signal: abortController.signal,
+    })
+      .then((result) => ({
+        agent_id: agentId,
+        lane,
+        result,
+      }))
+      .catch((error) => ({
+        agent_id: agentId,
+        lane,
+        result: {
+          ok: false,
+          content: null,
+          strategy: "",
+          commands: [],
+          confidence: 0.2,
+          mentorship_note: null,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      }));
+    pending.set(agentId, task);
+  }
+
+  const settled: Array<{
+    agent_id: string;
+    lane: string;
+    result: Awaited<ReturnType<typeof runAutopilotBridgeAsk>>;
+  }> = [];
+  let successCount = 0;
+  let quorumReached = false;
+
+  while (pending.size > 0) {
+    const completed = await Promise.race([...pending.values()]);
+    pending.delete(completed.agent_id);
+    settled.push(completed);
+    if (completed.result.ok && completed.result.content) {
+      successCount += 1;
+    }
+    if (!quorumReached && successCount >= minSuccessAgents) {
+      quorumReached = true;
+      abortController.abort();
+      break;
+    }
+  }
+
+  const abortedAgents: string[] = [];
+  if (pending.size > 0) {
+    const leftovers = await Promise.all([...pending.values()]);
+    for (const completed of leftovers) {
+      settled.push(completed);
+      if (
+        completed.result.error &&
+        completed.result.error.toLowerCase().includes("aborted by quorum-finalize")
+      ) {
+        abortedAgents.push(completed.agent_id);
+      }
+    }
+  }
+
+  return {
+    settled,
+    quorum_reached: quorumReached,
+    aborted_agents: [...new Set(abortedAgents)].sort(),
   };
 }
 
@@ -3374,6 +3482,7 @@ async function runAutopilotBridgeAsk(
     round: number;
     agent_id: string;
     lane: string;
+    signal?: AbortSignal;
   }
 ): Promise<{
   ok: boolean;
@@ -3425,11 +3534,12 @@ async function runAutopilotBridgeAsk(
       thread_id: input.thread_id,
     },
     execute: () =>
-      runAdapterProtocolCommand({
+      runAdapterProtocolCommandAsync({
         command: resolution.command!,
         timeout_seconds: input.config.bridge_timeout_seconds,
         workspace,
         env_overrides: input.config.bridge_dry_run ? { TRICHAT_BRIDGE_DRY_RUN: "1" } : undefined,
+        signal: input.signal,
         payload: {
           op: "ask",
           protocol_version: BRIDGE_PROTOCOL_VERSION,
@@ -5533,6 +5643,223 @@ function runAdapterProtocolCommand(input: {
     exit_code: exitCode,
     signal,
     envelope,
+  };
+}
+
+async function runAdapterProtocolCommandAsync(input: {
+  command: string;
+  payload: Record<string, unknown>;
+  timeout_seconds: number;
+  workspace: string;
+  env_overrides?: Record<string, string>;
+  signal?: AbortSignal;
+}): Promise<AdapterProtocolExecResult> {
+  const startedAt = Date.now();
+  const timeoutMs = Math.max(1000, Math.floor(input.timeout_seconds * 1000));
+  return await new Promise<AdapterProtocolExecResult>((resolve) => {
+    let settled = false;
+    let timedOut = false;
+    let abortedBySignal = false;
+    let exitCode: number | null = null;
+    let exitSignal: string | null = null;
+    let stdoutBuffers: Buffer[] = [];
+    let stderrBuffers: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const maxBytes = 256_000;
+
+    const finish = (result: AdapterProtocolExecResult) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(result);
+    };
+
+    const child = spawn("/bin/sh", ["-lc", input.command], {
+      cwd: input.workspace,
+      env: {
+        ...process.env,
+        ...(input.env_overrides ?? {}),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+
+    const onAbort = () => {
+      abortedBySignal = true;
+      child.kill("SIGTERM");
+      setTimeout(() => {
+        if (!settled) {
+          child.kill("SIGKILL");
+        }
+      }, 200);
+    };
+    if (input.signal) {
+      if (input.signal.aborted) {
+        onAbort();
+      } else {
+        input.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+      const next = appendBufferChunk(stdoutBuffers, stdoutBytes, buffer, maxBytes);
+      stdoutBuffers = next.chunks;
+      stdoutBytes = next.bytes;
+    });
+
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+      const next = appendBufferChunk(stderrBuffers, stderrBytes, buffer, maxBytes);
+      stderrBuffers = next.chunks;
+      stderrBytes = next.bytes;
+    });
+
+    child.on("error", (error) => {
+      clearTimeout(timeoutHandle);
+      const durationMs = Date.now() - startedAt;
+      const stdout = Buffer.concat(stdoutBuffers).toString("utf8");
+      const stderr = Buffer.concat(stderrBuffers).toString("utf8");
+      const message = timedOut
+        ? `bridge command timed out after ${input.timeout_seconds}s`
+        : abortedBySignal
+          ? "bridge command aborted by quorum-finalize"
+          : `bridge command failed: ${error.message}`;
+      finish({
+        ok: false,
+        duration_ms: durationMs,
+        error: message,
+        stdout,
+        stderr,
+        exit_code: exitCode,
+        signal: exitSignal,
+        envelope: decodeAdapterProtocolEnvelope(stdout),
+      });
+    });
+
+    child.on("close", (code, signal) => {
+      clearTimeout(timeoutHandle);
+      exitCode = typeof code === "number" ? code : null;
+      exitSignal = signal ? String(signal) : null;
+      const durationMs = Date.now() - startedAt;
+      const stdout = Buffer.concat(stdoutBuffers).toString("utf8");
+      const stderr = Buffer.concat(stderrBuffers).toString("utf8");
+
+      if (timedOut) {
+        finish({
+          ok: false,
+          duration_ms: durationMs,
+          error: `bridge command timed out after ${input.timeout_seconds}s`,
+          stdout,
+          stderr,
+          exit_code: exitCode,
+          signal: exitSignal,
+          envelope: decodeAdapterProtocolEnvelope(stdout),
+        });
+        return;
+      }
+      if (abortedBySignal) {
+        finish({
+          ok: false,
+          duration_ms: durationMs,
+          error: "bridge command aborted by quorum-finalize",
+          stdout,
+          stderr,
+          exit_code: exitCode,
+          signal: exitSignal,
+          envelope: decodeAdapterProtocolEnvelope(stdout),
+        });
+        return;
+      }
+      if (exitCode !== 0) {
+        const reason =
+          excerptAdapterText(stderr) ??
+          excerptAdapterText(stdout) ??
+          "bridge command returned non-zero exit code";
+        finish({
+          ok: false,
+          duration_ms: durationMs,
+          error: `bridge command failed (exit=${exitCode}${exitSignal ? ` signal=${exitSignal}` : ""}): ${reason}`,
+          stdout,
+          stderr,
+          exit_code: exitCode,
+          signal: exitSignal,
+          envelope: decodeAdapterProtocolEnvelope(stdout),
+        });
+        return;
+      }
+
+      const envelope = decodeAdapterProtocolEnvelope(stdout);
+      if (!envelope) {
+        finish({
+          ok: false,
+          duration_ms: durationMs,
+          error: "bridge protocol violation: adapter stdout was not valid JSON envelope",
+          stdout,
+          stderr,
+          exit_code: exitCode,
+          signal: exitSignal,
+          envelope: null,
+        });
+        return;
+      }
+
+      finish({
+        ok: true,
+        duration_ms: durationMs,
+        error: null,
+        stdout,
+        stderr,
+        exit_code: exitCode,
+        signal: exitSignal,
+        envelope,
+      });
+    });
+
+    try {
+      child.stdin.write(`${JSON.stringify(input.payload)}\n`);
+      child.stdin.end();
+    } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      const stdout = Buffer.concat(stdoutBuffers).toString("utf8");
+      const stderr = Buffer.concat(stderrBuffers).toString("utf8");
+      finish({
+        ok: false,
+        duration_ms: durationMs,
+        error: error instanceof Error ? error.message : String(error),
+        stdout,
+        stderr,
+        exit_code: exitCode,
+        signal: exitSignal,
+        envelope: decodeAdapterProtocolEnvelope(stdout),
+      });
+    }
+  });
+}
+
+function appendBufferChunk(
+  chunks: Buffer[],
+  currentBytes: number,
+  incoming: Buffer,
+  maxBytes: number
+): { chunks: Buffer[]; bytes: number } {
+  if (currentBytes >= maxBytes) {
+    return { chunks, bytes: currentBytes };
+  }
+  const allowedBytes = Math.min(incoming.byteLength, maxBytes - currentBytes);
+  if (allowedBytes <= 0) {
+    return { chunks, bytes: currentBytes };
+  }
+  const nextChunk = allowedBytes === incoming.byteLength ? incoming : incoming.subarray(0, allowedBytes);
+  return {
+    chunks: [...chunks, nextChunk],
+    bytes: currentBytes + nextChunk.byteLength,
   };
 }
 

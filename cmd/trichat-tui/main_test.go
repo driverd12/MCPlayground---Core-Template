@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -396,5 +399,131 @@ func TestRenderTimelineCouncilStripModes(t *testing.T) {
 	alwaysRendered := modeAlways.renderTimeline()
 	if !strings.Contains(alwaysRendered, "Council Transcript Strip") {
 		t.Fatalf("expected council strip visible when mode=always")
+	}
+}
+
+func TestFanoutUsesParallelAsksWithQuorumFirstFinalize(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "mock_bridge.py")
+	script := `#!/usr/bin/env python3
+import json
+import sys
+import time
+
+delay = 0.0
+if len(sys.argv) > 1:
+    delay = float(sys.argv[1])
+
+payload = json.loads(sys.stdin.read() or "{}")
+request_id = str(payload.get("request_id", ""))
+agent_id = str(payload.get("agent_id", ""))
+op = str(payload.get("op", "ask"))
+
+if op == "ask":
+    time.sleep(delay)
+    envelope = {
+        "kind": "trichat.adapter.response",
+        "protocol_version": "trichat-bridge-v1",
+        "request_id": request_id,
+        "agent_id": agent_id,
+        "bridge": "mock-bridge",
+        "content": f"{agent_id} quick response",
+        "meta": {"mock": True}
+    }
+else:
+    envelope = {
+        "kind": "trichat.adapter.pong",
+        "protocol_version": "trichat-bridge-v1",
+        "request_id": request_id,
+        "agent_id": agent_id,
+        "bridge": "mock-bridge",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "meta": {"mock": True}
+    }
+
+sys.stdout.write(json.dumps(envelope))
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write mock bridge script: %v", err)
+	}
+
+	cfg := appConfig{
+		repoRoot:                     tmpDir,
+		codexCommand:                 fmt.Sprintf("python3 %s 0.04", shellQuote(scriptPath)),
+		cursorCommand:                fmt.Sprintf("python3 %s 0.05", shellQuote(scriptPath)),
+		imprintCommand:               fmt.Sprintf("python3 %s 3.80", shellQuote(scriptPath)),
+		model:                        defaultModel,
+		modelTimeoutSeconds:          10,
+		bridgeTimeoutSeconds:         10,
+		adapterFailoverTimeoutSecond: 10,
+		adapterCircuitThreshold:      2,
+		adapterCircuitRecoverySecond: 45,
+	}
+	settings := runtimeSettings{
+		model:                        defaultModel,
+		consensusMinAgents:           2,
+		modelTimeoutSeconds:          10,
+		bridgeTimeoutSeconds:         10,
+		adapterFailoverTimeoutSecond: 10,
+		adapterCircuitThreshold:      2,
+		adapterCircuitRecoverySecond: 45,
+	}
+	orch := newOrchestrator(cfg)
+
+	startedAt := time.Now()
+	responses, _ := orch.fanout(
+		"TRICHAT_TURN_PHASE=propose\nTest quorum-first fanout",
+		nil,
+		nil,
+		cfg,
+		settings,
+		"all",
+		"trichat-test-thread",
+		"",
+	)
+	duration := time.Since(startedAt)
+
+	if duration >= 2*time.Second {
+		t.Fatalf("expected quorum-first fanout under 2s, got %s", duration)
+	}
+	if len(responses) != 2 {
+		t.Fatalf("expected exactly 2 quorum responses, got %d", len(responses))
+	}
+
+	responders := map[string]bool{}
+	for _, response := range responses {
+		responders[response.agentID] = true
+		if !fanoutResponseCountsTowardQuorum(response) {
+			t.Fatalf("response from %s should count toward quorum", response.agentID)
+		}
+	}
+	if responders["local-imprint"] {
+		t.Fatalf("expected slow straggler local-imprint to be skipped by quorum finalize")
+	}
+}
+
+func TestFanoutResponseCountsTowardQuorumSkipsDegraded(t *testing.T) {
+	ok := fanoutResponseCountsTowardQuorum(agentResponse{
+		agentID: "codex",
+		content: "ready",
+		adapterMeta: map[string]any{
+			"adapter":  "command",
+			"degraded": false,
+		},
+	})
+	if !ok {
+		t.Fatalf("expected non-degraded response to count toward quorum")
+	}
+
+	degraded := fanoutResponseCountsTowardQuorum(agentResponse{
+		agentID: "cursor",
+		content: "degraded",
+		adapterMeta: map[string]any{
+			"adapter":  "degraded",
+			"degraded": true,
+		},
+	})
+	if degraded {
+		t.Fatalf("expected degraded response to be excluded from quorum")
 	}
 }
