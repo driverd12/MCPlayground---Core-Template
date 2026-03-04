@@ -67,6 +67,7 @@ function printHelp() {
     "  --event-limit <n>                Adapter telemetry event window (default: 400)",
     "  --slo-window-minutes <n>         SLO lookback window (default: 120)",
     "  --workboard-settle-seconds <n>   Wait for active turn finalize before leak checks (default: 12)",
+    "  --workboard-settle-max-seconds <n>Max adaptive settle timeout ceiling (default: 180)",
     "  --cycle-timeout-seconds <n>      Timeout for one dogfood cycle process (default: 420)",
     "  --cycle-timeout-max-seconds <n>  Max adaptive cycle timeout ceiling (default: 1800)",
     "  --transport stdio|http           MCP transport for telemetry checks (default: stdio)",
@@ -468,20 +469,20 @@ function classifyCycleErrorClass(error) {
   return "cycle_other";
 }
 
-function extendedMaxAttempts(baseMaxAttempts, options, failureClass) {
+function retryBonusForFailureClass(options, failureClass) {
   switch (failureClass) {
     case "quorum_shortfall":
-      return baseMaxAttempts + options.quorumFailureExtraRetries;
+      return options.quorumFailureExtraRetries;
     case "timeout":
-      return baseMaxAttempts + options.timeoutFailureExtraRetries;
+      return options.timeoutFailureExtraRetries;
     case "bridge_failure":
     case "adapter_handshake":
     case "service_unavailable":
-      return baseMaxAttempts + options.bridgeFailureExtraRetries;
+      return options.bridgeFailureExtraRetries;
     case "turn_settle":
-      return baseMaxAttempts + options.turnSettleExtraRetries;
+      return options.turnSettleExtraRetries;
     default:
-      return baseMaxAttempts;
+      return 0;
   }
 }
 
@@ -511,6 +512,51 @@ function updateAdaptiveCycleTimeoutOnSuccess(currentSeconds, ewmaSeconds, observ
     options.cycleTimeoutMaxSeconds
   );
   return { timeoutSeconds: blended, ewmaSeconds: nextEwma };
+}
+
+function maybeExtendMaxAttempts({
+  maxAttempts,
+  options,
+  failureClass,
+  classRetryBoosts,
+}) {
+  const retryBonus = retryBonusForFailureClass(options, failureClass);
+  if (retryBonus <= 0) {
+    return { maxAttempts, boosted: false, retryBonus: 0 };
+  }
+  if (classRetryBoosts.has(failureClass)) {
+    return { maxAttempts, boosted: false, retryBonus: 0 };
+  }
+  const extended = Math.min(options.maxCycleAttempts, maxAttempts + retryBonus);
+  if (extended > maxAttempts) {
+    classRetryBoosts.add(failureClass);
+    return { maxAttempts: extended, boosted: true, retryBonus };
+  }
+  return { maxAttempts, boosted: false, retryBonus: 0 };
+}
+
+function isTurnSettleReason(reason) {
+  return String(reason ?? "").toLowerCase().includes("active turn still running");
+}
+
+function isTurnSettleOnlyFailure(reasons) {
+  return Array.isArray(reasons) && reasons.length > 0 && reasons.every((reason) => isTurnSettleReason(reason));
+}
+
+function bumpAdaptiveWorkboardSettleTimeout(currentSeconds, options) {
+  return clampInt(
+    Math.ceil(currentSeconds * 1.65 + 6),
+    options.workboardSettleSeconds,
+    options.workboardSettleMaxSeconds
+  );
+}
+
+function decayAdaptiveWorkboardSettleTimeout(currentSeconds, options) {
+  return clampInt(
+    Math.round(currentSeconds * 0.7 + options.workboardSettleSeconds * 0.3),
+    options.workboardSettleSeconds,
+    options.workboardSettleMaxSeconds
+  );
 }
 
 function isActiveTurnRunning(activeTurn) {
@@ -666,6 +712,18 @@ function parseOptions(cli) {
     baseCycleTimeoutSeconds,
     7200
   );
+  const workboardSettleSeconds = parseBoundedInt(
+    cli["workboard-settle-seconds"] ?? process.env.TRICHAT_SOAK_WORKBOARD_SETTLE_SECONDS,
+    12,
+    0,
+    300
+  );
+  const workboardSettleMaxSeconds = parseBoundedInt(
+    cli["workboard-settle-max-seconds"] ?? process.env.TRICHAT_SOAK_WORKBOARD_SETTLE_MAX_SECONDS,
+    180,
+    Math.max(1, workboardSettleSeconds),
+    900
+  );
   return {
     transport,
     url: String(cli.url ?? process.env.TRICHAT_SOAK_URL ?? "http://127.0.0.1:8787/"),
@@ -783,12 +841,8 @@ function parseOptions(cli) {
       15,
       1440
     ),
-    workboardSettleSeconds: parseBoundedInt(
-      cli["workboard-settle-seconds"] ?? process.env.TRICHAT_SOAK_WORKBOARD_SETTLE_SECONDS,
-      12,
-      0,
-      300
-    ),
+    workboardSettleSeconds,
+    workboardSettleMaxSeconds,
     cycleTimeoutSeconds: baseCycleTimeoutSeconds,
     cycleTimeoutMaxSeconds,
   };
@@ -841,6 +895,7 @@ async function main() {
       event_limit: options.eventLimit,
       slo_window_minutes: options.sloWindowMinutes,
       workboard_settle_seconds: options.workboardSettleSeconds,
+      workboard_settle_max_seconds: options.workboardSettleMaxSeconds,
       cycle_timeout_seconds: options.cycleTimeoutSeconds,
       cycle_timeout_max_seconds: options.cycleTimeoutMaxSeconds,
     },
@@ -852,6 +907,7 @@ async function main() {
   try {
     await client.connect(createTransport(options));
     let adaptiveCycleTimeoutSeconds = options.cycleTimeoutSeconds;
+    let adaptiveWorkboardSettleSeconds = options.workboardSettleSeconds;
     let cycleRuntimeEwmaSeconds = 0;
     let cycle = 1;
     for (; cycle <= options.maxCycles; cycle += 1) {
@@ -866,8 +922,8 @@ async function main() {
       let acceptedSnapshot = null;
       let cycleFailedReason = "";
       let cycleFailedDetails = null;
-      const baseMaxAttempts = options.cycleRetryLimit + 1;
-      let maxAttempts = Math.min(options.maxCycleAttempts, Math.max(1, baseMaxAttempts));
+      let maxAttempts = Math.min(options.maxCycleAttempts, Math.max(1, options.cycleRetryLimit + 1));
+      const classRetryBoosts = new Set();
       let elapsedMs = 0;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         const attemptStartedMs = Date.now();
@@ -910,16 +966,21 @@ async function main() {
             window_minutes: options.sloWindowMinutes,
             event_limit: options.eventLimit * 20,
           });
-          const workboard = await waitForWorkboardSettled(
+          const settleTimeoutSeconds = clampInt(
+            adaptiveWorkboardSettleSeconds,
+            options.workboardSettleSeconds,
+            options.workboardSettleMaxSeconds
+          );
+          let workboard = await waitForWorkboardSettled(
             client,
             options.threadId,
-            options.workboardSettleSeconds
+            settleTimeoutSeconds
           );
           const taskSummary = await callTool(client, "task.summary", {
             running_limit: Math.max(10, options.maxRunningTasks * 2),
           });
 
-          const evaluated = evaluateCycleHealth({
+          let evaluated = evaluateCycleHealth({
             cycle,
             cycleStartedMs: attemptStartedMs,
             cycleResult,
@@ -929,6 +990,29 @@ async function main() {
             taskSummary,
             options,
           });
+          let settleProbeSeconds = 0;
+          if (
+            !evaluated.ok &&
+            isTurnSettleOnlyFailure(evaluated.reasons) &&
+            settleTimeoutSeconds < options.workboardSettleMaxSeconds
+          ) {
+            settleProbeSeconds = bumpAdaptiveWorkboardSettleTimeout(settleTimeoutSeconds, options);
+            process.stderr.write(
+              `[soak] cycle=${cycle} attempt=${attempt}/${maxAttempts} settle_probe=${settleProbeSeconds}s reason="` +
+              `${compactSingleLine(evaluated.reasons.join("; "), 140)}"\n`
+            );
+            workboard = await waitForWorkboardSettled(client, options.threadId, settleProbeSeconds);
+            evaluated = evaluateCycleHealth({
+              cycle,
+              cycleStartedMs: attemptStartedMs,
+              cycleResult,
+              adapterTelemetry,
+              slo,
+              workboard,
+              taskSummary,
+              options,
+            });
+          }
           const observedAttemptSeconds = Math.max(1, Math.round((Date.now() - attemptStartedMs) / 1000));
           const statusLine =
             `[soak] cycle=${cycle} attempt=${attempt}/${maxAttempts} ` +
@@ -938,7 +1022,7 @@ async function main() {
             `adapter_err=${evaluated.snapshot.adapter_error_rate.toFixed(3)} ` +
             `turn_fail=${evaluated.snapshot.turn_failure_rate.toFixed(3)} ` +
             `active_turn_running=${evaluated.snapshot.active_turn_running} ` +
-            `timeout_budget=${attemptTimeoutSeconds}s`;
+            `timeout_budget=${attemptTimeoutSeconds}s settle_budget=${settleTimeoutSeconds}s`;
 
           if (evaluated.ok) {
             if (options.adaptiveCycleTimeouts) {
@@ -951,13 +1035,23 @@ async function main() {
               adaptiveCycleTimeoutSeconds = updatedBudget.timeoutSeconds;
               cycleRuntimeEwmaSeconds = updatedBudget.ewmaSeconds;
             }
+            if (settleProbeSeconds > 0) {
+              adaptiveWorkboardSettleSeconds = settleProbeSeconds;
+            }
+            adaptiveWorkboardSettleSeconds = decayAdaptiveWorkboardSettleTimeout(
+              adaptiveWorkboardSettleSeconds,
+              options
+            );
             acceptedSnapshot = {
               ...evaluated.snapshot,
               attempt,
               retries_used: attempt - 1,
               attempt_timeout_seconds: attemptTimeoutSeconds,
+              settle_timeout_seconds: settleTimeoutSeconds,
+              settle_probe_seconds: settleProbeSeconds,
               observed_attempt_seconds: observedAttemptSeconds,
               adaptive_cycle_timeout_seconds: adaptiveCycleTimeoutSeconds,
+              adaptive_workboard_settle_seconds: adaptiveWorkboardSettleSeconds,
             };
             elapsedMs = Date.now() - cycleStartedMs;
             process.stderr.write(`${statusLine}\n`);
@@ -966,13 +1060,14 @@ async function main() {
 
           const gateReason = evaluated.reasons.join("; ");
           const gateClass = classifyGateFailureClass(evaluated.reasons);
-          const extendedAttempts = Math.min(
-            options.maxCycleAttempts,
-            extendedMaxAttempts(baseMaxAttempts, options, gateClass)
-          );
-          if (extendedAttempts > maxAttempts) {
-            maxAttempts = extendedAttempts;
-          }
+          const maxAttemptsBefore = maxAttempts;
+          const extended = maybeExtendMaxAttempts({
+            maxAttempts,
+            options,
+            failureClass: gateClass,
+            classRetryBoosts,
+          });
+          maxAttempts = extended.maxAttempts;
           const retryableGate = isRetryableGateReasons(evaluated.reasons);
           if (attempt < maxAttempts && retryableGate) {
             if (options.adaptiveCycleTimeouts) {
@@ -980,6 +1075,12 @@ async function main() {
                 adaptiveCycleTimeoutSeconds,
                 options,
                 false
+              );
+            }
+            if (gateClass === "turn_settle") {
+              adaptiveWorkboardSettleSeconds = bumpAdaptiveWorkboardSettleTimeout(
+                adaptiveWorkboardSettleSeconds,
+                options
               );
             }
             report.retry_events.push({
@@ -990,20 +1091,28 @@ async function main() {
               failure_class: gateClass,
               timeout_budget_seconds: attemptTimeoutSeconds,
               next_timeout_budget_seconds: adaptiveCycleTimeoutSeconds,
+              settle_budget_seconds: settleTimeoutSeconds,
+              settle_probe_seconds: settleProbeSeconds,
+              next_settle_budget_seconds: adaptiveWorkboardSettleSeconds,
               retry_backoff_seconds: options.cycleRetryBackoffSeconds,
+              max_attempts_before: maxAttemptsBefore,
               max_attempts: maxAttempts,
+              retry_boost_applied: extended.boosted,
+              retry_boost_amount: extended.retryBonus,
               gate_snapshot: {
                 ...evaluated.snapshot,
                 attempt,
                 retries_used: attempt - 1,
                 attempt_timeout_seconds: attemptTimeoutSeconds,
+                settle_timeout_seconds: settleTimeoutSeconds,
+                settle_probe_seconds: settleProbeSeconds,
                 observed_attempt_seconds: observedAttemptSeconds,
               },
             });
             process.stderr.write(
               `${statusLine} retry=on reason="${compactSingleLine(gateReason, 180)}" ` +
               `class=${gateClass} max_attempts=${maxAttempts} next_timeout=${adaptiveCycleTimeoutSeconds}s ` +
-              `backoff=${options.cycleRetryBackoffSeconds}s\n`
+              `next_settle=${adaptiveWorkboardSettleSeconds}s backoff=${options.cycleRetryBackoffSeconds}s\n`
             );
             if (options.cycleRetryBackoffSeconds > 0) {
               await sleep(options.cycleRetryBackoffSeconds * 1000);
@@ -1019,8 +1128,11 @@ async function main() {
               attempt,
               retries_used: attempt - 1,
               attempt_timeout_seconds: attemptTimeoutSeconds,
+              settle_timeout_seconds: settleTimeoutSeconds,
+              settle_probe_seconds: settleProbeSeconds,
               observed_attempt_seconds: observedAttemptSeconds,
               adaptive_cycle_timeout_seconds: adaptiveCycleTimeoutSeconds,
+              adaptive_workboard_settle_seconds: adaptiveWorkboardSettleSeconds,
             },
           };
           const terminalSnapshot = {
@@ -1028,8 +1140,11 @@ async function main() {
             attempt,
             retries_used: attempt - 1,
             attempt_timeout_seconds: attemptTimeoutSeconds,
+            settle_timeout_seconds: settleTimeoutSeconds,
+            settle_probe_seconds: settleProbeSeconds,
             observed_attempt_seconds: observedAttemptSeconds,
             adaptive_cycle_timeout_seconds: adaptiveCycleTimeoutSeconds,
+            adaptive_workboard_settle_seconds: adaptiveWorkboardSettleSeconds,
           };
           report.cycles.push(terminalSnapshot);
           process.stderr.write(`${statusLine} retry=off reason="${compactSingleLine(gateReason, 180)}"\n`);
@@ -1039,19 +1154,26 @@ async function main() {
           const timeoutLike = isTimeoutLikeError(errorReason);
           const retryableError = isRetryableCycleError(errorReason);
           const failureClass = classifyCycleErrorClass(error);
-          const extendedAttempts = Math.min(
-            options.maxCycleAttempts,
-            extendedMaxAttempts(baseMaxAttempts, options, failureClass)
-          );
-          if (extendedAttempts > maxAttempts) {
-            maxAttempts = extendedAttempts;
-          }
+          const maxAttemptsBefore = maxAttempts;
+          const extended = maybeExtendMaxAttempts({
+            maxAttempts,
+            options,
+            failureClass,
+            classRetryBoosts,
+          });
+          maxAttempts = extended.maxAttempts;
           const failurePayload = error instanceof SoakCycleError ? error.details : null;
           if (options.adaptiveCycleTimeouts) {
             adaptiveCycleTimeoutSeconds = bumpAdaptiveCycleTimeout(
               adaptiveCycleTimeoutSeconds,
               options,
               timeoutLike
+            );
+          }
+          if (failureClass === "turn_settle") {
+            adaptiveWorkboardSettleSeconds = bumpAdaptiveWorkboardSettleTimeout(
+              adaptiveWorkboardSettleSeconds,
+              options
             );
           }
           if (attempt < maxAttempts && retryableError) {
@@ -1065,7 +1187,10 @@ async function main() {
               timeout_budget_seconds: attemptTimeoutSeconds,
               next_timeout_budget_seconds: adaptiveCycleTimeoutSeconds,
               retry_backoff_seconds: options.cycleRetryBackoffSeconds,
+              max_attempts_before: maxAttemptsBefore,
               max_attempts: maxAttempts,
+              retry_boost_applied: extended.boosted,
+              retry_boost_amount: extended.retryBonus,
               failure_payload: failurePayload,
             });
             process.stderr.write(
@@ -1083,6 +1208,8 @@ async function main() {
             failure_class: failureClass,
             timeout_like: timeoutLike,
             failure_payload: failurePayload,
+            adaptive_cycle_timeout_seconds: adaptiveCycleTimeoutSeconds,
+            adaptive_workboard_settle_seconds: adaptiveWorkboardSettleSeconds,
           };
           process.stderr.write(
             `[soak] cycle=${cycle} attempt=${attempt}/${maxAttempts} error="${compactSingleLine(errorReason, 180)}" ` +

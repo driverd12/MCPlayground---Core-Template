@@ -189,6 +189,12 @@ Soak gate (release criteria: long-run fanout stability with leak/timeout/breaker
 npm run trichat:soak:gate -- --hours 1 --interval-seconds 60
 ```
 
+Strict representative gate (real bridges + execute path + class-aware retries):
+
+```bash
+npm run trichat:soak:gate -- --hours 1 --interval-seconds 60 --bridge-dry-run false --execute true --require-success-agents 2 --workboard-settle-max-seconds 180
+```
+
 Fast local validation (non-release short run):
 
 ```bash
