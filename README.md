@@ -1,51 +1,41 @@
-# MCPlayground Core Template
+# MCPlayground CFD Analysis Server
 
-MCPlayground Core Template is a local-first MCP server runtime designed to be reused across domains.
+MCPlayground CFD Analysis Server is a local-first MCP server focused on Computational Fluid Dynamics workflows.
 
-The repository is intentionally split into two layers:
+This repository is a CFD-focused fork of `MCPlayground---Core-Template`:
 
-1. Core runtime: durable memory, transcripts, tasks, run ledgers, governance, ADRs, and safety checks.
-2. Domain packs: optional modules that register domain-specific MCP tools without modifying core infrastructure.
+- Core runtime durability/governance is inherited from the template.
+- `cfd` domain pack is enabled by default.
 
-This repository ships with one reference pack:
+## What This Server Provides
 
-- `cfd` Computational Fluid Dynamics lifecycle tooling.
+- Durable CFD case lifecycle tools (`cfd.case.*`)
+- Mesh registration and quality gates (`cfd.mesh.*`)
+- Solver orchestration state (`cfd.solve.*`)
+- QoI extraction and validation (`cfd.post.extract`, `cfd.validate.compare`)
+- Reproducibility report bundles (`cfd.report.bundle`)
+- Full continuity stack (`memory.*`, `transcript.*`, `run.*`, `task.*`, ADR/decision tools)
 
-## Why This Template Exists
+## Architecture Pitch
 
-Most MCP projects repeat the same infrastructure work:
+Use this stakeholder framing:
 
-- durability and state continuity
-- safe/idempotent writes
-- local governance and auditability
-- task orchestration
-- cross-client interoperability
-
-This template centralizes those concerns so teams can build domain tools directly.
-
-## Client-Ready Architecture Pitch
-
-Use this framing with stakeholders:
-
-- This is not a single-purpose assistant.
-- This is a local MCP platform with reusable reliability primitives.
-- Domain value is delivered through packs, not by rewriting runtime infrastructure.
+1. The server is local-first and deterministic.
+2. All CFD lifecycle state is persisted in one local SQLite authority.
+3. Multiple IDE/agent clients can coordinate through one runtime endpoint.
+4. Safety, idempotency, and governance are built in at the platform layer.
 
 ```mermaid
 flowchart LR
-  A["IDE / Agent Client A"] --> D["Local MCP Runtime"]
-  B["IDE / Agent Client B"] --> D
-  C["Automation Worker"] --> D
+  A["CFD Engineer IDE"] --> D["Local MCP Server (CFD Fork)"]
+  B["Automation Agent"] --> D
+  C["Post-Processing Client"] --> D
 
-  D --> E["Core: memory, transcript, tasks, runs, governance"]
-  D --> F["Domain Pack API"]
-  F --> G["CFD Pack (example)"]
-
-  E --> H[("SQLite: ./data/hub.sqlite")]
-  G --> I["Domain artifacts + reports"]
+  D --> E["Core Runtime: memory/task/run/governance"]
+  D --> F["CFD Pack: case/mesh/solve/validate/report"]
+  E --> G[("SQLite ./data/hub.sqlite")]
+  F --> H["CFD artifacts + benchmark outputs"]
 ```
-
-More detail: [Architecture Pitch](./docs/ARCHITECTURE_PITCH.md)
 
 ## Quick Start
 
@@ -55,66 +45,61 @@ npm run build
 npm run start:stdio
 ```
 
-Start HTTP transport:
+HTTP mode:
 
 ```bash
 npm run start:http
 ```
 
-Start with CFD pack enabled:
+## Core and CFD Startup Commands
 
-```bash
-npm run start:cfd
-# or
-npm run start:cfd:http
-```
+Default scripts start with CFD enabled:
 
-## Configuration
+- `npm run start`
+- `npm run start:stdio`
+- `npm run start:http`
 
-Copy the template:
+Core-only fallbacks:
+
+- `npm run start:core`
+- `npm run start:core:http`
+
+## Environment
 
 ```bash
 cp .env.example .env
 ```
 
-Key variables:
+Important variables:
 
-- `ANAMNESIS_HUB_DB_PATH` local SQLite path
-- `MCP_HTTP_BEARER_TOKEN` auth token for HTTP transport
-- `MCP_HTTP_ALLOWED_ORIGINS` comma-separated local origins
-- `MCP_DOMAIN_PACKS` comma-separated pack ids (`cfd`, etc.)
+- `MCP_DOMAIN_PACKS=cfd` (enabled by default in this fork)
+- `ANAMNESIS_HUB_DB_PATH` SQLite path
+- `MCP_HTTP_BEARER_TOKEN` HTTP auth token
+- `MCP_HTTP_ALLOWED_ORIGINS` local CORS policy
 
-## Core Tool Surface
+## CFD Tool Inventory
 
-Core runtime tools include:
-
-- Memory and continuity: `memory.*`, `transcript.*`, `who_knows`, `knowledge.query`, `retrieval.hybrid`
-- Governance and safety: `policy.evaluate`, `preflight.check`, `postflight.verify`, `mutation.check`
-- Durable execution: `run.*`, `task.*`, `lock.*`
-- Decision and incident logging: `adr.create`, `decision.link`, `incident.*`
-- Runtime ops: `health.*`, `migration.status`, `imprint.*`, `imprint.inbox.*`
-
-## Domain Pack Framework
-
-Domain packs are loaded at startup from `MCP_DOMAIN_PACKS` or `--domain-packs`.
-
-- Framework: `src/domain-packs/types.ts`, `src/domain-packs/index.ts`
-- Reference pack: `src/domain-packs/cfd.ts`
-
-Pack authoring guide: [Domain Packs](./docs/DOMAIN_PACKS.md)
+- `cfd.case.create`
+- `cfd.case.get`
+- `cfd.case.list`
+- `cfd.mesh.generate`
+- `cfd.mesh.check`
+- `cfd.solve.start`
+- `cfd.solve.status`
+- `cfd.solve.stop`
+- `cfd.post.extract`
+- `cfd.validate.compare`
+- `cfd.report.bundle`
+- `cfd.schema.status`
 
 ## IDE and Agent Setup
 
-Connection examples and client setup:
+See:
 
-- [IDE + Agent Setup Guide](./docs/IDE_AGENT_SETUP.md)
+- [IDE + Agent Setup](./docs/IDE_AGENT_SETUP.md)
 - [Transport Connection Guide](./docs/CONNECT.md)
-
-## CFD Fork Path
-
-How to publish a CFD-focused fork from this template:
-
-- [CFD Fork Guide](./docs/CFD_FORK_GUIDE.md)
+- [Security Notes](./docs/SECURITY.md)
+- [CFD Playbook](./docs/CFD_PLAYBOOK.md)
 
 ## Validation
 
@@ -122,13 +107,3 @@ How to publish a CFD-focused fork from this template:
 npm test
 npm run mvp:smoke
 ```
-
-## Repository Layout
-
-- `src/server.ts` core MCP runtime and tool registration
-- `src/tools/` core reusable tools
-- `src/domain-packs/` optional domain modules
-- `scripts/` operational scripts and smoke checks
-- `docs/` architecture, setup, and fork guides
-- `tests/` integration and persistence tests
-- `data/` local runtime state and SQLite database

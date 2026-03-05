@@ -1,5 +1,5 @@
 {
-  "name": "mcplayground-core-template",
+  "name": "mcplayground-cfd-analysis-server",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -9,9 +9,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test ./tests/auto_squish.persistence.test.mjs ./tests/core_template.integration.test.mjs ./tests/cfd_pack.integration.test.mjs",
-    "start": "node dist/server.js",
-    "start:stdio": "node dist/server.js",
-    "start:http": "MCP_HTTP=1 node dist/server.js --http --http-port 8787",
+    "start": "MCP_DOMAIN_PACKS=cfd node dist/server.js",
+    "start:stdio": "MCP_DOMAIN_PACKS=cfd node dist/server.js",
+    "start:http": "MCP_HTTP=1 MCP_DOMAIN_PACKS=cfd node dist/server.js --http --http-port 8787",
+    "start:core": "node dist/server.js",
+    "start:core:http": "MCP_HTTP=1 node dist/server.js --http --http-port 8787",
     "start:cfd": "MCP_DOMAIN_PACKS=cfd node dist/server.js",
     "start:cfd:http": "MCP_HTTP=1 MCP_DOMAIN_PACKS=cfd node dist/server.js --http --http-port 8787",
     "inbox:worker": "python3 ./scripts/imprint_inbox_worker.py --repo-root .",

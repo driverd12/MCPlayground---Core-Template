@@ -1,4 +1,4 @@
-# MCPlayground Core Template Setup
+# MCPlayground CFD Analysis Server Setup
 
 Fastest path to run locally.
 
@@ -10,8 +10,8 @@ Fastest path to run locally.
 ## 2. Clone
 
 ```bash
-git clone https://github.com/driverd12/MCPlayground---Core-Template.git
-cd MCPlayground---Core-Template
+git clone <your-cfd-fork-url> MCPlayground---CFD-Server
+cd MCPlayground---CFD-Server
 ```
 
 ## 3. Install and Build
@@ -27,18 +27,18 @@ npm run build
 cp .env.example .env
 ```
 
-Minimal values:
+Default pack mode in this fork is:
+
+```bash
+MCP_DOMAIN_PACKS=cfd
+```
+
+Core network settings:
 
 ```bash
 ANAMNESIS_HUB_DB_PATH=./data/hub.sqlite
 MCP_HTTP_BEARER_TOKEN=change-me
 MCP_HTTP_ALLOWED_ORIGINS=http://localhost,http://127.0.0.1
-```
-
-Enable CFD tools (optional):
-
-```bash
-MCP_DOMAIN_PACKS=cfd
 ```
 
 ## 5. Verify
@@ -49,28 +49,23 @@ npm test
 
 ## 6. Start Server
 
-Core STDIO:
+CFD STDIO (default):
 
 ```bash
 npm run start:stdio
 ```
 
-Core HTTP:
+CFD HTTP (default):
 
 ```bash
 npm run start:http
 ```
 
-CFD STDIO:
+Core-only fallback:
 
 ```bash
-npm run start:cfd
-```
-
-CFD HTTP:
-
-```bash
-npm run start:cfd:http
+npm run start:core
+npm run start:core:http
 ```
 
 ## 7. Smoke Check
@@ -79,24 +74,12 @@ npm run start:cfd:http
 npm run mvp:smoke
 ```
 
-Against an already-running HTTP server:
-
-```bash
-MCP_SMOKE_TRANSPORT=http MCP_HTTP_BEARER_TOKEN=change-me ./scripts/mvp_smoke.sh
-```
-
 ## 8. Connect IDE/Agent
 
-Point MCP client STDIO command to:
+Point MCP client command to:
 
 ```bash
-node /absolute/path/to/MCPlayground---Core-Template/dist/server.js
+node /absolute/path/to/MCPlayground---CFD-Server/dist/server.js
 ```
 
 For full client examples, see [docs/IDE_AGENT_SETUP.md](./docs/IDE_AGENT_SETUP.md).
-
-## Troubleshooting
-
-- Build errors: run `npm ci` and `npm run build` again.
-- Missing tools in client: restart client process and verify it points at `dist/server.js`.
-- Missing CFD tools: confirm `MCP_DOMAIN_PACKS=cfd` is set for that client/session.
