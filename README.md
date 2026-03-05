@@ -55,6 +55,27 @@ npm run build
 npm run start:stdio
 ```
 
+## Get or Update This Repo
+
+Fresh clone:
+
+```bash
+git clone https://github.com/driverd12/MCPlayground---Core-Template.git
+cd MCPlayground---Core-Template
+npm ci
+npm run build
+```
+
+If you already have a local checkout:
+
+```bash
+git fetch origin
+git checkout main
+git pull --ff-only origin main
+npm ci
+npm run build
+```
+
 Start HTTP transport:
 
 ```bash
@@ -109,6 +130,39 @@ Connection examples and client setup:
 
 - [IDE + Agent Setup Guide](./docs/IDE_AGENT_SETUP.md)
 - [Transport Connection Guide](./docs/CONNECT.md)
+
+Fast STDIO connection example:
+
+```json
+{
+  "mcpServers": {
+    "mcplayground-core-template": {
+      "command": "node",
+      "args": ["/absolute/path/to/MCPlayground---Core-Template/dist/server.js"],
+      "env": {
+        "ANAMNESIS_HUB_DB_PATH": "/absolute/path/to/MCPlayground---Core-Template/data/hub.sqlite"
+      }
+    }
+  }
+}
+```
+
+Fast CFD-enabled connection example:
+
+```json
+{
+  "mcpServers": {
+    "mcplayground-cfd": {
+      "command": "node",
+      "args": ["/absolute/path/to/MCPlayground---Core-Template/dist/server.js"],
+      "env": {
+        "ANAMNESIS_HUB_DB_PATH": "/absolute/path/to/MCPlayground---Core-Template/data/hub.sqlite",
+        "MCP_DOMAIN_PACKS": "cfd"
+      }
+    }
+  }
+}
+```
 
 ## CFD Fork Path
 
