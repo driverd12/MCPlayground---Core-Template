@@ -457,12 +457,13 @@ export const cfdDomainPack: DomainPack = {
             withCfdDb(dbPath, (db) => {
               const caseRecord = requireCase(db, input.case_id);
               const now = new Date().toISOString();
-              const thresholds = {
-                skewness: input.thresholds?.skewness ?? 4,
-                non_orthogonality: input.thresholds?.non_orthogonality ?? 70,
-                min_orthogonality: input.thresholds?.min_orthogonality ?? 20,
-                max_aspect_ratio: input.thresholds?.max_aspect_ratio ?? 1000,
-              };
+	              const thresholds = {
+	                // These are generic defaults and should be calibrated by a CFD analyst.
+	                skewness: input.thresholds?.skewness ?? 4,
+	                non_orthogonality: input.thresholds?.non_orthogonality ?? 70,
+	                min_orthogonality: input.thresholds?.min_orthogonality ?? 20,
+	                max_aspect_ratio: input.thresholds?.max_aspect_ratio ?? 1000,
+	              };
 
               const checks = {
                 skewness: {
@@ -896,13 +897,15 @@ export const cfdDomainPack: DomainPack = {
               for (const key of keys) {
                 const baseline = input.baseline[key] ?? 0;
                 const actual = input.actual[key] ?? 0;
-                const tolerance = input.tolerances[key] ?? input.tolerances["*"] ?? 0;
-                const deltaAbs = Math.abs(actual - baseline);
-                const delta =
-                  input.mode === "relative"
-                    ? baseline === 0
-                      ? actual === 0
-                        ? 0
+	                const tolerance = input.tolerances[key] ?? input.tolerances["*"] ?? 0;
+	                const deltaAbs = Math.abs(actual - baseline);
+	                // Relative mode uses |actual-baseline|/|baseline| and returns Infinity when baseline is zero but actual is non-zero.
+	                // Review this behavior with a CFD analyst for each metric family before production use.
+	                const delta =
+	                  input.mode === "relative"
+	                    ? baseline === 0
+	                      ? actual === 0
+	                        ? 0
                         : Number.POSITIVE_INFINITY
                       : deltaAbs / Math.abs(baseline)
                     : deltaAbs;

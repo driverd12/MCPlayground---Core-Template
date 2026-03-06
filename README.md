@@ -100,6 +100,17 @@ See:
 - [Transport Connection Guide](./docs/CONNECT.md)
 - [Security Notes](./docs/SECURITY.md)
 - [CFD Playbook](./docs/CFD_PLAYBOOK.md)
+- [CFD Analyst Handoff](./docs/CFD_ANALYST_HANDOFF.md)
+- [CFD Math Review Checklist](./docs/CFD_MATH_REVIEW_CHECKLIST.md)
+
+## Read This Before Production Use
+
+If your team will make engineering decisions from these outputs, review these two docs first:
+
+1. [CFD Analyst Handoff](./docs/CFD_ANALYST_HANDOFF.md)
+2. [CFD Math Review Checklist](./docs/CFD_MATH_REVIEW_CHECKLIST.md)
+
+These identify where defaults are generic and where a CFD analyst should calibrate formulas, thresholds, and validation policy.
 
 ## Validation
 

@@ -2,6 +2,11 @@
 
 This fork defaults to `MCP_DOMAIN_PACKS=cfd`.
 
+Before production use, complete:
+
+- [CFD Analyst Handoff](./CFD_ANALYST_HANDOFF.md)
+- [CFD Math Review Checklist](./CFD_MATH_REVIEW_CHECKLIST.md)
+
 ## Typical Workflow
 
 1. `cfd.case.create` to define objective, solver family, geometry reference.
@@ -32,3 +37,4 @@ This fork defaults to `MCP_DOMAIN_PACKS=cfd`.
 - Use explicit mesh thresholds in `cfd.mesh.check`.
 - Define tolerances in `cfd.validate.compare` per metric.
 - Keep validation outputs and generated report bundles with each run.
+- Create ADR records for accepted threshold and formula policy decisions.
