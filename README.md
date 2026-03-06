@@ -1,4 +1,4 @@
-# MCPlayground CFD Analysis Server
+# MCPlayground: EXAMPLE CFD Analysis Server 
 
 MCPlayground CFD Analysis Server is a local-first MCP server focused on Computational Fluid Dynamics workflows.
 
