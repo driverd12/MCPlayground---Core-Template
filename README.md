@@ -6,6 +6,7 @@ This repository is a CFD-focused fork of `MCPlayground---Core-Template`:
 
 - Core runtime durability/governance is inherited from the template.
 - `cfd` domain pack is enabled by default.
+- Full TriChat runtime (`trichat.*`) is included for multi-agent fanout, autopilot, tmux orchestration, and reliability telemetry.
 
 ## What This Server Provides
 
@@ -125,4 +126,12 @@ These identify where defaults are generic and where a CFD analyst should calibra
 ```bash
 npm test
 npm run mvp:smoke
+```
+
+TriChat reliability checks:
+
+```bash
+npm run trichat:smoke
+npm run trichat:dogfood
+npm run trichat:soak:gate -- --hours 1 --interval-seconds 60
 ```
