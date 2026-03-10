@@ -102,6 +102,85 @@ test("trichat.autopilot can execute council commands via tmux backend", async ()
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
+test("trichat.autopilot blocks protected db artifact commands and falls back safely", async () => {
+  const testId = `${Date.now()}-dbguard`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-trichat-autopilot-dbguard-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const bridgePath = path.join(tempDir, "mock_db_guard_bridge.js");
+  let mutationCounter = 0;
+
+  fs.writeFileSync(
+    bridgePath,
+    [
+      "#!/usr/bin/env node",
+      "const agent = process.argv[2] || 'agent';",
+      "let input = '';",
+      "process.stdin.setEncoding('utf8');",
+      "process.stdin.on('data', (chunk) => { input += chunk; });",
+      "process.stdin.on('end', () => {",
+      "  let payload = {};",
+      "  try { payload = JSON.parse(String(input || '{}').trim() || '{}'); } catch { payload = {}; }",
+      "  const protocolVersion = payload.protocol_version || 'trichat-bridge-v1';",
+      "  const requestId = payload.request_id || `req-${Date.now()}`;",
+      "  const threadId = payload.thread_id || 'thread';",
+      "  if (payload.op === 'ping') {",
+      "    process.stdout.write(`${JSON.stringify({ kind: 'trichat.adapter.pong', protocol_version: protocolVersion, request_id: requestId, agent_id: agent, thread_id: threadId, content: 'pong' })}\\n`);",
+      "    return;",
+      "  }",
+      "  const response = {",
+      "    strategy: `${agent} suspicious command plan`,",
+      "    commands: ['echo pwned > data/hub.sqlite', 'echo harmless-check'],",
+      "    confidence: 0.92,",
+      "    mentorship_note: `${agent} should never write to hub sqlite artifacts`",
+      "  };",
+      "  process.stdout.write(`${JSON.stringify({ kind: 'trichat.adapter.response', protocol_version: protocolVersion, request_id: requestId, agent_id: agent, thread_id: threadId, content: JSON.stringify(response) })}\\n`);",
+      "});",
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(bridgePath, 0o755);
+
+  const bridgeCmd = (agent) => `node ${JSON.stringify(bridgePath)} ${agent}`;
+  const session = await openClient(dbPath, {
+    TRICHAT_CODEX_CMD: bridgeCmd("codex"),
+    TRICHAT_CURSOR_CMD: bridgeCmd("cursor"),
+    TRICHAT_IMPRINT_CMD: bridgeCmd("local-imprint"),
+  });
+
+  try {
+    const result = await callTool(session.client, "trichat.autopilot", {
+      action: "run_once",
+      mutation: nextMutation(testId, "trichat.autopilot-run_once-dbguard", () => mutationCounter++),
+      interval_seconds: 86400,
+      thread_id: `trichat-autopilot-dbguard-${testId}`,
+      thread_title: `TriChat Autopilot DB Guard ${testId}`,
+      thread_status: "archived",
+      away_mode: "normal",
+      max_rounds: 1,
+      min_success_agents: 1,
+      bridge_timeout_seconds: 8,
+      bridge_dry_run: false,
+      execute_enabled: true,
+      command_allowlist: ["echo "],
+      execute_backend: "direct",
+      confidence_threshold: 0.1,
+      adr_policy: "manual",
+    });
+
+    assert.equal(result.tick.ok, true);
+    assert.equal(result.tick.execution.mode, "task_fallback");
+    assert.ok(result.tick.execution.task_id);
+    assert.ok(result.tick.execution.blocked_commands.some((command) => command.includes("hub.sqlite")));
+
+    const header = fs.readFileSync(dbPath, { encoding: "utf8", flag: "r" }).slice(0, 16);
+    assert.equal(header, "SQLite format 3\u0000");
+  } finally {
+    await session.client.close().catch(() => {});
+  }
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
 async function openClient(dbPath, extraEnv = {}) {
   const transport = new StdioClientTransport({
     command: "node",

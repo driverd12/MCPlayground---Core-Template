@@ -4,6 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { Storage, ImprintAutoSnapshotStateRecord } from "../storage.js";
+import { assertSafeWritePath } from "../path_safety.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 
 type ImprintRuntimeOptions = {
@@ -511,6 +512,10 @@ function captureImprintSnapshot(
     fs.mkdirSync(dir, { recursive: true });
     const safeTimestamp = now.replace(/[:.]/g, "-");
     snapshotPath = path.join(dir, `${safeTimestamp}-${snapshotId}.json`);
+    assertSafeWritePath(snapshotPath, {
+      repo_root: options.repo_root,
+      operation: "imprint snapshot write",
+    });
     fs.writeFileSync(snapshotPath, JSON.stringify(state, null, 2), "utf8");
   }
 

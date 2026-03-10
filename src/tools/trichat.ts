@@ -8,6 +8,7 @@ import {
   TriChatTmuxControllerStateRecord,
   TriChatTmuxControllerTaskRecord,
 } from "../storage.js";
+import { commandReferencesProtectedDbArtifact } from "../path_safety.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { appendMemory } from "./memory.js";
 import { runBegin, runEnd, runStep } from "./run.js";
@@ -429,7 +430,7 @@ const trichatTmuxTaskInputSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 
-const trichatTmuxActionSchema = z.enum(["status", "start", "stop", "dispatch", "sync", "tail"]);
+const trichatTmuxActionSchema = z.enum(["status", "start", "stop", "dispatch", "sync", "maintain", "tail"]);
 
 export const trichatTmuxControllerSchema = z
   .object({
@@ -438,8 +439,13 @@ export const trichatTmuxControllerSchema = z
     session_name: z.string().min(1).optional(),
     workspace: z.string().min(1).optional(),
     worker_count: z.number().int().min(1).max(12).optional(),
+    min_worker_count: z.number().int().min(1).max(12).optional(),
+    max_worker_count: z.number().int().min(1).max(12).optional(),
+    target_queue_per_worker: z.number().int().min(1).max(200).optional(),
+    auto_scale_workers: z.boolean().optional(),
     shell: z.string().min(1).optional(),
     max_queue_per_worker: z.number().int().min(1).max(200).optional(),
+    nudge_blocked_lanes: z.boolean().optional(),
     lock_key: z.string().min(1).optional(),
     lock_lease_seconds: z.number().int().min(15).max(3600).optional(),
     tasks: z.array(trichatTmuxTaskInputSchema).min(1).max(200).optional(),
@@ -453,12 +459,13 @@ export const trichatTmuxControllerSchema = z
       (value.action === "start" ||
         value.action === "stop" ||
         value.action === "dispatch" ||
-        value.action === "sync") &&
+        value.action === "sync" ||
+        value.action === "maintain") &&
       !value.mutation
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "mutation is required for start, stop, dispatch, and sync actions",
+        message: "mutation is required for start, stop, dispatch, sync, and maintain actions",
         path: ["mutation"],
       });
     }
@@ -1912,7 +1919,7 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
   }
 
   if (!input.mutation) {
-    throw new Error("mutation is required for start, stop, dispatch, and sync actions");
+    throw new Error("mutation is required for start, stop, dispatch, sync, and maintain actions");
   }
   const mutation = input.mutation;
 
@@ -1974,6 +1981,113 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
           dashboard: buildTmuxDashboard(persisted, summarized.workers),
           sync: synced.summary,
         };
+      }
+
+      if (input.action === "maintain") {
+        const desired = resolveTmuxControllerState(storage, input);
+        if (!desired.enabled) {
+          const summarized = summarizeTmuxState(desired, true);
+          return {
+            action: "maintain",
+            ok: false,
+            status: summarized,
+            dashboard: buildTmuxDashboard(desired, summarized.workers),
+            maintenance: {
+              skipped: true,
+              reason: "tmux controller is disabled",
+              sync: {
+                running_marked: 0,
+                completed_marked: 0,
+                failed_marked: 0,
+              },
+              scaled_up: false,
+              from_worker_count: desired.worker_count,
+              to_worker_count: desired.worker_count,
+              nudged_count: 0,
+              nudges: [],
+            },
+          };
+        }
+        ensureTmuxSession(desired);
+        const lockKey =
+          input.lock_key?.trim() || `trichat.tmux_controller.exec.${desired.session_name.replace(/\s+/g, "-")}`;
+        const lockOwnerId = `${TMUX_CONTROLLER_EXEC_OWNER}:${Date.now()}:${Math.floor(Math.random() * 10_000)}`;
+        const lockMutation = buildTmuxDerivedMutation(mutation, "maintain.lock.acquire", lockKey);
+        const releaseMutation = buildTmuxDerivedMutation(mutation, "maintain.lock.release", lockKey);
+        const lockLeaseSeconds = clampInt(
+          input.lock_lease_seconds ?? TMUX_CONTROLLER_DEFAULTS.lock_lease_seconds,
+          15,
+          3600
+        );
+        const lockResult = await acquireLock(storage, {
+          mutation: lockMutation,
+          lock_key: lockKey,
+          owner_id: lockOwnerId,
+          lease_seconds: lockLeaseSeconds,
+          metadata: {
+            source: TMUX_CONTROLLER_TOOL_NAME,
+            action: "maintain",
+            session_name: desired.session_name,
+            worker_count: desired.worker_count,
+          },
+        });
+        if (!lockResult.acquired) {
+          throw new Error(`maintain lock not acquired (${lockResult.reason}) for key ${lockKey}`);
+        }
+
+        try {
+          let nextState = { ...desired };
+          const sync = syncTmuxTaskStatusFromPanes(nextState, {
+            capture_lines: input.capture_lines ?? 400,
+          });
+          nextState = sync.state;
+          const scaleDecision = maybeScaleUpTmuxWorkers(nextState, {
+            auto_scale_workers: input.auto_scale_workers ?? true,
+            min_worker_count: input.min_worker_count,
+            max_worker_count: input.max_worker_count,
+            target_queue_per_worker: input.target_queue_per_worker,
+          });
+          nextState = scaleDecision.state;
+          const workerSnapshots = buildTmuxWorkerSnapshots(nextState);
+          const laneSignals = buildTmuxWorkerLaneSignals(nextState, workerSnapshots);
+          const nudgeResult = (input.nudge_blocked_lanes ?? true)
+            ? nudgeBlockedTmuxWorkers(nextState, laneSignals)
+            : { nudged_count: 0, nudges: [] };
+          const firstNudgeError =
+            nudgeResult.nudges.find((entry) => !entry.ok)?.error ??
+            (scaleDecision.error ? compactConsensusText(scaleDecision.error, 240) : null);
+          const persisted = storage.setTriChatTmuxControllerState({
+            ...nextState,
+            tasks: pruneTmuxTaskHistory(nextState.tasks),
+            last_error: firstNudgeError ?? null,
+          });
+          const summarized = summarizeTmuxState(persisted, true);
+          return {
+            action: "maintain",
+            ok: !firstNudgeError,
+            status: summarized,
+            dashboard: buildTmuxDashboard(persisted, summarized.workers),
+            maintenance: {
+              skipped: false,
+              reason: null,
+              sync: sync.summary,
+              scaled_up: scaleDecision.scaled_up,
+              from_worker_count: scaleDecision.from_worker_count,
+              to_worker_count: scaleDecision.to_worker_count,
+              target_worker_count: scaleDecision.target_worker_count,
+              queue_depth: scaleDecision.queue_depth,
+              target_queue_per_worker: scaleDecision.target_queue_per_worker,
+              nudged_count: nudgeResult.nudged_count,
+              nudges: nudgeResult.nudges,
+            },
+          };
+        } finally {
+          await releaseLock(storage, {
+            mutation: releaseMutation,
+            lock_key: lockKey,
+            owner_id: lockOwnerId,
+          });
+        }
       }
 
       const desired = resolveTmuxControllerState(storage, input);
@@ -3784,6 +3898,46 @@ async function runAutopilotExecutionViaTmux(
       };
     }
 
+    const maintainedRaw = await runAutopilotIdempotent(storage, {
+      tool_name: "trichat.tmux_controller.maintain",
+      session_key: input.session_key,
+      label: "execute.tmux_controller.maintain",
+      fingerprint: `${sessionName}:${input.intake.turn_id}:maintain`,
+      payload: {
+        action: "maintain",
+        session_name: sessionName,
+        workspace: input.intake.project_dir,
+      },
+      execute: async () =>
+        asRecord(
+          await Promise.resolve(
+            trichatTmuxController(storage, {
+              mutation: buildAutopilotMutation(input.session_key, "execute.tmux.inner.maintain", sessionName),
+              action: "maintain",
+              session_name: sessionName,
+              workspace: input.intake.project_dir,
+              worker_count: workerCount,
+              min_worker_count: 1,
+              max_worker_count: configuredWorkers,
+              max_queue_per_worker: input.config.tmux_max_queue_per_worker,
+              auto_scale_workers: input.config.tmux_auto_scale_workers,
+              target_queue_per_worker: Math.max(1, Math.min(input.config.tmux_max_queue_per_worker, 4)),
+              nudge_blocked_lanes: true,
+            })
+          )
+        ),
+    });
+    const maintained = asRecord(maintainedRaw);
+    if (maintained.ok === false && maintained.status === undefined) {
+      return {
+        ...baseResult,
+        reason: compactConsensusText(
+          `tmux controller maintain failed: ${String(maintained.error ?? "unknown error")}`,
+          320
+        ),
+      };
+    }
+
     const dispatchedRaw = await runAutopilotIdempotent(storage, {
       tool_name: "trichat.tmux_controller.dispatch",
       session_key: input.session_key,
@@ -4292,6 +4446,15 @@ function buildAutopilotCommandPlan(input: {
   const blocked: string[] = [];
   const blockedBy: Record<string, string> = {};
   for (const command of commands) {
+    const protectedDbMatch = commandReferencesProtectedDbArtifact(command, {
+      repo_root: process.cwd(),
+    });
+    if (protectedDbMatch.matched) {
+      blocked.push(command);
+      const alias = protectedDbMatch.matched_alias || protectedDbMatch.artifact_path || "protected-db-artifact";
+      blockedBy[command] = `protected-db-artifact:${alias}`;
+      continue;
+    }
     const denied = AUTOPILOT_HARD_DENY_PATTERNS.find((pattern) => pattern.test(command));
     if (denied) {
       blocked.push(command);
@@ -5097,6 +5260,26 @@ function runAutopilotShellCommand(input: {
   duration_ms: number;
 } {
   const startedAt = Date.now();
+  const protectedDbMatch = commandReferencesProtectedDbArtifact(input.command, {
+    repo_root: process.cwd(),
+    workspace: input.cwd,
+  });
+  if (protectedDbMatch.matched) {
+    const alias = protectedDbMatch.matched_alias || protectedDbMatch.artifact_path || "protected-db-artifact";
+    return {
+      command: input.command,
+      ok: false,
+      exit_code: 126,
+      signal: null,
+      timed_out: false,
+      stdout: "",
+      stderr: compactConsensusText(
+        `blocked command referencing protected db artifact (${alias})`,
+        input.output_cap_bytes
+      ),
+      duration_ms: Date.now() - startedAt,
+    };
+  }
   const spawned = spawnSync("/bin/sh", ["-lc", input.command], {
     cwd: input.cwd,
     encoding: "utf8",
@@ -7722,6 +7905,137 @@ function buildTmuxDashboard(
   };
 }
 
+function maybeScaleUpTmuxWorkers(
+  state: TriChatTmuxControllerStateRecord,
+  input: {
+    auto_scale_workers: boolean;
+    min_worker_count?: number;
+    max_worker_count?: number;
+    target_queue_per_worker?: number;
+  }
+): {
+  state: TriChatTmuxControllerStateRecord;
+  scaled_up: boolean;
+  from_worker_count: number;
+  to_worker_count: number;
+  target_worker_count: number;
+  queue_depth: number;
+  target_queue_per_worker: number;
+  error: string | null;
+} {
+  const fromWorkerCount = clampInt(state.worker_count, 1, 12);
+  const minWorkerCount = clampInt(input.min_worker_count ?? 1, 1, 12);
+  const maxWorkerCount = clampInt(input.max_worker_count ?? 12, minWorkerCount, 12);
+  const queueDepth = state.tasks.filter((task) => task.status === "queued" || task.status === "dispatched").length;
+  const targetQueuePerWorker = clampInt(
+    input.target_queue_per_worker ?? Math.max(1, Math.min(state.max_queue_per_worker, 4)),
+    1,
+    200
+  );
+  const recommended = clampInt(Math.ceil(Math.max(1, queueDepth) / targetQueuePerWorker), minWorkerCount, maxWorkerCount);
+  const targetWorkerCount = input.auto_scale_workers ? Math.max(fromWorkerCount, recommended) : fromWorkerCount;
+  if (targetWorkerCount <= fromWorkerCount) {
+    return {
+      state,
+      scaled_up: false,
+      from_worker_count: fromWorkerCount,
+      to_worker_count: fromWorkerCount,
+      target_worker_count: targetWorkerCount,
+      queue_depth: queueDepth,
+      target_queue_per_worker: targetQueuePerWorker,
+      error: null,
+    };
+  }
+
+  const candidate: TriChatTmuxControllerStateRecord = {
+    ...state,
+    worker_count: targetWorkerCount,
+  };
+  try {
+    ensureTmuxSession(candidate);
+    return {
+      state: candidate,
+      scaled_up: true,
+      from_worker_count: fromWorkerCount,
+      to_worker_count: targetWorkerCount,
+      target_worker_count: targetWorkerCount,
+      queue_depth: queueDepth,
+      target_queue_per_worker: targetQueuePerWorker,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      state,
+      scaled_up: false,
+      from_worker_count: fromWorkerCount,
+      to_worker_count: fromWorkerCount,
+      target_worker_count: targetWorkerCount,
+      queue_depth: queueDepth,
+      target_queue_per_worker: targetQueuePerWorker,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function nudgeBlockedTmuxWorkers(
+  state: TriChatTmuxControllerStateRecord,
+  laneSignals: Map<string, TriChatTmuxWorkerLaneSignal>
+): {
+  nudged_count: number;
+  nudges: Array<{
+    worker_id: string;
+    lane_state: TriChatTmuxLaneState;
+    sent: string;
+    ok: boolean;
+    error: string | null;
+  }>;
+} {
+  const nudges: Array<{
+    worker_id: string;
+    lane_state: TriChatTmuxLaneState;
+    sent: string;
+    ok: boolean;
+    error: string | null;
+  }> = [];
+
+  for (const [workerId, signal] of laneSignals.entries()) {
+    const payload = resolveTmuxLaneNudgePayload(signal.lane_state);
+    if (payload === null) {
+      continue;
+    }
+    const sent = payload.length > 0 ? payload : "<enter>";
+    const args =
+      payload.length > 0
+        ? ["send-keys", "-t", `${state.session_name}:${workerId}`, payload, "C-m"]
+        : ["send-keys", "-t", `${state.session_name}:${workerId}`, "C-m"];
+    const result = runTmuxCommand(args, {
+      timeout_ms: 3000,
+    });
+    nudges.push({
+      worker_id: workerId,
+      lane_state: signal.lane_state,
+      sent,
+      ok: result.ok,
+      error: result.ok ? null : compactConsensusText((result.error ?? result.stderr) || "tmux nudge failed", 240),
+    });
+  }
+
+  return {
+    nudged_count: nudges.filter((entry) => entry.ok).length,
+    nudges,
+  };
+}
+
+function resolveTmuxLaneNudgePayload(laneState: TriChatTmuxLaneState): string | null {
+  if (laneState === "blocked_trust") {
+    return "yes";
+  }
+  if (laneState === "blocked_plan" || laneState === "blocked_prompt") {
+    return "";
+  }
+  return null;
+}
+
 function classifyTmuxFailureClass(errorText: string): TriChatTmuxFailureClass {
   const normalized = String(errorText ?? "").trim().toLowerCase();
   if (!normalized) {
@@ -7734,6 +8048,9 @@ function classifyTmuxFailureClass(errorText: string): TriChatTmuxFailureClass {
     return "command_not_found";
   }
   if (/\bpermission denied\b|eacces/.test(normalized)) {
+    return "permission_denied";
+  }
+  if (/protected db artifact|blocked tmux task/.test(normalized)) {
     return "permission_denied";
   }
   if (/tmux runtime is unavailable|failed to create tmux session|failed to create tmux window|kill-session/.test(normalized)) {
@@ -8333,7 +8650,7 @@ function dispatchAssignedTmuxTasks(state: TriChatTmuxControllerStateRecord): Tri
   const failures: TriChatTmuxDispatchResult["failures"] = [];
 
   for (const task of queue) {
-    const result = dispatchTmuxTask(state.session_name, task.worker_id, task);
+    const result = dispatchTmuxTask(state.session_name, state.workspace, task.worker_id, task);
     if (result.ok) {
       task.status = "dispatched";
       task.dispatched_at = now;
@@ -8489,9 +8806,27 @@ function stopTmuxSession(sessionName: string): {
 
 function dispatchTmuxTask(
   sessionName: string,
+  workspace: string,
   workerId: string,
   task: TriChatTmuxDispatchTaskRecord
 ): TriChatTmuxCommandResult {
+  const protectedDbMatch = commandReferencesProtectedDbArtifact(task.command, {
+    repo_root: process.cwd(),
+    workspace,
+  });
+  if (protectedDbMatch.matched) {
+    const alias = protectedDbMatch.matched_alias || protectedDbMatch.artifact_path || "protected-db-artifact";
+    return {
+      ok: false,
+      code: 126,
+      signal: null,
+      stdout: "",
+      stderr: "",
+      error: `blocked tmux task referencing protected db artifact (${alias})`,
+      dry_run: false,
+      timed_out: false,
+    };
+  }
   const wrapped = [
     `echo "${TMUX_TASK_START_MARKER} ${task.task_id}"`,
     task.command,

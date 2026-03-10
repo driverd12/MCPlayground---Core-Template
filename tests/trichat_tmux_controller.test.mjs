@@ -140,6 +140,40 @@ test("trichat.tmux_controller supports durable start/dispatch/stop flow with ide
         )
       );
 
+      const protectedDispatch = await callTool(first.client, "trichat.tmux_controller", {
+        action: "dispatch",
+        mutation: nextMutation(testId, "trichat.tmux_controller-dispatch-db-guard", () => mutationCounter++),
+        tasks: [
+          {
+            title: "Attempt db overwrite",
+            command: "echo bad > data/hub.sqlite",
+            priority: 95,
+            complexity: 60,
+          },
+        ],
+      });
+      assert.equal(protectedDispatch.ok, false);
+      assert.ok(
+        protectedDispatch.failures.some((entry) =>
+          String(entry.error).toLowerCase().includes("protected db artifact")
+        )
+      );
+
+      const maintainResult = await callTool(first.client, "trichat.tmux_controller", {
+        action: "maintain",
+        mutation: nextMutation(testId, "trichat.tmux_controller-maintain", () => mutationCounter++),
+        min_worker_count: 1,
+        max_worker_count: 4,
+        target_queue_per_worker: 1,
+        auto_scale_workers: true,
+        nudge_blocked_lanes: true,
+      });
+      assert.equal(maintainResult.action, "maintain");
+      assert.ok(maintainResult.maintenance);
+      assert.equal(maintainResult.maintenance.scaled_up, true);
+      assert.ok(maintainResult.status.worker_count >= 3);
+      assert.ok(Array.isArray(maintainResult.maintenance.nudges));
+
       const statusAfterDispatch = await callTool(first.client, "trichat.tmux_controller", {
         action: "status",
         include_completed: true,
@@ -153,6 +187,8 @@ test("trichat.tmux_controller supports durable start/dispatch/stop flow with ide
       for (const worker of statusAfterDispatch.dashboard.worker_load) {
         assert.equal(typeof worker.lane_state, "string");
       }
+      const dbHeader = fs.readFileSync(dbPath, { encoding: "utf8", flag: "r" }).slice(0, 16);
+      assert.equal(dbHeader, "SQLite format 3\u0000");
 
       const syncResult = await callTool(first.client, "trichat.tmux_controller", {
         action: "sync",

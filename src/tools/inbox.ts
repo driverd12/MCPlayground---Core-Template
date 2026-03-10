@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { mutationSchema } from "./mutation.js";
+import { assertSafeWritePath } from "../path_safety.js";
 
 export const inboxEnqueueSchema = z.object({
   mutation: mutationSchema,
@@ -63,6 +64,10 @@ export function inboxEnqueue(repoRoot: string, input: z.infer<typeof inboxEnqueu
     created_at: now,
   };
 
+  assertSafeWritePath(filePath, {
+    repo_root: repoRoot,
+    operation: "imprint inbox enqueue write",
+  });
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 
   return {

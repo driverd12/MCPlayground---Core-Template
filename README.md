@@ -210,6 +210,13 @@ TRICHAT_TMUX_DRY_RUN=1 node scripts/mcp_tool_call.mjs \
 - `dashboard.worker_load[].lane_state` + `lane_signal` (idle/working/blocked/error lane detection from pane captures)
 - `dashboard.queue_age_seconds` + `dashboard.queue_depth`
 - `dashboard.failure_class` + `dashboard.failure_count`
+- `action="maintain"` performs unattended upkeep: pane sync, optional queue-driven worker scale-up, and blocked-lane nudge attempts for continuous long-running sessions
+
+Execution safety hardening:
+
+- protected DB artifacts (`hub.sqlite`, `-wal`, `-shm`, `-journal`) are now blocked from autopilot command plans and tmux dispatch tasks
+- direct autopilot shell execution also enforces this guardrail as a final pre-spawn check
+- local write-producing MCP tools (`adr.create`, `imprint.inbox.enqueue`, `imprint.snapshot`) now enforce protected-path checks before writing
 
 TriChat TUI interactive `/execute` can route via tmux allocator (`TRICHAT_EXECUTE_BACKEND=auto|tmux|direct`) using:
 

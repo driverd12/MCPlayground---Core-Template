@@ -2,6 +2,7 @@ import { z } from "zod";
 import fs from "node:fs";
 import path from "node:path";
 import { Storage } from "../storage.js";
+import { assertSafeWritePath } from "../path_safety.js";
 import { logEvent } from "../utils.js";
 import { mutationSchema } from "./mutation.js";
 
@@ -37,6 +38,10 @@ export function createAdr(
     throw new Error(`ADR file already exists: ${filePath}`);
   }
 
+  assertSafeWritePath(filePath, {
+    repo_root: repoRoot,
+    operation: "adr markdown write",
+  });
   fs.writeFileSync(filePath, markdown, "utf8");
   try {
     storage.insertAdr({
