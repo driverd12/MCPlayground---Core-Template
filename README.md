@@ -11,6 +11,8 @@ This repository ships with one reference pack:
 
 - `cfd` Computational Fluid Dynamics lifecycle tooling.
 
+The runtime also includes first-class TriChat orchestration tools (`trichat.*`) for multi-agent turns, autonomous loops, and tmux-backed nested execution control.
+
 ## Why This Template Exists
 
 Most MCP projects repeat the same infrastructure work:
@@ -101,9 +103,17 @@ cp .env.example .env
 Key variables:
 
 - `ANAMNESIS_HUB_DB_PATH` local SQLite path
+- `ANAMNESIS_HUB_RUN_QUICK_CHECK_ON_START` run SQLite quick integrity check at startup (`1` by default)
+- `ANAMNESIS_HUB_STARTUP_BACKUP` create rotating startup snapshots (`1` by default)
+- `ANAMNESIS_HUB_BACKUP_DIR` snapshot directory (default: sibling `backups/` near DB path)
+- `ANAMNESIS_HUB_BACKUP_KEEP` retained snapshot count (default: `24`)
+- `ANAMNESIS_HUB_AUTO_RESTORE_FROM_BACKUP` auto-restore latest snapshot on startup corruption (`1` by default)
+- `ANAMNESIS_HUB_ALLOW_FRESH_DB_ON_CORRUPTION` allow empty DB bootstrap if no backup exists (`0` by default)
 - `MCP_HTTP_BEARER_TOKEN` auth token for HTTP transport
 - `MCP_HTTP_ALLOWED_ORIGINS` comma-separated local origins
 - `MCP_DOMAIN_PACKS` comma-separated pack ids (`cfd`, etc.)
+
+The runtime now quarantines non-SQLite/corrupted artifacts into `corrupt/` before recovery attempts so startup failures do not silently overwrite evidence.
 
 ## Core Tool Surface
 
@@ -114,6 +124,7 @@ Core runtime tools include:
 - Durable execution: `run.*`, `task.*`, `lock.*`
 - Decision and incident logging: `adr.create`, `decision.link`, `incident.*`
 - Runtime ops: `health.*`, `migration.status`, `imprint.*`, `imprint.inbox.*`
+- TriChat orchestration: `trichat.*` (`thread/message/turn`, `autopilot`, `tmux_controller`, `bus`, `adapter_telemetry`, `chaos`, `slo`)
 
 ## Domain Pack Framework
 
@@ -175,6 +186,56 @@ How to publish a CFD-focused fork from this template:
 ```bash
 npm test
 npm run mvp:smoke
+```
+
+TriChat reliability checks:
+
+```bash
+npm run trichat:smoke
+npm run trichat:dogfood
+npm run trichat:soak:gate -- --hours 1 --interval-seconds 60
+```
+
+TriChat tmux controller dry-run example:
+
+```bash
+TRICHAT_TMUX_DRY_RUN=1 node scripts/mcp_tool_call.mjs \
+  --tool trichat.tmux_controller \
+  --args '{"action":"start","mutation":{"idempotency_key":"demo-start","side_effect_fingerprint":"demo-start"}}'
+```
+
+`trichat.tmux_controller` status/dispatch responses include a lightweight live dashboard payload for TUIs:
+
+- `dashboard.worker_load` (queue/load per worker)
+- `dashboard.worker_load[].lane_state` + `lane_signal` (idle/working/blocked/error lane detection from pane captures)
+- `dashboard.queue_age_seconds` + `dashboard.queue_depth`
+- `dashboard.failure_class` + `dashboard.failure_count`
+
+TriChat TUI interactive `/execute` can route via tmux allocator (`TRICHAT_EXECUTE_BACKEND=auto|tmux|direct`) using:
+
+- `TRICHAT_TMUX_SESSION_NAME`
+- `TRICHAT_TMUX_WORKER_COUNT`
+- `TRICHAT_TMUX_MAX_QUEUE_PER_WORKER`
+- `TRICHAT_TMUX_SYNC_AFTER_DISPATCH`
+- `TRICHAT_TMUX_LOCK_LEASE_SECONDS`
+
+Optional fanout auto-dispatch (no manual `/execute`) can be enabled with `TRICHAT_AUTO_EXECUTE_AFTER_DECISION=1`.
+This path is tmux-dispatch-first for snappiness and will skip with a clear status if no runnable command plan is present.
+Use `TRICHAT_AUTO_EXECUTE_CYCLES` and `TRICHAT_AUTO_EXECUTE_BREAKER_FAILURES` to run bounded review/fix/feature/verify cycles with breaker halts.
+
+Autopilot can use tmux nested execution directly (`execute_backend=tmux|auto`) with dynamic worker budgeting from command complexity/priority:
+
+```bash
+TRICHAT_TMUX_DRY_RUN=1 node scripts/mcp_tool_call.mjs \
+  --tool trichat.autopilot \
+  --args '{
+    "action":"run_once",
+    "mutation":{"idempotency_key":"demo-autopilot","side_effect_fingerprint":"demo-autopilot"},
+    "execute_backend":"tmux",
+    "tmux_session_name":"trichat-autopilot-demo",
+    "tmux_worker_count":4,
+    "tmux_auto_scale_workers":true
+  }'
 ```
 
 ## Repository Layout

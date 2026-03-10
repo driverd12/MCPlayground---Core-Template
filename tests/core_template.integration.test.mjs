@@ -8,7 +8,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const REPO_ROOT = process.cwd();
 
-test("core template starts without domain packs and exposes universal tools", async () => {
+test("server starts without domain packs and exposes core + TriChat tools", async () => {
   const testId = `${Date.now()}`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-test-"));
   const dbPath = path.join(tempDir, "hub.sqlite");
@@ -23,8 +23,9 @@ test("core template starts without domain packs and exposes universal tools", as
     assert.equal(names.has("task.create"), true);
     assert.equal(names.has("transcript.log"), true);
 
-    assert.equal(names.has("trichat.thread_open"), false);
-    assert.equal(names.has("simulate.workflow"), false);
+    assert.equal(names.has("trichat.thread_open"), true);
+    assert.equal(names.has("trichat.tmux_controller"), true);
+    assert.equal(names.has("simulate.workflow"), true);
     assert.equal(names.has("cfd.case.create"), false);
 
     await callTool(client, "memory.append", {

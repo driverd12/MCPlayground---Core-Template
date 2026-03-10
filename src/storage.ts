@@ -3,6 +3,23 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
+const SQLITE_HEADER = Buffer.from("SQLite format 3\u0000", "utf8");
+
+type StorageGuardOptions = {
+  backup_dir: string;
+  backup_keep: number;
+  startup_backup_enabled: boolean;
+  startup_quick_check_enabled: boolean;
+  auto_restore_from_backup: boolean;
+  allow_fresh_on_corruption: boolean;
+  quarantine_dir: string;
+};
+
+type StorageGuardOutcome = {
+  quarantined_paths: string[];
+  restored_from_backup: string | null;
+};
+
 export type TrustTier = "raw" | "verified" | "policy-backed" | "deprecated";
 
 export type NoteRecord = {
@@ -387,12 +404,59 @@ export type TriChatAutopilotStateRecord = {
   bridge_dry_run: boolean;
   execute_enabled: boolean;
   command_allowlist: string[];
+  execute_backend: "direct" | "tmux" | "auto";
+  tmux_session_name: string;
+  tmux_worker_count: number;
+  tmux_max_queue_per_worker: number;
+  tmux_auto_scale_workers: boolean;
+  tmux_sync_after_dispatch: boolean;
   confidence_threshold: number;
   max_consecutive_errors: number;
   lock_key: string | null;
   lock_lease_seconds: number;
   adr_policy: "every_success" | "high_impact" | "manual";
   pause_reason: string | null;
+  updated_at: string;
+};
+
+export type TriChatTmuxControllerTaskStatus =
+  | "queued"
+  | "dispatched"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type TriChatTmuxControllerTaskRecord = {
+  task_id: string;
+  seq: number;
+  title: string;
+  command: string;
+  priority: number;
+  complexity: number;
+  worker_id: string | null;
+  status: TriChatTmuxControllerTaskStatus;
+  created_at: string;
+  dispatched_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  exit_code: number | null;
+  thread_id: string | null;
+  turn_id: string | null;
+  metadata: Record<string, unknown>;
+};
+
+export type TriChatTmuxControllerStateRecord = {
+  enabled: boolean;
+  session_name: string;
+  workspace: string;
+  worker_count: number;
+  shell: string;
+  max_queue_per_worker: number;
+  next_task_seq: number;
+  tasks: TriChatTmuxControllerTaskRecord[];
+  last_dispatch_at: string | null;
+  last_error: string | null;
   updated_at: string;
 };
 
@@ -466,11 +530,15 @@ export type MigrationStatusRecord = {
 
 export class Storage {
   private db: Database.Database;
+  private readonly guardOptions: StorageGuardOptions;
+  private readonly guardOutcome: StorageGuardOutcome;
 
   constructor(private dbPath: string) {
     const dir = path.dirname(dbPath);
     fs.mkdirSync(dir, { recursive: true });
-    this.db = new Database(dbPath);
+    this.guardOptions = resolveStorageGuardOptions(dbPath);
+    this.guardOutcome = guardDatabasePathBeforeOpen(dbPath, this.guardOptions);
+    this.db = openDatabaseWithGuard(dbPath, this.guardOptions);
   }
 
   getDatabasePath(): string {
@@ -478,6 +546,12 @@ export class Storage {
   }
 
   init(): void {
+    if (this.guardOutcome.restored_from_backup) {
+      writeStorageGuardLog(
+        `[storage] restored database from backup: ${this.guardOutcome.restored_from_backup} -> ${this.dbPath}`
+      );
+    }
+    this.ensureStartupIntegrity();
     this.db.pragma("foreign_keys = ON");
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("busy_timeout = 5000");
@@ -503,8 +577,109 @@ export class Storage {
         name: "add-task-orchestrator-schema",
         run: () => this.applyTaskSchemaMigration(),
       },
+      {
+        version: 5,
+        name: "add-trichat-thread-message-schema",
+        run: () => this.applyTriChatSchemaMigration(),
+      },
+      {
+        version: 6,
+        name: "add-trichat-adapter-telemetry-schema",
+        run: () => this.applyTriChatAdapterTelemetryMigration(),
+      },
+      {
+        version: 7,
+        name: "add-trichat-bus-schema",
+        run: () => this.applyTriChatBusMigration(),
+      },
+      {
+        version: 8,
+        name: "add-trichat-turn-schema",
+        run: () => this.applyTriChatTurnSchemaMigration(),
+      },
+      {
+        version: 9,
+        name: "add-trichat-reliability-schema",
+        run: () => this.applyTriChatReliabilitySchemaMigration(),
+      },
     ]);
     this.ensureRuntimeSchemaCompleteness();
+    this.createStartupBackupSnapshot();
+  }
+
+  private ensureStartupIntegrity(): void {
+    if (!this.guardOptions.startup_quick_check_enabled) {
+      return;
+    }
+    const quickCheck = runQuickCheck(this.db);
+    if (quickCheck.ok) {
+      return;
+    }
+    this.recoverFromCorruption(`quick_check failed: ${quickCheck.reason}`, "quick-check");
+  }
+
+  private recoverFromCorruption(reason: string, stage: string): void {
+    writeStorageGuardLog(`[storage] corruption detected (${stage}): ${reason}`);
+    safeCloseDatabase(this.db);
+    const quarantined = quarantineDatabaseArtifacts(this.dbPath, this.guardOptions, stage);
+    if (quarantined.length > 0) {
+      writeStorageGuardLog(`[storage] quarantined artifacts: ${quarantined.join(", ")}`);
+    }
+
+    if (this.guardOptions.auto_restore_from_backup) {
+      const restoredFrom = restoreLatestDatabaseBackup(this.dbPath, this.guardOptions);
+      if (restoredFrom) {
+        writeStorageGuardLog(`[storage] attempting restore from backup: ${restoredFrom}`);
+        this.db = openDatabaseWithGuard(this.dbPath, this.guardOptions);
+        const postRestoreCheck = runQuickCheck(this.db);
+        if (postRestoreCheck.ok) {
+          writeStorageGuardLog(`[storage] restore succeeded with clean integrity check.`);
+          return;
+        }
+        writeStorageGuardLog(`[storage] restored backup still failed quick_check: ${postRestoreCheck.reason}`);
+        safeCloseDatabase(this.db);
+      }
+    }
+
+    if (!this.guardOptions.allow_fresh_on_corruption) {
+      throw new Error(
+        [
+          `Storage corruption could not be recovered automatically for ${this.dbPath}.`,
+          `No healthy backup could be restored from ${this.guardOptions.backup_dir}.`,
+          `Set ANAMNESIS_HUB_ALLOW_FRESH_DB_ON_CORRUPTION=1 only if you intentionally want a fresh empty DB.`,
+        ].join(" ")
+      );
+    }
+
+    removeDatabaseArtifacts(this.dbPath);
+    this.db = openDatabaseWithGuard(this.dbPath, this.guardOptions);
+    writeStorageGuardLog(`[storage] initialized fresh empty database after unrecoverable corruption: ${this.dbPath}`);
+  }
+
+  private createStartupBackupSnapshot(): void {
+    if (!this.guardOptions.startup_backup_enabled) {
+      return;
+    }
+    if (this.dbPath === ":memory:") {
+      return;
+    }
+
+    fs.mkdirSync(this.guardOptions.backup_dir, { recursive: true });
+    const base = path.basename(this.dbPath);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const tmpPath = path.join(this.guardOptions.backup_dir, `${base}.${stamp}.tmp.sqlite`);
+    const finalPath = path.join(this.guardOptions.backup_dir, `${base}.${stamp}.sqlite`);
+    const escapedTmpPath = tmpPath.replace(/'/g, "''");
+    try {
+      this.db.pragma("wal_checkpoint(PASSIVE)");
+      this.db.exec(`VACUUM INTO '${escapedTmpPath}'`);
+      moveFileWithFallback(tmpPath, finalPath);
+      pruneDatabaseBackups(this.dbPath, this.guardOptions);
+    } catch (error) {
+      removeFileIfExists(tmpPath);
+      const message = error instanceof Error ? error.message : String(error);
+      writeStorageGuardLog(`[storage] startup backup skipped: ${message}`);
+    }
   }
 
   getSchemaVersion(): number {
@@ -1353,6 +1528,9 @@ export class Storage {
     const adrPolicyRaw = String(config.adr_policy ?? "every_success").trim().toLowerCase();
     const adrPolicy: TriChatAutopilotStateRecord["adr_policy"] =
       adrPolicyRaw === "manual" || adrPolicyRaw === "high_impact" ? adrPolicyRaw : "every_success";
+    const executeBackendRaw = String(config.execute_backend ?? "auto").trim().toLowerCase();
+    const executeBackend: TriChatAutopilotStateRecord["execute_backend"] =
+      executeBackendRaw === "direct" || executeBackendRaw === "tmux" ? executeBackendRaw : "auto";
     const commandAllowlist = dedupeNonEmpty(
       Array.isArray(config.command_allowlist)
         ? (config.command_allowlist as unknown[]).map((entry) => String(entry ?? ""))
@@ -1379,6 +1557,13 @@ export class Storage {
       bridge_dry_run: parseBoolean(config.bridge_dry_run, false),
       execute_enabled: parseBoolean(config.execute_enabled, true),
       command_allowlist: commandAllowlist,
+      execute_backend: executeBackend,
+      tmux_session_name:
+        String(config.tmux_session_name ?? "trichat-autopilot").trim() || "trichat-autopilot",
+      tmux_worker_count: parseBoundedInt(config.tmux_worker_count, 3, 1, 12),
+      tmux_max_queue_per_worker: parseBoundedInt(config.tmux_max_queue_per_worker, 6, 1, 200),
+      tmux_auto_scale_workers: parseBoolean(config.tmux_auto_scale_workers, true),
+      tmux_sync_after_dispatch: parseBoolean(config.tmux_sync_after_dispatch, true),
       confidence_threshold: parseBoundedFloat(config.confidence_threshold, 0.45, 0.05, 1),
       max_consecutive_errors: parseBoundedInt(config.max_consecutive_errors, 3, 1, 20),
       lock_key: lockKeyRaw || null,
@@ -1403,6 +1588,12 @@ export class Storage {
     bridge_dry_run: boolean;
     execute_enabled: boolean;
     command_allowlist: string[];
+    execute_backend: "direct" | "tmux" | "auto";
+    tmux_session_name: string;
+    tmux_worker_count: number;
+    tmux_max_queue_per_worker: number;
+    tmux_auto_scale_workers: boolean;
+    tmux_sync_after_dispatch: boolean;
     confidence_threshold: number;
     max_consecutive_errors: number;
     lock_key?: string | null;
@@ -1419,6 +1610,10 @@ export class Storage {
       params.adr_policy === "manual" || params.adr_policy === "high_impact"
         ? params.adr_policy
         : "every_success";
+    const executeBackend: TriChatAutopilotStateRecord["execute_backend"] =
+      params.execute_backend === "direct" || params.execute_backend === "tmux"
+        ? params.execute_backend
+        : "auto";
     const lockKey = String(params.lock_key ?? "").trim();
     const normalized = {
       enabled: Boolean(params.enabled),
@@ -1436,6 +1631,12 @@ export class Storage {
       bridge_dry_run: Boolean(params.bridge_dry_run),
       execute_enabled: Boolean(params.execute_enabled),
       command_allowlist: dedupeNonEmpty(params.command_allowlist ?? []),
+      execute_backend: executeBackend,
+      tmux_session_name: String(params.tmux_session_name ?? "").trim() || "trichat-autopilot",
+      tmux_worker_count: parseBoundedInt(params.tmux_worker_count, 3, 1, 12),
+      tmux_max_queue_per_worker: parseBoundedInt(params.tmux_max_queue_per_worker, 6, 1, 200),
+      tmux_auto_scale_workers: Boolean(params.tmux_auto_scale_workers),
+      tmux_sync_after_dispatch: Boolean(params.tmux_sync_after_dispatch),
       confidence_threshold: parseBoundedFloat(params.confidence_threshold, 0.45, 0.05, 1),
       max_consecutive_errors: parseBoundedInt(params.max_consecutive_errors, 3, 1, 20),
       lock_key: lockKey || null,
@@ -1456,6 +1657,12 @@ export class Storage {
       bridge_dry_run: normalized.bridge_dry_run,
       execute_enabled: normalized.execute_enabled,
       command_allowlist: normalized.command_allowlist,
+      execute_backend: normalized.execute_backend,
+      tmux_session_name: normalized.tmux_session_name,
+      tmux_worker_count: normalized.tmux_worker_count,
+      tmux_max_queue_per_worker: normalized.tmux_max_queue_per_worker,
+      tmux_auto_scale_workers: normalized.tmux_auto_scale_workers,
+      tmux_sync_after_dispatch: normalized.tmux_sync_after_dispatch,
       confidence_threshold: normalized.confidence_threshold,
       max_consecutive_errors: normalized.max_consecutive_errors,
       lock_key: normalized.lock_key,
@@ -1479,6 +1686,183 @@ export class Storage {
       ...normalized,
       updated_at: now,
     };
+  }
+
+  getTriChatTmuxControllerState(): TriChatTmuxControllerStateRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT enabled, config_json, updated_at
+         FROM daemon_configs
+         WHERE daemon_key = ?`
+      )
+      .get("trichat.tmux_controller") as Record<string, unknown> | undefined;
+    if (!row) {
+      return null;
+    }
+
+    const config = parseJsonObject(row.config_json);
+    const tasksRaw = Array.isArray(config.tasks) ? (config.tasks as unknown[]) : [];
+    const tasks = tasksRaw
+      .map((entry, index) => {
+        if (!entry || typeof entry !== "object") {
+          return null;
+        }
+        const item = entry as Record<string, unknown>;
+        const taskId = String(item.task_id ?? "").trim();
+        const command = String(item.command ?? "").trim();
+        if (!taskId || !command) {
+          return null;
+        }
+        const statusRaw = String(item.status ?? "queued").trim().toLowerCase();
+        const status: TriChatTmuxControllerTaskStatus =
+          statusRaw === "dispatched" ||
+          statusRaw === "running" ||
+          statusRaw === "completed" ||
+          statusRaw === "failed" ||
+          statusRaw === "cancelled"
+            ? statusRaw
+            : "queued";
+        const createdAtFallback = new Date().toISOString();
+        return {
+          task_id: taskId,
+          seq: parseBoundedInt(item.seq, index + 1, 1, 10_000_000),
+          title: String(item.title ?? taskId).trim() || taskId,
+          command,
+          priority: parseBoundedInt(item.priority, 50, 1, 100),
+          complexity: parseBoundedInt(item.complexity, 50, 1, 100),
+          worker_id: asNullableString(item.worker_id),
+          status,
+          created_at: normalizeIsoTimestamp(asNullableString(item.created_at) ?? undefined, createdAtFallback),
+          dispatched_at: normalizeOptionalIsoTimestamp(asNullableString(item.dispatched_at)),
+          started_at: normalizeOptionalIsoTimestamp(asNullableString(item.started_at)),
+          completed_at: normalizeOptionalIsoTimestamp(asNullableString(item.completed_at)),
+          exit_code:
+            typeof item.exit_code === "number" && Number.isFinite(item.exit_code)
+              ? Math.trunc(item.exit_code)
+              : item.exit_code === null
+                ? null
+                : Number.isFinite(Number(item.exit_code))
+                  ? Math.trunc(Number(item.exit_code))
+                  : null,
+          thread_id: asNullableString(item.thread_id),
+          turn_id: asNullableString(item.turn_id),
+          metadata: parseLooseObject(item.metadata),
+        } satisfies TriChatTmuxControllerTaskRecord;
+      })
+      .filter((entry): entry is TriChatTmuxControllerTaskRecord => Boolean(entry))
+      .sort((left, right) => left.seq - right.seq);
+
+    return {
+      enabled: Number(row.enabled ?? 0) === 1,
+      session_name: String(config.session_name ?? "trichat-controller").trim() || "trichat-controller",
+      workspace: String(config.workspace ?? ".").trim() || ".",
+      worker_count: parseBoundedInt(config.worker_count, 3, 1, 12),
+      shell: String(config.shell ?? "/bin/zsh").trim() || "/bin/zsh",
+      max_queue_per_worker: parseBoundedInt(config.max_queue_per_worker, 8, 1, 200),
+      next_task_seq: parseBoundedInt(config.next_task_seq, tasks.length + 1, 1, 100_000_000),
+      tasks,
+      last_dispatch_at: normalizeOptionalIsoTimestamp(asNullableString(config.last_dispatch_at)),
+      last_error: asNullableString(config.last_error),
+      updated_at: String(row.updated_at ?? ""),
+    };
+  }
+
+  setTriChatTmuxControllerState(params: {
+    enabled: boolean;
+    session_name: string;
+    workspace: string;
+    worker_count: number;
+    shell: string;
+    max_queue_per_worker: number;
+    next_task_seq: number;
+    tasks: TriChatTmuxControllerTaskRecord[];
+    last_dispatch_at?: string | null;
+    last_error?: string | null;
+  }): TriChatTmuxControllerStateRecord {
+    const now = new Date().toISOString();
+    const normalizedTasks = (params.tasks ?? [])
+      .map((task, index) => {
+        const taskId = String(task.task_id ?? "").trim();
+        const command = String(task.command ?? "").trim();
+        if (!taskId || !command) {
+          return null;
+        }
+        const statusRaw = String(task.status ?? "queued").trim().toLowerCase();
+        const status: TriChatTmuxControllerTaskStatus =
+          statusRaw === "dispatched" ||
+          statusRaw === "running" ||
+          statusRaw === "completed" ||
+          statusRaw === "failed" ||
+          statusRaw === "cancelled"
+            ? statusRaw
+            : "queued";
+        return {
+          task_id: taskId,
+          seq: parseBoundedInt(task.seq, index + 1, 1, 10_000_000),
+          title: String(task.title ?? taskId).trim() || taskId,
+          command,
+          priority: parseBoundedInt(task.priority, 50, 1, 100),
+          complexity: parseBoundedInt(task.complexity, 50, 1, 100),
+          worker_id: asNullableString(task.worker_id),
+          status,
+          created_at: normalizeIsoTimestamp(asNullableString(task.created_at) ?? undefined, now),
+          dispatched_at: normalizeOptionalIsoTimestamp(asNullableString(task.dispatched_at)),
+          started_at: normalizeOptionalIsoTimestamp(asNullableString(task.started_at)),
+          completed_at: normalizeOptionalIsoTimestamp(asNullableString(task.completed_at)),
+          exit_code:
+            typeof task.exit_code === "number" && Number.isFinite(task.exit_code)
+              ? Math.trunc(task.exit_code)
+              : task.exit_code === null
+                ? null
+                : Number.isFinite(Number(task.exit_code))
+                  ? Math.trunc(Number(task.exit_code))
+                  : null,
+          thread_id: asNullableString(task.thread_id),
+          turn_id: asNullableString(task.turn_id),
+          metadata: parseLooseObject(task.metadata),
+        } satisfies TriChatTmuxControllerTaskRecord;
+      })
+      .filter((entry): entry is TriChatTmuxControllerTaskRecord => Boolean(entry))
+      .sort((left, right) => left.seq - right.seq);
+
+    const normalized: TriChatTmuxControllerStateRecord = {
+      enabled: Boolean(params.enabled),
+      session_name: String(params.session_name ?? "").trim() || "trichat-controller",
+      workspace: String(params.workspace ?? "").trim() || ".",
+      worker_count: parseBoundedInt(params.worker_count, 3, 1, 12),
+      shell: String(params.shell ?? "").trim() || "/bin/zsh",
+      max_queue_per_worker: parseBoundedInt(params.max_queue_per_worker, 8, 1, 200),
+      next_task_seq: parseBoundedInt(params.next_task_seq, normalizedTasks.length + 1, 1, 100_000_000),
+      tasks: normalizedTasks,
+      last_dispatch_at: normalizeOptionalIsoTimestamp(asNullableString(params.last_dispatch_at)),
+      last_error: asNullableString(params.last_error),
+      updated_at: now,
+    };
+
+    const configJson = stableStringify({
+      session_name: normalized.session_name,
+      workspace: normalized.workspace,
+      worker_count: normalized.worker_count,
+      shell: normalized.shell,
+      max_queue_per_worker: normalized.max_queue_per_worker,
+      next_task_seq: normalized.next_task_seq,
+      tasks: normalized.tasks,
+      last_dispatch_at: normalized.last_dispatch_at,
+      last_error: normalized.last_error,
+    });
+
+    this.db
+      .prepare(
+        `INSERT INTO daemon_configs (daemon_key, enabled, config_json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(daemon_key) DO UPDATE SET
+           enabled = excluded.enabled,
+           config_json = excluded.config_json,
+           updated_at = excluded.updated_at`
+      )
+      .run("trichat.tmux_controller", normalized.enabled ? 1 : 0, configJson, now);
+
+    return normalized;
   }
 
   getImprintAutoSnapshotState(): ImprintAutoSnapshotStateRecord | null {
@@ -4598,6 +4982,15 @@ export class Storage {
       "task_events",
       "task_leases",
       "task_artifacts",
+      "trichat_threads",
+      "trichat_messages",
+      "trichat_turns",
+      "trichat_turn_artifacts",
+      "trichat_bus_events",
+      "trichat_adapter_states",
+      "trichat_adapter_events",
+      "trichat_chaos_events",
+      "trichat_slo_snapshots",
     ] as const;
     const counts: Record<string, number> = {};
     for (const table of tables) {
@@ -4671,6 +5064,11 @@ export class Storage {
     this.applyDaemonConfigMigration();
     this.applyImprintSchemaMigration();
     this.applyTaskSchemaMigration();
+    this.applyTriChatSchemaMigration();
+    this.applyTriChatAdapterTelemetryMigration();
+    this.applyTriChatBusMigration();
+    this.applyTriChatTurnSchemaMigration();
+    this.applyTriChatReliabilitySchemaMigration();
   }
 
   private applyCoreSchemaMigration(): void {
@@ -5655,6 +6053,13 @@ function parseJsonObject(value: unknown): Record<string, unknown> {
   return {};
 }
 
+function parseLooseObject(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return parseJsonObject(value);
+}
+
 function parseNullableJsonObject(value: unknown): Record<string, unknown> | null {
   if (value === null || value === undefined) {
     return null;
@@ -5689,6 +6094,257 @@ function parseJsonUnknown(value: string | null): unknown {
   } catch {
     return value;
   }
+}
+
+function resolveStorageGuardOptions(dbPath: string): StorageGuardOptions {
+  const dbDir = path.dirname(dbPath);
+  const backupDirRaw = String(process.env.ANAMNESIS_HUB_BACKUP_DIR ?? "").trim();
+  const backupDir = backupDirRaw ? path.resolve(backupDirRaw) : path.join(dbDir, "backups");
+  return {
+    backup_dir: backupDir,
+    backup_keep: parseBoundedInt(process.env.ANAMNESIS_HUB_BACKUP_KEEP, 24, 1, 500),
+    startup_backup_enabled: parseBoolean(process.env.ANAMNESIS_HUB_STARTUP_BACKUP, true),
+    startup_quick_check_enabled: parseBoolean(process.env.ANAMNESIS_HUB_RUN_QUICK_CHECK_ON_START, true),
+    auto_restore_from_backup: parseBoolean(process.env.ANAMNESIS_HUB_AUTO_RESTORE_FROM_BACKUP, true),
+    allow_fresh_on_corruption: parseBoolean(process.env.ANAMNESIS_HUB_ALLOW_FRESH_DB_ON_CORRUPTION, false),
+    quarantine_dir: path.join(dbDir, "corrupt"),
+  };
+}
+
+function guardDatabasePathBeforeOpen(dbPath: string, options: StorageGuardOptions): StorageGuardOutcome {
+  const outcome: StorageGuardOutcome = {
+    quarantined_paths: [],
+    restored_from_backup: null,
+  };
+  if (dbPath === ":memory:") {
+    return outcome;
+  }
+  if (!fs.existsSync(dbPath)) {
+    return outcome;
+  }
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(dbPath);
+  } catch (error) {
+    throw new Error(`Unable to stat database path ${dbPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (stat.size === 0) {
+    return outcome;
+  }
+  if (hasSqliteHeader(dbPath)) {
+    return outcome;
+  }
+
+  const quarantined = quarantineDatabaseArtifacts(dbPath, options, "invalid-header");
+  outcome.quarantined_paths.push(...quarantined);
+  writeStorageGuardLog(
+    `[storage] non-SQLite header detected at ${dbPath}; quarantined ${quarantined.length} artifact(s).`
+  );
+
+  if (options.auto_restore_from_backup) {
+    const restoredFrom = restoreLatestDatabaseBackup(dbPath, options);
+    if (restoredFrom) {
+      outcome.restored_from_backup = restoredFrom;
+      return outcome;
+    }
+  }
+
+  if (!options.allow_fresh_on_corruption) {
+    throw new Error(
+      [
+        `Database file ${dbPath} is not a valid SQLite file and no backup was restored from ${options.backup_dir}.`,
+        `Set ANAMNESIS_HUB_ALLOW_FRESH_DB_ON_CORRUPTION=1 to allow an empty database bootstrap (data loss).`,
+      ].join(" ")
+    );
+  }
+  return outcome;
+}
+
+function openDatabaseWithGuard(dbPath: string, options: StorageGuardOptions): Database.Database {
+  try {
+    return new Database(dbPath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const isCorruption = /SQLITE_CORRUPT|malformed|file is not a database|disk image is malformed/i.test(message);
+    if (!isCorruption) {
+      throw error;
+    }
+
+    writeStorageGuardLog(`[storage] open failed due to corruption at ${dbPath}: ${message}`);
+    const quarantined = quarantineDatabaseArtifacts(dbPath, options, "open-failed");
+    if (quarantined.length > 0) {
+      writeStorageGuardLog(`[storage] quarantined after open failure: ${quarantined.join(", ")}`);
+    }
+
+    if (options.auto_restore_from_backup) {
+      const restoredFrom = restoreLatestDatabaseBackup(dbPath, options);
+      if (restoredFrom) {
+        writeStorageGuardLog(`[storage] restored from backup after open failure: ${restoredFrom}`);
+        return new Database(dbPath);
+      }
+    }
+
+    if (!options.allow_fresh_on_corruption) {
+      throw new Error(
+        [
+          `Unable to open SQLite database at ${dbPath}; corruption detected and no backup could be restored.`,
+          `Set ANAMNESIS_HUB_ALLOW_FRESH_DB_ON_CORRUPTION=1 only if you intentionally want a fresh database.`,
+        ].join(" ")
+      );
+    }
+
+    removeDatabaseArtifacts(dbPath);
+    writeStorageGuardLog(`[storage] opening fresh empty database at ${dbPath} after unrecoverable corruption.`);
+    return new Database(dbPath);
+  }
+}
+
+function runQuickCheck(db: Database.Database): { ok: boolean; reason: string } {
+  try {
+    const value = String(db.pragma("quick_check", { simple: true }) ?? "").trim();
+    if (!value || value.toLowerCase() === "ok") {
+      return { ok: true, reason: "ok" };
+    }
+    return { ok: false, reason: value };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function hasSqliteHeader(dbPath: string): boolean {
+  if (!fs.existsSync(dbPath)) {
+    return false;
+  }
+  const fd = fs.openSync(dbPath, "r");
+  try {
+    const header = Buffer.alloc(SQLITE_HEADER.length);
+    const read = fs.readSync(fd, header, 0, header.length, 0);
+    if (read < SQLITE_HEADER.length) {
+      return false;
+    }
+    return header.equals(SQLITE_HEADER);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function quarantineDatabaseArtifacts(dbPath: string, options: StorageGuardOptions, reason: string): string[] {
+  if (dbPath === ":memory:") {
+    return [];
+  }
+  fs.mkdirSync(options.quarantine_dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const suffixes = ["", "-wal", "-shm"];
+  const moved: string[] = [];
+  for (const suffix of suffixes) {
+    const artifactPath = `${dbPath}${suffix}`;
+    if (!fs.existsSync(artifactPath)) {
+      continue;
+    }
+    const artifactName = path.basename(artifactPath);
+    const targetPath = path.join(options.quarantine_dir, `${artifactName}.${stamp}.${reason}`);
+    moveFileWithFallback(artifactPath, targetPath);
+    moved.push(targetPath);
+  }
+  return moved;
+}
+
+function restoreLatestDatabaseBackup(dbPath: string, options: StorageGuardOptions): string | null {
+  if (dbPath === ":memory:") {
+    return null;
+  }
+  if (!fs.existsSync(options.backup_dir)) {
+    return null;
+  }
+  const base = path.basename(dbPath);
+  const candidates = fs
+    .readdirSync(options.backup_dir)
+    .filter((entry) => entry.startsWith(`${base}.`) && entry.endsWith(".sqlite"))
+    .map((entry) => path.join(options.backup_dir, entry))
+    .filter((entry) => fs.existsSync(entry))
+    .sort((left, right) => {
+      const leftMs = safeMtimeMs(left);
+      const rightMs = safeMtimeMs(right);
+      return rightMs - leftMs;
+    });
+
+  const selected = candidates[0];
+  if (!selected) {
+    return null;
+  }
+  removeDatabaseArtifacts(dbPath);
+  fs.copyFileSync(selected, dbPath);
+  return selected;
+}
+
+function removeDatabaseArtifacts(dbPath: string): void {
+  if (dbPath === ":memory:") {
+    return;
+  }
+  const suffixes = ["", "-wal", "-shm"];
+  for (const suffix of suffixes) {
+    removeFileIfExists(`${dbPath}${suffix}`);
+  }
+}
+
+function pruneDatabaseBackups(dbPath: string, options: StorageGuardOptions): void {
+  if (!fs.existsSync(options.backup_dir)) {
+    return;
+  }
+  const base = path.basename(dbPath);
+  const backups = fs
+    .readdirSync(options.backup_dir)
+    .filter((entry) => entry.startsWith(`${base}.`) && entry.endsWith(".sqlite"))
+    .map((entry) => path.join(options.backup_dir, entry))
+    .filter((entry) => fs.existsSync(entry))
+    .sort((left, right) => safeMtimeMs(right) - safeMtimeMs(left));
+
+  if (backups.length <= options.backup_keep) {
+    return;
+  }
+
+  const toDelete = backups.slice(options.backup_keep);
+  for (const entry of toDelete) {
+    removeFileIfExists(entry);
+  }
+}
+
+function safeCloseDatabase(db: Database.Database): void {
+  try {
+    db.close();
+  } catch {
+    // ignore close failures during recovery flow
+  }
+}
+
+function moveFileWithFallback(fromPath: string, toPath: string): void {
+  fs.mkdirSync(path.dirname(toPath), { recursive: true });
+  try {
+    fs.renameSync(fromPath, toPath);
+    return;
+  } catch {
+    fs.copyFileSync(fromPath, toPath);
+    fs.unlinkSync(fromPath);
+  }
+}
+
+function removeFileIfExists(filePath: string): void {
+  if (!fs.existsSync(filePath)) {
+    return;
+  }
+  fs.unlinkSync(filePath);
+}
+
+function safeMtimeMs(filePath: string): number {
+  try {
+    return fs.statSync(filePath).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+function writeStorageGuardLog(message: string): void {
+  process.stderr.write(`${message}\n`);
 }
 
 function parseBoolean(value: unknown, fallback: boolean): boolean {
