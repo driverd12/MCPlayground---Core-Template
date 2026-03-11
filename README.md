@@ -106,6 +106,7 @@ The storage runtime quarantines non-SQLite/corrupt DB artifacts before restore a
 See:
 
 - [IDE + Agent Setup](./docs/IDE_AGENT_SETUP.md)
+- [Coworker Quickstart (Cursor + Codex)](./docs/COWORKER_QUICKSTART_CURSOR_CODEX.md)
 - [Transport Connection Guide](./docs/CONNECT.md)
 - [Security Notes](./docs/SECURITY.md)
 - [CFD Playbook](./docs/CFD_PLAYBOOK.md)
