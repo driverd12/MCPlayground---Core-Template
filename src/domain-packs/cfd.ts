@@ -1060,6 +1060,236 @@ export const cfdDomainPack: DomainPack = {
           };
         })
     );
+
+    context.register_planner_hook({
+      hook_name: "case_lifecycle",
+      title: "CFD Case Lifecycle Planner",
+      description: "Generate a durable lifecycle plan for a CFD case using the CFD pack toolchain.",
+      target_types: ["cfd.case"],
+      plan: ({ target, options }) =>
+        withCfdDb(dbPath, (db) => {
+          const caseRecord = requireCase(db, target.entity_id);
+          const meshStrategy =
+            typeof options?.mesh_strategy === "string" && options.mesh_strategy.trim()
+              ? options.mesh_strategy.trim()
+              : "snappyHexMesh";
+          const targetCellCount =
+            typeof options?.target_cell_count === "number" && Number.isFinite(options.target_cell_count)
+              ? Math.max(100, Math.round(options.target_cell_count))
+              : 1_200_000;
+          const boundaryLayers =
+            typeof options?.boundary_layers === "number" && Number.isFinite(options.boundary_layers)
+              ? Math.max(0, Math.round(options.boundary_layers))
+              : 8;
+          const projectDir =
+            typeof options?.project_dir === "string" && options.project_dir.trim()
+              ? options.project_dir.trim()
+              : context.repo_root;
+          const solveCommand =
+            typeof options?.solve_command === "string" && options.solve_command.trim()
+              ? options.solve_command.trim()
+              : `simpleFoam -case ./cases/${caseRecord.case_id}`;
+
+          return {
+            summary: `Generated a CFD lifecycle plan for case ${caseRecord.case_id}.`,
+            confidence: 0.78,
+            assumptions: [
+              "CFD operators can claim worker steps for solver execution.",
+              "Latest run will be discoverable by cfd.report.bundle without an explicit run_id input.",
+            ],
+            success_criteria: [
+              "Case state can be inspected through the CFD pack.",
+              "A solver execution task is queued for the attached agent runtime.",
+              "Case readiness is verified before the report bundle step.",
+            ],
+            rollback: [
+              "Stop active solve runs before invalidating the plan.",
+              "Preserve latest mesh and validation evidence before re-planning.",
+            ],
+            metadata: {
+              case_status: caseRecord.status,
+              solver_family: caseRecord.solver_family,
+              planner_pack: "cfd",
+            },
+            steps: [
+              {
+                step_id: "inspect-case",
+                title: "Inspect CFD case state",
+                step_kind: "analysis",
+                executor_kind: "tool",
+                tool_name: "cfd.case.get",
+                input: {
+                  case_id: caseRecord.case_id,
+                },
+              },
+              {
+                step_id: "generate-mesh",
+                title: "Generate or refresh the CFD mesh",
+                step_kind: "mutation",
+                executor_kind: "tool",
+                tool_name: "cfd.mesh.generate",
+                input: {
+                  case_id: caseRecord.case_id,
+                  strategy: meshStrategy,
+                  target_cell_count: targetCellCount,
+                  boundary_layers: boundaryLayers,
+                },
+                expected_artifact_types: ["mesh"],
+              },
+              {
+                step_id: "run-solve",
+                title: "Run the CFD solve workflow",
+                step_kind: "mutation",
+                executor_kind: "worker",
+                depends_on: ["generate-mesh"],
+                input: {
+                  objective: `Run the CFD solve workflow for case ${caseRecord.case_id}`,
+                  project_dir: projectDir,
+                  priority: 7,
+                  tags: ["cfd", "solve", caseRecord.case_id],
+                  payload: {
+                    mode: "cfd.solve",
+                    case_id: caseRecord.case_id,
+                    solver_family: caseRecord.solver_family,
+                    recommended_tool: "cfd.solve.start",
+                    recommended_command: solveCommand,
+                  },
+                },
+              },
+              {
+                step_id: "verify-case",
+                title: "Verify CFD case readiness",
+                step_kind: "verification",
+                executor_kind: "tool",
+                tool_name: "pack.verify.run",
+                depends_on: ["run-solve"],
+                input: {
+                  pack_id: "cfd",
+                  hook_name: "case_readiness",
+                  target: {
+                    entity_type: "cfd.case",
+                    entity_id: caseRecord.case_id,
+                  },
+                  goal_id: target.goal_id,
+                },
+                expected_artifact_types: ["verifier_result", "cfd.case_readiness"],
+              },
+              {
+                step_id: "bundle-report",
+                title: "Bundle the CFD report",
+                step_kind: "verification",
+                executor_kind: "tool",
+                tool_name: "cfd.report.bundle",
+                depends_on: ["verify-case"],
+                input: {
+                  case_id: caseRecord.case_id,
+                },
+                expected_artifact_types: ["report"],
+              },
+            ],
+          };
+        }),
+    });
+
+    context.register_verifier_hook({
+      hook_name: "case_readiness",
+      title: "CFD Case Readiness Verifier",
+      description: "Evaluate whether a CFD case has the mesh, run, and validation state needed for robust execution.",
+      target_types: ["cfd.case"],
+      verify: ({ target, expectations }) =>
+        withCfdDb(dbPath, (db) => {
+          const caseRecord = requireCase(db, target.entity_id);
+          const latestRun = getLatestRunByCase(db, caseRecord.case_id);
+          const latestValidation = getLatestValidationByCase(db, caseRecord.case_id);
+          const latestMeshArtifact = getLatestArtifactByCaseAndKind(db, caseRecord.case_id, "mesh");
+          const requireRun = expectations?.require_run !== false;
+          const requireValidation = expectations?.require_validation !== false;
+          const requirePassedValidation = expectations?.require_passed_validation !== false;
+
+          const checks = [
+            {
+              name: "case_loaded",
+              pass: true,
+              severity: "info" as const,
+              details: `Loaded CFD case ${caseRecord.case_id}.`,
+            },
+            {
+              name: "case_not_archived",
+              pass: caseRecord.status !== "archived",
+              severity: caseRecord.status === "archived" ? ("error" as const) : ("info" as const),
+              details: `Current case status is ${caseRecord.status}.`,
+            },
+            {
+              name: "mesh_registered",
+              pass: Boolean(latestMeshArtifact),
+              severity: "error" as const,
+              details: latestMeshArtifact
+                ? `Latest mesh artifact is ${latestMeshArtifact.artifact_id}.`
+                : "No mesh artifact has been registered for this case.",
+            },
+            {
+              name: "run_recorded",
+              pass: !requireRun || Boolean(latestRun),
+              severity: requireRun ? ("error" as const) : ("warn" as const),
+              details: latestRun
+                ? `Latest run is ${latestRun.run_id} with status ${latestRun.status}.`
+                : "No solve run has been recorded for this case.",
+            },
+            {
+              name: "validation_present",
+              pass: !requireValidation || Boolean(latestValidation),
+              severity: requireValidation ? ("error" as const) : ("warn" as const),
+              details: latestValidation
+                ? `Latest validation is ${latestValidation.validation_id}.`
+                : "No validation result has been recorded for this case.",
+            },
+            {
+              name: "validation_passed",
+              pass:
+                !requirePassedValidation ||
+                (latestValidation ? latestValidation.pass : false),
+              severity: requirePassedValidation ? ("error" as const) : ("warn" as const),
+              details: latestValidation
+                ? `Latest validation pass state is ${latestValidation.pass}.`
+                : "Validation pass state is unavailable because no validation exists.",
+            },
+          ];
+
+          const pass = checks.every((check) => check.pass);
+          return {
+            summary: pass
+              ? `CFD case ${caseRecord.case_id} is ready for downstream execution.`
+              : `CFD case ${caseRecord.case_id} is missing readiness requirements.`,
+            pass,
+            score: pass ? 1 : 0,
+            checks,
+            produced_artifacts: [
+              {
+                artifact_type: "cfd.case_readiness",
+                trust_tier: pass ? "verified" : "derived",
+                content_json: {
+                  case: caseRecord,
+                  latest_run: latestRun,
+                  latest_validation: latestValidation,
+                  latest_mesh_artifact: latestMeshArtifact,
+                  checks,
+                },
+                metadata: {
+                  case_status: caseRecord.status,
+                  latest_run_id: latestRun?.run_id ?? null,
+                  latest_validation_id: latestValidation?.validation_id ?? null,
+                },
+              },
+            ],
+            metadata: {
+              case_status: caseRecord.status,
+              latest_run_id: latestRun?.run_id ?? null,
+              latest_validation_id: latestValidation?.validation_id ?? null,
+              latest_mesh_artifact_id: latestMeshArtifact?.artifact_id ?? null,
+            },
+          };
+        }),
+    });
   },
 };
 
@@ -1221,6 +1451,44 @@ function getLatestRunByCase(db: Database.Database, caseId: string): CfdRunRecord
     return null;
   }
   return mapRunRow(row);
+}
+
+function getLatestValidationByCase(db: Database.Database, caseId: string): CfdValidationRecord | null {
+  if (!caseId) {
+    return null;
+  }
+  const row = db
+    .prepare(
+      `SELECT *
+       FROM cfd_validations
+       WHERE case_id = ?
+       ORDER BY created_at DESC
+       LIMIT 1`
+    )
+    .get(caseId) as Record<string, unknown> | undefined;
+  if (!row) {
+    return null;
+  }
+  return mapValidationRow(row);
+}
+
+function getLatestArtifactByCaseAndKind(db: Database.Database, caseId: string, kind: string): CfdArtifactRecord | null {
+  if (!caseId || !kind) {
+    return null;
+  }
+  const row = db
+    .prepare(
+      `SELECT *
+       FROM cfd_artifacts
+       WHERE case_id = ? AND kind = ?
+       ORDER BY created_at DESC
+       LIMIT 1`
+    )
+    .get(caseId, kind) as Record<string, unknown> | undefined;
+  if (!row) {
+    return null;
+  }
+  return mapArtifactRow(row);
 }
 
 function appendCfdEvent(

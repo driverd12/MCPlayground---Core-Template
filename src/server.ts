@@ -78,6 +78,19 @@ import {
 import { eventPublish, eventPublishSchema, eventSummary, eventSummarySchema, eventTail, eventTailSchema } from "./tools/event.js";
 import { goalCreate, goalCreateSchema, goalGet, goalGetSchema, goalList, goalListSchema } from "./tools/goal.js";
 import {
+  goalPlanGenerate,
+  goalPlanGenerateSchema,
+  listPackHooks,
+  packHooksListSchema,
+  packPlanGenerate,
+  packPlanGenerateSchema,
+  packVerifyRun,
+  packVerifyRunSchema,
+  type PackHookRegistry,
+  type RegisteredPlannerHook,
+  type RegisteredVerifierHook,
+} from "./tools/pack_hooks.js";
+import {
   playbookGet,
   playbookGetSchema,
   playbookInstantiate,
@@ -215,6 +228,7 @@ import {
 import { startStdioTransport } from "./transports/stdio.js";
 import { startHttpTransport } from "./transports/http.js";
 import { truncate } from "./utils.js";
+import { type DomainPackPlannerHook, type DomainPackVerifierHook } from "./domain-packs/types.js";
 import {
   listBuiltinDomainPacks,
   parseEnabledDomainPackIds,
@@ -267,6 +281,10 @@ const trichatVerifySchema = z.object({
 });
 
 const toolRegistry = new Map<string, ToolEntry>();
+const packHookRegistry: PackHookRegistry = {
+  planners: [],
+  verifiers: [],
+};
 
 function registerTool(name: string, description: string, schema: z.ZodTypeAny, handler: ToolEntry["handler"]) {
   const tool: Tool = {
@@ -284,6 +302,34 @@ async function invokeRegisteredTool(name: string, args: unknown) {
   }
   const parsed = entry.schema.parse(args ?? {});
   return entry.handler(parsed);
+}
+
+function registerPlannerHook(packId: string, hook: DomainPackPlannerHook) {
+  const hookId = `${packId}.${hook.hook_name}`;
+  if (packHookRegistry.planners.some((candidate) => candidate.hook_id === hookId)) {
+    throw new Error(`Duplicate planner hook registration: ${hookId}`);
+  }
+  const registered: RegisteredPlannerHook = {
+    ...hook,
+    pack_id: packId,
+    hook_kind: "planner",
+    hook_id: hookId,
+  };
+  packHookRegistry.planners.push(registered);
+}
+
+function registerVerifierHook(packId: string, hook: DomainPackVerifierHook) {
+  const hookId = `${packId}.${hook.hook_name}`;
+  if (packHookRegistry.verifiers.some((candidate) => candidate.hook_id === hookId)) {
+    throw new Error(`Duplicate verifier hook registration: ${hookId}`);
+  }
+  const registered: RegisteredVerifierHook = {
+    ...hook,
+    pack_id: packId,
+    hook_kind: "verifier",
+    hook_id: hookId,
+  };
+  packHookRegistry.verifiers.push(registered);
 }
 
 function hashDispatchValue(value: string) {
@@ -1359,6 +1405,22 @@ registerTool("goal.list", "List durable goals by status or target filters.", goa
   goalList(storage, input)
 );
 
+registerTool("goal.plan_generate", "Generate and persist a durable plan for a goal through a registered pack planner hook.", goalPlanGenerateSchema, (input) =>
+  goalPlanGenerate(storage, packHookRegistry, input)
+);
+
+registerTool("pack.hooks.list", "List registered pack planner and verifier hooks by pack or target type.", packHooksListSchema, (input) =>
+  listPackHooks(packHookRegistry, input)
+);
+
+registerTool("pack.plan.generate", "Generate and persist a durable plan through a registered pack planner hook.", packPlanGenerateSchema, (input) =>
+  packPlanGenerate(storage, packHookRegistry, input)
+);
+
+registerTool("pack.verify.run", "Run a registered pack verifier hook, persist the hook run, and record evidence artifacts.", packVerifyRunSchema, (input) =>
+  packVerifyRun(storage, packHookRegistry, input)
+);
+
 registerTool("event.publish", "Persist a generic runtime event into the shared kernel event feed.", eventPublishSchema, (input) =>
   eventPublish(storage, input)
 );
@@ -2233,6 +2295,8 @@ const domainPackRegistration = registerDomainPacks(requestedDomainPacks, {
   server_name: SERVER_NAME,
   server_version: SERVER_VERSION,
   register_tool: registerTool,
+  register_planner_hook: registerPlannerHook,
+  register_verifier_hook: registerVerifierHook,
   run_idempotent_mutation: runIdempotentMutation,
 });
 

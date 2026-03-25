@@ -24,6 +24,10 @@ test("server starts without domain packs and exposes core + TriChat tools", asyn
     assert.equal(names.has("goal.create"), true);
     assert.equal(names.has("goal.get"), true);
     assert.equal(names.has("goal.list"), true);
+    assert.equal(names.has("goal.plan_generate"), true);
+    assert.equal(names.has("pack.hooks.list"), true);
+    assert.equal(names.has("pack.plan.generate"), true);
+    assert.equal(names.has("pack.verify.run"), true);
     assert.equal(names.has("event.publish"), true);
     assert.equal(names.has("event.tail"), true);
     assert.equal(names.has("event.summary"), true);
@@ -73,6 +77,9 @@ test("server starts without domain packs and exposes core + TriChat tools", asyn
     assert.deepEqual(roster.active_agent_ids, ["codex", "cursor", "local-imprint"]);
     assert.equal(Array.isArray(roster.agents), true);
     assert.ok(roster.agents.some((agent) => agent.agent_id === "codex" && agent.active === true));
+
+    const emptyPackHooks = await callTool(client, "pack.hooks.list", {});
+    assert.equal(emptyPackHooks.count, 0);
 
     await callTool(client, "memory.append", {
       mutation: nextMutation(testId, "memory.append", () => mutationCounter++),

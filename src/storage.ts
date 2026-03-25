@@ -328,6 +328,33 @@ export type ExperimentRunRecord = {
   source_agent: string | null;
 };
 
+export type PackHookKind = "planner" | "verifier";
+
+export type PackHookRunStatus = "running" | "completed" | "failed";
+
+export type PackHookRunRecord = {
+  hook_run_id: string;
+  created_at: string;
+  updated_at: string;
+  pack_id: string;
+  hook_kind: PackHookKind;
+  hook_name: string;
+  target_type: string;
+  target_id: string;
+  goal_id: string | null;
+  plan_id: string | null;
+  step_id: string | null;
+  status: PackHookRunStatus;
+  summary: string | null;
+  score: number | null;
+  input: Record<string, unknown>;
+  output: Record<string, unknown> | null;
+  error_text: string | null;
+  source_client: string | null;
+  source_model: string | null;
+  source_agent: string | null;
+};
+
 export type TaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
 export type TaskRecord = {
@@ -4360,6 +4387,258 @@ export class Storage {
     }
     return {
       experiment_run: experimentRun,
+    };
+  }
+
+  createPackHookRun(params: {
+    hook_run_id?: string;
+    pack_id: string;
+    hook_kind: PackHookKind;
+    hook_name: string;
+    target_type: string;
+    target_id: string;
+    goal_id?: string;
+    plan_id?: string;
+    step_id?: string;
+    status?: PackHookRunStatus;
+    summary?: string;
+    score?: number | null;
+    input?: Record<string, unknown>;
+    output?: Record<string, unknown>;
+    error_text?: string;
+    source_client?: string;
+    source_model?: string;
+    source_agent?: string;
+  }): { created: boolean; hook_run: PackHookRunRecord } {
+    const now = new Date().toISOString();
+    const hookRunId = params.hook_run_id?.trim() || crypto.randomUUID();
+    const existing = this.getPackHookRunById(hookRunId);
+    if (existing) {
+      return {
+        created: false,
+        hook_run: existing,
+      };
+    }
+
+    const packId = params.pack_id.trim();
+    const hookName = params.hook_name.trim();
+    const targetType = params.target_type.trim();
+    const targetId = params.target_id.trim();
+    if (!packId || !hookName || !targetType || !targetId) {
+      throw new Error("pack_id, hook_name, target_type, and target_id are required");
+    }
+
+    this.db
+      .prepare(
+        `INSERT INTO pack_hook_runs (
+           hook_run_id, created_at, updated_at, pack_id, hook_kind, hook_name, target_type, target_id,
+           goal_id, plan_id, step_id, status, summary, score, input_json, output_json, error_text,
+           source_client, source_model, source_agent
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        hookRunId,
+        now,
+        now,
+        packId,
+        normalizePackHookKind(params.hook_kind),
+        hookName,
+        targetType,
+        targetId,
+        params.goal_id?.trim() || null,
+        params.plan_id?.trim() || null,
+        params.step_id?.trim() || null,
+        normalizePackHookRunStatus(params.status),
+        params.summary?.trim() || null,
+        params.score === undefined ? null : params.score,
+        stableStringify(parseLooseObject(params.input ?? {})),
+        params.output === undefined ? null : stableStringify(parseLooseObject(params.output)),
+        params.error_text?.trim() || null,
+        params.source_client ?? null,
+        params.source_model ?? null,
+        params.source_agent ?? null
+      );
+
+    const hookRun = this.getPackHookRunById(hookRunId);
+    if (!hookRun) {
+      throw new Error(`Failed to read pack hook run after create: ${hookRunId}`);
+    }
+
+    this.appendRuntimeEvent({
+      event_type: "pack.hook_started",
+      entity_type: "pack_hook_run",
+      entity_id: hookRun.hook_run_id,
+      status: hookRun.status,
+      summary: hookRun.summary ?? `Pack ${hookRun.hook_kind} hook ${hookRun.pack_id}.${hookRun.hook_name} started.`,
+      details: {
+        pack_id: hookRun.pack_id,
+        hook_kind: hookRun.hook_kind,
+        hook_name: hookRun.hook_name,
+        target_type: hookRun.target_type,
+        target_id: hookRun.target_id,
+        goal_id: hookRun.goal_id,
+        plan_id: hookRun.plan_id,
+        step_id: hookRun.step_id,
+      },
+      source_client: hookRun.source_client ?? undefined,
+      source_model: hookRun.source_model ?? undefined,
+      source_agent: hookRun.source_agent ?? undefined,
+      created_at: hookRun.created_at,
+    });
+
+    return {
+      created: true,
+      hook_run: hookRun,
+    };
+  }
+
+  getPackHookRunById(hookRunId: string): PackHookRunRecord | null {
+    const normalized = hookRunId.trim();
+    if (!normalized) {
+      return null;
+    }
+    const row = this.db
+      .prepare(
+        `SELECT hook_run_id, created_at, updated_at, pack_id, hook_kind, hook_name, target_type, target_id,
+                goal_id, plan_id, step_id, status, summary, score, input_json, output_json, error_text,
+                source_client, source_model, source_agent
+         FROM pack_hook_runs
+         WHERE hook_run_id = ?`
+      )
+      .get(normalized) as Record<string, unknown> | undefined;
+    if (!row) {
+      return null;
+    }
+    return mapPackHookRunRow(row);
+  }
+
+  listPackHookRuns(params: {
+    pack_id?: string;
+    hook_kind?: PackHookKind;
+    target_type?: string;
+    target_id?: string;
+    status?: PackHookRunStatus;
+    limit: number;
+  }): PackHookRunRecord[] {
+    const limit = Math.max(1, Math.min(500, params.limit));
+    const whereClauses: string[] = [];
+    const values: unknown[] = [];
+    const packId = params.pack_id?.trim();
+    const targetType = params.target_type?.trim();
+    const targetId = params.target_id?.trim();
+    if (packId) {
+      whereClauses.push("pack_id = ?");
+      values.push(packId);
+    }
+    if (params.hook_kind) {
+      whereClauses.push("hook_kind = ?");
+      values.push(normalizePackHookKind(params.hook_kind));
+    }
+    if (targetType) {
+      whereClauses.push("target_type = ?");
+      values.push(targetType);
+    }
+    if (targetId) {
+      whereClauses.push("target_id = ?");
+      values.push(targetId);
+    }
+    if (params.status) {
+      whereClauses.push("status = ?");
+      values.push(normalizePackHookRunStatus(params.status));
+    }
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(
+        `SELECT hook_run_id, created_at, updated_at, pack_id, hook_kind, hook_name, target_type, target_id,
+                goal_id, plan_id, step_id, status, summary, score, input_json, output_json, error_text,
+                source_client, source_model, source_agent
+         FROM pack_hook_runs
+         ${whereSql}
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(...values, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => mapPackHookRunRow(row));
+  }
+
+  updatePackHookRun(params: {
+    hook_run_id: string;
+    status?: PackHookRunStatus;
+    summary?: string | null;
+    score?: number | null;
+    output?: Record<string, unknown> | null;
+    error_text?: string | null;
+  }): { hook_run: PackHookRunRecord } {
+    const hookRunId = params.hook_run_id.trim();
+    if (!hookRunId) {
+      throw new Error("hook_run_id is required");
+    }
+    const existing = this.getPackHookRunById(hookRunId);
+    if (!existing) {
+      throw new Error(`Pack hook run not found: ${hookRunId}`);
+    }
+
+    const now = new Date().toISOString();
+    const status = params.status ? normalizePackHookRunStatus(params.status) : existing.status;
+    const summary = params.summary === undefined ? existing.summary : params.summary?.trim() || null;
+    const score = params.score === undefined ? existing.score : params.score;
+    const output = params.output === undefined ? existing.output : params.output;
+    const errorText = params.error_text === undefined ? existing.error_text : params.error_text?.trim() || null;
+
+    this.db
+      .prepare(
+        `UPDATE pack_hook_runs
+         SET updated_at = ?, status = ?, summary = ?, score = ?, output_json = ?, error_text = ?
+         WHERE hook_run_id = ?`
+      )
+      .run(
+        now,
+        status,
+        summary,
+        score,
+        output === null ? null : stableStringify(parseLooseObject(output ?? {})),
+        errorText,
+        hookRunId
+      );
+
+    const hookRun = this.getPackHookRunById(hookRunId);
+    if (!hookRun) {
+      throw new Error(`Failed to read pack hook run after update: ${hookRunId}`);
+    }
+
+    this.appendRuntimeEvent({
+      event_type:
+        hookRun.status === "failed"
+          ? "pack.hook_failed"
+          : hookRun.status === "completed"
+            ? "pack.hook_completed"
+            : "pack.hook_updated",
+      entity_type: "pack_hook_run",
+      entity_id: hookRun.hook_run_id,
+      status: hookRun.status,
+      summary:
+        hookRun.summary ??
+        `Pack ${hookRun.hook_kind} hook ${hookRun.pack_id}.${hookRun.hook_name} ${hookRun.status}.`,
+      details: {
+        pack_id: hookRun.pack_id,
+        hook_kind: hookRun.hook_kind,
+        hook_name: hookRun.hook_name,
+        target_type: hookRun.target_type,
+        target_id: hookRun.target_id,
+        goal_id: hookRun.goal_id,
+        plan_id: hookRun.plan_id,
+        step_id: hookRun.step_id,
+        score: hookRun.score,
+        error_text: hookRun.error_text,
+      },
+      source_client: hookRun.source_client ?? undefined,
+      source_model: hookRun.source_model ?? undefined,
+      source_agent: hookRun.source_agent ?? undefined,
+      created_at: hookRun.updated_at,
+    });
+
+    return {
+      hook_run: hookRun,
     };
   }
 
@@ -8751,6 +9030,31 @@ function mapExperimentRunRow(row: Record<string, unknown>): ExperimentRunRecord 
   };
 }
 
+function mapPackHookRunRow(row: Record<string, unknown>): PackHookRunRecord {
+  return {
+    hook_run_id: String(row.hook_run_id ?? ""),
+    created_at: String(row.created_at ?? ""),
+    updated_at: String(row.updated_at ?? ""),
+    pack_id: String(row.pack_id ?? ""),
+    hook_kind: normalizePackHookKind(row.hook_kind),
+    hook_name: String(row.hook_name ?? ""),
+    target_type: String(row.target_type ?? ""),
+    target_id: String(row.target_id ?? ""),
+    goal_id: asNullableString(row.goal_id),
+    plan_id: asNullableString(row.plan_id),
+    step_id: asNullableString(row.step_id),
+    status: normalizePackHookRunStatus(row.status),
+    summary: asNullableString(row.summary),
+    score: asNullableNumber(row.score),
+    input: parseJsonObject(row.input_json),
+    output: row.output_json == null ? null : parseJsonObject(row.output_json),
+    error_text: asNullableString(row.error_text),
+    source_client: asNullableString(row.source_client),
+    source_model: asNullableString(row.source_model),
+    source_agent: asNullableString(row.source_agent),
+  };
+}
+
 function mapRuntimeEventRow(row: Record<string, unknown>): RuntimeEventRecord {
   return {
     event_seq: Number(row.event_seq ?? 0),
@@ -9255,6 +9559,18 @@ function normalizeOptionalExperimentVerdict(value: unknown): ExperimentVerdict |
     return normalized;
   }
   return null;
+}
+
+function normalizePackHookKind(value: unknown): PackHookKind {
+  return String(value ?? "planner") === "verifier" ? "verifier" : "planner";
+}
+
+function normalizePackHookRunStatus(value: unknown): PackHookRunStatus {
+  const normalized = String(value ?? "running");
+  if (normalized === "completed" || normalized === "failed") {
+    return normalized;
+  }
+  return "running";
 }
 
 function normalizeTriChatThreadStatus(value: unknown): TriChatThreadStatus {

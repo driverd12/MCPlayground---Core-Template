@@ -23,6 +23,9 @@ test("CFD domain pack supports case-to-report lifecycle", async () => {
     const names = new Set(tools.map((tool) => tool.name));
     assert.equal(names.has("cfd.case.create"), true);
     assert.equal(names.has("cfd.solve.start"), true);
+    assert.equal(names.has("pack.hooks.list"), true);
+    assert.equal(names.has("goal.plan_generate"), true);
+    assert.equal(names.has("pack.verify.run"), true);
 
     const createdCase = await callTool(client, "cfd.case.create", {
       mutation: nextMutation(testId, "cfd.case.create", () => mutationCounter++),
@@ -41,6 +44,35 @@ test("CFD domain pack supports case-to-report lifecycle", async () => {
     assert.equal(createdCase.created, true);
 
     const caseId = createdCase.case.case_id;
+
+    const hookList = await callTool(client, "pack.hooks.list", {
+      pack_id: "cfd",
+    });
+    assert.ok(hookList.hooks.some((hook) => hook.hook_kind === "planner" && hook.hook_name === "case_lifecycle"));
+    assert.ok(hookList.hooks.some((hook) => hook.hook_kind === "verifier" && hook.hook_name === "case_readiness"));
+
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "CFD case lifecycle goal",
+      objective: "Plan and verify the CFD case lifecycle through pack hooks",
+      status: "active",
+      target_entity_type: "cfd.case",
+      target_entity_id: caseId,
+      acceptance_criteria: ["A pack planner can generate a case lifecycle plan", "A pack verifier can record readiness evidence"],
+    });
+    assert.equal(createdGoal.created, true);
+
+    const plannedGoal = await callTool(client, "goal.plan_generate", {
+      mutation: nextMutation(testId, "goal.plan_generate", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      pack_id: "cfd",
+      hook_name: "case_lifecycle",
+    });
+    assert.equal(plannedGoal.ok, true);
+    assert.equal(plannedGoal.plan.planner_kind, "pack");
+    assert.equal(plannedGoal.plan.planner_id, "cfd.case_lifecycle");
+    assert.ok(plannedGoal.steps.some((step) => step.tool_name === "cfd.case.get"));
+    assert.ok(plannedGoal.steps.some((step) => step.tool_name === "pack.verify.run"));
 
     const mesh = await callTool(client, "cfd.mesh.generate", {
       mutation: nextMutation(testId, "cfd.mesh.generate", () => mutationCounter++),
@@ -122,6 +154,23 @@ test("CFD domain pack supports case-to-report lifecycle", async () => {
       source_agent: "codex",
     });
     assert.equal(validation.pass, true);
+
+    const readiness = await callTool(client, "pack.verify.run", {
+      mutation: nextMutation(testId, "pack.verify.run", () => mutationCounter++),
+      pack_id: "cfd",
+      hook_name: "case_readiness",
+      target: {
+        entity_type: "cfd.case",
+        entity_id: caseId,
+      },
+      goal_id: createdGoal.goal.goal_id,
+      plan_id: plannedGoal.plan.plan_id,
+      step_id: "verify-case",
+    });
+    assert.equal(readiness.ok, true);
+    assert.equal(readiness.verification.pass, true);
+    assert.equal(readiness.hook_run.status, "completed");
+    assert.ok(readiness.artifact_ids.length >= 1);
 
     const stopped = await callTool(client, "cfd.solve.stop", {
       mutation: nextMutation(testId, "cfd.solve.stop", () => mutationCounter++),

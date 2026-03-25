@@ -2,6 +2,7 @@ import { cfdDomainPack } from "./cfd.js";
 import {
   DomainPack,
   DomainPackContext,
+  DomainPackRegistrationContext,
   DomainPackRegistrationResult,
 } from "./types.js";
 
@@ -35,7 +36,7 @@ export function parseEnabledDomainPackIds(rawValue: string | undefined): string[
 
 export function registerDomainPacks(
   requestedIds: string[],
-  context: DomainPackContext
+  context: DomainPackRegistrationContext
 ): DomainPackRegistrationResult {
   const requested = Array.from(new Set(requestedIds.map((entry) => entry.trim().toLowerCase()).filter(Boolean)));
   const registered: string[] = [];
@@ -47,7 +48,12 @@ export function registerDomainPacks(
       unknown.push(id);
       continue;
     }
-    pack.register(context);
+    const packContext: DomainPackContext = {
+      ...context,
+      register_planner_hook: (hook) => context.register_planner_hook(id, hook),
+      register_verifier_hook: (hook) => context.register_verifier_hook(id, hook),
+    };
+    pack.register(packContext);
     registered.push(id);
   }
 
