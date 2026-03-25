@@ -185,30 +185,100 @@ class InboxWorker:
             processed += 1
         return processed
 
+    def _normalize_string_list(self, value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        seen: set[str] = set()
+        normalized: List[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            trimmed = item.strip()
+            if not trimmed:
+                continue
+            lowered = trimmed.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            normalized.append(trimmed)
+        return normalized
+
+    def _resolve_task_routing(self, task: Dict[str, Any]) -> Dict[str, List[str]]:
+        merged = {
+            "preferred_agent_ids": [],
+            "allowed_agent_ids": [],
+            "preferred_client_kinds": [],
+            "allowed_client_kinds": [],
+            "required_capabilities": [],
+            "preferred_capabilities": [],
+        }
+        payload = task.get("payload") if isinstance(task.get("payload"), dict) else {}
+        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        candidates = [
+            metadata.get("task_routing"),
+            metadata.get("routing"),
+            payload.get("task_routing"),
+            payload.get("routing"),
+        ]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            for key in merged.keys():
+                merged[key] = self._normalize_string_list(merged[key] + self._normalize_string_list(candidate.get(key)))
+        return merged
+
+    def _task_is_claimable_by_worker(self, task: Dict[str, Any]) -> bool:
+        routing = self._resolve_task_routing(task)
+        normalized_worker_id = self.worker_id.strip().lower()
+
+        allowed_agent_ids = {value.lower() for value in routing["allowed_agent_ids"]}
+        if allowed_agent_ids and normalized_worker_id not in allowed_agent_ids:
+            return False
+
+        if routing["allowed_client_kinds"]:
+            return False
+
+        if routing["required_capabilities"]:
+            return False
+
+        return True
+
     def _claim_next_task(self) -> Optional[Dict[str, Any]]:
         now = utc_now_iso()
         lease_expires_at = iso_after_seconds(self.lease_seconds)
         with self._open_db() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                candidate = conn.execute(
+                candidate_rows = conn.execute(
                     """
-                    SELECT t.task_id
+                    SELECT t.task_id, t.created_at, t.updated_at, t.status, t.priority, t.objective, t.project_dir,
+                           t.payload_json, t.source, t.source_client, t.source_model, t.source_agent,
+                           t.tags_json, t.metadata_json, t.max_attempts, t.attempt_count, t.available_at,
+                           t.started_at, t.finished_at, t.last_worker_id, t.last_error, t.result_json,
+                           l.owner_id AS lease_owner_id, l.lease_expires_at, l.heartbeat_at
                     FROM tasks t
                     LEFT JOIN task_leases l ON l.task_id = t.task_id
                     WHERE t.status = 'pending'
                       AND t.available_at <= ?
                       AND (l.task_id IS NULL OR l.lease_expires_at <= ?)
                     ORDER BY t.priority DESC, t.created_at ASC
-                    LIMIT 1
+                    LIMIT 50
                     """,
                     (now, now),
-                ).fetchone()
-                if candidate is None:
+                ).fetchall()
+
+                candidate_task: Optional[Dict[str, Any]] = None
+                for row in candidate_rows:
+                    task = self._row_to_task(row)
+                    if self._task_is_claimable_by_worker(task):
+                        candidate_task = task
+                        break
+
+                if candidate_task is None:
                     conn.execute("COMMIT")
                     return None
 
-                task_id = str(candidate["task_id"])
+                task_id = str(candidate_task["task_id"])
                 updated = conn.execute(
                     """
                     UPDATE tasks

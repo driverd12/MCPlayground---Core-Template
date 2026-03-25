@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Storage } from "../storage.js";
+import { Storage, type TaskRecord } from "../storage.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { ensureWorkspaceFingerprint } from "./workspace_fingerprint.js";
 
@@ -244,6 +244,190 @@ function dedupeStrings(values: string[] | undefined): string[] {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return dedupeStrings(value.filter((item): item is string => typeof item === "string"));
+}
+
+function resolveTaskRouting(task: TaskRecord) {
+  const merged = {
+    preferred_agent_ids: [] as string[],
+    allowed_agent_ids: [] as string[],
+    preferred_client_kinds: [] as string[],
+    allowed_client_kinds: [] as string[],
+    required_capabilities: [] as string[],
+    preferred_capabilities: [] as string[],
+  };
+
+  const candidates = [
+    task.metadata.task_routing,
+    task.metadata.routing,
+    isRecord(task.payload) ? task.payload.task_routing : undefined,
+    isRecord(task.payload) ? task.payload.routing : undefined,
+  ];
+  for (const candidate of candidates) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+    merged.preferred_agent_ids = dedupeStrings([
+      ...merged.preferred_agent_ids,
+      ...normalizeStringArray(candidate.preferred_agent_ids),
+    ]);
+    merged.allowed_agent_ids = dedupeStrings([...merged.allowed_agent_ids, ...normalizeStringArray(candidate.allowed_agent_ids)]);
+    merged.preferred_client_kinds = dedupeStrings([
+      ...merged.preferred_client_kinds,
+      ...normalizeStringArray(candidate.preferred_client_kinds),
+    ]);
+    merged.allowed_client_kinds = dedupeStrings([
+      ...merged.allowed_client_kinds,
+      ...normalizeStringArray(candidate.allowed_client_kinds),
+    ]);
+    merged.required_capabilities = dedupeStrings([
+      ...merged.required_capabilities,
+      ...normalizeStringArray(candidate.required_capabilities),
+    ]);
+    merged.preferred_capabilities = dedupeStrings([
+      ...merged.preferred_capabilities,
+      ...normalizeStringArray(candidate.preferred_capabilities),
+    ]);
+  }
+  return merged;
+}
+
+function isTaskClaimableNow(task: TaskRecord, nowIso: string) {
+  if (task.status !== "pending") {
+    return {
+      claimable: false,
+      reason: `not-pending:${task.status}`,
+    };
+  }
+  if (task.available_at > nowIso) {
+    return {
+      claimable: false,
+      reason: "not-ready",
+    };
+  }
+  if (task.lease && task.lease.lease_expires_at > nowIso) {
+    return {
+      claimable: false,
+      reason: "leased",
+    };
+  }
+  return {
+    claimable: true,
+    reason: "claimable",
+  };
+}
+
+function isTaskEligibleForGenericWorker(task: TaskRecord, workerId: string) {
+  const routing = resolveTaskRouting(task);
+  const normalizedWorkerId = workerId.trim().toLowerCase();
+
+  if (routing.allowed_agent_ids.length > 0) {
+    const allowed = new Set(routing.allowed_agent_ids.map((value) => value.toLowerCase()));
+    if (!allowed.has(normalizedWorkerId)) {
+      return {
+        eligible: false,
+        reason: "routing-ineligible:agent_id_not_allowed",
+      };
+    }
+  }
+
+  if (routing.allowed_client_kinds.length > 0) {
+    return {
+      eligible: false,
+      reason: "routing-ineligible:client_kind_not_allowed",
+    };
+  }
+
+  if (routing.required_capabilities.length > 0) {
+    return {
+      eligible: false,
+      reason: "routing-ineligible:missing_capabilities",
+    };
+  }
+
+  return {
+    eligible: true,
+    reason: "eligible",
+  };
+}
+
+function selectTaskForWorkerClaim(storage: Storage, workerId: string, requestedTaskId?: string) {
+  const nowIso = new Date().toISOString();
+  if (requestedTaskId && requestedTaskId.trim()) {
+    const task = storage.getTaskById(requestedTaskId);
+    if (!task) {
+      return {
+        task: null,
+        reason: "not-found",
+        scanned: 0,
+      };
+    }
+    const claimability = isTaskClaimableNow(task, nowIso);
+    if (!claimability.claimable) {
+      return {
+        task: null,
+        reason: claimability.reason,
+        scanned: 1,
+      };
+    }
+    const routing = isTaskEligibleForGenericWorker(task, workerId);
+    if (!routing.eligible) {
+      return {
+        task: null,
+        reason: routing.reason,
+        scanned: 1,
+      };
+    }
+    return {
+      task,
+      reason: "selected",
+      scanned: 1,
+    };
+  }
+
+  const pendingTasks = storage.listTasks({
+    status: "pending",
+    limit: 200,
+  });
+  for (const task of pendingTasks) {
+    const claimability = isTaskClaimableNow(task, nowIso);
+    if (!claimability.claimable) {
+      continue;
+    }
+    const routing = isTaskEligibleForGenericWorker(task, workerId);
+    if (!routing.eligible) {
+      continue;
+    }
+    return {
+      task,
+      reason: "selected",
+      scanned: pendingTasks.length,
+    };
+  }
+
+  return {
+    task: null,
+    reason: pendingTasks.length > 0 ? "none-eligible" : "none-available",
+    scanned: pendingTasks.length,
+  };
+}
+
 export function taskList(storage: Storage, input: z.infer<typeof taskListSchema>) {
   const tasks = storage.listTasks({
     status: input.status,
@@ -282,12 +466,24 @@ export async function taskClaim(storage: Storage, input: z.infer<typeof taskClai
     tool_name: "task.claim",
     mutation: input.mutation,
     payload: input,
-    execute: () =>
-      storage.claimTask({
-        worker_id: input.worker_id,
-        lease_seconds: input.lease_seconds ?? 300,
-        task_id: input.task_id,
-      }),
+    execute: () => {
+      const selection = selectTaskForWorkerClaim(storage, input.worker_id, input.task_id);
+      if (!selection.task) {
+        return {
+          claimed: false,
+          reason: selection.reason,
+          scanned_task_count: selection.scanned,
+        };
+      }
+      return {
+        ...storage.claimTask({
+          worker_id: input.worker_id,
+          lease_seconds: input.lease_seconds ?? 300,
+          task_id: selection.task.task_id,
+        }),
+        scanned_task_count: selection.scanned,
+      };
+    },
   });
 }
 

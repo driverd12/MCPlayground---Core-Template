@@ -602,6 +602,59 @@ test("agent.worklist and agent.claim_next respect task routing for codex and cur
   }
 });
 
+test("task.claim skips explicitly agent-routed work for generic workers", async () => {
+  const testId = `${Date.now()}-task-claim-routing`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-task-claim-routing-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const routedTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.routed", () => mutationCounter++),
+      objective: "Routed task for codex only",
+      project_dir: REPO_ROOT,
+      priority: 9,
+      routing: {
+        allowed_agent_ids: ["codex"],
+      },
+    });
+
+    const genericTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.generic", () => mutationCounter++),
+      objective: "Generic worker task",
+      project_dir: REPO_ROOT,
+      priority: 5,
+    });
+
+    const explicitRejection = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim.rejected", () => mutationCounter++),
+      worker_id: "generic-worker-1",
+      task_id: routedTask.task.task_id,
+      lease_seconds: 120,
+    });
+    assert.equal(explicitRejection.claimed, false);
+    assert.equal(explicitRejection.reason, "routing-ineligible:agent_id_not_allowed");
+
+    const genericClaim = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim.generic", () => mutationCounter++),
+      worker_id: "generic-worker-1",
+      lease_seconds: 120,
+    });
+    assert.equal(genericClaim.claimed, true);
+    assert.equal(genericClaim.task.task_id, genericTask.task.task_id);
+
+    const pending = await callTool(client, "task.list", {
+      status: "pending",
+      limit: 10,
+    });
+    assert.ok(pending.tasks.some((task) => task.task_id === routedTask.task.task_id));
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("agent.claim_next and agent.report_result close the worker loop back into plan steps", async () => {
   const testId = `${Date.now()}-agent-worker-loop`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-agent-worker-loop-test-"));
