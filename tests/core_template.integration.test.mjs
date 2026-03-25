@@ -22,6 +22,7 @@ test("server starts with default agentic workflow hooks and exposes core + TriCh
 
     assert.equal(names.has("memory.append"), true);
     assert.equal(names.has("goal.create"), true);
+    assert.equal(names.has("goal.execute"), true);
     assert.equal(names.has("goal.get"), true);
     assert.equal(names.has("goal.list"), true);
     assert.equal(names.has("goal.plan_generate"), true);
@@ -371,6 +372,158 @@ test("playbook tools expose GSD and autoresearch workflow profiles and instantia
       fetchedPlan.steps.find((step) => step.step_id === "accept-or-reject").executor_kind,
       "human"
     );
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("goal.execute generates a default agentic plan and dispatches the first runnable slice", async () => {
+  const testId = `${Date.now()}-goal-execute-generate`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-execute-generate-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Generated execution goal",
+      objective: "Drive the kernel from goal.execute with no pre-existing plan",
+      status: "active",
+      autonomy_mode: "execute_bounded",
+      acceptance_criteria: ["A default selected plan is generated", "The first runnable worker slice is dispatched"],
+      tags: ["agentic"],
+    });
+
+    const executedGoal = await callTool(client, "goal.execute", {
+      mutation: nextMutation(testId, "goal.execute", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      max_passes: 4,
+    });
+
+    assert.equal(executedGoal.ok, true);
+    assert.equal(executedGoal.executed, true);
+    assert.equal(executedGoal.created_plan, true);
+    assert.equal(executedGoal.plan_resolution, "generated");
+    assert.equal(executedGoal.dispatch_mode, "autorun");
+    assert.equal(executedGoal.execution.stop_reason, "idle");
+    assert.equal(executedGoal.plan.metadata.planner_hook.hook_id, "agentic.delivery_path");
+    assert.equal(typeof executedGoal.plan.plan_id, "string");
+    assert.equal(executedGoal.execution_summary.completed_count, 1);
+    assert.equal(executedGoal.execution_summary.running_count, 1);
+    assert.equal(executedGoal.execution_summary.failed_count, 0);
+    assert.match(executedGoal.execution_summary.next_action, /Wait for running tasks or turns to finish/);
+
+    const generatedPlan = await callTool(client, "plan.get", {
+      plan_id: executedGoal.plan.plan_id,
+    });
+    const loadGoalContext = generatedPlan.steps.find((step) => step.title === "Load the durable goal context");
+    const mapCodebase = generatedPlan.steps.find((step) => step.title === "Map the relevant codebase and continuity surface");
+    const shapeBoundedSlice = generatedPlan.steps.find((step) => step.title === "Shape the next bounded delivery slice with the council");
+    assert.ok(loadGoalContext);
+    assert.ok(mapCodebase);
+    assert.ok(shapeBoundedSlice);
+    assert.equal(loadGoalContext.status, "completed");
+    assert.equal(mapCodebase.status, "running");
+    assert.equal(typeof mapCodebase.task_id, "string");
+    assert.equal(shapeBoundedSlice.status, "pending");
+
+    const queuedTasks = await callTool(client, "task.list", {
+      status: "pending",
+      limit: 20,
+    });
+    assert.ok(
+      queuedTasks.tasks.some(
+        (task) =>
+          task.task_id === mapCodebase.task_id &&
+          /Map the repository structure/.test(task.objective)
+      )
+    );
+
+    const goalState = await callTool(client, "goal.get", {
+      goal_id: createdGoal.goal.goal_id,
+    });
+    assert.equal(goalState.goal.active_plan_id, executedGoal.plan.plan_id);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("goal.execute can run an existing synchronous plan to terminal completion", async () => {
+  const testId = `${Date.now()}-goal-execute-complete`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-execute-complete-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Synchronous execution goal",
+      objective: "Finish an existing selected plan through goal.execute",
+      status: "active",
+      autonomy_mode: "recommend",
+      acceptance_criteria: ["The selected plan reaches a terminal completed state"],
+    });
+
+    const createdPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      title: "Synchronous execution plan",
+      summary: "Use two synchronous MCP tool steps so goal.execute can finish the plan",
+      selected: true,
+      steps: [
+        {
+          step_id: "read-goal-once",
+          seq: 1,
+          title: "Read the goal once",
+          step_kind: "analysis",
+          executor_kind: "tool",
+          tool_name: "goal.get",
+          input: {
+            goal_id: createdGoal.goal.goal_id,
+          },
+        },
+        {
+          step_id: "read-goal-twice",
+          seq: 2,
+          title: "Read the goal twice",
+          step_kind: "analysis",
+          executor_kind: "tool",
+          tool_name: "goal.get",
+          depends_on: ["read-goal-once"],
+          input: {
+            goal_id: createdGoal.goal.goal_id,
+          },
+        },
+      ],
+    });
+
+    const executedGoal = await callTool(client, "goal.execute", {
+      mutation: nextMutation(testId, "goal.execute", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      plan_id: createdPlan.plan.plan_id,
+      max_passes: 4,
+    });
+
+    assert.equal(executedGoal.ok, true);
+    assert.equal(executedGoal.executed, true);
+    assert.equal(executedGoal.created_plan, false);
+    assert.equal(executedGoal.plan_resolution, "explicit");
+    assert.equal(executedGoal.final_plan.status, "completed");
+    assert.equal(executedGoal.execution.stop_reason, "plan_terminal");
+    assert.equal(executedGoal.execution_summary.completed_count, 2);
+    assert.equal(executedGoal.execution_summary.running_count, 0);
+    assert.equal(executedGoal.execution_summary.ready_count, 0);
+    assert.match(executedGoal.execution_summary.next_action, /Plan completed/);
+
+    const completedPlan = await callTool(client, "plan.get", {
+      plan_id: createdPlan.plan.plan_id,
+    });
+    assert.equal(completedPlan.plan.status, "completed");
+    assert.ok(completedPlan.steps.every((step) => step.status === "completed"));
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

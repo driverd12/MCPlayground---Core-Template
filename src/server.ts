@@ -78,7 +78,16 @@ import {
   experimentRunSchema,
 } from "./tools/experiment.js";
 import { eventPublish, eventPublishSchema, eventSummary, eventSummarySchema, eventTail, eventTailSchema } from "./tools/event.js";
-import { goalCreate, goalCreateSchema, goalGet, goalGetSchema, goalList, goalListSchema } from "./tools/goal.js";
+import {
+  goalCreate,
+  goalCreateSchema,
+  goalExecute,
+  goalExecuteSchema,
+  goalGet,
+  goalGetSchema,
+  goalList,
+  goalListSchema,
+} from "./tools/goal.js";
 import {
   goalPlanGenerate,
   goalPlanGenerateSchema,
@@ -1423,6 +1432,10 @@ registerTool("goal.list", "List durable goals by status or target filters.", goa
 
 registerTool("goal.plan_generate", "Generate and persist a durable plan for a goal through a registered pack planner hook.", goalPlanGenerateSchema, (input) =>
   goalPlanGenerate(storage, packHookRegistry, input)
+);
+
+registerTool("goal.execute", "Resolve or generate a durable plan for a goal, then dispatch it through the kernel.", goalExecuteSchema, (input) =>
+  goalExecute(storage, invokeRegisteredTool, input)
 );
 
 registerTool("pack.hooks.list", "List registered pack planner and verifier hooks by pack or target type.", packHooksListSchema, (input) =>
