@@ -75,6 +75,7 @@ import {
   experimentRun,
   experimentRunSchema,
 } from "./tools/experiment.js";
+import { eventPublish, eventPublishSchema, eventSummary, eventSummarySchema, eventTail, eventTailSchema } from "./tools/event.js";
 import { goalCreate, goalCreateSchema, goalGet, goalGetSchema, goalList, goalListSchema } from "./tools/goal.js";
 import {
   playbookGet,
@@ -395,6 +396,42 @@ function isPlanTerminalStatus(status: string) {
   return status === "completed" || status === "invalidated" || status === "archived";
 }
 
+function appendPlanStepRuntimeEvent(params: {
+  event_type: string;
+  plan_id: string;
+  goal_id: string | null;
+  step_id: string;
+  title?: string;
+  executor_kind?: string | null;
+  status?: string | null;
+  summary: string;
+  details?: Record<string, unknown>;
+  source_client?: string;
+  source_model?: string;
+  source_agent?: string;
+  created_at?: string;
+}) {
+  return storage.appendRuntimeEvent({
+    event_type: params.event_type,
+    entity_type: "step",
+    entity_id: params.step_id,
+    status: params.status ?? null,
+    summary: params.summary,
+    details: {
+      plan_id: params.plan_id,
+      goal_id: params.goal_id ?? null,
+      step_id: params.step_id,
+      title: params.title ?? null,
+      executor_kind: params.executor_kind ?? null,
+      ...(params.details ?? {}),
+    },
+    source_client: params.source_client,
+    source_model: params.source_model,
+    source_agent: params.source_agent,
+    created_at: params.created_at,
+  });
+}
+
 async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
   return runIdempotentMutation({
     storage,
@@ -547,6 +584,27 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
                 },
               },
             });
+            const dispatchEvent = appendPlanStepRuntimeEvent({
+              event_type: "plan.step_dispatched",
+              plan_id: plan.plan_id,
+              goal_id: plan.goal_id,
+              step_id: step.step_id,
+              title: step.title,
+              executor_kind: executorKind,
+              status: updated.step.status,
+              summary: `Tool step ${step.step_id} dispatched via ${toolName}.`,
+              details: {
+                dispatch_kind: "tool",
+                action: "tool_invoked",
+                tool_name: toolName,
+                task_id: taskId,
+                run_id: runId,
+                result_preview: summarizeDispatchValue(toolResult),
+              },
+              source_client: input.source_client,
+              source_model: input.source_model,
+              source_agent: input.source_agent,
+            });
             dispatchedCount += 1;
             completedCount += 1;
             results.push({
@@ -558,6 +616,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               run_id: runId,
               step_status_after: updated.step.status,
               tool_result: toolResult,
+              event: dispatchEvent,
             });
             continue;
           }
@@ -612,6 +671,25 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
                 },
               },
             });
+            const dispatchEvent = appendPlanStepRuntimeEvent({
+              event_type: "plan.step_dispatched",
+              plan_id: plan.plan_id,
+              goal_id: plan.goal_id,
+              step_id: step.step_id,
+              title: step.title,
+              executor_kind: executorKind,
+              status: updated.step.status,
+              summary: `${executorKind} step ${step.step_id} dispatched into the task queue.`,
+              details: {
+                dispatch_kind: executorKind,
+                action: "task_created",
+                task_id: taskId,
+                objective: readString(rawInput.objective) ?? step.title,
+              },
+              source_client: input.source_client,
+              source_model: input.source_model,
+              source_agent: input.source_agent,
+            });
             dispatchedCount += 1;
             runningCount += 1;
             results.push({
@@ -621,6 +699,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               task_id: taskId,
               step_status_after: updated.step.status,
               task: taskResult,
+              event: dispatchEvent,
             });
             continue;
           }
@@ -720,6 +799,28 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
                 },
               },
             });
+            const dispatchEvent = appendPlanStepRuntimeEvent({
+              event_type: "plan.step_dispatched",
+              plan_id: plan.plan_id,
+              goal_id: plan.goal_id,
+              step_id: step.step_id,
+              title: step.title,
+              executor_kind: executorKind,
+              status: updated.step.status,
+              summary: `TriChat step ${step.step_id} dispatched into thread ${threadId}.`,
+              details: {
+                dispatch_kind: "trichat",
+                action: "trichat_turn_started",
+                thread_id: threadId,
+                user_message_id: userMessageId,
+                turn_id: turnId,
+                expected_agents: expectedAgents ?? [],
+                min_agents: minAgents ?? null,
+              },
+              source_client: input.source_client,
+              source_model: input.source_model,
+              source_agent: input.source_agent,
+            });
             dispatchedCount += 1;
             runningCount += 1;
             results.push({
@@ -733,6 +834,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               thread: threadResult,
               message: messageResult,
               turn: advancedTurn,
+              event: dispatchEvent,
             });
             continue;
           }
@@ -751,6 +853,23 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               },
             },
           });
+          const blockedEvent = appendPlanStepRuntimeEvent({
+            event_type: "plan.step_blocked",
+            plan_id: plan.plan_id,
+            goal_id: plan.goal_id,
+            step_id: step.step_id,
+            title: step.title,
+            executor_kind: executorKind,
+            status: updated.step.status,
+            summary: readString(step.input?.approval_summary) ?? `Human approval required for step ${step.title}.`,
+            details: {
+              gate_type: "human",
+              requires_human_approval: true,
+            },
+            source_client: input.source_client,
+            source_model: input.source_model,
+            source_agent: input.source_agent,
+          });
           blockedCount += 1;
           results.push({
             ...baseResult,
@@ -763,10 +882,12 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               kind: "human",
               summary: readString(step.input?.approval_summary) ?? `Human approval required for step ${step.title}`,
             },
+            event: blockedEvent,
           });
         } catch (error) {
           const message = truncate(error instanceof Error ? error.message : String(error));
           let stepStatusAfter = "failed";
+          let failedEvent: Record<string, unknown> | null = null;
           try {
             const updated = storage.updatePlanStep({
               plan_id: plan.plan_id,
@@ -781,6 +902,22 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               },
             });
             stepStatusAfter = updated.step.status;
+            failedEvent = appendPlanStepRuntimeEvent({
+              event_type: "plan.step_dispatch_failed",
+              plan_id: plan.plan_id,
+              goal_id: plan.goal_id,
+              step_id: step.step_id,
+              title: step.title,
+              executor_kind: executorKind,
+              status: updated.step.status,
+              summary: `Dispatch failed for step ${step.step_id}.`,
+              details: {
+                error: message,
+              },
+              source_client: input.source_client,
+              source_model: input.source_model,
+              source_agent: input.source_agent,
+            });
           } catch {
             stepStatusAfter = "failed";
           }
@@ -791,6 +928,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
             action: "dispatch_failed",
             step_status_after: stepStatusAfter,
             error: message,
+            event: failedEvent,
           });
         }
       }
@@ -854,6 +992,21 @@ async function planResume(input: z.infer<typeof planResumeSchema>) {
 
       if (input.dispatch_after === false) {
         const updatedSnapshot = getPlanExecutionSnapshot(input.plan_id);
+        const event = storage.appendRuntimeEvent({
+          event_type: "plan.resumed",
+          entity_type: "plan",
+          entity_id: input.plan_id,
+          status: updatedSnapshot.plan.status,
+          summary: input.summary?.trim() || `Plan ${input.plan_id} resumed without dispatch.`,
+          details: {
+            step_id: input.step_id ?? null,
+            reset_step_id: reset?.step.step_id ?? null,
+            dispatch_after: false,
+          },
+          source_client: input.source_client,
+          source_model: input.source_model,
+          source_agent: input.source_agent,
+        });
         return {
           ok: true,
           resumed: true,
@@ -863,6 +1016,7 @@ async function planResume(input: z.infer<typeof planResumeSchema>) {
           plan: updatedSnapshot.plan,
           steps: updatedSnapshot.steps,
           readiness: updatedSnapshot.readiness,
+          event,
         };
       }
 
@@ -875,6 +1029,22 @@ async function planResume(input: z.infer<typeof planResumeSchema>) {
         source_agent: input.source_agent,
       });
       const updatedSnapshot = getPlanExecutionSnapshot(input.plan_id);
+      const event = storage.appendRuntimeEvent({
+        event_type: "plan.resumed",
+        entity_type: "plan",
+        entity_id: input.plan_id,
+        status: updatedSnapshot.plan.status,
+        summary: input.summary?.trim() || `Plan ${input.plan_id} resumed and re-dispatched.`,
+        details: {
+          step_id: input.step_id ?? null,
+          reset_step_id: reset?.step.step_id ?? null,
+          dispatch_after: true,
+          dispatch_preview: summarizeDispatchValue(dispatchResult),
+        },
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      });
       return {
         ok: true,
         resumed: true,
@@ -884,6 +1054,7 @@ async function planResume(input: z.infer<typeof planResumeSchema>) {
         plan: updatedSnapshot.plan,
         steps: updatedSnapshot.steps,
         readiness: updatedSnapshot.readiness,
+        event,
       };
     },
   });
@@ -986,6 +1157,31 @@ async function dispatchAutorun(input: z.infer<typeof dispatchAutorunSchema>) {
                   },
                 },
               });
+              const backendEvent = appendPlanStepRuntimeEvent({
+                event_type: turnFailed ? "plan.step_backend_failed" : "plan.step_backend_completed",
+                plan_id: input.plan_id,
+                goal_id: snapshot.plan.goal_id,
+                step_id: step.step_id,
+                title: step.title,
+                executor_kind: step.executor_kind,
+                status: updated.step.status,
+                summary: turnFailed
+                  ? `TriChat backend failed for step ${step.step_id}.`
+                  : `TriChat backend completed for step ${step.step_id}.`,
+                details: {
+                  backend: "trichat",
+                  pass,
+                  turn_id: turnId,
+                  turn_status: turnStatus,
+                  selected_agent: readString(autorunResult.turn?.selected_agent) ?? null,
+                  selected_strategy: readString(autorunResult.turn?.selected_strategy) ?? null,
+                  verify_status: readString(autorunResult.turn?.verify_status) ?? null,
+                  verify_summary: readString(autorunResult.turn?.verify_summary) ?? null,
+                },
+                source_client: input.source_client,
+                source_model: input.source_model,
+                source_agent: input.source_agent,
+              });
               if (turnFailed) {
                 backendFailed += 1;
               } else {
@@ -999,12 +1195,13 @@ async function dispatchAutorun(input: z.infer<typeof dispatchAutorunSchema>) {
                 turn_status: turnStatus,
                 step_status_after: updated.step.status,
                 result: autorunResult,
+                event: backendEvent,
               };
               backendRuns.push(backendRun);
               passBackendRuns.push(backendRun);
             } catch (error) {
               const message = truncate(error instanceof Error ? error.message : String(error));
-              storage.updatePlanStep({
+              const updated = storage.updatePlanStep({
                 plan_id: input.plan_id,
                 step_id: step.step_id,
                 status: "failed",
@@ -1018,6 +1215,25 @@ async function dispatchAutorun(input: z.infer<typeof dispatchAutorunSchema>) {
                   },
                 },
               });
+              const backendEvent = appendPlanStepRuntimeEvent({
+                event_type: "plan.step_backend_failed",
+                plan_id: input.plan_id,
+                goal_id: snapshot.plan.goal_id,
+                step_id: step.step_id,
+                title: step.title,
+                executor_kind: step.executor_kind,
+                status: updated.step.status,
+                summary: `TriChat backend failed for step ${step.step_id}.`,
+                details: {
+                  backend: "trichat",
+                  pass,
+                  turn_id: turnId,
+                  error: message,
+                },
+                source_client: input.source_client,
+                source_model: input.source_model,
+                source_agent: input.source_agent,
+              });
               backendFailed += 1;
               const backendRun = {
                 backend: "trichat",
@@ -1025,6 +1241,7 @@ async function dispatchAutorun(input: z.infer<typeof dispatchAutorunSchema>) {
                 turn_id: turnId,
                 ok: false,
                 error: message,
+                event: backendEvent,
               };
               backendRuns.push(backendRun);
               passBackendRuns.push(backendRun);
@@ -1140,6 +1357,18 @@ registerTool("goal.get", "Fetch a durable goal by id.", goalGetSchema, (input) =
 
 registerTool("goal.list", "List durable goals by status or target filters.", goalListSchema, (input) =>
   goalList(storage, input)
+);
+
+registerTool("event.publish", "Persist a generic runtime event into the shared kernel event feed.", eventPublishSchema, (input) =>
+  eventPublish(storage, input)
+);
+
+registerTool("event.tail", "Tail the shared kernel event feed with type, entity, and source filters.", eventTailSchema, (input) =>
+  eventTail(storage, input)
+);
+
+registerTool("event.summary", "Summarize the shared kernel event feed by type and entity.", eventSummarySchema, (input) =>
+  eventSummary(storage, input)
 );
 
 registerTool("artifact.record", "Persist a durable artifact and optionally link it to goals, plans, tasks, runs, or other entities.", artifactRecordSchema, (input) =>

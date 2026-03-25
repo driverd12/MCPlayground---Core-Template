@@ -223,8 +223,8 @@ export async function openAgentSession(storage: Storage, input: z.infer<typeof a
     tool_name: "agent.session_open",
     mutation: input.mutation,
     payload: input,
-    execute: () =>
-      storage.upsertAgentSession({
+    execute: () => {
+      const opened = storage.upsertAgentSession({
         session_id: input.session_id,
         agent_id: input.agent_id,
         display_name: input.display_name,
@@ -240,7 +240,31 @@ export async function openAgentSession(storage: Storage, input: z.infer<typeof a
         source_client: input.source_client,
         source_model: input.source_model,
         source_agent: input.source_agent,
-      }),
+      });
+      const event = storage.appendRuntimeEvent({
+        event_type: opened.created ? "agent.session_opened" : "agent.session_refreshed",
+        entity_type: "agent_session",
+        entity_id: opened.session.session_id,
+        status: opened.session.status,
+        summary: opened.created
+          ? `Agent session ${opened.session.session_id} opened.`
+          : `Agent session ${opened.session.session_id} refreshed.`,
+        details: {
+          agent_id: opened.session.agent_id,
+          client_kind: opened.session.client_kind,
+          transport_kind: opened.session.transport_kind,
+          workspace_root: opened.session.workspace_root,
+          capability_keys: Object.keys(opened.session.capabilities),
+        },
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      });
+      return {
+        ...opened,
+        event,
+      };
+    },
   });
 }
 
@@ -300,11 +324,31 @@ export async function closeAgentSession(storage: Storage, input: z.infer<typeof 
     tool_name: "agent.session_close",
     mutation: input.mutation,
     payload: input,
-    execute: () =>
-      storage.closeAgentSession({
+    execute: () => {
+      const closed = storage.closeAgentSession({
         session_id: input.session_id,
         metadata: input.metadata,
-      }),
+      });
+      const event =
+        closed.closed && closed.session
+          ? storage.appendRuntimeEvent({
+              event_type: "agent.session_closed",
+              entity_type: "agent_session",
+              entity_id: closed.session.session_id,
+              status: closed.session.status,
+              summary: `Agent session ${closed.session.session_id} closed.`,
+              details: {
+                agent_id: closed.session.agent_id,
+                client_kind: closed.session.client_kind,
+                ended_at: closed.session.ended_at,
+              },
+            })
+          : null;
+      return {
+        ...closed,
+        event,
+      };
+    },
   });
 }
 
@@ -373,9 +417,31 @@ export async function agentClaimNext(storage: Storage, input: z.infer<typeof age
         },
       });
 
+      const event =
+        claimed.claimed && claimed.task
+          ? storage.appendRuntimeEvent({
+              event_type: "agent.task_claimed",
+              entity_type: "task",
+              entity_id: claimed.task.task_id,
+              status: claimed.task.status,
+              summary: `Task ${claimed.task.task_id} claimed through agent session ${session.session_id}.`,
+              details: {
+                session_id: session.session_id,
+                agent_id: session.agent_id,
+                client_kind: session.client_kind,
+                task_id: claimed.task.task_id,
+                lease_expires_at: claimed.lease_expires_at ?? null,
+              },
+              source_client: session.source_client ?? input.source_client,
+              source_model: session.source_model ?? input.source_model,
+              source_agent: session.agent_id,
+            })
+          : null;
+
       return {
         ...claimed,
         session: renewedSession.session ?? session,
+        event,
       };
     },
   });
@@ -447,10 +513,31 @@ export async function agentHeartbeatTask(storage: Storage, input: z.infer<typeof
               },
             })
           : { session };
+      const event =
+        heartbeat.ok && taskId
+          ? storage.appendRuntimeEvent({
+              event_type: "agent.task_heartbeat",
+              entity_type: "task",
+              entity_id: taskId,
+              status: "running",
+              summary: `Task ${taskId} heartbeat recorded through agent session ${session.session_id}.`,
+              details: {
+                session_id: session.session_id,
+                agent_id: session.agent_id,
+                task_id: taskId,
+                lease_expires_at: heartbeat.lease_expires_at ?? null,
+                heartbeat_at: heartbeat.heartbeat_at ?? null,
+              },
+              source_client: session.source_client ?? input.source_client,
+              source_model: session.source_model ?? input.source_model,
+              source_agent: session.agent_id,
+            })
+          : null;
       return {
         ...heartbeat,
         session: renewedSession.session ?? session,
         task: heartbeat.ok ? storage.getTaskById(taskId) : activeTask ?? storage.getTaskById(taskId),
+        event,
       };
     },
   });
@@ -565,6 +652,31 @@ export async function agentReportResult(storage: Storage, input: z.infer<typeof 
             },
           })
         : null;
+      const planStepEvent =
+        planContext && planStepUpdate
+          ? storage.appendRuntimeEvent({
+              event_type: input.outcome === "completed" ? "plan.step_completed" : "plan.step_failed",
+              entity_type: "step",
+              entity_id: planContext.step.step_id,
+              status: planStepUpdate.step.status,
+              summary:
+                input.summary?.trim() ||
+                `Plan step ${planContext.step.step_id} ${input.outcome === "completed" ? "completed" : "failed"} via agent report.`,
+              details: {
+                plan_id: planContext.plan.plan_id,
+                goal_id: planContext.plan.goal_id,
+                step_id: planContext.step.step_id,
+                task_id: task.task_id,
+                run_id: input.run_id ?? null,
+                session_id: session.session_id,
+                agent_id: session.agent_id,
+                produced_artifact_ids: producedArtifactIds,
+              },
+              source_client: input.source_client,
+              source_model: input.source_model,
+              source_agent: session.agent_id,
+            })
+          : null;
 
       const experimentRun = storage.findExperimentRunByTaskId(task.task_id);
       const experimentUpdate =
@@ -610,6 +722,28 @@ export async function agentReportResult(storage: Storage, input: z.infer<typeof 
           ...(input.metadata ?? {}),
         },
       });
+      const agentTaskEvent = storage.appendRuntimeEvent({
+        event_type: "agent.task_reported",
+        entity_type: "task",
+        entity_id: task.task_id,
+        status: task.status,
+        summary:
+          input.summary?.trim() ||
+          `Task ${task.task_id} ${input.outcome === "completed" ? "completed" : "failed"} through agent session ${session.session_id}.`,
+        details: {
+          session_id: session.session_id,
+          agent_id: session.agent_id,
+          task_id: task.task_id,
+          outcome: input.outcome,
+          run_id: input.run_id ?? null,
+          produced_artifact_ids: producedArtifactIds,
+          artifact_links_created: artifactLinks.length,
+          experiment_run_id: experimentRun?.experiment_run_id ?? null,
+        },
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: session.agent_id,
+      });
 
       return {
         reported: true,
@@ -621,6 +755,10 @@ export async function agentReportResult(storage: Storage, input: z.infer<typeof 
         artifact_links_created: artifactLinks.length,
         artifact_links: artifactLinks,
         experiment: experimentUpdate,
+        events: {
+          task: agentTaskEvent,
+          step: planStepEvent,
+        },
       };
     },
   });

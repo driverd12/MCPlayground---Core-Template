@@ -286,14 +286,37 @@ export function judgeExperimentRunWithStorage(
     experiment_id: experiment.experiment_id,
     status: params.experiment_status,
     current_best_metric: selectAcceptedRun ? observedMetric : undefined,
-    selected_run_id: selectAcceptedRun ? experimentRun.experiment_run_id : undefined,
-    metadata: {
-      last_judged_run_id: experimentRun.experiment_run_id,
-      last_verdict: verdict,
-      last_observed_metric: observedMetric,
-      last_delta: improvement,
+        selected_run_id: selectAcceptedRun ? experimentRun.experiment_run_id : undefined,
+        metadata: {
+          last_judged_run_id: experimentRun.experiment_run_id,
+          last_verdict: verdict,
+          last_observed_metric: observedMetric,
+          last_delta: improvement,
+        },
+      }).experiment;
+  const event = storage.appendRuntimeEvent({
+    event_type: "experiment.run_judged",
+    entity_type: "experiment_run",
+    entity_id: experimentRun.experiment_run_id,
+    status: updatedRun.experiment_run.status,
+    summary: params.summary?.trim() || `Experiment run ${experimentRun.candidate_label} judged as ${verdict}.`,
+    details: {
+      experiment_id: experiment.experiment_id,
+      experiment_run_id: experimentRun.experiment_run_id,
+      candidate_label: experimentRun.candidate_label,
+      verdict,
+      accepted: verdict === "accepted",
+      comparison_metric: comparisonMetric,
+      observed_metric: observedMetric,
+      delta: improvement,
+      selected_run_id: updatedExperiment.selected_run_id,
+      artifact_ids: artifactLinks.artifact_ids,
+      artifact_links_created: artifactLinks.links_created,
     },
-  }).experiment;
+    source_client: params.source_client,
+    source_model: params.source_model,
+    source_agent: params.source_agent,
+  });
 
   return {
     ok: true,
@@ -307,6 +330,7 @@ export function judgeExperimentRunWithStorage(
     artifact_ids: artifactLinks.artifact_ids,
     artifact_links_created: artifactLinks.links_created,
     artifact_links: artifactLinks.links,
+    event,
   };
 }
 
@@ -316,8 +340,8 @@ export async function experimentCreate(storage: Storage, input: z.infer<typeof e
     tool_name: "experiment.create",
     mutation: input.mutation,
     payload: input,
-    execute: () =>
-      storage.createExperiment({
+    execute: () => {
+      const created = storage.createExperiment({
         experiment_id: input.experiment_id,
         goal_id: input.goal_id,
         plan_id: input.plan_id,
@@ -341,7 +365,33 @@ export async function experimentCreate(storage: Storage, input: z.infer<typeof e
         source_client: input.source_client,
         source_model: input.source_model,
         source_agent: input.source_agent,
-      }),
+      });
+      const event =
+        created.created
+          ? storage.appendRuntimeEvent({
+              event_type: "experiment.created",
+              entity_type: "experiment",
+              entity_id: created.experiment.experiment_id,
+              status: created.experiment.status,
+              summary: `Experiment ${created.experiment.title} created.`,
+              details: {
+                goal_id: created.experiment.goal_id,
+                plan_id: created.experiment.plan_id,
+                step_id: created.experiment.step_id,
+                metric_name: created.experiment.metric_name,
+                metric_direction: created.experiment.metric_direction,
+                baseline_metric: created.experiment.baseline_metric,
+              },
+              source_client: input.source_client,
+              source_model: input.source_model,
+              source_agent: input.source_agent,
+            })
+          : null;
+      return {
+        ...created,
+        event,
+      };
+    },
   });
 }
 
@@ -484,6 +534,29 @@ export async function experimentRun(storage: Storage, input: z.infer<typeof expe
         source_model: input.source_model,
         source_agent: input.source_agent,
       });
+      const event = storage.appendRuntimeEvent({
+        event_type: dispatchMode === "task" ? "experiment.run_started" : "experiment.run_created",
+        entity_type: "experiment_run",
+        entity_id: createdRun.experiment_run.experiment_run_id,
+        status: createdRun.experiment_run.status,
+        summary: `Experiment run ${createdRun.experiment_run.candidate_label} ${dispatchMode === "task" ? "started" : "created"}.`,
+        details: {
+          experiment_id: experiment.experiment_id,
+          experiment_run_id: createdRun.experiment_run.experiment_run_id,
+          candidate_label: createdRun.experiment_run.candidate_label,
+          dispatch_mode: dispatchMode,
+          task_id: taskResult?.task.task_id ?? null,
+          run_id: input.run_id ?? null,
+          goal_id: experiment.goal_id,
+          plan_id: experiment.plan_id,
+          step_id: experiment.step_id,
+          artifact_ids: artifactLinks.artifact_ids,
+          artifact_links_created: artifactLinks.links_created,
+        },
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      });
 
       return {
         ...createdRun,
@@ -494,6 +567,7 @@ export async function experimentRun(storage: Storage, input: z.infer<typeof expe
         artifact_ids: artifactLinks.artifact_ids,
         artifact_links_created: artifactLinks.links_created,
         artifact_links: artifactLinks.links,
+        event,
       };
     },
   });

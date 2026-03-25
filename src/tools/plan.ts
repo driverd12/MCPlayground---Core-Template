@@ -438,8 +438,8 @@ export async function planStepUpdate(storage: Storage, input: z.infer<typeof pla
     tool_name: "plan.step_update",
     mutation: input.mutation,
     payload: input,
-    execute: () =>
-      storage.updatePlanStep({
+    execute: () => {
+      const updated = storage.updatePlanStep({
         plan_id: input.plan_id,
         step_id: input.step_id,
         status: input.status,
@@ -450,7 +450,31 @@ export async function planStepUpdate(storage: Storage, input: z.infer<typeof pla
         run_id: input.run_id,
         produced_artifact_ids: input.produced_artifact_ids,
         metadata: input.metadata,
-      }),
+      });
+      const event = storage.appendRuntimeEvent({
+        event_type: "plan.step_updated",
+        entity_type: "step",
+        entity_id: updated.step.step_id,
+        status: updated.step.status,
+        summary: input.summary?.trim() || `Plan step ${updated.step.title} updated.`,
+        details: {
+          plan_id: updated.plan.plan_id,
+          goal_id: updated.plan.goal_id,
+          step_id: updated.step.step_id,
+          executor_kind: updated.step.executor_kind,
+          task_id: updated.step.task_id,
+          run_id: updated.step.run_id,
+          produced_artifact_ids: updated.step.metadata.produced_artifact_ids ?? input.produced_artifact_ids ?? [],
+        },
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      });
+      return {
+        ...updated,
+        event,
+      };
+    },
   });
 }
 
@@ -496,12 +520,30 @@ export async function planApprove(storage: Storage, input: z.infer<typeof planAp
           ...(input.metadata ?? {}),
         },
       });
+      const event = storage.appendRuntimeEvent({
+        event_type: "plan.step_approved",
+        entity_type: "step",
+        entity_id: updated.step.step_id,
+        status: updated.step.status,
+        summary: approvalSummary,
+        details: {
+          plan_id: updated.plan.plan_id,
+          goal_id: updated.plan.goal_id,
+          step_id: updated.step.step_id,
+          approved_at: approvedAt,
+          approved_by: approvedBy,
+        },
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      });
       const readiness = evaluatePlanStepReadiness(storage.listPlanSteps(input.plan_id));
       return {
         approved: true,
         plan: updated.plan,
         step: updated.step,
         readiness,
+        event,
       };
     },
   });

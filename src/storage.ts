@@ -603,6 +603,22 @@ export type IncidentEventRecord = {
   source_agent: string | null;
 };
 
+export type RuntimeEventRecord = {
+  event_seq: number;
+  event_id: string;
+  created_at: string;
+  event_type: string;
+  entity_type: string | null;
+  entity_id: string | null;
+  status: string | null;
+  summary: string | null;
+  content: string | null;
+  details: Record<string, unknown>;
+  source_client: string | null;
+  source_model: string | null;
+  source_agent: string | null;
+};
+
 export type TranscriptAutoSquishStateRecord = {
   enabled: boolean;
   interval_seconds: number;
@@ -874,6 +890,11 @@ export class Storage {
         version: 12,
         name: "add-experiment-kernel-schema",
         run: () => this.applyExperimentSchemaMigration(),
+      },
+      {
+        version: 13,
+        name: "add-runtime-event-bus-schema",
+        run: () => this.applyRuntimeEventBusMigration(),
       },
     ]);
     this.ensureRuntimeSchemaCompleteness();
@@ -2597,6 +2618,22 @@ export class Storage {
         params.source_model ?? null,
         params.source_agent ?? null
       );
+    this.appendRuntimeEvent({
+      event_type: `goal.${params.event_type.trim() || "event"}`,
+      entity_type: "goal",
+      entity_id: goalId,
+      status: params.to_status ?? params.from_status ?? null,
+      summary,
+      details: {
+        from_status: params.from_status ?? null,
+        to_status: params.to_status ?? null,
+        ...(params.details ?? {}),
+      },
+      source_client: params.source_client,
+      source_model: params.source_model,
+      source_agent: params.source_agent,
+      created_at: createdAt,
+    });
     return {
       id,
       created_at: createdAt,
@@ -6849,6 +6886,21 @@ export class Storage {
         params.source_agent ?? null,
         stableStringify(details)
       );
+    this.appendRuntimeEvent({
+      event_type: `run.${params.event_type}`,
+      entity_type: "run",
+      entity_id: params.run_id,
+      status: params.status,
+      summary: params.summary,
+      details: {
+        step_index: params.step_index,
+        ...details,
+      },
+      source_client: params.source_client,
+      source_model: params.source_model,
+      source_agent: params.source_agent,
+      created_at: createdAt,
+    });
     return { id, created_at: createdAt };
   }
 
@@ -7130,7 +7182,231 @@ export class Storage {
       .prepare(`UPDATE incidents SET updated_at = ? WHERE incident_id = ?`)
       .run(createdAt, params.incident_id);
 
+    this.appendRuntimeEvent({
+      event_type: `incident.${params.event_type.trim() || "event"}`,
+      entity_type: "incident",
+      entity_id: params.incident_id,
+      summary: params.summary,
+      details: params.details ?? {},
+      source_client: params.source_client,
+      source_model: params.source_model,
+      source_agent: params.source_agent,
+      created_at: createdAt,
+    });
+
     return { id, created_at: createdAt };
+  }
+
+  appendRuntimeEvent(params: {
+    event_id?: string;
+    created_at?: string;
+    event_type: string;
+    entity_type?: string | null;
+    entity_id?: string | null;
+    status?: string | null;
+    summary?: string | null;
+    content?: string | null;
+    details?: Record<string, unknown>;
+    source_client?: string;
+    source_model?: string;
+    source_agent?: string;
+  }): RuntimeEventRecord {
+    const eventType = params.event_type.trim();
+    if (!eventType) {
+      throw new Error("event_type is required");
+    }
+    const createdAt = normalizeIsoTimestamp(params.created_at, new Date().toISOString());
+    const eventId = params.event_id?.trim() || crypto.randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO runtime_events (
+           event_id, created_at, event_type, entity_type, entity_id, status, summary, content, details_json,
+           source_client, source_model, source_agent
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        eventId,
+        createdAt,
+        eventType,
+        params.entity_type?.trim() || null,
+        params.entity_id?.trim() || null,
+        params.status?.trim() || null,
+        params.summary?.trim() || null,
+        params.content ?? null,
+        stableStringify(params.details ?? {}),
+        params.source_client ?? null,
+        params.source_model ?? null,
+        params.source_agent ?? null
+      );
+
+    const row = this.db
+      .prepare(
+        `SELECT event_seq, event_id, created_at, event_type, entity_type, entity_id, status, summary, content, details_json,
+                source_client, source_model, source_agent
+         FROM runtime_events
+         WHERE event_id = ?`
+      )
+      .get(eventId) as Record<string, unknown> | undefined;
+    if (!row) {
+      throw new Error(`Failed to read runtime event after insert: ${eventId}`);
+    }
+    return mapRuntimeEventRow(row);
+  }
+
+  listRuntimeEvents(params?: {
+    entity_type?: string;
+    entity_id?: string;
+    source_agent?: string;
+    source_client?: string;
+    event_type?: string;
+    event_types?: string[];
+    since_seq?: number;
+    since?: string;
+    limit?: number;
+  }): RuntimeEventRecord[] {
+    const whereClauses: string[] = [];
+    const values: Array<string | number> = [];
+
+    const entityType = params?.entity_type?.trim();
+    if (entityType) {
+      whereClauses.push("entity_type = ?");
+      values.push(entityType);
+    }
+    const entityId = params?.entity_id?.trim();
+    if (entityId) {
+      whereClauses.push("entity_id = ?");
+      values.push(entityId);
+    }
+    const sourceAgent = params?.source_agent?.trim();
+    if (sourceAgent) {
+      whereClauses.push("source_agent = ?");
+      values.push(sourceAgent);
+    }
+    const sourceClient = params?.source_client?.trim();
+    if (sourceClient) {
+      whereClauses.push("source_client = ?");
+      values.push(sourceClient);
+    }
+    const eventTypes = [
+      ...(params?.event_type?.trim() ? [params.event_type.trim()] : []),
+      ...((params?.event_types ?? []).map((entry) => entry.trim()).filter(Boolean)),
+    ];
+    if (eventTypes.length > 0) {
+      const placeholders = eventTypes.map(() => "?").join(", ");
+      whereClauses.push(`event_type IN (${placeholders})`);
+      values.push(...eventTypes);
+    }
+    const sinceSeq = parseBoundedInt(params?.since_seq, 0, 0, Number.MAX_SAFE_INTEGER);
+    if (sinceSeq > 0) {
+      whereClauses.push("event_seq > ?");
+      values.push(sinceSeq);
+    }
+    if (params?.since?.trim()) {
+      whereClauses.push("created_at > ?");
+      values.push(normalizeIsoTimestamp(params.since, params.since));
+    }
+
+    const limit = parseBoundedInt(params?.limit, 200, 1, 5000);
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(
+        `SELECT event_seq, event_id, created_at, event_type, entity_type, entity_id, status, summary, content, details_json,
+                source_client, source_model, source_agent
+         FROM runtime_events
+         ${whereSql}
+         ORDER BY event_seq DESC
+         LIMIT ?`
+      )
+      .all(...values, limit) as Array<Record<string, unknown>>;
+    return rows.reverse().map((row) => mapRuntimeEventRow(row));
+  }
+
+  summarizeRuntimeEvents(params?: {
+    entity_type?: string;
+    entity_id?: string;
+    source_agent?: string;
+    source_client?: string;
+    event_type?: string;
+    event_types?: string[];
+    since?: string;
+  }) {
+    const whereClauses: string[] = [];
+    const values: Array<string | number> = [];
+
+    const entityType = params?.entity_type?.trim();
+    if (entityType) {
+      whereClauses.push("entity_type = ?");
+      values.push(entityType);
+    }
+    const entityId = params?.entity_id?.trim();
+    if (entityId) {
+      whereClauses.push("entity_id = ?");
+      values.push(entityId);
+    }
+    const sourceAgent = params?.source_agent?.trim();
+    if (sourceAgent) {
+      whereClauses.push("source_agent = ?");
+      values.push(sourceAgent);
+    }
+    const sourceClient = params?.source_client?.trim();
+    if (sourceClient) {
+      whereClauses.push("source_client = ?");
+      values.push(sourceClient);
+    }
+    const eventTypes = [
+      ...(params?.event_type?.trim() ? [params.event_type.trim()] : []),
+      ...((params?.event_types ?? []).map((entry) => entry.trim()).filter(Boolean)),
+    ];
+    if (eventTypes.length > 0) {
+      const placeholders = eventTypes.map(() => "?").join(", ");
+      whereClauses.push(`event_type IN (${placeholders})`);
+      values.push(...eventTypes);
+    }
+    if (params?.since?.trim()) {
+      whereClauses.push("created_at > ?");
+      values.push(normalizeIsoTimestamp(params.since, params.since));
+    }
+
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+    const countRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count, MAX(event_seq) AS max_seq, MAX(created_at) AS latest_created_at
+         FROM runtime_events
+         ${whereSql}`
+      )
+      .get(...values) as Record<string, unknown> | undefined;
+    const eventTypeRows = this.db
+      .prepare(
+        `SELECT event_type, COUNT(*) AS count
+         FROM runtime_events
+         ${whereSql}
+         GROUP BY event_type
+         ORDER BY count DESC, event_type ASC`
+      )
+      .all(...values) as Array<Record<string, unknown>>;
+    const entityTypeRows = this.db
+      .prepare(
+        `SELECT entity_type, COUNT(*) AS count
+         FROM runtime_events
+         ${whereSql}
+         GROUP BY entity_type
+         ORDER BY count DESC, entity_type ASC`
+      )
+      .all(...values) as Array<Record<string, unknown>>;
+
+    return {
+      count: Number(countRow?.count ?? 0),
+      max_event_seq: Number(countRow?.max_seq ?? 0),
+      latest_created_at: asNullableString(countRow?.latest_created_at),
+      event_type_counts: eventTypeRows.map((row) => ({
+        event_type: String(row.event_type ?? ""),
+        count: Number(row.count ?? 0),
+      })),
+      entity_type_counts: entityTypeRows.map((row) => ({
+        entity_type: asNullableString(row.entity_type),
+        count: Number(row.count ?? 0),
+      })),
+    };
   }
 
   getIncidentTimeline(incidentId: string, limit: number): {
@@ -7220,6 +7496,7 @@ export class Storage {
       "decision_links",
       "incidents",
       "incident_events",
+      "runtime_events",
       "schema_migrations",
       "daemon_configs",
       "imprint_profiles",
@@ -7324,6 +7601,7 @@ export class Storage {
     this.applyAgenticSchemaMigration();
     this.applyAgentSessionsSchemaMigration();
     this.applyExperimentSchemaMigration();
+    this.applyRuntimeEventBusMigration();
   }
 
   private applyCoreSchemaMigration(): void {
@@ -7869,6 +8147,32 @@ export class Storage {
     this.ensureIndex("idx_experiment_runs_status", "experiment_runs", "status, created_at DESC");
   }
 
+  private applyRuntimeEventBusMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS runtime_events (
+        event_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        entity_type TEXT,
+        entity_id TEXT,
+        status TEXT,
+        summary TEXT,
+        content TEXT,
+        details_json TEXT NOT NULL,
+        source_client TEXT,
+        source_model TEXT,
+        source_agent TEXT
+      );
+    `);
+
+    this.ensureIndex("idx_runtime_events_seq", "runtime_events", "event_seq DESC");
+    this.ensureIndex("idx_runtime_events_created", "runtime_events", "created_at DESC");
+    this.ensureIndex("idx_runtime_events_type_seq", "runtime_events", "event_type, event_seq DESC");
+    this.ensureIndex("idx_runtime_events_entity_seq", "runtime_events", "entity_type, entity_id, event_seq DESC");
+    this.ensureIndex("idx_runtime_events_agent_seq", "runtime_events", "source_agent, event_seq DESC");
+  }
+
   private applyTriChatSchemaMigration(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS trichat_threads (
@@ -8095,6 +8399,21 @@ export class Storage {
         params.summary ?? null,
         stableStringify(params.details ?? {})
       );
+    this.appendRuntimeEvent({
+      event_type: `task.${params.event_type}`,
+      entity_type: "task",
+      entity_id: params.task_id,
+      status: params.to_status ?? params.from_status ?? null,
+      summary: params.summary ?? null,
+      details: {
+        from_status: params.from_status ?? null,
+        to_status: params.to_status ?? null,
+        worker_id: params.worker_id ?? null,
+        ...(params.details ?? {}),
+      },
+      source_agent: params.worker_id ?? undefined,
+      created_at: createdAt,
+    });
     return { id, created_at: createdAt };
   }
 
@@ -8426,6 +8745,24 @@ function mapExperimentRunRow(row: Record<string, unknown>): ExperimentRunRecord 
     log_excerpt: asNullableString(row.log_excerpt),
     error_text: asNullableString(row.error_text),
     metadata: parseJsonObject(row.metadata_json),
+    source_client: asNullableString(row.source_client),
+    source_model: asNullableString(row.source_model),
+    source_agent: asNullableString(row.source_agent),
+  };
+}
+
+function mapRuntimeEventRow(row: Record<string, unknown>): RuntimeEventRecord {
+  return {
+    event_seq: Number(row.event_seq ?? 0),
+    event_id: String(row.event_id ?? ""),
+    created_at: String(row.created_at ?? ""),
+    event_type: String(row.event_type ?? ""),
+    entity_type: asNullableString(row.entity_type),
+    entity_id: asNullableString(row.entity_id),
+    status: asNullableString(row.status),
+    summary: asNullableString(row.summary),
+    content: asNullableString(row.content),
+    details: parseJsonObject(row.details_json),
     source_client: asNullableString(row.source_client),
     source_model: asNullableString(row.source_model),
     source_agent: asNullableString(row.source_agent),

@@ -218,10 +218,30 @@ export async function artifactRecord(storage: Storage, input: z.infer<typeof art
         });
         createdLinks.push(link.link);
       }
+      const event = storage.appendRuntimeEvent({
+        event_type: "artifact.recorded",
+        entity_type: "artifact",
+        entity_id: recorded.artifact.artifact_id,
+        status: recorded.artifact.status,
+        summary: `artifact ${recorded.artifact.artifact_type} recorded`,
+        details: {
+          artifact_type: recorded.artifact.artifact_type,
+          goal_id: recorded.artifact.goal_id,
+          plan_id: recorded.artifact.plan_id,
+          step_id: recorded.artifact.step_id,
+          task_id: recorded.artifact.task_id,
+          run_id: recorded.artifact.run_id,
+          links_created: createdLinks.length,
+        },
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      });
       return {
         ...recorded,
         links_created: createdLinks.length,
         links: createdLinks,
+        event,
       };
     },
   });
@@ -283,8 +303,8 @@ export async function artifactLink(storage: Storage, input: z.infer<typeof artif
     tool_name: "artifact.link",
     mutation: input.mutation,
     payload: input,
-    execute: () =>
-      storage.linkArtifact({
+    execute: () => {
+      const linked = storage.linkArtifact({
         src_artifact_id: input.src_artifact_id,
         dst_artifact_id: input.dst_artifact_id,
         dst_entity_type: input.dst_entity?.entity_type,
@@ -295,7 +315,28 @@ export async function artifactLink(storage: Storage, input: z.infer<typeof artif
         source_client: input.source_client,
         source_model: input.source_model,
         source_agent: input.source_agent,
-      }),
+      });
+      const event = storage.appendRuntimeEvent({
+        event_type: "artifact.linked",
+        entity_type: "artifact",
+        entity_id: input.src_artifact_id,
+        summary: `artifact link ${input.relation} created`,
+        details: {
+          src_artifact_id: input.src_artifact_id,
+          dst_artifact_id: input.dst_artifact_id ?? null,
+          dst_entity_type: input.dst_entity?.entity_type ?? null,
+          dst_entity_id: input.dst_entity?.entity_id ?? null,
+          relation: input.relation,
+        },
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      });
+      return {
+        ...linked,
+        event,
+      };
+    },
   });
 }
 

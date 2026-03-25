@@ -24,6 +24,9 @@ test("server starts without domain packs and exposes core + TriChat tools", asyn
     assert.equal(names.has("goal.create"), true);
     assert.equal(names.has("goal.get"), true);
     assert.equal(names.has("goal.list"), true);
+    assert.equal(names.has("event.publish"), true);
+    assert.equal(names.has("event.tail"), true);
+    assert.equal(names.has("event.summary"), true);
     assert.equal(names.has("artifact.record"), true);
     assert.equal(names.has("artifact.get"), true);
     assert.equal(names.has("artifact.list"), true);
@@ -498,6 +501,19 @@ test("agent.claim_next and agent.report_result close the worker loop back into p
       status: "active",
       acceptance_criteria: ["Agents can claim queued work", "Plan step state updates on report"],
     });
+    const publishedEvent = await callTool(client, "event.publish", {
+      mutation: nextMutation(testId, "event.publish", () => mutationCounter++),
+      event_type: "runtime.note",
+      entity_type: "goal",
+      entity_id: createdGoal.goal.goal_id,
+      summary: "Worker-loop integration note",
+      details: {
+        scenario: "agent-worker-loop",
+      },
+      source_agent: "codex",
+    });
+    assert.equal(publishedEvent.event_type, "runtime.note");
+    assert.equal(publishedEvent.entity_id, createdGoal.goal.goal_id);
 
     const createdPlan = await callTool(client, "plan.create", {
       mutation: nextMutation(testId, "plan.create", () => mutationCounter++),
@@ -622,6 +638,36 @@ test("agent.claim_next and agent.report_result close the worker loop back into p
     assert.equal(sessionAfterReport.found, true);
     assert.equal(sessionAfterReport.session.status, "idle");
     assert.equal(sessionAfterReport.session.metadata.last_reported_task_id, claimedTask.task.task_id);
+
+    const allEvents = await callTool(client, "event.tail", {
+      limit: 200,
+    });
+    const eventTypes = new Set(allEvents.events.map((event) => event.event_type));
+    assert.equal(eventTypes.has("runtime.note"), true);
+    assert.equal(eventTypes.has("task.created"), true);
+    assert.equal(eventTypes.has("task.claimed"), true);
+    assert.equal(eventTypes.has("task.completed"), true);
+    assert.equal(eventTypes.has("artifact.recorded"), true);
+    assert.equal(eventTypes.has("agent.task_claimed"), true);
+    assert.equal(eventTypes.has("agent.task_reported"), true);
+    assert.equal(eventTypes.has("plan.step_dispatched"), true);
+    assert.equal(eventTypes.has("plan.step_completed"), true);
+
+    const stepEvents = await callTool(client, "event.tail", {
+      entity_type: "step",
+      entity_id: "worker-step",
+      limit: 50,
+    });
+    assert.ok(stepEvents.events.some((event) => event.event_type === "plan.step_dispatched"));
+    assert.ok(stepEvents.events.some((event) => event.event_type === "plan.step_completed"));
+
+    const taskEventSummary = await callTool(client, "event.summary", {
+      entity_type: "task",
+      entity_id: claimedTask.task.task_id,
+      event_types: ["task.created", "task.claimed", "task.completed"],
+    });
+    assert.equal(taskEventSummary.count, 3);
+    assert.ok(taskEventSummary.event_type_counts.some((entry) => entry.event_type === "task.created"));
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -787,6 +833,21 @@ test("artifact and experiment tools persist evidence and judge candidate runs", 
     assert.equal(judgedRun.delta, 10);
     assert.equal(judgedRun.experiment.current_best_metric, 90);
     assert.equal(judgedRun.experiment.selected_run_id, startedRun.experiment_run.experiment_run_id);
+
+    const experimentEvents = await callTool(client, "event.tail", {
+      entity_type: "experiment",
+      entity_id: createdExperiment.experiment.experiment_id,
+      limit: 20,
+    });
+    assert.ok(experimentEvents.events.some((event) => event.event_type === "experiment.created"));
+
+    const experimentRunEvents = await callTool(client, "event.tail", {
+      entity_type: "experiment_run",
+      entity_id: startedRun.experiment_run.experiment_run_id,
+      limit: 20,
+    });
+    assert.ok(experimentRunEvents.events.some((event) => event.event_type === "experiment.run_started"));
+    assert.ok(experimentRunEvents.events.some((event) => event.event_type === "experiment.run_judged"));
 
     const fetchedExperiment = await callTool(client, "experiment.get", {
       experiment_id: createdExperiment.experiment.experiment_id,
