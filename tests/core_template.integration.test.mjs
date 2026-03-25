@@ -30,6 +30,7 @@ test("server starts without domain packs and exposes core + TriChat tools", asyn
     assert.equal(names.has("plan.select"), true);
     assert.equal(names.has("plan.step_update"), true);
     assert.equal(names.has("plan.step_ready"), true);
+    assert.equal(names.has("plan.dispatch"), true);
     assert.equal(names.has("task.create"), true);
     assert.equal(names.has("transcript.log"), true);
 
@@ -262,6 +263,166 @@ test("server starts without domain packs and exposes core + TriChat tools", asyn
     const storageHealth = await callTool(client, "health.storage", {});
     assert.equal(storageHealth.ok, true);
     assert.ok(storageHealth.schema_version >= 4);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("plan.dispatch routes ready steps into tool, worker, TriChat, and human execution lanes", async () => {
+  const testId = `${Date.now()}-dispatch`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-dispatch-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Dispatch integration goal",
+      objective: "Exercise plan.dispatch across execution lanes",
+      status: "active",
+      autonomy_mode: "recommend",
+      acceptance_criteria: ["Each executor lane is reachable from a durable plan"],
+    });
+
+    const createdPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      title: "Dispatchable execution plan",
+      summary: "Fan out ready steps into the runtime execution lanes",
+      selected: true,
+      steps: [
+        {
+          step_id: "tool-goal",
+          seq: 1,
+          title: "Fetch the goal via MCP",
+          step_kind: "analysis",
+          executor_kind: "tool",
+          tool_name: "goal.get",
+          input: {
+            goal_id: createdGoal.goal.goal_id,
+          },
+        },
+        {
+          step_id: "worker-queue",
+          seq: 2,
+          title: "Dispatch through task queue",
+          step_kind: "mutation",
+          executor_kind: "worker",
+          input: {
+            objective: "Dispatch through task queue",
+            project_dir: ".",
+            priority: 6,
+            tags: ["dispatch", "worker"],
+            payload: {
+              lane: "worker",
+            },
+          },
+        },
+        {
+          step_id: "trichat-fanout",
+          seq: 3,
+          title: "Start a TriChat turn",
+          step_kind: "decision",
+          executor_kind: "trichat",
+          input: {
+            prompt: "Compare implementation options for the next runtime slice.",
+            expected_agents: ["codex", "cursor"],
+            min_agents: 2,
+          },
+        },
+        {
+          step_id: "human-gate",
+          seq: 4,
+          title: "Await human approval",
+          step_kind: "handoff",
+          executor_kind: "human",
+          input: {
+            approval_summary: "Manual approval required before applying the next runtime patch.",
+          },
+        },
+      ],
+    });
+
+    const dispatched = await callTool(client, "plan.dispatch", {
+      mutation: nextMutation(testId, "plan.dispatch", () => mutationCounter++),
+      plan_id: createdPlan.plan.plan_id,
+    });
+    assert.equal(dispatched.ok, true);
+    assert.equal(dispatched.considered_count, 4);
+    assert.equal(dispatched.dispatched_count, 3);
+    assert.equal(dispatched.completed_count, 1);
+    assert.equal(dispatched.running_count, 2);
+    assert.equal(dispatched.blocked_count, 1);
+    assert.equal(dispatched.failed_count, 0);
+
+    const resultByStepId = new Map(dispatched.results.map((result) => [result.step_id, result]));
+
+    const toolDispatch = resultByStepId.get("tool-goal");
+    assert.equal(toolDispatch.dispatched, true);
+    assert.equal(toolDispatch.action, "tool_invoked");
+    assert.equal(toolDispatch.tool_name, "goal.get");
+    assert.equal(toolDispatch.tool_result.found, true);
+    assert.equal(toolDispatch.tool_result.goal.goal_id, createdGoal.goal.goal_id);
+
+    const workerDispatch = resultByStepId.get("worker-queue");
+    assert.equal(workerDispatch.dispatched, true);
+    assert.equal(workerDispatch.action, "task_created");
+    assert.equal(typeof workerDispatch.task_id, "string");
+
+    const trichatDispatch = resultByStepId.get("trichat-fanout");
+    assert.equal(trichatDispatch.dispatched, true);
+    assert.equal(trichatDispatch.action, "trichat_turn_started");
+    assert.equal(typeof trichatDispatch.thread_id, "string");
+    assert.equal(typeof trichatDispatch.turn_id, "string");
+
+    const humanDispatch = resultByStepId.get("human-gate");
+    assert.equal(humanDispatch.dispatched, false);
+    assert.equal(humanDispatch.action, "approval_required");
+    assert.equal(humanDispatch.gate_type, "human");
+    assert.equal(humanDispatch.requires_human_approval, true);
+
+    const planFetch = await callTool(client, "plan.get", {
+      plan_id: createdPlan.plan.plan_id,
+    });
+    const stepById = new Map(planFetch.steps.map((step) => [step.step_id, step]));
+    assert.equal(stepById.get("tool-goal").status, "completed");
+    assert.equal(stepById.get("worker-queue").status, "running");
+    assert.equal(stepById.get("worker-queue").task_id, workerDispatch.task_id);
+    assert.equal(stepById.get("trichat-fanout").status, "running");
+    assert.equal(stepById.get("trichat-fanout").executor_ref, trichatDispatch.turn_id);
+    assert.equal(stepById.get("human-gate").status, "blocked");
+    assert.equal(stepById.get("human-gate").metadata.human_approval_required, true);
+
+    const pendingTasks = await callTool(client, "task.list", {
+      status: "pending",
+      limit: 20,
+    });
+    assert.ok(
+      pendingTasks.tasks.some(
+        (task) => task.task_id === workerDispatch.task_id && task.objective === "Dispatch through task queue"
+      )
+    );
+
+    const thread = await callTool(client, "trichat.thread_get", {
+      thread_id: trichatDispatch.thread_id,
+    });
+    assert.equal(thread.found, true);
+
+    const turn = await callTool(client, "trichat.turn_get", {
+      turn_id: trichatDispatch.turn_id,
+    });
+    assert.equal(turn.found, true);
+    assert.equal(turn.turn.phase, "propose");
+    assert.equal(turn.turn.phase_status, "running");
+
+    const readinessAfterDispatch = await callTool(client, "plan.step_ready", {
+      plan_id: createdPlan.plan.plan_id,
+    });
+    const humanReadiness = readinessAfterDispatch.readiness.find((step) => step.step_id === "human-gate");
+    assert.equal(humanReadiness.ready, false);
+    assert.equal(humanReadiness.gate_reason, "human");
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Storage } from "../storage.js";
+import { Storage, type PlanStepRecord } from "../storage.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 
 const planStatusSchema = z.enum([
@@ -193,6 +193,68 @@ export const planStepReadySchema = z.object({
   plan_id: z.string().min(1),
 });
 
+export const planDispatchSchema = z.object({
+  mutation: mutationSchema,
+  plan_id: z.string().min(1),
+  step_id: z.string().min(1).optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+  allow_non_ready: z.boolean().optional(),
+  dry_run: z.boolean().optional(),
+  ...sourceSchema.shape,
+});
+
+type PlanStepReadinessRecord = {
+  step_id: string;
+  seq: number;
+  title: string;
+  status: PlanStepRecord["status"];
+  depends_on: string[];
+  ready: boolean;
+  blocked_by: Array<{
+    step_id: string;
+    title: string;
+    status: PlanStepRecord["status"];
+  }>;
+  gate_reason: string | null;
+};
+
+function getStepGateReason(step: PlanStepRecord): string | null {
+  const metadata = step.metadata ?? {};
+  if (typeof metadata.dispatch_gate_type === "string" && metadata.dispatch_gate_type.trim()) {
+    return metadata.dispatch_gate_type.trim();
+  }
+  if (metadata.human_approval_required === true) {
+    return "human_approval_required";
+  }
+  return null;
+}
+
+export function evaluatePlanStepReadiness(steps: PlanStepRecord[]): PlanStepReadinessRecord[] {
+  const stepById = new Map(steps.map((step) => [step.step_id, step]));
+  return steps.map((step) => {
+    const blockedBy = step.depends_on
+      .map((dependencyId) => stepById.get(dependencyId))
+      .filter((dependency) => dependency && dependency.status !== "completed")
+      .map((dependency) => ({
+        step_id: dependency!.step_id,
+        title: dependency!.title,
+        status: dependency!.status,
+      }));
+    const gateReason = getStepGateReason(step);
+    const readyCandidate = step.status === "pending" || step.status === "blocked" || step.status === "ready";
+    return {
+      step_id: step.step_id,
+      seq: step.seq,
+      title: step.title,
+      status: step.status,
+      depends_on: step.depends_on,
+      ready: readyCandidate && blockedBy.length === 0 && !gateReason,
+      blocked_by: blockedBy,
+      gate_reason: gateReason,
+    };
+  });
+}
+
 export async function planCreate(storage: Storage, input: z.infer<typeof planCreateSchema>) {
   return runIdempotentMutation({
     storage,
@@ -380,27 +442,7 @@ export function planStepReady(storage: Storage, input: z.infer<typeof planStepRe
     };
   }
   const steps = storage.listPlanSteps(input.plan_id);
-  const stepById = new Map(steps.map((step) => [step.step_id, step]));
-  const readiness = steps.map((step) => {
-    const blockedBy = step.depends_on
-      .map((dependencyId) => stepById.get(dependencyId))
-      .filter((dependency) => dependency && dependency.status !== "completed")
-      .map((dependency) => ({
-        step_id: dependency!.step_id,
-        title: dependency!.title,
-        status: dependency!.status,
-      }));
-    const readyCandidate = step.status === "pending" || step.status === "blocked" || step.status === "ready";
-    return {
-      step_id: step.step_id,
-      seq: step.seq,
-      title: step.title,
-      status: step.status,
-      depends_on: step.depends_on,
-      ready: readyCandidate && blockedBy.length === 0,
-      blocked_by: blockedBy,
-    };
-  });
+  const readiness = evaluatePlanStepReadiness(steps);
 
   return {
     found: true,

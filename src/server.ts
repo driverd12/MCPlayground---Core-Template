@@ -1,5 +1,6 @@
 import path from "node:path";
 import fs from "node:fs";
+import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
@@ -33,6 +34,8 @@ import { goalCreate, goalCreateSchema, goalGet, goalGetSchema, goalList, goalLis
 import {
   planCreate,
   planCreateSchema,
+  planDispatchSchema,
+  evaluatePlanStepReadiness,
   planGet,
   planGetSchema,
   planList,
@@ -216,6 +219,523 @@ function registerTool(name: string, description: string, schema: z.ZodTypeAny, h
   toolRegistry.set(name, { schema, tool, handler });
 }
 
+async function invokeRegisteredTool(name: string, args: unknown) {
+  const entry = toolRegistry.get(name);
+  if (!entry) {
+    throw new Error(`Unknown tool: ${name}`);
+  }
+  const parsed = entry.schema.parse(args ?? {});
+  return entry.handler(parsed);
+}
+
+function hashDispatchValue(value: string) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function buildPlanDispatchDerivedMutation(
+  base: { idempotency_key: string; side_effect_fingerprint: string },
+  label: string,
+  seed: string
+) {
+  const keyHash = hashDispatchValue(`${base.idempotency_key}|${label}|${seed}`).slice(0, 40);
+  const fingerprintHash = hashDispatchValue(`${base.side_effect_fingerprint}|${label}|${seed}`).slice(0, 64);
+  return {
+    idempotency_key: `plan-dispatch-${keyHash}`,
+    side_effect_fingerprint: `plan-dispatch-${fingerprintHash}`,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim();
+  return normalized || undefined;
+}
+
+function readStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const normalized = value
+    .map((entry) => readString(entry))
+    .filter((entry): entry is string => Boolean(entry));
+  return normalized.length > 0 ? Array.from(new Set(normalized)) : undefined;
+}
+
+function readInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  return Math.round(value);
+}
+
+function buildPlanDispatchThreadId(planId: string, stepId: string) {
+  return `plan-dispatch-${hashDispatchValue(`${planId}|${stepId}`).slice(0, 24)}`;
+}
+
+function summarizeDispatchValue(value: unknown): unknown {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  try {
+    return JSON.parse(truncate(JSON.stringify(value), 1500));
+  } catch {
+    return truncate(String(value), 1500);
+  }
+}
+
+function extractTaskId(value: unknown): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const direct = readString(value.task_id);
+  if (direct) {
+    return direct;
+  }
+  if (isRecord(value.task)) {
+    return readString(value.task.task_id) ?? null;
+  }
+  return null;
+}
+
+function extractRunId(value: unknown): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const direct = readString(value.run_id);
+  if (direct) {
+    return direct;
+  }
+  if (isRecord(value.run)) {
+    return readString(value.run.run_id) ?? null;
+  }
+  return null;
+}
+
+async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
+  return runIdempotentMutation({
+    storage,
+    tool_name: "plan.dispatch",
+    mutation: input.mutation,
+    payload: input,
+    execute: async () => {
+      const plan = storage.getPlanById(input.plan_id);
+      if (!plan) {
+        throw new Error(`Plan not found: ${input.plan_id}`);
+      }
+
+      const steps = storage.listPlanSteps(input.plan_id);
+      const readiness = evaluatePlanStepReadiness(steps);
+      const stepById = new Map(steps.map((step) => [step.step_id, step]));
+      const readinessById = new Map(readiness.map((entry) => [entry.step_id, entry]));
+      const limit = input.limit ?? 25;
+
+      const rawCandidateSteps = input.step_id
+        ? [stepById.get(input.step_id)]
+        : readiness
+            .filter((entry) => entry.ready)
+            .sort((left, right) => left.seq - right.seq)
+            .slice(0, limit)
+            .map((entry) => stepById.get(entry.step_id));
+
+      const missingStep = input.step_id && !rawCandidateSteps[0];
+      if (missingStep) {
+        throw new Error(`Plan step not found: ${input.step_id}`);
+      }
+
+      const candidateSteps = rawCandidateSteps.filter(
+        (step): step is NonNullable<(typeof rawCandidateSteps)[number]> => Boolean(step)
+      );
+      if (candidateSteps.length === 0) {
+        return {
+          ok: true,
+          plan_id: input.plan_id,
+          dry_run: input.dry_run ?? false,
+          considered_count: 0,
+          dispatched_count: 0,
+          completed_count: 0,
+          running_count: 0,
+          blocked_count: 0,
+          failed_count: 0,
+          results: [],
+          message: input.step_id ? "No matching step was dispatchable." : "No ready plan steps found.",
+        };
+      }
+
+      const results: Array<Record<string, unknown>> = [];
+      let dispatchedCount = 0;
+      let completedCount = 0;
+      let runningCount = 0;
+      let blockedCount = 0;
+      let failedCount = 0;
+
+      for (const step of candidateSteps) {
+        const readinessEntry = readinessById.get(step.step_id);
+        const executorKind = step.executor_kind;
+        const nowIso = new Date().toISOString();
+        const baseResult: Record<string, unknown> = {
+          step_id: step.step_id,
+          seq: step.seq,
+          title: step.title,
+          executor_kind: executorKind,
+          step_status_before: step.status,
+          ready: readinessEntry?.ready ?? false,
+          blocked_by: readinessEntry?.blocked_by ?? [],
+          gate_reason: readinessEntry?.gate_reason ?? null,
+        };
+
+        if (input.step_id && !(readinessEntry?.ready ?? false) && !input.allow_non_ready) {
+          results.push({
+            ...baseResult,
+            dispatched: false,
+            action: "skipped_not_ready",
+            step_status_after: step.status,
+            reason: readinessEntry?.gate_reason ?? "step is not ready for dispatch",
+          });
+          continue;
+        }
+
+        if (!executorKind) {
+          results.push({
+            ...baseResult,
+            dispatched: false,
+            action: "configuration_required",
+            step_status_after: step.status,
+            reason: "executor_kind is required to dispatch a plan step",
+          });
+          continue;
+        }
+
+        if (input.dry_run) {
+          results.push({
+            ...baseResult,
+            dispatched: false,
+            dry_run: true,
+            action: "dry_run",
+            step_status_after: step.status,
+          });
+          continue;
+        }
+
+        try {
+          if (executorKind === "tool") {
+            const toolName = readString(step.tool_name) ?? readString(step.executor_ref);
+            if (!toolName) {
+              results.push({
+                ...baseResult,
+                dispatched: false,
+                action: "configuration_required",
+                step_status_after: step.status,
+                reason: "tool executor requires tool_name or executor_ref",
+              });
+              continue;
+            }
+            if (toolName === "plan.dispatch") {
+              results.push({
+                ...baseResult,
+                dispatched: false,
+                action: "configuration_required",
+                step_status_after: step.status,
+                reason: "plan.dispatch cannot recursively dispatch itself",
+              });
+              continue;
+            }
+            const toolInput = isRecord(step.input) ? { ...step.input } : {};
+            if (!("mutation" in toolInput)) {
+              toolInput.mutation = buildPlanDispatchDerivedMutation(input.mutation, "tool", step.step_id);
+            }
+            const toolResult = await invokeRegisteredTool(toolName, toolInput);
+            const taskId = extractTaskId(toolResult);
+            const runId = extractRunId(toolResult);
+            const updated = storage.updatePlanStep({
+              plan_id: plan.plan_id,
+              step_id: step.step_id,
+              status: "completed",
+              task_id: taskId ?? undefined,
+              run_id: runId ?? undefined,
+              metadata: {
+                human_approval_required: false,
+                dispatch_gate_type: null,
+                last_dispatch: {
+                  kind: "tool",
+                  dispatched_at: nowIso,
+                  tool_name: toolName,
+                  result_preview: summarizeDispatchValue(toolResult),
+                },
+              },
+            });
+            dispatchedCount += 1;
+            completedCount += 1;
+            results.push({
+              ...baseResult,
+              dispatched: true,
+              action: "tool_invoked",
+              tool_name: toolName,
+              task_id: taskId,
+              run_id: runId,
+              step_status_after: updated.step.status,
+              tool_result: toolResult,
+            });
+            continue;
+          }
+
+          if (executorKind === "task" || executorKind === "worker") {
+            const rawInput = isRecord(step.input) ? step.input : {};
+            const payload = isRecord(rawInput.payload) ? rawInput.payload : {};
+            const taskResult = await invokeRegisteredTool("task.create", {
+              mutation: buildPlanDispatchDerivedMutation(input.mutation, executorKind, step.step_id),
+              task_id: readString(rawInput.task_id),
+              objective: readString(rawInput.objective) ?? step.title,
+              project_dir: readString(rawInput.project_dir),
+              payload: {
+                ...payload,
+                plan_id: plan.plan_id,
+                step_id: step.step_id,
+                goal_id: plan.goal_id,
+              },
+              priority: readInteger(rawInput.priority),
+              max_attempts: readInteger(rawInput.max_attempts),
+              available_at: readString(rawInput.available_at),
+              source: readString(rawInput.source) ?? "plan.dispatch",
+              source_client: input.source_client,
+              source_model: input.source_model,
+              source_agent: input.source_agent,
+              tags: readStringArray(rawInput.tags) ?? ["plan.dispatch", executorKind],
+              metadata: {
+                ...(isRecord(rawInput.metadata) ? rawInput.metadata : {}),
+                plan_dispatch: {
+                  plan_id: plan.plan_id,
+                  step_id: step.step_id,
+                  goal_id: plan.goal_id,
+                  executor_kind: executorKind,
+                },
+              },
+            });
+            const taskId = extractTaskId(taskResult);
+            const updated = storage.updatePlanStep({
+              plan_id: plan.plan_id,
+              step_id: step.step_id,
+              status: "running",
+              task_id: taskId ?? undefined,
+              executor_ref: taskId ?? step.executor_ref ?? undefined,
+              metadata: {
+                human_approval_required: false,
+                dispatch_gate_type: null,
+                last_dispatch: {
+                  kind: executorKind,
+                  dispatched_at: nowIso,
+                  task_id: taskId,
+                  objective: readString(rawInput.objective) ?? step.title,
+                },
+              },
+            });
+            dispatchedCount += 1;
+            runningCount += 1;
+            results.push({
+              ...baseResult,
+              dispatched: true,
+              action: "task_created",
+              task_id: taskId,
+              step_status_after: updated.step.status,
+              task: taskResult,
+            });
+            continue;
+          }
+
+          if (executorKind === "trichat") {
+            const rawInput = isRecord(step.input) ? step.input : {};
+            const userPrompt =
+              readString(rawInput.user_prompt) ??
+              readString(rawInput.prompt) ??
+              readString(rawInput.content) ??
+              step.title;
+            const threadId = readString(rawInput.thread_id) ?? buildPlanDispatchThreadId(plan.plan_id, step.step_id);
+            const threadTitle = readString(rawInput.thread_title) ?? `${plan.title}: ${step.title}`;
+            const expectedAgents = readStringArray(rawInput.expected_agents);
+            const minAgents = readInteger(rawInput.min_agents);
+
+            const threadResult = await invokeRegisteredTool("trichat.thread_open", {
+              mutation: buildPlanDispatchDerivedMutation(input.mutation, "trichat-thread", step.step_id),
+              thread_id: threadId,
+              title: threadTitle,
+              status: "active",
+              metadata: {
+                ...(isRecord(rawInput.thread_metadata) ? rawInput.thread_metadata : {}),
+                plan_id: plan.plan_id,
+                step_id: step.step_id,
+                goal_id: plan.goal_id,
+              },
+            });
+            const messageResult = await invokeRegisteredTool("trichat.message_post", {
+              mutation: buildPlanDispatchDerivedMutation(input.mutation, "trichat-message", step.step_id),
+              thread_id: threadId,
+              agent_id: "plan-dispatch",
+              role: "user",
+              content: userPrompt,
+              metadata: {
+                kind: "plan.dispatch",
+                plan_id: plan.plan_id,
+                step_id: step.step_id,
+                goal_id: plan.goal_id,
+              },
+            });
+            const userMessageId =
+              isRecord(messageResult) && isRecord(messageResult.message)
+                ? readString(messageResult.message.message_id)
+                : undefined;
+            if (!userMessageId) {
+              throw new Error(`TriChat dispatch did not return a user message id for step ${step.step_id}`);
+            }
+            const startedTurn = await invokeRegisteredTool("trichat.turn_start", {
+              mutation: buildPlanDispatchDerivedMutation(input.mutation, "trichat-turn-start", step.step_id),
+              thread_id: threadId,
+              user_message_id: userMessageId,
+              user_prompt: userPrompt,
+              expected_agents: expectedAgents,
+              min_agents: minAgents,
+              metadata: {
+                plan_id: plan.plan_id,
+                step_id: step.step_id,
+                goal_id: plan.goal_id,
+              },
+            });
+            const turnId =
+              isRecord(startedTurn) && isRecord(startedTurn.turn) ? readString(startedTurn.turn.turn_id) : undefined;
+            if (!turnId) {
+              throw new Error(`TriChat dispatch did not return a turn id for step ${step.step_id}`);
+            }
+            const advancedTurn = await invokeRegisteredTool("trichat.turn_advance", {
+              mutation: buildPlanDispatchDerivedMutation(input.mutation, "trichat-turn-advance", step.step_id),
+              turn_id: turnId,
+              status: "running",
+              phase: "propose",
+              phase_status: "running",
+              metadata: {
+                dispatched_from_plan_id: plan.plan_id,
+                dispatched_from_step_id: step.step_id,
+              },
+            });
+            const updated = storage.updatePlanStep({
+              plan_id: plan.plan_id,
+              step_id: step.step_id,
+              status: "running",
+              executor_ref: turnId,
+              metadata: {
+                human_approval_required: false,
+                dispatch_gate_type: null,
+                thread_id: threadId,
+                user_message_id: userMessageId,
+                turn_id: turnId,
+                expected_agents: expectedAgents ?? null,
+                min_agents: minAgents ?? null,
+                last_dispatch: {
+                  kind: "trichat",
+                  dispatched_at: nowIso,
+                  thread_id: threadId,
+                  user_message_id: userMessageId,
+                  turn_id: turnId,
+                },
+              },
+            });
+            dispatchedCount += 1;
+            runningCount += 1;
+            results.push({
+              ...baseResult,
+              dispatched: true,
+              action: "trichat_turn_started",
+              thread_id: threadId,
+              user_message_id: userMessageId,
+              turn_id: turnId,
+              step_status_after: updated.step.status,
+              thread: threadResult,
+              message: messageResult,
+              turn: advancedTurn,
+            });
+            continue;
+          }
+
+          const updated = storage.updatePlanStep({
+            plan_id: plan.plan_id,
+            step_id: step.step_id,
+            status: "blocked",
+            metadata: {
+              human_approval_required: true,
+              dispatch_gate_type: "human",
+              last_dispatch: {
+                kind: "human",
+                dispatched_at: nowIso,
+                approval_summary: readString(step.input?.approval_summary) ?? `Human approval required for step ${step.title}`,
+              },
+            },
+          });
+          blockedCount += 1;
+          results.push({
+            ...baseResult,
+            dispatched: false,
+            action: "approval_required",
+            gate_type: "human",
+            requires_human_approval: true,
+            step_status_after: updated.step.status,
+            approval_gate: {
+              kind: "human",
+              summary: readString(step.input?.approval_summary) ?? `Human approval required for step ${step.title}`,
+            },
+          });
+        } catch (error) {
+          const message = truncate(error instanceof Error ? error.message : String(error));
+          let stepStatusAfter = "failed";
+          try {
+            const updated = storage.updatePlanStep({
+              plan_id: plan.plan_id,
+              step_id: step.step_id,
+              status: "failed",
+              metadata: {
+                last_dispatch: {
+                  kind: executorKind,
+                  dispatched_at: nowIso,
+                  error: message,
+                },
+              },
+            });
+            stepStatusAfter = updated.step.status;
+          } catch {
+            stepStatusAfter = "failed";
+          }
+          failedCount += 1;
+          results.push({
+            ...baseResult,
+            dispatched: false,
+            action: "dispatch_failed",
+            step_status_after: stepStatusAfter,
+            error: message,
+          });
+        }
+      }
+
+      return {
+        ok: true,
+        plan_id: input.plan_id,
+        dry_run: input.dry_run ?? false,
+        considered_count: candidateSteps.length,
+        dispatched_count: dispatchedCount,
+        completed_count: completedCount,
+        running_count: runningCount,
+        blocked_count: blockedCount,
+        failed_count: failedCount,
+        results,
+      };
+    },
+  });
+}
+
 registerTool("memory.append", "Append distilled long-term memory content.", memoryAppendSchema, (input) =>
   runIdempotentMutation({
     storage,
@@ -272,6 +792,10 @@ registerTool("plan.step_update", "Update durable plan step progress, bindings, a
 
 registerTool("plan.step_ready", "Evaluate which durable plan steps are ready based on current dependencies.", planStepReadySchema, (input) =>
   planStepReady(storage, input)
+);
+
+registerTool("plan.dispatch", "Dispatch ready durable plan steps into tools, tasks, TriChat, or human approval gates.", planDispatchSchema, (input) =>
+  planDispatch(input)
 );
 
 registerTool(
@@ -1080,16 +1604,8 @@ function createServerInstance() {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    const entry = toolRegistry.get(name);
-    if (!entry) {
-      return {
-        content: [{ type: "text", text: `Unknown tool: ${name}` }],
-        isError: true,
-      };
-    }
     try {
-      const parsed = entry.schema.parse(args ?? {});
-      const result = await entry.handler(parsed);
+      const result = await invokeRegisteredTool(name, args ?? {});
       return {
         content: [{ type: "text", text: JSON.stringify(result) }],
       };
