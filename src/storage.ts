@@ -195,6 +195,31 @@ export type PlanStepRecord = {
   depends_on: string[];
 };
 
+export type AgentSessionStatus = "active" | "idle" | "busy" | "expired" | "closed" | "failed";
+
+export type AgentSessionRecord = {
+  session_id: string;
+  agent_id: string;
+  created_at: string;
+  updated_at: string;
+  started_at: string;
+  ended_at: string | null;
+  status: AgentSessionStatus;
+  display_name: string | null;
+  client_kind: string | null;
+  transport_kind: string | null;
+  workspace_root: string | null;
+  owner_id: string | null;
+  lease_expires_at: string | null;
+  heartbeat_at: string | null;
+  capabilities: Record<string, unknown>;
+  tags: string[];
+  metadata: Record<string, unknown>;
+  source_client: string | null;
+  source_model: string | null;
+  source_agent: string | null;
+};
+
 export type TaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
 export type TaskRecord = {
@@ -731,6 +756,11 @@ export class Storage {
         version: 10,
         name: "add-agentic-runtime-foundation-schema",
         run: () => this.applyAgenticSchemaMigration(),
+      },
+      {
+        version: 11,
+        name: "add-agent-session-kernel-schema",
+        run: () => this.applyAgentSessionsSchemaMigration(),
       },
     ]);
     this.ensureRuntimeSchemaCompleteness();
@@ -3159,6 +3189,287 @@ export class Storage {
     return {
       plan: updatedPlan,
       step: updatedStep,
+    };
+  }
+
+  upsertAgentSession(params: {
+    session_id?: string;
+    agent_id: string;
+    status?: AgentSessionStatus;
+    display_name?: string;
+    client_kind?: string;
+    transport_kind?: string;
+    workspace_root?: string;
+    owner_id?: string;
+    lease_seconds?: number;
+    capabilities?: Record<string, unknown>;
+    tags?: string[];
+    metadata?: Record<string, unknown>;
+    source_client?: string;
+    source_model?: string;
+    source_agent?: string;
+  }): { created: boolean; session: AgentSessionRecord } {
+    const now = new Date().toISOString();
+    const sessionId = params.session_id?.trim() || crypto.randomUUID();
+    const existing = this.getAgentSessionById(sessionId);
+    const agentId = params.agent_id.trim();
+    if (!agentId) {
+      throw new Error("agent_id is required");
+    }
+    const leaseSeconds =
+      params.lease_seconds === undefined ? 300 : parseBoundedInt(params.lease_seconds, 300, 15, 86400);
+    const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
+    const status = normalizeAgentSessionStatus(params.status ?? existing?.status);
+    const displayName = params.display_name === undefined ? existing?.display_name ?? null : params.display_name?.trim() || null;
+    const clientKind = params.client_kind === undefined ? existing?.client_kind ?? null : params.client_kind?.trim() || null;
+    const transportKind =
+      params.transport_kind === undefined ? existing?.transport_kind ?? null : params.transport_kind?.trim() || null;
+    const workspaceRoot =
+      params.workspace_root === undefined ? existing?.workspace_root ?? null : params.workspace_root?.trim() || null;
+    const ownerId = params.owner_id === undefined ? existing?.owner_id ?? null : params.owner_id?.trim() || null;
+    const capabilities =
+      params.capabilities === undefined ? existing?.capabilities ?? {} : parseLooseObject(params.capabilities);
+    const tags = params.tags === undefined ? existing?.tags ?? [] : dedupeNonEmpty(params.tags);
+    const metadata =
+      params.metadata === undefined
+        ? existing?.metadata ?? {}
+        : {
+            ...(existing?.metadata ?? {}),
+            ...parseLooseObject(params.metadata),
+          };
+    const startedAt = existing?.started_at ?? now;
+    const endedAt = status === "closed" ? existing?.ended_at ?? now : null;
+
+    this.db
+      .prepare(
+        `INSERT INTO agent_sessions (
+           session_id, agent_id, created_at, updated_at, started_at, ended_at, status, display_name,
+           client_kind, transport_kind, workspace_root, owner_id, lease_expires_at, heartbeat_at,
+           capabilities_json, tags_json, metadata_json, source_client, source_model, source_agent
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           agent_id = excluded.agent_id,
+           updated_at = excluded.updated_at,
+           ended_at = excluded.ended_at,
+           status = excluded.status,
+           display_name = excluded.display_name,
+           client_kind = excluded.client_kind,
+           transport_kind = excluded.transport_kind,
+           workspace_root = excluded.workspace_root,
+           owner_id = excluded.owner_id,
+           lease_expires_at = excluded.lease_expires_at,
+           heartbeat_at = excluded.heartbeat_at,
+           capabilities_json = excluded.capabilities_json,
+           tags_json = excluded.tags_json,
+           metadata_json = excluded.metadata_json,
+           source_client = excluded.source_client,
+           source_model = excluded.source_model,
+           source_agent = excluded.source_agent`
+      )
+      .run(
+        sessionId,
+        agentId,
+        existing?.created_at ?? now,
+        now,
+        startedAt,
+        endedAt,
+        status,
+        displayName,
+        clientKind,
+        transportKind,
+        workspaceRoot,
+        ownerId,
+        leaseExpiresAt,
+        now,
+        stableStringify(capabilities),
+        stableStringify(tags),
+        stableStringify(metadata),
+        params.source_client ?? existing?.source_client ?? null,
+        params.source_model ?? existing?.source_model ?? null,
+        params.source_agent ?? existing?.source_agent ?? null
+      );
+
+    const session = this.getAgentSessionById(sessionId);
+    if (!session) {
+      throw new Error(`Failed to read agent session after upsert: ${sessionId}`);
+    }
+    return {
+      created: existing === null,
+      session,
+    };
+  }
+
+  getAgentSessionById(sessionId: string): AgentSessionRecord | null {
+    const normalized = sessionId.trim();
+    if (!normalized) {
+      return null;
+    }
+    const row = this.db
+      .prepare(
+        `SELECT session_id, agent_id, created_at, updated_at, started_at, ended_at, status, display_name,
+                client_kind, transport_kind, workspace_root, owner_id, lease_expires_at, heartbeat_at,
+                capabilities_json, tags_json, metadata_json, source_client, source_model, source_agent
+         FROM agent_sessions
+         WHERE session_id = ?`
+      )
+      .get(normalized) as Record<string, unknown> | undefined;
+    if (!row) {
+      return null;
+    }
+    return mapAgentSessionRow(row);
+  }
+
+  listAgentSessions(params: {
+    status?: AgentSessionStatus;
+    agent_id?: string;
+    client_kind?: string;
+    active_only?: boolean;
+    limit: number;
+  }): AgentSessionRecord[] {
+    const limit = Math.max(1, Math.min(500, params.limit));
+    const now = new Date().toISOString();
+    const whereClauses: string[] = [];
+    const values: unknown[] = [];
+
+    if (params.status) {
+      whereClauses.push("status = ?");
+      values.push(normalizeAgentSessionStatus(params.status));
+    }
+    const agentId = params.agent_id?.trim();
+    if (agentId) {
+      whereClauses.push("agent_id = ?");
+      values.push(agentId);
+    }
+    const clientKind = params.client_kind?.trim();
+    if (clientKind) {
+      whereClauses.push("client_kind = ?");
+      values.push(clientKind);
+    }
+    if (params.active_only) {
+      whereClauses.push("status <> 'closed'");
+      whereClauses.push("(lease_expires_at IS NULL OR lease_expires_at > ?)");
+      values.push(now);
+    }
+
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(
+        `SELECT session_id, agent_id, created_at, updated_at, started_at, ended_at, status, display_name,
+                client_kind, transport_kind, workspace_root, owner_id, lease_expires_at, heartbeat_at,
+                capabilities_json, tags_json, metadata_json, source_client, source_model, source_agent
+         FROM agent_sessions
+         ${whereSql}
+         ORDER BY updated_at DESC
+         LIMIT ?`
+      )
+      .all(...values, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => mapAgentSessionRow(row));
+  }
+
+  heartbeatAgentSession(params: {
+    session_id: string;
+    lease_seconds?: number;
+    status?: AgentSessionStatus;
+    owner_id?: string;
+    capabilities?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  }): { renewed: boolean; reason: string; session?: AgentSessionRecord } {
+    const sessionId = params.session_id.trim();
+    if (!sessionId) {
+      throw new Error("session_id is required");
+    }
+    const existing = this.getAgentSessionById(sessionId);
+    if (!existing) {
+      return {
+        renewed: false,
+        reason: "not-found",
+      };
+    }
+    const now = new Date().toISOString();
+    const leaseSeconds =
+      params.lease_seconds === undefined ? 300 : parseBoundedInt(params.lease_seconds, 300, 15, 86400);
+    const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
+    const status = params.status === undefined ? existing.status : normalizeAgentSessionStatus(params.status);
+    const ownerId = params.owner_id === undefined ? existing.owner_id : params.owner_id?.trim() || null;
+    const capabilities =
+      params.capabilities === undefined ? existing.capabilities : parseLooseObject(params.capabilities);
+    const metadata =
+      params.metadata === undefined
+        ? existing.metadata
+        : {
+            ...existing.metadata,
+            ...parseLooseObject(params.metadata),
+          };
+
+    this.db
+      .prepare(
+        `UPDATE agent_sessions
+         SET updated_at = ?,
+             ended_at = ?,
+             status = ?,
+             owner_id = ?,
+             lease_expires_at = ?,
+             heartbeat_at = ?,
+             capabilities_json = ?,
+             metadata_json = ?
+         WHERE session_id = ?`
+      )
+      .run(
+        now,
+        status === "closed" ? existing.ended_at ?? now : null,
+        status,
+        ownerId,
+        leaseExpiresAt,
+        now,
+        stableStringify(capabilities),
+        stableStringify(metadata),
+        sessionId
+      );
+
+    const session = this.getAgentSessionById(sessionId);
+    return {
+      renewed: Boolean(session),
+      reason: session ? "heartbeat-recorded" : "not-found",
+      session: session ?? undefined,
+    };
+  }
+
+  closeAgentSession(params: {
+    session_id: string;
+    metadata?: Record<string, unknown>;
+  }): { closed: boolean; reason: string; session?: AgentSessionRecord } {
+    const sessionId = params.session_id.trim();
+    if (!sessionId) {
+      throw new Error("session_id is required");
+    }
+    const existing = this.getAgentSessionById(sessionId);
+    if (!existing) {
+      return {
+        closed: false,
+        reason: "not-found",
+      };
+    }
+    const now = new Date().toISOString();
+    const metadata = params.metadata
+      ? {
+          ...existing.metadata,
+          ...parseLooseObject(params.metadata),
+        }
+      : existing.metadata;
+
+    this.db
+      .prepare(
+        `UPDATE agent_sessions
+         SET updated_at = ?, ended_at = ?, status = 'closed', lease_expires_at = ?, heartbeat_at = ?, metadata_json = ?
+         WHERE session_id = ?`
+      )
+      .run(now, existing.ended_at ?? now, now, now, stableStringify(metadata), sessionId);
+
+    const session = this.getAgentSessionById(sessionId);
+    return {
+      closed: Boolean(session),
+      reason: session ? "closed" : "not-found",
+      session: session ?? undefined,
     };
   }
 
@@ -5985,6 +6296,7 @@ export class Storage {
       "task_events",
       "task_leases",
       "task_artifacts",
+      "agent_sessions",
       "trichat_threads",
       "trichat_messages",
       "trichat_turns",
@@ -6073,6 +6385,7 @@ export class Storage {
     this.applyTriChatTurnSchemaMigration();
     this.applyTriChatReliabilitySchemaMigration();
     this.applyAgenticSchemaMigration();
+    this.applyAgentSessionsSchemaMigration();
   }
 
   private applyCoreSchemaMigration(): void {
@@ -6526,6 +6839,37 @@ export class Storage {
     this.ensureIndex("idx_pack_hook_runs_pack_kind", "pack_hook_runs", "pack_id, hook_kind, created_at DESC");
   }
 
+  private applyAgentSessionsSchemaMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_sessions (
+        session_id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        status TEXT NOT NULL,
+        display_name TEXT,
+        client_kind TEXT,
+        transport_kind TEXT,
+        workspace_root TEXT,
+        owner_id TEXT,
+        lease_expires_at TEXT,
+        heartbeat_at TEXT,
+        capabilities_json TEXT NOT NULL,
+        tags_json TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        source_client TEXT,
+        source_model TEXT,
+        source_agent TEXT
+      );
+    `);
+
+    this.ensureIndex("idx_agent_sessions_agent", "agent_sessions", "agent_id, updated_at DESC");
+    this.ensureIndex("idx_agent_sessions_status", "agent_sessions", "status, updated_at DESC");
+    this.ensureIndex("idx_agent_sessions_lease", "agent_sessions", "lease_expires_at ASC");
+  }
+
   private applyTriChatSchemaMigration(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS trichat_threads (
@@ -6960,6 +7304,31 @@ function mapPlanStepRow(row: Record<string, unknown>, dependsOn: string[]): Plan
   };
 }
 
+function mapAgentSessionRow(row: Record<string, unknown>): AgentSessionRecord {
+  return {
+    session_id: String(row.session_id ?? ""),
+    agent_id: String(row.agent_id ?? ""),
+    created_at: String(row.created_at ?? ""),
+    updated_at: String(row.updated_at ?? ""),
+    started_at: String(row.started_at ?? ""),
+    ended_at: asNullableString(row.ended_at),
+    status: normalizeAgentSessionStatus(row.status),
+    display_name: asNullableString(row.display_name),
+    client_kind: asNullableString(row.client_kind),
+    transport_kind: asNullableString(row.transport_kind),
+    workspace_root: asNullableString(row.workspace_root),
+    owner_id: asNullableString(row.owner_id),
+    lease_expires_at: asNullableString(row.lease_expires_at),
+    heartbeat_at: asNullableString(row.heartbeat_at),
+    capabilities: parseJsonObject(row.capabilities_json),
+    tags: safeParseJsonArray(row.tags_json),
+    metadata: parseJsonObject(row.metadata_json),
+    source_client: asNullableString(row.source_client),
+    source_model: asNullableString(row.source_model),
+    source_agent: asNullableString(row.source_agent),
+  };
+}
+
 function mapTaskRow(row: Record<string, unknown>): TaskRecord {
   const leaseOwnerId = asNullableString(row.lease_owner_id);
   const leaseExpiresAt = asNullableString(row.lease_expires_at);
@@ -7379,6 +7748,21 @@ function normalizeTaskStatus(value: unknown): TaskStatus {
     return normalized;
   }
   return "pending";
+}
+
+function normalizeAgentSessionStatus(value: unknown): AgentSessionStatus {
+  const normalized = String(value ?? "active");
+  if (
+    normalized === "active" ||
+    normalized === "idle" ||
+    normalized === "busy" ||
+    normalized === "expired" ||
+    normalized === "closed" ||
+    normalized === "failed"
+  ) {
+    return normalized;
+  }
+  return "active";
 }
 
 function normalizeTriChatThreadStatus(value: unknown): TriChatThreadStatus {

@@ -203,6 +203,27 @@ export const planDispatchSchema = z.object({
   ...sourceSchema.shape,
 });
 
+export const planApproveSchema = z.object({
+  mutation: mutationSchema,
+  plan_id: z.string().min(1),
+  step_id: z.string().min(1),
+  approved_by: z.string().min(1).optional(),
+  summary: z.string().min(1).optional(),
+  metadata: z.record(z.unknown()).optional(),
+  ...sourceSchema.shape,
+});
+
+export const planResumeSchema = z.object({
+  mutation: mutationSchema,
+  plan_id: z.string().min(1),
+  step_id: z.string().min(1).optional(),
+  reset_step: z.boolean().optional(),
+  dispatch_after: z.boolean().optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+  summary: z.string().min(1).optional(),
+  ...sourceSchema.shape,
+});
+
 type PlanStepReadinessRecord = {
   step_id: string;
   seq: number;
@@ -430,6 +451,59 @@ export async function planStepUpdate(storage: Storage, input: z.infer<typeof pla
         produced_artifact_ids: input.produced_artifact_ids,
         metadata: input.metadata,
       }),
+  });
+}
+
+export async function planApprove(storage: Storage, input: z.infer<typeof planApproveSchema>) {
+  return runIdempotentMutation({
+    storage,
+    tool_name: "plan.approve",
+    mutation: input.mutation,
+    payload: input,
+    execute: () => {
+      const plan = storage.getPlanById(input.plan_id);
+      if (!plan) {
+        throw new Error(`Plan not found: ${input.plan_id}`);
+      }
+      const step = storage.listPlanSteps(input.plan_id).find((candidate) => candidate.step_id === input.step_id);
+      if (!step) {
+        throw new Error(`Plan step not found: ${input.step_id}`);
+      }
+      const gateReason = getStepGateReason(step);
+      const requiresHumanApproval =
+        step.executor_kind === "human" || gateReason === "human" || gateReason === "human_approval_required";
+      if (!requiresHumanApproval) {
+        throw new Error(`Plan step ${input.step_id} is not waiting on human approval`);
+      }
+
+      const approvedAt = new Date().toISOString();
+      const approvedBy =
+        input.approved_by?.trim() || input.source_agent?.trim() || input.source_client?.trim() || "human";
+      const approvalSummary = input.summary?.trim() || `Approved step ${step.title}`;
+      const updated = storage.updatePlanStep({
+        plan_id: input.plan_id,
+        step_id: input.step_id,
+        status: "completed",
+        summary: approvalSummary,
+        metadata: {
+          human_approval_required: false,
+          dispatch_gate_type: null,
+          approval: {
+            approved_at: approvedAt,
+            approved_by: approvedBy,
+            summary: approvalSummary,
+          },
+          ...(input.metadata ?? {}),
+        },
+      });
+      const readiness = evaluatePlanStepReadiness(storage.listPlanSteps(input.plan_id));
+      return {
+        approved: true,
+        plan: updated.plan,
+        step: updated.step,
+        readiness,
+      };
+    },
   });
 }
 

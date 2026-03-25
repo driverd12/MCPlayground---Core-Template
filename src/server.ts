@@ -9,6 +9,19 @@ import { CallToolRequestSchema, ListToolsRequestSchema, Tool } from "@modelconte
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { Storage } from "./storage.js";
+import {
+  agentSessionCloseSchema,
+  agentSessionGetSchema,
+  agentSessionHeartbeatSchema,
+  agentSessionListSchema,
+  agentSessionOpenSchema,
+  closeAgentSession,
+  getAgentSession,
+  heartbeatAgentSession,
+  listAgentSessions,
+  openAgentSession,
+} from "./tools/agent_session.js";
+import { dispatchAutorunSchema } from "./tools/dispatch.js";
 import { appendMemory, getMemory, memoryAppendSchema, memoryGetSchema, memorySearchSchema, searchMemory } from "./tools/memory.js";
 import {
   applyTranscriptRetention,
@@ -34,12 +47,15 @@ import { goalCreate, goalCreateSchema, goalGet, goalGetSchema, goalList, goalLis
 import {
   planCreate,
   planCreateSchema,
+  planApprove,
+  planApproveSchema,
   planDispatchSchema,
   evaluatePlanStepReadiness,
   planGet,
   planGetSchema,
   planList,
   planListSchema,
+  planResumeSchema,
   planSelect,
   planSelectSchema,
   planStepReady,
@@ -139,6 +155,7 @@ import {
   trichatAutopilotSchema,
   trichatTmuxController,
   trichatTmuxControllerSchema,
+  trichatTurnAutorun,
 } from "./tools/trichat.js";
 import { TriChatBusRuntime, trichatBusControl, trichatBusSchema } from "./tools/trichat_bus.js";
 import {
@@ -318,6 +335,24 @@ function extractRunId(value: unknown): string | null {
     return readString(value.run.run_id) ?? null;
   }
   return null;
+}
+
+function getPlanExecutionSnapshot(planId: string) {
+  const plan = storage.getPlanById(planId);
+  if (!plan) {
+    throw new Error(`Plan not found: ${planId}`);
+  }
+  const steps = storage.listPlanSteps(planId);
+  const readiness = evaluatePlanStepReadiness(steps);
+  return {
+    plan,
+    steps,
+    readiness,
+  };
+}
+
+function isPlanTerminalStatus(status: string) {
+  return status === "completed" || status === "invalidated" || status === "archived";
 }
 
 async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
@@ -736,6 +771,271 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
   });
 }
 
+async function planResume(input: z.infer<typeof planResumeSchema>) {
+  return runIdempotentMutation({
+    storage,
+    tool_name: "plan.resume",
+    mutation: input.mutation,
+    payload: input,
+    execute: async () => {
+      const snapshot = getPlanExecutionSnapshot(input.plan_id);
+      let reset = null as null | {
+        plan: ReturnType<typeof storage.updatePlanStep>["plan"];
+        step: ReturnType<typeof storage.updatePlanStep>["step"];
+      };
+
+      if (input.step_id) {
+        const step = snapshot.steps.find((candidate) => candidate.step_id === input.step_id);
+        if (!step) {
+          throw new Error(`Plan step not found: ${input.step_id}`);
+        }
+        if (input.reset_step) {
+          const resettableStatuses = new Set(["blocked", "failed", "skipped", "invalidated"]);
+          if (!resettableStatuses.has(step.status)) {
+            throw new Error(`Plan step ${input.step_id} cannot be reset from status ${step.status}`);
+          }
+          reset = storage.updatePlanStep({
+            plan_id: input.plan_id,
+            step_id: input.step_id,
+            status: "pending",
+            summary: input.summary?.trim() || `Resumed step ${step.title}`,
+            metadata: {
+              human_approval_required: false,
+              dispatch_gate_type: null,
+              last_resume: {
+                resumed_at: new Date().toISOString(),
+                resumed_by: input.source_agent ?? input.source_client ?? "plan.resume",
+                summary: input.summary?.trim() || null,
+              },
+            },
+          });
+        }
+      }
+
+      if (input.dispatch_after === false) {
+        const updatedSnapshot = getPlanExecutionSnapshot(input.plan_id);
+        return {
+          ok: true,
+          resumed: true,
+          plan_id: input.plan_id,
+          reset_step_id: reset?.step.step_id ?? null,
+          dispatch: null,
+          plan: updatedSnapshot.plan,
+          steps: updatedSnapshot.steps,
+          readiness: updatedSnapshot.readiness,
+        };
+      }
+
+      const dispatchResult = await invokeRegisteredTool("dispatch.autorun", {
+        mutation: buildPlanDispatchDerivedMutation(input.mutation, "resume", input.step_id ?? input.plan_id),
+        plan_id: input.plan_id,
+        limit: input.limit,
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      });
+      const updatedSnapshot = getPlanExecutionSnapshot(input.plan_id);
+      return {
+        ok: true,
+        resumed: true,
+        plan_id: input.plan_id,
+        reset_step_id: reset?.step.step_id ?? null,
+        dispatch: dispatchResult,
+        plan: updatedSnapshot.plan,
+        steps: updatedSnapshot.steps,
+        readiness: updatedSnapshot.readiness,
+      };
+    },
+  });
+}
+
+async function dispatchAutorun(input: z.infer<typeof dispatchAutorunSchema>) {
+  return runIdempotentMutation({
+    storage,
+    tool_name: "dispatch.autorun",
+    mutation: input.mutation,
+    payload: input,
+    execute: async () => {
+      const maxPasses = input.max_passes ?? 4;
+      const passResults: Array<Record<string, unknown>> = [];
+      const backendRuns: Array<Record<string, unknown>> = [];
+      const processedTriChatTurns = new Set<string>();
+      let stopReason = "max_passes_reached";
+
+      for (let pass = 1; pass <= maxPasses; pass += 1) {
+        const dispatchResult = (await invokeRegisteredTool("plan.dispatch", {
+          mutation: buildPlanDispatchDerivedMutation(input.mutation, "autorun", `${input.plan_id}:${pass}`),
+          plan_id: input.plan_id,
+          limit: input.limit,
+          dry_run: input.dry_run,
+          source_client: input.source_client,
+          source_model: input.source_model,
+          source_agent: input.source_agent,
+        })) as Record<string, unknown>;
+
+        const passBackendRuns: Array<Record<string, unknown>> = [];
+        let backendCompleted = 0;
+        let backendFailed = 0;
+
+        if (!(input.dry_run ?? false)) {
+          const snapshot = getPlanExecutionSnapshot(input.plan_id);
+          const trichatSteps = snapshot.steps.filter((step) => {
+            if (step.executor_kind !== "trichat" || step.status !== "running") {
+              return false;
+            }
+            const turnId = readString(step.metadata.turn_id) ?? readString(step.executor_ref);
+            if (!turnId || processedTriChatTurns.has(turnId)) {
+              return false;
+            }
+            return true;
+          });
+
+          for (const step of trichatSteps) {
+            const turnId = readString(step.metadata.turn_id) ?? readString(step.executor_ref);
+            if (!turnId) {
+              continue;
+            }
+            processedTriChatTurns.add(turnId);
+            try {
+              const autorunResult = await trichatTurnAutorun(storage, {
+                turn_id: turnId,
+                session_key: `dispatch-autorun:${input.plan_id}:${step.step_id}:${pass}`,
+                expected_agents: input.trichat_agent_ids,
+                max_rounds: input.trichat_max_rounds,
+                min_success_agents: input.trichat_min_success_agents,
+                bridge_timeout_seconds: input.trichat_bridge_timeout_seconds,
+                bridge_dry_run: input.trichat_bridge_dry_run,
+                objective:
+                  readString(step.input.user_prompt) ??
+                  readString(step.input.prompt) ??
+                  readString(step.input.content) ??
+                  step.title,
+                project_dir:
+                  readString(step.input.project_dir) ??
+                  readString(step.metadata.project_dir) ??
+                  process.cwd(),
+                verify_summary: `dispatch.autorun completed TriChat backend for step ${step.step_id}`,
+              });
+              const turnStatus = readString(autorunResult.turn?.status) ?? null;
+              const turnFailed = turnStatus === "failed";
+              const updated = storage.updatePlanStep({
+                plan_id: input.plan_id,
+                step_id: step.step_id,
+                status: turnFailed ? "failed" : "completed",
+                executor_ref: turnId,
+                metadata: {
+                  last_backend_run: {
+                    backend: "trichat",
+                    autorun_at: new Date().toISOString(),
+                    pass,
+                    replayed: Boolean(autorunResult.replayed),
+                    turn_id: turnId,
+                    turn_status: turnStatus,
+                    selected_agent: readString(autorunResult.turn?.selected_agent) ?? null,
+                    selected_strategy: readString(autorunResult.turn?.selected_strategy) ?? null,
+                    verify_status: readString(autorunResult.turn?.verify_status) ?? null,
+                    verify_summary: readString(autorunResult.turn?.verify_summary) ?? null,
+                    council_confidence: isRecord(autorunResult.council)
+                      ? autorunResult.council.council_confidence ?? null
+                      : null,
+                    success_agents: isRecord(autorunResult.council)
+                      ? Array.isArray(autorunResult.council.success_agents)
+                        ? autorunResult.council.success_agents
+                        : []
+                      : [],
+                  },
+                },
+              });
+              if (turnFailed) {
+                backendFailed += 1;
+              } else {
+                backendCompleted += 1;
+              }
+              const backendRun = {
+                backend: "trichat",
+                step_id: step.step_id,
+                turn_id: turnId,
+                ok: !turnFailed,
+                turn_status: turnStatus,
+                step_status_after: updated.step.status,
+                result: autorunResult,
+              };
+              backendRuns.push(backendRun);
+              passBackendRuns.push(backendRun);
+            } catch (error) {
+              const message = truncate(error instanceof Error ? error.message : String(error));
+              storage.updatePlanStep({
+                plan_id: input.plan_id,
+                step_id: step.step_id,
+                status: "failed",
+                metadata: {
+                  last_backend_run: {
+                    backend: "trichat",
+                    autorun_at: new Date().toISOString(),
+                    pass,
+                    turn_id: turnId,
+                    error: message,
+                  },
+                },
+              });
+              backendFailed += 1;
+              const backendRun = {
+                backend: "trichat",
+                step_id: step.step_id,
+                turn_id: turnId,
+                ok: false,
+                error: message,
+              };
+              backendRuns.push(backendRun);
+              passBackendRuns.push(backendRun);
+            }
+          }
+        }
+
+        passResults.push({
+          pass,
+          dispatch: dispatchResult,
+          backend_runs: passBackendRuns,
+        });
+
+        if (input.dry_run ?? false) {
+          stopReason = "dry_run";
+          break;
+        }
+        if (Number(dispatchResult.failed_count ?? 0) > 0 || backendFailed > 0) {
+          stopReason = "failure";
+          break;
+        }
+
+        const snapshot = getPlanExecutionSnapshot(input.plan_id);
+        if (isPlanTerminalStatus(snapshot.plan.status)) {
+          stopReason = "plan_terminal";
+          break;
+        }
+
+        if (Number(dispatchResult.dispatched_count ?? 0) === 0 && backendCompleted === 0) {
+          stopReason = "idle";
+          break;
+        }
+      }
+
+      const finalSnapshot = getPlanExecutionSnapshot(input.plan_id);
+      return {
+        ok: true,
+        plan_id: input.plan_id,
+        dry_run: input.dry_run ?? false,
+        pass_count: passResults.length,
+        stop_reason: stopReason,
+        pass_results: passResults,
+        backend_runs: backendRuns,
+        final_plan: finalSnapshot.plan,
+        final_steps: finalSnapshot.steps,
+        final_readiness: finalSnapshot.readiness,
+      };
+    },
+  });
+}
+
 registerTool("memory.append", "Append distilled long-term memory content.", memoryAppendSchema, (input) =>
   runIdempotentMutation({
     storage,
@@ -752,6 +1052,26 @@ registerTool("memory.search", "Search long-term memory using lexical matching.",
 
 registerTool("memory.get", "Fetch a memory by id for deterministic debugging.", memoryGetSchema, (input) =>
   getMemory(storage, input)
+);
+
+registerTool("agent.session_open", "Open or refresh a durable agent session record.", agentSessionOpenSchema, (input) =>
+  openAgentSession(storage, input)
+);
+
+registerTool("agent.session_get", "Fetch a durable agent session by id.", agentSessionGetSchema, (input) =>
+  getAgentSession(storage, input)
+);
+
+registerTool("agent.session_list", "List durable agent sessions by status, agent, or client filters.", agentSessionListSchema, (input) =>
+  listAgentSessions(storage, input)
+);
+
+registerTool("agent.session_heartbeat", "Renew a durable agent session lease and update live capabilities.", agentSessionHeartbeatSchema, (input) =>
+  heartbeatAgentSession(storage, input)
+);
+
+registerTool("agent.session_close", "Close a durable agent session and release its lease.", agentSessionCloseSchema, (input) =>
+  closeAgentSession(storage, input)
 );
 
 registerTool("goal.create", "Create a durable goal with acceptance criteria and autonomy settings.", goalCreateSchema, (input) =>
@@ -790,12 +1110,24 @@ registerTool("plan.step_update", "Update durable plan step progress, bindings, a
   planStepUpdate(storage, input)
 );
 
+registerTool("plan.approve", "Approve a human-gated durable plan step and mark the gate as satisfied.", planApproveSchema, (input) =>
+  planApprove(storage, input)
+);
+
 registerTool("plan.step_ready", "Evaluate which durable plan steps are ready based on current dependencies.", planStepReadySchema, (input) =>
   planStepReady(storage, input)
 );
 
 registerTool("plan.dispatch", "Dispatch ready durable plan steps into tools, tasks, TriChat, or human approval gates.", planDispatchSchema, (input) =>
   planDispatch(input)
+);
+
+registerTool("plan.resume", "Resume a durable plan or reset a blocked step, then re-dispatch through the kernel.", planResumeSchema, (input) =>
+  planResume(input)
+);
+
+registerTool("dispatch.autorun", "Run bounded re-dispatch loops so backend completions can unlock downstream plan steps.", dispatchAutorunSchema, (input) =>
+  dispatchAutorun(input)
 );
 
 registerTool(

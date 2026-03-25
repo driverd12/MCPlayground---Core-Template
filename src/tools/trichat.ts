@@ -1255,6 +1255,126 @@ export function trichatTurnGet(storage: Storage, input: z.infer<typeof trichatTu
   };
 }
 
+export async function trichatTurnAutorun(
+  storage: Storage,
+  input: {
+    turn_id: string;
+    session_key?: string;
+    expected_agents?: string[];
+    max_rounds?: number;
+    min_success_agents?: number;
+    bridge_timeout_seconds?: number;
+    bridge_dry_run?: boolean;
+    objective?: string;
+    project_dir?: string;
+    verify_summary?: string;
+  }
+) {
+  const turn = storage.getTriChatTurnById(input.turn_id);
+  if (!turn) {
+    throw new Error(`Tri-chat turn not found: ${input.turn_id}`);
+  }
+  if (isTerminalTurnStatus(turn.status)) {
+    return {
+      ok: turn.status === "completed",
+      replayed: true,
+      turn,
+      council: null,
+      verify: {
+        status: turn.verify_status ?? "skipped",
+        summary: turn.verify_summary ?? `turn already terminal (${turn.status})`,
+        failed: turn.status === "failed",
+      },
+    };
+  }
+
+  const thread = storage.getTriChatThreadById(turn.thread_id);
+  const requestedAgents = normalizeConsensusAgentIds(input.expected_agents ?? turn.expected_agents);
+  const effectiveAgents = requestedAgents.length > 0 ? requestedAgents : [...DEFAULT_CONSENSUS_AGENT_IDS];
+  const sessionKey =
+    input.session_key?.trim() || `dispatch-autorun:${turn.turn_id}:${Date.now().toString(36)}:${crypto.randomUUID().slice(0, 8)}`;
+  const objective = compactConsensusText(input.objective?.trim() || turn.user_prompt.trim(), 600);
+  const projectDir =
+    input.project_dir?.trim() ||
+    (typeof turn.metadata.project_dir === "string" && turn.metadata.project_dir.trim()) ||
+    process.cwd();
+  const config: TriChatAutopilotConfig = {
+    ...DEFAULT_AUTOPILOT_CONFIG,
+    thread_id: turn.thread_id,
+    thread_title: thread?.title ?? DEFAULT_AUTOPILOT_CONFIG.thread_title,
+    thread_status: thread?.status ?? "active",
+    objective,
+    max_rounds: input.max_rounds ?? DEFAULT_AUTOPILOT_CONFIG.max_rounds,
+    min_success_agents:
+      input.min_success_agents ??
+      Math.max(1, Math.min(turn.min_agents || DEFAULT_AUTOPILOT_CONFIG.min_success_agents, effectiveAgents.length)),
+    bridge_timeout_seconds: input.bridge_timeout_seconds ?? DEFAULT_AUTOPILOT_CONFIG.bridge_timeout_seconds,
+    bridge_dry_run:
+      input.bridge_dry_run ??
+      (String(process.env.TRICHAT_BRIDGE_DRY_RUN ?? "").trim() === "1" || DEFAULT_AUTOPILOT_CONFIG.bridge_dry_run),
+    execute_enabled: false,
+  };
+
+  if (turn.phase === "plan" || turn.phase_status !== "running") {
+    trichatTurnAdvance(storage, {
+      mutation: AUTOPILOT_INLINE_MUTATION,
+      turn_id: turn.turn_id,
+      phase: "propose",
+      phase_status: "running",
+      status: "running",
+      metadata: {
+        source: "dispatch.autorun",
+      },
+    });
+  }
+
+  const intake: AutopilotGoalIntakeResult = {
+    source_task: null,
+    objective,
+    objective_source: "plan.dispatch",
+    thread_id: turn.thread_id,
+    user_message_id: turn.user_message_id,
+    turn_id: turn.turn_id,
+    project_dir: projectDir,
+  };
+  const council = await runAutopilotCouncil(storage, {
+    session_key: sessionKey,
+    config,
+    intake,
+    target_agents: effectiveAgents,
+  });
+  const finalized = trichatTurnOrchestrate(storage, {
+    mutation: AUTOPILOT_INLINE_MUTATION,
+    turn_id: turn.turn_id,
+    action: "verify_finalize",
+    verify_status: "skipped",
+    verify_summary: input.verify_summary?.trim() || "dispatch.autorun completed TriChat council handoff",
+    verify_details: {
+      source: "dispatch.autorun",
+      selected_agent: council.selected_agent,
+      selected_strategy: council.selected_strategy,
+      council_confidence: council.council_confidence,
+      success_agents: council.success_agents,
+    },
+    allow_phase_skip: true,
+  }) as Record<string, unknown>;
+  const updatedTurn = storage.getTriChatTurnById(turn.turn_id);
+  if (!updatedTurn) {
+    throw new Error(`Tri-chat turn disappeared after autorun: ${turn.turn_id}`);
+  }
+  return {
+    ok: updatedTurn.status !== "failed",
+    replayed: false,
+    turn: updatedTurn,
+    council,
+    verify: (finalized.verify ?? {
+      status: updatedTurn.verify_status ?? "skipped",
+      summary: updatedTurn.verify_summary ?? "dispatch.autorun completed TriChat council handoff",
+      failed: updatedTurn.status === "failed",
+    }) as Record<string, unknown>,
+  };
+}
+
 export function trichatWorkboard(storage: Storage, input: z.infer<typeof trichatWorkboardSchema>) {
   const turns = storage.listTriChatTurns({
     thread_id: input.thread_id,
@@ -2268,7 +2388,7 @@ type AutopilotStepName = (typeof AUTOPILOT_STEP_ORDER)[number];
 type AutopilotGoalIntakeResult = {
   source_task: Awaited<ReturnType<typeof taskClaim>>["task"] | null;
   objective: string;
-  objective_source: "task" | "heartbeat";
+  objective_source: "task" | "heartbeat" | "plan.dispatch";
   thread_id: string;
   user_message_id: string;
   turn_id: string;
@@ -3220,11 +3340,13 @@ async function runAutopilotCouncil(
     session_key: string;
     config: TriChatAutopilotConfig;
     intake: AutopilotGoalIntakeResult;
+    target_agents?: string[];
   }
 ): Promise<AutopilotCouncilResult> {
   const proposalsByAgent = new Map<string, AutopilotProposal>();
   const successAgents = new Set<string>();
-  let targetAgents: string[] = [...DEFAULT_CONSENSUS_AGENT_IDS];
+  const configuredTargetAgents = normalizeConsensusAgentIds(input.target_agents ?? DEFAULT_CONSENSUS_AGENT_IDS);
+  let targetAgents: string[] = configuredTargetAgents.length > 0 ? configuredTargetAgents : [...DEFAULT_CONSENSUS_AGENT_IDS];
   for (let round = 1; round <= input.config.max_rounds; round += 1) {
     const roundOutcome = await runAutopilotCouncilRoundParallel(storage, {
       session_key: input.session_key,
@@ -3325,7 +3447,7 @@ async function runAutopilotCouncil(
     if (!novelty.found || !novelty.retry_required || round >= input.config.max_rounds) {
       break;
     }
-    targetAgents = novelty.retry_agents.length > 0 ? novelty.retry_agents : [...DEFAULT_CONSENSUS_AGENT_IDS];
+    targetAgents = novelty.retry_agents.length > 0 ? novelty.retry_agents : configuredTargetAgents;
   }
 
   const orchestrated = await runAutopilotIdempotent(storage, {

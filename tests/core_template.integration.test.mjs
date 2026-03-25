@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -31,6 +32,14 @@ test("server starts without domain packs and exposes core + TriChat tools", asyn
     assert.equal(names.has("plan.step_update"), true);
     assert.equal(names.has("plan.step_ready"), true);
     assert.equal(names.has("plan.dispatch"), true);
+    assert.equal(names.has("plan.approve"), true);
+    assert.equal(names.has("plan.resume"), true);
+    assert.equal(names.has("dispatch.autorun"), true);
+    assert.equal(names.has("agent.session_open"), true);
+    assert.equal(names.has("agent.session_get"), true);
+    assert.equal(names.has("agent.session_list"), true);
+    assert.equal(names.has("agent.session_heartbeat"), true);
+    assert.equal(names.has("agent.session_close"), true);
     assert.equal(names.has("task.create"), true);
     assert.equal(names.has("transcript.log"), true);
 
@@ -269,6 +278,331 @@ test("server starts without domain packs and exposes core + TriChat tools", asyn
   }
 });
 
+test("agent session lifecycle persists across open, heartbeat, list, and close", async () => {
+  const testId = `${Date.now()}-agent-session`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-agent-session-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const openResult = await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open", () => mutationCounter++),
+      session_id: "session-integration-1",
+      agent_id: "codex",
+      display_name: "Codex integration session",
+      client_kind: "cursor",
+      transport_kind: "stdio",
+      workspace_root: REPO_ROOT,
+      owner_id: "integration-owner",
+      lease_seconds: 60,
+      status: "active",
+      capabilities: {
+        reasoning: true,
+      },
+      tags: ["integration", "session"],
+      metadata: {
+        scenario: "lifecycle",
+      },
+    });
+
+    assert.equal(openResult.created, true);
+    assert.equal(openResult.session.session_id, "session-integration-1");
+    assert.equal(openResult.session.agent_id, "codex");
+    assert.equal(openResult.session.status, "active");
+    assert.equal(openResult.session.owner_id, "integration-owner");
+    assert.equal(openResult.session.metadata.scenario, "lifecycle");
+
+    const fetched = await callTool(client, "agent.session_get", {
+      session_id: "session-integration-1",
+    });
+    assert.equal(fetched.found, true);
+    assert.equal(fetched.session.session_id, "session-integration-1");
+    assert.equal(fetched.session.agent_id, "codex");
+    assert.equal(fetched.session.status, "active");
+
+    const listedActive = await callTool(client, "agent.session_list", {
+      agent_id: "codex",
+      active_only: true,
+      limit: 10,
+    });
+    assert.ok(listedActive.count >= 1);
+    assert.ok(listedActive.sessions.some((session) => session.session_id === "session-integration-1"));
+
+    const heartbeat = await callTool(client, "agent.session_heartbeat", {
+      mutation: nextMutation(testId, "agent.session_heartbeat", () => mutationCounter++),
+      session_id: "session-integration-1",
+      lease_seconds: 120,
+      status: "busy",
+      owner_id: "integration-owner",
+      capabilities: {
+        reasoning: true,
+        coordination: "turn-based",
+      },
+      metadata: {
+        heartbeat: 1,
+      },
+    });
+    assert.equal(heartbeat.renewed, true);
+    assert.equal(heartbeat.session.session_id, "session-integration-1");
+    assert.equal(heartbeat.session.status, "busy");
+    assert.equal(heartbeat.session.capabilities.coordination, "turn-based");
+    assert.equal(heartbeat.session.metadata.scenario, "lifecycle");
+    assert.equal(heartbeat.session.metadata.heartbeat, 1);
+    assert.equal(typeof heartbeat.session.heartbeat_at, "string");
+
+    const closed = await callTool(client, "agent.session_close", {
+      mutation: nextMutation(testId, "agent.session_close", () => mutationCounter++),
+      session_id: "session-integration-1",
+      metadata: {
+        closed_reason: "integration-complete",
+      },
+    });
+    assert.equal(closed.closed, true);
+    assert.equal(closed.session.session_id, "session-integration-1");
+    assert.equal(closed.session.status, "closed");
+    assert.equal(closed.session.metadata.closed_reason, "integration-complete");
+    assert.equal(typeof closed.session.ended_at, "string");
+
+    const fetchedClosed = await callTool(client, "agent.session_get", {
+      session_id: "session-integration-1",
+    });
+    assert.equal(fetchedClosed.found, true);
+    assert.equal(fetchedClosed.session.status, "closed");
+
+    const activeAfterClose = await callTool(client, "agent.session_list", {
+      agent_id: "codex",
+      active_only: true,
+      limit: 10,
+    });
+    assert.equal(activeAfterClose.sessions.some((session) => session.session_id === "session-integration-1"), false);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("plan.approve and plan.resume unblock a human gate before dispatching downstream work", async () => {
+  const testId = `${Date.now()}-approve-resume`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-approve-resume-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Approval integration goal",
+      objective: "Exercise the approval and resume tools",
+      status: "active",
+      autonomy_mode: "recommend",
+      acceptance_criteria: ["Human-gated work can resume into downstream execution"],
+    });
+
+    const createdPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      title: "Approval-controlled execution plan",
+      summary: "Gate one step behind a human approval before handing off to a worker",
+      selected: true,
+      steps: [
+        {
+          step_id: "human-gate",
+          seq: 1,
+          title: "Approve the plan gate",
+          step_kind: "handoff",
+          executor_kind: "human",
+          metadata: {
+            human_approval_required: true,
+          },
+          input: {
+            approval_summary: "Approve this plan before the worker stage is resumed.",
+          },
+        },
+        {
+          step_id: "downstream-worker",
+          seq: 2,
+          title: "Run the downstream worker",
+          step_kind: "mutation",
+          executor_kind: "worker",
+          depends_on: ["human-gate"],
+          input: {
+            objective: "Downstream worker after approval",
+            project_dir: ".",
+            priority: 4,
+            tags: ["approval", "resume"],
+            payload: {
+              lane: "worker",
+            },
+          },
+        },
+      ],
+    });
+
+    const readinessBefore = await callTool(client, "plan.step_ready", {
+      plan_id: createdPlan.plan.plan_id,
+    });
+    const humanGateBefore = readinessBefore.readiness.find((step) => step.step_id === "human-gate");
+    const workerBefore = readinessBefore.readiness.find((step) => step.step_id === "downstream-worker");
+    assert.equal(humanGateBefore.ready, false);
+    assert.equal(humanGateBefore.gate_reason, "human_approval_required");
+    assert.deepEqual(workerBefore.blocked_by.map((step) => step.step_id), ["human-gate"]);
+
+    await callTool(client, "plan.approve", {
+      mutation: nextMutation(testId, "plan.approve", () => mutationCounter++),
+      plan_id: createdPlan.plan.plan_id,
+      step_id: "human-gate",
+      summary: "Human approval granted for the gate step",
+    });
+
+    await callTool(client, "plan.resume", {
+      mutation: nextMutation(testId, "plan.resume", () => mutationCounter++),
+      plan_id: createdPlan.plan.plan_id,
+    });
+
+    const planState = await waitFor(async () => {
+      const fetchedPlan = await callTool(client, "plan.get", {
+        plan_id: createdPlan.plan.plan_id,
+      });
+      const stepById = new Map(fetchedPlan.steps.map((step) => [step.step_id, step]));
+      const humanGate = stepById.get("human-gate");
+      const downstreamWorker = stepById.get("downstream-worker");
+      if (humanGate.status !== "completed") {
+        return null;
+      }
+      if (downstreamWorker.status !== "running" || !downstreamWorker.task_id) {
+        return null;
+      }
+      const taskList = await callTool(client, "task.list", {
+        status: "pending",
+        limit: 20,
+      });
+      const task = taskList.tasks.find((entry) => entry.task_id === downstreamWorker.task_id);
+      if (!task) {
+        return null;
+      }
+      return { fetchedPlan, humanGate, downstreamWorker, task };
+    });
+
+    assert.equal(planState.humanGate.status, "completed");
+    assert.equal(planState.downstreamWorker.status, "running");
+    assert.equal(planState.task.task_id, planState.downstreamWorker.task_id);
+    assert.equal(planState.task.objective, "Downstream worker after approval");
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("dispatch.autorun finalizes TriChat steps before dispatching dependent worker tasks", async () => {
+  const testId = `${Date.now()}-autorun`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-autorun-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {
+    TRICHAT_BRIDGE_DRY_RUN: "1",
+  });
+  try {
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Autorun integration goal",
+      objective: "Exercise dispatch.autorun for TriChat plus worker lanes",
+      status: "active",
+      autonomy_mode: "recommend",
+      acceptance_criteria: ["TriChat steps can finalize before downstream workers are dispatched"],
+    });
+
+    const createdPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      title: "Autorun execution plan",
+      summary: "Run a TriChat decision step and then a dependent worker step",
+      selected: true,
+      steps: [
+        {
+          step_id: "tri-chat-decision",
+          seq: 1,
+          title: "Run a TriChat decision",
+          step_kind: "decision",
+          executor_kind: "trichat",
+          input: {
+            prompt: "Evaluate the next runtime slice using a dry-run bridge.",
+            expected_agents: ["codex", "cursor"],
+            min_agents: 2,
+          },
+        },
+        {
+          step_id: "worker-after-trichat",
+          seq: 2,
+          title: "Dispatch the dependent worker",
+          step_kind: "mutation",
+          executor_kind: "worker",
+          depends_on: ["tri-chat-decision"],
+          input: {
+            objective: "Worker dispatch after TriChat finalization",
+            project_dir: ".",
+            priority: 5,
+            tags: ["autorun", "trichat"],
+            payload: {
+              lane: "worker",
+            },
+          },
+        },
+      ],
+    });
+
+    await callTool(client, "dispatch.autorun", {
+      mutation: nextMutation(testId, "dispatch.autorun", () => mutationCounter++),
+      plan_id: createdPlan.plan.plan_id,
+    });
+
+    const autorunState = await waitFor(async () => {
+      const fetchedPlan = await callTool(client, "plan.get", {
+        plan_id: createdPlan.plan.plan_id,
+      });
+      const stepById = new Map(fetchedPlan.steps.map((step) => [step.step_id, step]));
+      const trichatStep = stepById.get("tri-chat-decision");
+      const workerStep = stepById.get("worker-after-trichat");
+      if (trichatStep.status !== "completed") {
+        return null;
+      }
+      if (workerStep.status !== "running" || !workerStep.task_id) {
+        return null;
+      }
+
+      const trichatTurn = await callTool(client, "trichat.turn_get", {
+        turn_id: trichatStep.executor_ref,
+      });
+      if (!trichatTurn.found || trichatTurn.turn.status !== "completed" || trichatTurn.turn.phase_status !== "completed") {
+        return null;
+      }
+
+      const taskList = await callTool(client, "task.list", {
+        status: "pending",
+        limit: 20,
+      });
+      const workerTask = taskList.tasks.find((task) => task.task_id === workerStep.task_id);
+      if (!workerTask) {
+        return null;
+      }
+
+      return { fetchedPlan, trichatStep, workerStep, trichatTurn, workerTask };
+    });
+
+    assert.equal(autorunState.trichatStep.status, "completed");
+    assert.equal(typeof autorunState.trichatStep.executor_ref, "string");
+    assert.equal(autorunState.workerStep.status, "running");
+    assert.equal(autorunState.workerTask.task_id, autorunState.workerStep.task_id);
+    assert.equal(autorunState.workerTask.objective, "Worker dispatch after TriChat finalization");
+    assert.equal(autorunState.trichatTurn.turn.status, "completed");
+    assert.equal(autorunState.trichatTurn.turn.phase_status, "completed");
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("plan.dispatch routes ready steps into tool, worker, TriChat, and human execution lanes", async () => {
   const testId = `${Date.now()}-dispatch`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-dispatch-test-"));
@@ -494,4 +828,24 @@ function extractText(response) {
     .filter((entry) => entry.type === "text")
     .map((entry) => entry.text)
     .join("\n");
+}
+
+async function waitFor(check, { timeoutMs = 15000, intervalMs = 200 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const value = await check();
+      if (value) {
+        return value;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await delay(intervalMs);
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  throw new Error(`Timed out after ${timeoutMs}ms waiting for condition`);
 }
