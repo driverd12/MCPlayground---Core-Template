@@ -27,6 +27,9 @@ test("server starts without domain packs and exposes core + TriChat tools", asyn
     assert.equal(names.has("plan.get"), true);
     assert.equal(names.has("plan.list"), true);
     assert.equal(names.has("plan.update"), true);
+    assert.equal(names.has("plan.select"), true);
+    assert.equal(names.has("plan.step_update"), true);
+    assert.equal(names.has("plan.step_ready"), true);
     assert.equal(names.has("task.create"), true);
     assert.equal(names.has("transcript.log"), true);
 
@@ -118,6 +121,36 @@ test("server starts without domain packs and exposes core + TriChat tools", asyn
     assert.equal(planFetch.step_count, 2);
     assert.deepEqual(planFetch.steps[1].depends_on, ["inspect-goal"]);
 
+    const initialReady = await callTool(client, "plan.step_ready", {
+      plan_id: createdPlan.plan.plan_id,
+    });
+    assert.equal(initialReady.found, true);
+    assert.equal(initialReady.ready_count, 1);
+    assert.equal(initialReady.readiness[0].step_id, "inspect-goal");
+    assert.equal(initialReady.readiness[0].ready, true);
+    assert.equal(initialReady.readiness[1].step_id, "wire-runtime");
+    assert.equal(initialReady.readiness[1].ready, false);
+    assert.deepEqual(initialReady.readiness[1].blocked_by.map((step) => step.step_id), ["inspect-goal"]);
+
+    const completedStep = await callTool(client, "plan.step_update", {
+      mutation: nextMutation(testId, "plan.step_update", () => mutationCounter++),
+      plan_id: createdPlan.plan.plan_id,
+      step_id: "inspect-goal",
+      status: "completed",
+      run_id: "plan-run-1",
+      summary: "Goal inspection complete",
+    });
+    assert.equal(completedStep.step.status, "completed");
+    assert.equal(completedStep.step.run_id, "plan-run-1");
+    assert.equal(completedStep.plan.status, "in_progress");
+
+    const readyAfterStepComplete = await callTool(client, "plan.step_ready", {
+      plan_id: createdPlan.plan.plan_id,
+    });
+    assert.equal(readyAfterStepComplete.ready_count, 1);
+    assert.equal(readyAfterStepComplete.readiness[1].step_id, "wire-runtime");
+    assert.equal(readyAfterStepComplete.readiness[1].ready, true);
+
     const planList = await callTool(client, "plan.list", {
       goal_id: createdGoal.goal.goal_id,
       selected_only: true,
@@ -144,6 +177,39 @@ test("server starts without domain packs and exposes core + TriChat tools", asyn
     assert.equal(updatedPlan.plan.status, "in_progress");
     assert.equal(updatedPlan.plan.confidence, 0.9);
     assert.equal(updatedPlan.plan.metadata.execution_mode, "bounded");
+
+    const alternatePlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create.alt", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      title: "Alternate plan candidate",
+      summary: "Use an explicit selected-plan handoff path",
+      confidence: 0.61,
+      steps: [
+        {
+          step_id: "handoff",
+          seq: 1,
+          title: "Handoff execution to the selected route",
+          step_kind: "handoff",
+          executor_kind: "trichat",
+        },
+      ],
+    });
+    assert.equal(alternatePlan.created, true);
+    assert.equal(alternatePlan.plan.selected, false);
+
+    const selectedPlan = await callTool(client, "plan.select", {
+      mutation: nextMutation(testId, "plan.select", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      plan_id: alternatePlan.plan.plan_id,
+      summary: "Switch to the alternate plan for execution",
+    });
+    assert.equal(selectedPlan.plan.plan_id, alternatePlan.plan.plan_id);
+    assert.equal(selectedPlan.plan.selected, true);
+
+    const goalWithSelectedAlternatePlan = await callTool(client, "goal.get", {
+      goal_id: createdGoal.goal.goal_id,
+    });
+    assert.equal(goalWithSelectedAlternatePlan.goal.active_plan_id, alternatePlan.plan.plan_id);
 
     const listedGoals = await callTool(client, "goal.list", {
       status: "active",

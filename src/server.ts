@@ -30,7 +30,22 @@ import {
 } from "./tools/transcript.js";
 import { adrCreateSchema, createAdr } from "./tools/adr.js";
 import { goalCreate, goalCreateSchema, goalGet, goalGetSchema, goalList, goalListSchema } from "./tools/goal.js";
-import { planCreate, planCreateSchema, planGet, planGetSchema, planList, planListSchema, planUpdate, planUpdateSchema } from "./tools/plan.js";
+import {
+  planCreate,
+  planCreateSchema,
+  planGet,
+  planGetSchema,
+  planList,
+  planListSchema,
+  planSelect,
+  planSelectSchema,
+  planStepReady,
+  planStepReadySchema,
+  planStepUpdate,
+  planStepUpdateSchema,
+  planUpdate,
+  planUpdateSchema,
+} from "./tools/plan.js";
 import { whoKnows, whoKnowsSchema } from "./tools/who_knows.js";
 import { policyEvaluateSchema, evaluatePolicy } from "./tools/policy.js";
 import { runBegin, runBeginSchema, runEnd, runEndSchema, runStep, runStepSchema, runTimeline, runTimelineSchema } from "./tools/run.js";
@@ -245,6 +260,18 @@ registerTool("plan.list", "List durable plans by goal, status, or selection stat
 
 registerTool("plan.update", "Update durable plan metadata, status, and selection state.", planUpdateSchema, (input) =>
   planUpdate(storage, input)
+);
+
+registerTool("plan.select", "Select a durable plan for a goal and update the goal's active plan.", planSelectSchema, (input) =>
+  planSelect(storage, input)
+);
+
+registerTool("plan.step_update", "Update durable plan step progress, bindings, and execution metadata.", planStepUpdateSchema, (input) =>
+  planStepUpdate(storage, input)
+);
+
+registerTool("plan.step_ready", "Evaluate which durable plan steps are ready based on current dependencies.", planStepReadySchema, (input) =>
+  planStepReady(storage, input)
 );
 
 registerTool(
