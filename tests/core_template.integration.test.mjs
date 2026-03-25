@@ -792,9 +792,13 @@ test("agent.claim_next and agent.report_result close the worker loop back into p
     assert.equal(reported.session.status, "idle");
     assert.equal(reported.plan_step_update.step.status, "completed");
     assert.equal(reported.plan_step_update.step.run_id, "agent-worker-run-1");
-    assert.deepEqual(reported.plan_step_update.step.metadata.produced_artifact_ids, [
-      producedArtifact.artifact.artifact_id,
-    ]);
+    assert.equal(typeof reported.auto_report_artifact_id, "string");
+    assert.ok(reported.produced_artifact_ids.includes(producedArtifact.artifact.artifact_id));
+    assert.ok(reported.produced_artifact_ids.includes(reported.auto_report_artifact_id));
+    assert.deepEqual(
+      new Set(reported.plan_step_update.step.metadata.produced_artifact_ids),
+      new Set([producedArtifact.artifact.artifact_id, reported.auto_report_artifact_id])
+    );
 
     const fetchedPlan = await callTool(client, "plan.get", {
       plan_id: createdPlan.plan.plan_id,
@@ -803,7 +807,10 @@ test("agent.claim_next and agent.report_result close the worker loop back into p
     assert.equal(workerStep.status, "completed");
     assert.equal(workerStep.task_id, claimedTask.task.task_id);
     assert.equal(workerStep.run_id, "agent-worker-run-1");
-    assert.deepEqual(workerStep.metadata.produced_artifact_ids, [producedArtifact.artifact.artifact_id]);
+    assert.deepEqual(
+      new Set(workerStep.metadata.produced_artifact_ids),
+      new Set([producedArtifact.artifact.artifact_id, reported.auto_report_artifact_id])
+    );
 
     const stepBundle = await callTool(client, "artifact.bundle", {
       entity: {
@@ -816,6 +823,21 @@ test("agent.claim_next and agent.report_result close the worker loop back into p
     assert.ok(
       stepBundle.artifacts.some((artifact) => artifact.artifact_id === producedArtifact.artifact.artifact_id)
     );
+    assert.ok(
+      stepBundle.artifacts.some(
+        (artifact) =>
+          artifact.artifact_id === reported.auto_report_artifact_id && artifact.artifact_type === "agent.task_report"
+      )
+    );
+
+    const autoReportArtifact = await callTool(client, "artifact.get", {
+      artifact_id: reported.auto_report_artifact_id,
+    });
+    assert.equal(autoReportArtifact.found, true);
+    assert.equal(autoReportArtifact.artifact.artifact_type, "agent.task_report");
+    assert.equal(autoReportArtifact.artifact.task_id, claimedTask.task.task_id);
+    assert.equal(autoReportArtifact.artifact.run_id, "agent-worker-run-1");
+    assert.equal(autoReportArtifact.artifact.content_json.outcome, "completed");
 
     const sessionAfterReport = await callTool(client, "agent.session_get", {
       session_id: "agent-worker-loop-session",

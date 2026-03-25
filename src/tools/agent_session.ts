@@ -246,6 +246,72 @@ function attachArtifactsToTaskContext(
   return links;
 }
 
+function recordAgentReportArtifact(
+  storage: Storage,
+  params: {
+    session: AgentSessionRecord;
+    task: TaskRecord;
+    outcome: "completed" | "failed";
+    result?: Record<string, unknown>;
+    summary?: string;
+    error?: string;
+    run_id?: string;
+    observed_metric?: number;
+    observed_metrics?: Record<string, unknown>;
+    experiment_verdict?: "accepted" | "rejected" | "inconclusive" | "crash";
+    metadata?: Record<string, unknown>;
+    source_client?: string;
+    source_model?: string;
+    source_agent?: string;
+    planContext?: { plan: PlanRecord; step: PlanStepRecord } | null;
+  }
+) {
+  const recorded = storage.recordArtifact({
+    artifact_type: "agent.task_report",
+    goal_id: params.planContext?.plan.goal_id,
+    plan_id: params.planContext?.plan.plan_id,
+    step_id: params.planContext?.step.step_id,
+    task_id: params.task.task_id,
+    run_id: params.run_id,
+    producer_kind: "worker",
+    producer_id: params.session.session_id,
+    trust_tier: "derived",
+    content_json: {
+      outcome: params.outcome,
+      summary: params.summary?.trim() || null,
+      error: params.error?.trim() || null,
+      result: params.result ?? {},
+      observed_metric: params.observed_metric ?? null,
+      observed_metrics: params.observed_metrics ?? {},
+      experiment_verdict: params.experiment_verdict ?? null,
+      session: {
+        session_id: params.session.session_id,
+        agent_id: params.session.agent_id,
+        client_kind: params.session.client_kind,
+      },
+      task: {
+        task_id: params.task.task_id,
+        objective: params.task.objective,
+        status: params.task.status,
+        project_dir: params.task.project_dir,
+      },
+    },
+    metadata: {
+      auto_recorded: true,
+      artifact_role: "task_report",
+      session_id: params.session.session_id,
+      agent_id: params.session.agent_id,
+      client_kind: params.session.client_kind,
+      task_status: params.task.status,
+      ...(params.metadata ?? {}),
+    },
+    source_client: params.source_client,
+    source_model: params.source_model,
+    source_agent: params.source_agent ?? params.session.agent_id,
+  });
+  return recorded.artifact;
+}
+
 function normalizeStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
@@ -1017,7 +1083,7 @@ export async function agentReportResult(storage: Storage, input: z.infer<typeof 
         };
       }
 
-      const producedArtifactIds = dedupeStrings(input.produced_artifact_ids);
+      const reportedArtifactIds = dedupeStrings(input.produced_artifact_ids);
       const outcomeResult =
         input.outcome === "completed"
           ? storage.completeTask({
@@ -1053,6 +1119,24 @@ export async function agentReportResult(storage: Storage, input: z.infer<typeof 
       }
 
       const planContext = resolveTaskPlanContext(storage, task);
+      const autoReportArtifact = recordAgentReportArtifact(storage, {
+        session,
+        task,
+        outcome: input.outcome,
+        result: input.result,
+        summary: input.summary,
+        error: input.error,
+        run_id: input.run_id,
+        observed_metric: input.observed_metric,
+        observed_metrics: input.observed_metrics,
+        experiment_verdict: input.experiment_verdict,
+        metadata: input.metadata,
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+        planContext,
+      });
+      const producedArtifactIds = dedupeStrings([...reportedArtifactIds, autoReportArtifact.artifact_id]);
       const artifactLinks = attachArtifactsToTaskContext(
         storage,
         task,
@@ -1073,11 +1157,11 @@ export async function agentReportResult(storage: Storage, input: z.infer<typeof 
             task_id: task.task_id,
             run_id: input.run_id,
             produced_artifact_ids: producedArtifactIds,
-            metadata: {
-              human_approval_required: false,
-              dispatch_gate_type: null,
-              last_agent_report: {
-                session_id: session.session_id,
+              metadata: {
+                human_approval_required: false,
+                dispatch_gate_type: null,
+                last_agent_report: {
+                  session_id: session.session_id,
                 agent_id: session.agent_id,
                 reported_at: new Date().toISOString(),
                 outcome: input.outcome,
@@ -1173,14 +1257,15 @@ export async function agentReportResult(storage: Storage, input: z.infer<typeof 
           session_id: session.session_id,
           agent_id: session.agent_id,
           task_id: task.task_id,
-          outcome: input.outcome,
-          run_id: input.run_id ?? null,
-          produced_artifact_ids: producedArtifactIds,
-          artifact_links_created: artifactLinks.length,
-          experiment_run_id: experimentRun?.experiment_run_id ?? null,
-        },
-        source_client: input.source_client,
-        source_model: input.source_model,
+                outcome: input.outcome,
+                run_id: input.run_id ?? null,
+                produced_artifact_ids: producedArtifactIds,
+                artifact_links_created: artifactLinks.length,
+                auto_report_artifact_id: autoReportArtifact.artifact_id,
+                experiment_run_id: experimentRun?.experiment_run_id ?? null,
+              },
+              source_client: input.source_client,
+              source_model: input.source_model,
         source_agent: session.agent_id,
       });
 
@@ -1191,6 +1276,7 @@ export async function agentReportResult(storage: Storage, input: z.infer<typeof 
         session: renewedSession.session ?? session,
         plan_step_update: planStepUpdate,
         produced_artifact_ids: producedArtifactIds,
+        auto_report_artifact_id: autoReportArtifact.artifact_id,
         artifact_links_created: artifactLinks.length,
         artifact_links: artifactLinks,
         experiment: experimentUpdate,
