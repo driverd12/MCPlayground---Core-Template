@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "default_agent_ids": ["codex", "cursor", "local-imprint"],
+  "agents": [
+    {
+      "agent_id": "codex",
+      "display_name": "Codex",
+      "provider": "openai",
+      "auth_mode": "cli-login",
+      "role_lane": "planner",
+      "accent_color": "#ff4fd8",
+      "bridge_env_var": "TRICHAT_CODEX_CMD",
+      "bridge_script_names": ["codex_bridge.py"],
+      "supports_local_model_fallback": true,
+      "description": "High-signal engineering planner and merge strategist.",
+      "system_prompt": "You are Codex in tri-chat mode. Respond with concrete, high-signal engineering guidance. Keep replies concise: max 6 lines unless asked for depth. Do not include next actions, thread history, or other scaffolding."
+    },
+    {
+      "agent_id": "cursor",
+      "display_name": "Cursor",
+      "provider": "cursor",
+      "auth_mode": "cli-login",
+      "role_lane": "implementer",
+      "accent_color": "#54c6eb",
+      "bridge_env_var": "TRICHAT_CURSOR_CMD",
+      "bridge_script_names": ["cursor_bridge.py"],
+      "supports_local_model_fallback": true,
+      "description": "Practical implementation guide focused on developer UX and execution details.",
+      "system_prompt": "You are Cursor in tri-chat mode. Respond with practical implementation guidance and concise reasoning. Keep replies to max 6 lines unless asked for details. Avoid meta-scaffolding sections."
+    },
+    {
+      "agent_id": "gemini",
+      "display_name": "Gemini",
+      "provider": "google",
+      "auth_mode": "cli-or-env",
+      "role_lane": "analyst",
+      "accent_color": "#32c26b",
+      "bridge_env_var": "TRICHAT_GEMINI_CMD",
+      "bridge_script_names": ["gemini_bridge.py"],
+      "supports_local_model_fallback": true,
+      "description": "Cross-check analyst tuned for synthesis, summarization, and alternative implementation framing.",
+      "system_prompt": "You are Gemini in tri-chat mode. Respond with concise analysis, synthesis, and practical alternatives. Keep replies to max 6 lines unless asked for detail. Avoid recap sections and stay implementation-relevant."
+    },
+    {
+      "agent_id": "claude",
+      "display_name": "Claude",
+      "provider": "anthropic",
+      "auth_mode": "cli-or-env",
+      "role_lane": "critic",
+      "accent_color": "#f4a261",
+      "bridge_env_var": "TRICHAT_CLAUDE_CMD",
+      "bridge_script_names": ["claude_bridge.py"],
+      "supports_local_model_fallback": true,
+      "description": "Safety and critique lane for risk review, tradeoff analysis, and counterarguments.",
+      "system_prompt": "You are Claude in tri-chat mode. Respond with careful critique, risk surfacing, and concise reasoning. Keep replies to max 6 lines unless asked for detail. Avoid recap sections and focus on tradeoffs that matter."
+    },
+    {
+      "agent_id": "local-imprint",
+      "display_name": "Local Imprint",
+      "provider": "local",
+      "auth_mode": "local-model",
+      "role_lane": "reliability-critic",
+      "accent_color": "#ffd166",
+      "bridge_env_var": "TRICHAT_IMPRINT_CMD",
+      "bridge_script_names": ["local-imprint_bridge.py", "local_imprint_bridge.py"],
+      "supports_local_model_fallback": true,
+      "description": "Deterministic local-first reliability mentor backed by Ollama.",
+      "system_prompt": "You are the local Imprint agent for Anamnesis. Favor deterministic local-first execution and idempotent operations. Reply in max 6 lines by default and do not dump memory or transcript blocks unless explicitly requested."
+    }
+  ]
+}

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""TriChat adapter bridge for Cursor Agent CLI."""
+"""TriChat adapter bridge for Claude CLI or compatible wrappers."""
 
 from __future__ import annotations
 
-import json
 import os
+import shlex
 import sys
 
 from bridge_common import (
@@ -18,28 +18,27 @@ from bridge_common import (
     normalize_plain_response,
     normalize_proposal,
     read_payload,
-    resolve_cli_executable,
     run_cli_command,
 )
 
-LOG_PREFIX = "cursor_bridge"
-BRIDGE_NAME = "cursor-bridge"
+LOG_PREFIX = "claude_bridge"
+BRIDGE_NAME = "claude-bridge"
 
 
 def main() -> int:
     payload = read_payload(LOG_PREFIX)
-    context = build_context(payload, "cursor")
+    context = build_context(payload, "claude")
 
     if context.op == "ping":
-        emit_pong(context, bridge=BRIDGE_NAME, meta={"provider": "cursor-cli"})
+        emit_pong(context, bridge=BRIDGE_NAME, meta={"provider": "claude-cli"})
         return 0
 
     if is_dry_run():
-        emit_response(context, build_dry_run_content(context), bridge=BRIDGE_NAME, meta={"provider": "cursor-cli", "mode": "dry-run"})
+        emit_response(context, build_dry_run_content(context), bridge=BRIDGE_NAME, meta={"provider": "claude-cli", "mode": "dry-run"})
         return 0
 
     try:
-        result = run_cursor(context)
+        result = run_claude(context)
     except RuntimeError as error:
         print(f"[{LOG_PREFIX}] {compact(str(error), limit=600)}", file=sys.stderr)
         return 2
@@ -51,43 +50,30 @@ def main() -> int:
             result.output,
             agent_id=context.agent_id,
             objective=context.objective,
-            fallback_confidence=0.72,
+            fallback_confidence=0.71,
             fallback_mentorship=f"{context.agent_id} mentorship: keep proposals compact, safe, and replay-friendly.",
         ).to_json()
     emit_response(context, content, bridge=BRIDGE_NAME, meta=result.meta)
     return 0
 
 
-def run_cursor(context: BridgeContext):
-    executable = resolve_cli_executable(
-        str(os.environ.get("TRICHAT_CURSOR_EXECUTABLE") or ""),
-        "cursor",
-        fallback_paths=(os.path.expanduser("~/.local/bin/cursor"),),
-    )
-    cmd = [
-        executable,
-        "agent",
-        "--print",
-        "--output-format",
-        "json",
-        "--workspace",
-        str(context.workspace),
-        "--trust",
-        "--mode",
-        "ask",
-        build_cursor_prompt(context),
-    ]
+def run_claude(context: BridgeContext):
+    executable = str(os.environ.get("TRICHAT_CLAUDE_EXECUTABLE") or "claude").strip() or "claude"
+    args = shlex.split(str(os.environ.get("TRICHAT_CLAUDE_ARGS") or "-p"))
+    workspace_flag = str(os.environ.get("TRICHAT_CLAUDE_WORKSPACE_FLAG") or "").strip()
+    cmd = [executable, *args]
+    if workspace_flag:
+        cmd.extend([workspace_flag, str(context.workspace)])
+    cmd.append(build_prompt(context))
     return run_cli_command(
         command=cmd,
         workspace=context.workspace,
         log_prefix=LOG_PREFIX,
-        provider="cursor-cli",
-        stdout_extractor=extract_cursor_result,
-        strict_extractor=True,
+        provider="claude-cli",
     )
 
 
-def build_cursor_prompt(context: BridgeContext) -> str:
+def build_prompt(context: BridgeContext) -> str:
     if context.response_mode == "plain":
         return (
             f"You are {context.agent_id} in a multi-agent council.\n"
@@ -106,26 +92,6 @@ def build_cursor_prompt(context: BridgeContext) -> str:
         "- keep strategy concise and concrete.\n"
         f"Objective: {context.objective}\n"
     )
-
-
-def extract_cursor_result(stdout: str) -> str:
-    result_text = ""
-    for line in stdout.splitlines():
-        candidate = line.strip()
-        if not candidate.startswith("{"):
-            continue
-        try:
-            entry = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("type") != "result":
-            continue
-        value = entry.get("result")
-        if isinstance(value, str) and value.strip():
-            result_text = value.strip()
-    return result_text
 
 
 if __name__ == "__main__":

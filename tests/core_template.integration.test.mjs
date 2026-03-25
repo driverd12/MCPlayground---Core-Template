@@ -28,8 +28,14 @@ test("server starts without domain packs and exposes core + TriChat tools", asyn
 
     assert.equal(names.has("trichat.thread_open"), true);
     assert.equal(names.has("trichat.tmux_controller"), true);
+    assert.equal(names.has("trichat.roster"), true);
     assert.equal(names.has("simulate.workflow"), true);
     assert.equal(names.has("cfd.case.create"), false);
+
+    const roster = await callTool(client, "trichat.roster", {});
+    assert.deepEqual(roster.active_agent_ids, ["codex", "cursor", "local-imprint"]);
+    assert.equal(Array.isArray(roster.agents), true);
+    assert.ok(roster.agents.some((agent) => agent.agent_id === "codex" && agent.active === true));
 
     await callTool(client, "memory.append", {
       mutation: nextMutation(testId, "memory.append", () => mutationCounter++),

@@ -20,13 +20,22 @@ import { incidentOpen } from "./incident.js";
 import { createAdr } from "./adr.js";
 import { appendTranscript, summarizeTranscript } from "./transcript.js";
 import { taskClaim, taskComplete, taskCreate, taskFail } from "./task.js";
+import { ensureWorkspaceFingerprint } from "./workspace_fingerprint.js";
+import {
+  getTriChatActiveAgentIds,
+  getTriChatBridgeCandidates,
+  getTriChatBridgeEnvVar,
+  getTriChatRoleLaneMap,
+  getTriChatRosterSummary,
+  normalizeTriChatAgentId,
+} from "../trichat_roster.js";
 
 const threadStatusSchema = z.enum(["active", "archived"]);
 const adapterChannelSchema = z.enum(["command", "model"]);
 const turnStatusSchema = z.enum(["running", "completed", "failed", "cancelled"]);
 const turnPhaseSchema = z.enum(["plan", "propose", "critique", "merge", "execute", "verify", "summarize"]);
 const turnPhaseStatusSchema = z.enum(["running", "completed", "failed", "skipped"]);
-const DEFAULT_CONSENSUS_AGENT_IDS = ["codex", "cursor", "local-imprint"] as const;
+const DEFAULT_CONSENSUS_AGENT_IDS = Object.freeze(getTriChatActiveAgentIds()) as readonly string[];
 const DEFAULT_TURN_AGENT_IDS = [...DEFAULT_CONSENSUS_AGENT_IDS];
 const BRIDGE_PROTOCOL_VERSION = "trichat-bridge-v1";
 const BRIDGE_RESPONSE_KIND = "trichat.adapter.response";
@@ -86,6 +95,11 @@ export const trichatRetentionSchema = z.object({
 
 export const trichatSummarySchema = z.object({
   busiest_limit: z.number().int().min(1).max(200).optional(),
+});
+
+export const trichatRosterSchema = z.object({
+  agent_ids: z.array(z.string().min(1)).min(1).max(12).optional(),
+  active_only: z.boolean().optional(),
 });
 
 export const trichatConsensusSchema = z.object({
@@ -786,11 +800,7 @@ const autopilotRuntime: {
 const AUTOPILOT_WORKER_ID = "trichat-autopilot";
 const AUTOPILOT_TICK_LOCK_KEY = "trichat.autopilot.tick";
 const AUTOPILOT_OWNER_NONCE = `${process.pid}-${crypto.randomUUID().slice(0, 12)}`;
-const AUTOPILOT_AGENT_ROLE_LANES: Record<string, string> = {
-  codex: "planner",
-  cursor: "implementer",
-  "local-imprint": "reliability-critic",
-};
+const AUTOPILOT_AGENT_ROLE_LANES: Record<string, string> = getTriChatRoleLaneMap(DEFAULT_CONSENSUS_AGENT_IDS);
 const AUTOPILOT_STEP_ORDER = [
   "goal_intake",
   "council",
@@ -1050,6 +1060,19 @@ export function trichatSummary(storage: Storage, input: z.infer<typeof trichatSu
   return {
     generated_at: new Date().toISOString(),
     ...summary,
+  };
+}
+
+export function trichatRoster(_storage: Storage, input: z.infer<typeof trichatRosterSchema>) {
+  const summary = getTriChatRosterSummary(input.agent_ids);
+  const agents = input.active_only ? summary.agents.filter((agent) => agent.active) : summary.agents;
+  return {
+    generated_at: new Date().toISOString(),
+    config_path: summary.config_path,
+    default_agent_ids: summary.default_agent_ids,
+    active_agent_ids: summary.active_agent_ids,
+    overridden_by_env: summary.overridden_by_env,
+    agents,
   };
 }
 
@@ -1789,8 +1812,8 @@ export function trichatChaos(storage: Storage, input: z.infer<typeof trichatChao
         thread_id: syntheticThreadId,
         user_message_id: userMessage.message_id,
         user_prompt: userPrompt,
-        expected_agents: ["codex", "cursor", "local-imprint"],
-        min_agents: 2,
+        expected_agents: [...DEFAULT_CONSENSUS_AGENT_IDS],
+        min_agents: Math.min(2, Math.max(1, DEFAULT_CONSENSUS_AGENT_IDS.length)),
         metadata: {
           source: "trichat.chaos",
           kind: "run_once",
@@ -3082,6 +3105,19 @@ async function runAutopilotGoalIntake(
     600
   );
   const projectDir = sourceTask?.project_dir?.trim() || process.cwd();
+  await runAutopilotIdempotent(storage, {
+    tool_name: "memory.append",
+    session_key: input.session_key,
+    label: "goal_intake.workspace_fingerprint",
+    fingerprint: projectDir,
+    payload: {
+      project_dir: projectDir,
+    },
+    execute: () =>
+      ensureWorkspaceFingerprint(storage, projectDir, {
+        source: "trichat.autopilot",
+      }),
+  });
   const thread = await runAutopilotIdempotent(storage, {
     tool_name: "trichat.thread_open",
     session_key: input.session_key,
@@ -6419,7 +6455,7 @@ function normalizeAdapterProtocolAgentIds(agentIds: readonly string[] | undefine
   if (normalized.length > 0) {
     return normalized;
   }
-  return [...DEFAULT_CONSENSUS_AGENT_IDS];
+  return [...getTriChatActiveAgentIds()];
 }
 
 function runAdapterProtocolCheckForAgent(input: AdapterProtocolCheckInput) {
@@ -6584,9 +6620,11 @@ function resolveAdapterProtocolCommand(input: AdapterProtocolCheckInput): Adapte
   const envKeyByAgent: Record<string, string> = {
     codex: "TRICHAT_CODEX_CMD",
     cursor: "TRICHAT_CURSOR_CMD",
+    gemini: "TRICHAT_GEMINI_CMD",
+    claude: "TRICHAT_CLAUDE_CMD",
     "local-imprint": "TRICHAT_IMPRINT_CMD",
   };
-  const envKey = envKeyByAgent[normalizedAgentId] ?? "";
+  const envKey = getTriChatBridgeEnvVar(normalizedAgentId) ?? envKeyByAgent[normalizedAgentId] ?? "";
   const envValue = envKey ? String(process.env[envKey] ?? "").trim() : "";
   if (envValue) {
     return {
@@ -6596,10 +6634,7 @@ function resolveAdapterProtocolCommand(input: AdapterProtocolCheckInput): Adapte
     };
   }
 
-  const bridgeCandidates = [
-    path.join(input.workspace, "bridges", `${normalizedAgentId}_bridge.py`),
-    path.join(input.workspace, "bridges", `${normalizedAgentId.replace(/-/g, "_")}_bridge.py`),
-  ];
+  const bridgeCandidates = getTriChatBridgeCandidates(input.workspace, normalizedAgentId);
   const existingWrapper = bridgeCandidates.find((candidate) => fs.existsSync(candidate));
   if (!existingWrapper) {
     return {
@@ -7015,9 +7050,7 @@ function buildAdapterProtocolRequestId(agentId: string, operation: string): stri
 type TriChatTimelineMessage = ReturnType<Storage["getTriChatTimeline"]>[number];
 
 function normalizeConsensusAgentIds(agentIds: readonly string[] | undefined): string[] {
-  const values = (agentIds?.length ? agentIds : DEFAULT_CONSENSUS_AGENT_IDS).map((agentId) =>
-    normalizeConsensusAgentId(agentId)
-  );
+  const values = getTriChatActiveAgentIds(agentIds).map((agentId) => normalizeConsensusAgentId(agentId));
   const deduped = new Set<string>();
   for (const value of values) {
     if (value) {
@@ -7027,13 +7060,11 @@ function normalizeConsensusAgentIds(agentIds: readonly string[] | undefined): st
   if (deduped.size > 0) {
     return Array.from(deduped);
   }
-  return [...DEFAULT_CONSENSUS_AGENT_IDS];
+  return [...getTriChatActiveAgentIds()];
 }
 
 function normalizeConsensusAgentId(agentId: string | null | undefined): string {
-  return String(agentId ?? "")
-    .trim()
-    .toLowerCase();
+  return normalizeTriChatAgentId(agentId);
 }
 
 function compactConsensusText(value: string, limit: number): string {

@@ -12,7 +12,12 @@ export type HttpOptions = {
   bearerToken: string | null;
 };
 
-export async function startHttpTransport(server: Server, options: HttpOptions) {
+type SessionBinding = {
+  server: Server;
+  transport: StreamableHTTPServerTransport;
+};
+
+export async function startHttpTransport(createServer: () => Server, options: HttpOptions) {
   if (options.host !== "127.0.0.1" && options.host !== "localhost") {
     throw new Error("HTTP transport must bind to 127.0.0.1 or localhost");
   }
@@ -20,7 +25,7 @@ export async function startHttpTransport(server: Server, options: HttpOptions) {
     throw new Error("MCP_HTTP_BEARER_TOKEN is required for HTTP transport");
   }
 
-  const transports = new Map<string, StreamableHTTPServerTransport>();
+  const sessions = new Map<string, SessionBinding>();
 
   const httpServer = http.createServer((req, res) => {
     if (!validateOrigin(req.headers.origin, options.allowedOrigins)) {
@@ -35,7 +40,7 @@ export async function startHttpTransport(server: Server, options: HttpOptions) {
       return;
     }
 
-    void routeRequest(server, transports, req, res).catch((error) => {
+    void routeRequest(createServer, sessions, req, res).catch((error) => {
       logEvent("http.error", {
         error: String(error),
         method: req.method ?? "unknown",
@@ -74,8 +79,8 @@ function validateBearer(authorization: string | undefined, expected: string | nu
 }
 
 async function routeRequest(
-  server: Server,
-  transports: Map<string, StreamableHTTPServerTransport>,
+  createServer: () => Server,
+  sessions: Map<string, SessionBinding>,
   req: http.IncomingMessage,
   res: http.ServerResponse
 ) {
@@ -86,27 +91,34 @@ async function routeRequest(
   if (method === "POST") {
     const body = await parseJsonBody(req);
     let transport: StreamableHTTPServerTransport | undefined;
+    let server: Server | undefined;
 
     if (sessionId) {
-      transport = transports.get(sessionId);
-      if (!transport) {
+      const session = sessions.get(sessionId);
+      if (!session) {
         res.statusCode = 404;
         res.end("Unknown MCP session");
         return;
       }
+      transport = session.transport;
+      server = session.server;
     } else if (isInitializeRequest(body)) {
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newSessionId) => {
-          transports.set(newSessionId, transport!);
+          sessions.set(newSessionId, {
+            server: server!,
+            transport: transport!,
+          });
         },
       });
       transport.onclose = () => {
         const sid = transport?.sessionId;
         if (sid) {
-          transports.delete(sid);
+          sessions.delete(sid);
         }
       };
+      server = createServer();
       await server.connect(transport);
     } else {
       res.statusCode = 400;
@@ -124,13 +136,13 @@ async function routeRequest(
       res.end("Missing MCP session id");
       return;
     }
-    const transport = transports.get(sessionId);
-    if (!transport) {
+    const session = sessions.get(sessionId);
+    if (!session) {
       res.statusCode = 404;
       res.end("Unknown MCP session");
       return;
     }
-    await transport.handleRequest(req, res);
+    await session.transport.handleRequest(req, res);
     return;
   }
 

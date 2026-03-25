@@ -100,6 +100,8 @@ import {
   trichatMessagePostSchema,
   trichatRetention,
   trichatRetentionSchema,
+  trichatRoster,
+  trichatRosterSchema,
   trichatSummary,
   trichatSummarySchema,
   trichatThreadGet,
@@ -173,18 +175,6 @@ const SERVER_VERSION = "1.0.0";
 const CONSENSUS_ALERT_MIN_AGENTS = parseConsensusMinAgents(process.env.TRICHAT_CONSENSUS_ALERT_MIN_AGENTS);
 const DEFAULT_TRICHAT_VERIFY_COMMAND = String(process.env.TRICHAT_VERIFY_COMMAND ?? "").trim();
 const DEFAULT_TRICHAT_VERIFY_TIMEOUT_SECONDS = parseBoundedInt(process.env.TRICHAT_VERIFY_TIMEOUT_SECONDS, 90, 5, 1800);
-
-const server = new Server(
-  {
-    name: SERVER_NAME,
-    version: SERVER_VERSION,
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
-);
 
 type ToolEntry = {
   schema: z.ZodTypeAny;
@@ -829,9 +819,13 @@ registerTool("trichat.summary", "Summarize tri-chat thread/message bus state.", 
   trichatSummary(storage, input)
 );
 
+registerTool("trichat.roster", "Read the configured tri-chat agent roster and active council selection.", trichatRosterSchema, (input) =>
+  trichatRoster(storage, input)
+);
+
 registerTool(
   "trichat.consensus",
-  "Compare codex/cursor/local-imprint answers per user turn and flag disagreement.",
+  "Compare configured tri-chat agent answers per user turn and flag disagreement.",
   trichatConsensusSchema,
   (input) => trichatConsensus(storage, input)
 );
@@ -845,7 +839,7 @@ registerTool(
 
 registerTool(
   "trichat.adapter_protocol_check",
-  "Run bridge protocol diagnostics (ping + optional dry-run ask) for codex/cursor/local-imprint adapters.",
+  "Run bridge protocol diagnostics (ping + optional dry-run ask) for configured tri-chat adapters.",
   trichatAdapterProtocolCheckSchema,
   (input) => trichatAdapterProtocolCheck(storage, input)
 );
@@ -1023,33 +1017,49 @@ initializeImprintAutoSnapshotDaemon(storage, {
   get_tool_names: () => Array.from(toolRegistry.keys()),
 });
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: Array.from(toolRegistry.values()).map((entry) => entry.tool),
-}));
+function createServerInstance() {
+  const server = new Server(
+    {
+      name: SERVER_NAME,
+      version: SERVER_VERSION,
+    },
+    {
+      capabilities: {
+        tools: {},
+      },
+    }
+  );
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-  const entry = toolRegistry.get(name);
-  if (!entry) {
-    return {
-      content: [{ type: "text", text: `Unknown tool: ${name}` }],
-      isError: true,
-    };
-  }
-  try {
-    const parsed = entry.schema.parse(args ?? {});
-    const result = await entry.handler(parsed);
-    return {
-      content: [{ type: "text", text: JSON.stringify(result) }],
-    };
-  } catch (error) {
-    const message = truncate(error instanceof Error ? error.message : String(error));
-    return {
-      content: [{ type: "text", text: message }],
-      isError: true,
-    };
-  }
-});
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: Array.from(toolRegistry.values()).map((entry) => entry.tool),
+  }));
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    const entry = toolRegistry.get(name);
+    if (!entry) {
+      return {
+        content: [{ type: "text", text: `Unknown tool: ${name}` }],
+        isError: true,
+      };
+    }
+    try {
+      const parsed = entry.schema.parse(args ?? {});
+      const result = await entry.handler(parsed);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result) }],
+      };
+    } catch (error) {
+      const message = truncate(error instanceof Error ? error.message : String(error));
+      return {
+        content: [{ type: "text", text: message }],
+        isError: true,
+      };
+    }
+  });
+
+  return server;
+}
 
 async function main() {
   const args = process.argv.slice(2);
@@ -1062,14 +1072,14 @@ async function main() {
       process.env.MCP_HTTP_ALLOWED_ORIGINS ?? "http://localhost,http://127.0.0.1";
     const allowedOrigins = allowedOriginsEnv.split(",").map((origin) => origin.trim()).filter(Boolean);
 
-    await startHttpTransport(server, {
+    await startHttpTransport(createServerInstance, {
       port,
       host,
       allowedOrigins,
       bearerToken: process.env.MCP_HTTP_BEARER_TOKEN ?? null,
     });
   } else {
-    await startStdioTransport(server);
+    await startStdioTransport(createServerInstance());
   }
 }
 
@@ -1162,7 +1172,7 @@ function parseConsensusMinAgents(value: string | undefined): number {
   if (!Number.isFinite(parsed)) {
     return 3;
   }
-  return parsed <= 2 ? 2 : 3;
+  return Math.max(2, Math.min(parsed, 12));
 }
 
 function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean {
