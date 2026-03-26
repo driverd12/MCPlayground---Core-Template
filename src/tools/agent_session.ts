@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { Storage, type AgentSessionRecord, type PlanRecord, type PlanStepRecord, type TaskRecord } from "../storage.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
-import { judgeExperimentRunWithStorage } from "./experiment.js";
+import { deriveExperimentObservation, judgeExperimentRunWithStorage } from "./experiment.js";
 
 const agentSessionStatusSchema = z.enum(["active", "idle", "busy", "expired", "closed", "failed"]);
 
@@ -127,8 +127,29 @@ function readString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function readBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function readPositiveInt(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    return null;
+  }
+  return value;
+}
+
 function dedupeStrings(values: string[] | undefined): string[] {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
+}
+
+function buildAgentDerivedMutation(
+  mutation: { idempotency_key: string; side_effect_fingerprint: string },
+  phase: string
+) {
+  return {
+    idempotency_key: `${mutation.idempotency_key}:agent:${phase}`,
+    side_effect_fingerprint: `${mutation.side_effect_fingerprint}:agent:${phase}`,
+  };
 }
 
 type TaskRoutingRule = {
@@ -178,6 +199,50 @@ function resolveTaskPlanContext(
     return null;
   }
   return { plan, step };
+}
+
+function goalSupportsAutorun(goalAutonomyMode: string | null | undefined) {
+  return (
+    goalAutonomyMode === "stage" ||
+    goalAutonomyMode === "execute_bounded" ||
+    goalAutonomyMode === "execute_destructive_with_approval"
+  );
+}
+
+function shouldTriggerGoalAutorun(
+  storage: Storage,
+  task: TaskRecord,
+  planContext: { plan: PlanRecord; step: PlanStepRecord } | null
+) {
+  if (!planContext) {
+    return {
+      enabled: false,
+      reason: "no-plan-context",
+      goal_id: null,
+      max_passes: null,
+    };
+  }
+
+  const dispatchMetadata = isRecord(task.metadata.plan_dispatch) ? task.metadata.plan_dispatch : null;
+  const explicitFlag = readBoolean(dispatchMetadata?.autorun_goal_on_completion);
+  if (explicitFlag === false) {
+    return {
+      enabled: false,
+      reason: "dispatch-disabled",
+      goal_id: planContext.plan.goal_id,
+      max_passes: null,
+    };
+  }
+
+  const workflowFlag = readBoolean(planContext.plan.metadata.workflow_autorun_enabled);
+  const goal = storage.getGoalById(planContext.plan.goal_id);
+  const enabled = explicitFlag === true || workflowFlag === true || goalSupportsAutorun(goal?.autonomy_mode);
+  return {
+    enabled,
+    reason: enabled ? (workflowFlag === true ? "plan-workflow-autorun" : goal ? `goal:${goal.autonomy_mode}` : "dispatch-enabled") : "goal-autonomy-disabled",
+    goal_id: planContext.plan.goal_id,
+    max_passes: readPositiveInt(planContext.plan.metadata.workflow_autorun_max_passes),
+  };
 }
 
 function attachArtifactsToTaskContext(
@@ -1048,13 +1113,17 @@ export async function agentHeartbeatTask(storage: Storage, input: z.infer<typeof
   });
 }
 
-export async function agentReportResult(storage: Storage, input: z.infer<typeof agentReportResultSchema>) {
+export async function agentReportResult(
+  storage: Storage,
+  invokeTool: (toolName: string, input: Record<string, unknown>) => Promise<unknown>,
+  input: z.infer<typeof agentReportResultSchema>
+) {
   return runIdempotentMutation({
     storage,
     tool_name: "agent.report_result",
     mutation: input.mutation,
     payload: input,
-    execute: () => {
+    execute: async () => {
       const session = storage.getAgentSessionById(input.session_id);
       if (!session) {
         return {
@@ -1202,8 +1271,24 @@ export async function agentReportResult(storage: Storage, input: z.infer<typeof 
           : null;
 
       const experimentRun = storage.findExperimentRunByTaskId(task.task_id);
+      const experiment = experimentRun ? storage.getExperimentById(experimentRun.experiment_id) : null;
+      const derivedExperimentObservation =
+        experiment
+          ? deriveExperimentObservation(experiment, {
+              observed_metric: input.observed_metric,
+              observed_metrics: input.observed_metrics,
+              result: input.result,
+              metadata: input.metadata,
+              summary: input.summary,
+            })
+          : {
+              observed_metric: input.observed_metric,
+              observed_metrics: input.observed_metrics,
+              source: null,
+            };
       const experimentUpdate =
-        experimentRun && (input.observed_metric !== undefined || input.experiment_verdict || input.outcome === "failed")
+        experimentRun &&
+        ((derivedExperimentObservation.observed_metric ?? null) !== null || input.experiment_verdict || input.outcome === "failed")
           ? judgeExperimentRunWithStorage(storage, {
               experiment_id: experimentRun.experiment_id,
               experiment_run_id: experimentRun.experiment_run_id,
@@ -1211,12 +1296,17 @@ export async function agentReportResult(storage: Storage, input: z.infer<typeof 
               verdict: input.experiment_verdict,
               task_id: task.task_id,
               run_id: input.run_id,
-              observed_metric: input.observed_metric,
-              observed_metrics: input.observed_metrics,
+              observed_metric: derivedExperimentObservation.observed_metric,
+              observed_metrics: derivedExperimentObservation.observed_metrics,
               summary: input.summary,
               error_text: input.outcome === "failed" ? input.error : undefined,
               artifact_ids: producedArtifactIds,
-              metadata: input.metadata,
+              metadata: {
+                ...(input.metadata ?? {}),
+                ...(derivedExperimentObservation.source
+                  ? { observed_metric_source: derivedExperimentObservation.source }
+                  : {}),
+              },
               source_client: input.source_client,
               source_model: input.source_model,
               source_agent: input.source_agent,
@@ -1245,6 +1335,22 @@ export async function agentReportResult(storage: Storage, input: z.infer<typeof 
           ...(input.metadata ?? {}),
         },
       });
+      const goalAutorunTrigger = shouldTriggerGoalAutorun(storage, task, planContext);
+      const goalAutorun =
+        input.outcome === "completed" && goalAutorunTrigger.enabled && goalAutorunTrigger.goal_id
+          ? ((await invokeTool("goal.autorun", {
+              mutation: buildAgentDerivedMutation(input.mutation, `goal-autorun:${task.task_id}`),
+              goal_id: goalAutorunTrigger.goal_id,
+              create_plan_if_missing: false,
+              max_passes: goalAutorunTrigger.max_passes ?? 4,
+              source_client: input.source_client,
+              source_model: input.source_model,
+              source_agent: session.agent_id,
+            })) as Record<string, unknown>)
+          : {
+              triggered: false,
+              reason: input.outcome !== "completed" ? "task_failed" : goalAutorunTrigger.reason,
+            };
       const agentTaskEvent = storage.appendRuntimeEvent({
         event_type: "agent.task_reported",
         entity_type: "task",
@@ -1263,6 +1369,7 @@ export async function agentReportResult(storage: Storage, input: z.infer<typeof 
                 artifact_links_created: artifactLinks.length,
                 auto_report_artifact_id: autoReportArtifact.artifact_id,
                 experiment_run_id: experimentRun?.experiment_run_id ?? null,
+                goal_autorun_triggered: goalAutorunTrigger.enabled && input.outcome === "completed",
               },
               source_client: input.source_client,
               source_model: input.source_model,
@@ -1280,6 +1387,7 @@ export async function agentReportResult(storage: Storage, input: z.infer<typeof 
         artifact_links_created: artifactLinks.length,
         artifact_links: artifactLinks,
         experiment: experimentUpdate,
+        goal_autorun: goalAutorun,
         events: {
           task: agentTaskEvent,
           step: planStepEvent,

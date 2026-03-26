@@ -31,6 +31,7 @@ The runtime now has the minimum building blocks needed for a real automated pipe
   - `event.*`
 - methodology injection:
   - `playbook.*`
+  - `playbook.run`
   - `pack.plan.generate`
   - `pack.verify.run`
   - default `agentic.*` planner/verifier hooks
@@ -159,7 +160,8 @@ To have something testable over the next four days, these behaviors should be co
 
 - `goal.execute` can generate and dispatch methodology-aligned plans
 - `goal.autorun` can re-enter eligible goals after async work finishes
-- worker completions attach artifacts and can feed experiment judgment
+- `playbook.run` can create and enter methodology flows in one call
+- worker completions attach artifacts, can derive experiment observations, and can re-enter bounded goals automatically
 - the methodology can be inferred from goal metadata and tags
 - the pipeline can stop cleanly at human gates instead of free-running past them
 
@@ -167,17 +169,17 @@ To have something testable over the next four days, these behaviors should be co
 
 Highest-value next patches:
 
-1. `playbook.run`
-   One-shot tool to instantiate a playbook and immediately call `goal.execute`.
-
-2. Event-driven re-entry.
-   When `agent.report_result` completes a task, publish a follow-up candidate for `goal.autorun` so the system does not depend on manual re-entry.
-
-3. Experiment metric parsing.
-   Add a parser/helper so worker outputs can automatically extract `observed_metric` for `experiment.judge`.
-
-4. Method selector.
+1. Method selector.
    Add a compact objective classifier that chooses `delivery_path` vs `optimization_loop` before plan generation.
+
+2. Autoresearch bootstrap.
+   Add a one-shot helper that creates the experiment record and binds benchmark/variant steps to it automatically when the selected playbook is optimization-oriented.
+
+3. Periodic goal continuation.
+   Add a bounded daemon or inbox path that re-runs `goal.autorun` on active workflow goals so long-lived overnight pipelines do not depend only on task completion callbacks.
+
+4. Artifact expectations.
+   Enforce `expected_artifact_types` more strictly at report time so GSD/autoresearch plans can detect when a worker completed without enough evidence.
 
 5. Approval policy profiles.
    Let the user opt into strict, bounded, or fully autonomous execution modes without rewriting planners.

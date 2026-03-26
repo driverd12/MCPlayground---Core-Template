@@ -65,6 +65,10 @@ More detail: [Architecture Pitch](./docs/ARCHITECTURE_PITCH.md)
 
 Methodology automation: [Automated GSD + autoresearch Pipeline](./docs/AUTOMATED_GSD_AUTORESEARCH_PIPELINE.md)
 
+Practical entrypoint:
+- use `playbook.run` to instantiate a GSD/autoresearch workflow and immediately enter `goal.execute`
+- let `agent.report_result` feed artifacts, experiment observations, and bounded `goal.autorun` continuation back into the kernel
+
 ## Quick Start
 
 ```bash
@@ -199,7 +203,7 @@ Core runtime tools include:
 - Governance and safety: `policy.evaluate`, `preflight.check`, `postflight.verify`, `mutation.check`
 - Durable execution: `run.*`, `task.*`, `lock.*`
 - Agentic kernel: `goal.*` including `goal.execute` and `goal.autorun`, `plan.*`, `artifact.*`, `experiment.*`, `event.*`, `agent.session.*`, `dispatch.autorun`
-- Workflow methodology: `playbook.*`, `pack.hooks.list`, `pack.plan.generate`, `pack.verify.run`
+- Workflow methodology: `playbook.*` including `playbook.run`, `pack.hooks.list`, `pack.plan.generate`, `pack.verify.run`
 - Decision and incident logging: `adr.create`, `decision.link`, `incident.*`
 - Runtime ops: `health.*`, `migration.status`, `imprint.*`, `imprint.inbox.*`
 - TriChat orchestration: `trichat.*` (`roster`, `thread/message/turn`, `autopilot`, `tmux_controller`, `bus`, `adapter_telemetry`, `chaos`, `slo`)

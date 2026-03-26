@@ -71,6 +71,46 @@ export const playbookInstantiateSchema = z
     }
   });
 
+export const playbookRunSchema = z
+  .object({
+    mutation: mutationSchema,
+    playbook_id: z.string().min(1),
+    goal_id: z.string().min(1).max(200).optional(),
+    plan_id: z.string().min(1).max(200).optional(),
+    title: z.string().min(1),
+    objective: z.string().min(1),
+    goal_status: goalStatusSchema.default("active"),
+    priority: z.number().int().min(0).max(100).optional(),
+    risk_tier: goalRiskTierSchema.default("medium"),
+    autonomy_mode: autonomyModeSchema.default("execute_bounded"),
+    target_entity_type: z.string().min(1).optional(),
+    target_entity_id: z.string().min(1).optional(),
+    acceptance_criteria: z.array(z.string().min(1)).optional(),
+    constraints: z.array(z.string().min(1)).optional(),
+    assumptions: z.array(z.string().min(1)).optional(),
+    tags: z.array(z.string().min(1)).optional(),
+    metadata: z.record(z.unknown()).optional(),
+    selected_plan: z.boolean().optional(),
+    dry_run: z.boolean().optional(),
+    dispatch_limit: z.number().int().min(1).max(100).optional(),
+    max_passes: z.number().int().min(1).max(20).optional(),
+    trichat_agent_ids: z.array(z.string().min(1)).max(50).optional(),
+    trichat_max_rounds: z.number().int().min(1).max(10).optional(),
+    trichat_min_success_agents: z.number().int().min(1).max(10).optional(),
+    trichat_bridge_timeout_seconds: z.number().int().min(5).max(1800).optional(),
+    trichat_bridge_dry_run: z.boolean().optional(),
+    ...sourceSchema.shape,
+  })
+  .superRefine((value, ctx) => {
+    if ((value.target_entity_type && !value.target_entity_id) || (!value.target_entity_type && value.target_entity_id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "target_entity_type and target_entity_id must be provided together",
+        path: ["target_entity_type"],
+      });
+    }
+  });
+
 type PlaybookTemplateStep = {
   step_id: string;
   seq: number;
@@ -462,6 +502,123 @@ function getPlaybookDefinition(playbookId: string) {
   return PLAYBOOKS.find((playbook) => playbook.playbook_id === playbookId) ?? null;
 }
 
+function buildPlaybookDerivedMutation(
+  mutation: { idempotency_key: string; side_effect_fingerprint: string },
+  phase: string
+) {
+  return {
+    idempotency_key: `${mutation.idempotency_key}:playbook:${phase}`,
+    side_effect_fingerprint: `${mutation.side_effect_fingerprint}:playbook:${phase}`,
+  };
+}
+
+function instantiatePlaybook(
+  storage: Storage,
+  input: z.infer<typeof playbookInstantiateSchema> | z.infer<typeof playbookRunSchema>,
+  options?: {
+    workflow_autorun_enabled?: boolean;
+    workflow_autorun_max_passes?: number;
+  }
+) {
+  const playbook = getPlaybookDefinition(input.playbook_id);
+  if (!playbook) {
+    throw new Error(`Unknown playbook: ${input.playbook_id}`);
+  }
+
+  const context = {
+    title: input.title,
+    objective: input.objective,
+    repo_root: process.cwd(),
+  };
+  const goalTags = Array.from(new Set([...(input.tags ?? []), ...playbook.tags]));
+  const acceptanceCriteria = Array.from(
+    new Set([...(input.acceptance_criteria ?? []), ...playbook.default_acceptance_criteria])
+  );
+
+  const goalResult = storage.createGoal({
+    goal_id: input.goal_id,
+    title: input.title,
+    objective: input.objective,
+    status: input.goal_status,
+    priority: input.priority,
+    risk_tier: input.risk_tier,
+    autonomy_mode: input.autonomy_mode,
+    target_entity_type: input.target_entity_type,
+    target_entity_id: input.target_entity_id,
+    acceptance_criteria: acceptanceCriteria,
+    constraints: input.constraints,
+    assumptions: input.assumptions,
+    tags: goalTags,
+    metadata: {
+      ...(input.metadata ?? {}),
+      playbook: {
+        playbook_id: playbook.playbook_id,
+        source_repo: playbook.source_repo,
+        category: playbook.category,
+      },
+    },
+    source_client: input.source_client,
+    source_model: input.source_model,
+    source_agent: input.source_agent,
+  });
+
+  const createdPlan = storage.createPlan({
+    plan_id: input.plan_id,
+    goal_id: goalResult.goal.goal_id,
+    title: `${playbook.title}: ${input.title}`,
+    summary: `${playbook.summary} Objective: ${input.objective}`,
+    status: "candidate",
+    planner_kind: "core",
+    selected: input.selected_plan ?? true,
+    assumptions: input.assumptions,
+    success_criteria: acceptanceCriteria,
+    metadata: {
+      playbook_id: playbook.playbook_id,
+      source_repo: playbook.source_repo,
+      category: playbook.category,
+      instantiated_at: new Date().toISOString(),
+      ...(options?.workflow_autorun_enabled === true
+        ? {
+            workflow_autorun_enabled: true,
+            workflow_autorun_max_passes: options.workflow_autorun_max_passes ?? 4,
+            workflow_autorun_source: "playbook.run",
+          }
+        : {}),
+    },
+    steps: playbook.steps.map((step) => ({
+      step_id: step.step_id,
+      seq: step.seq,
+      title: materializeValue(step.title, context),
+      step_kind: step.step_kind,
+      executor_kind: step.executor_kind,
+      tool_name: step.tool_name,
+      input: materializeValue(step.input ?? {}, context),
+      expected_artifact_types: step.expected_artifact_types,
+      acceptance_checks: step.acceptance_checks,
+      depends_on: step.depends_on,
+      metadata: materializeValue(
+        {
+          ...(step.metadata ?? {}),
+          playbook_id: playbook.playbook_id,
+          source_repo: playbook.source_repo,
+        },
+        context
+      ),
+    })),
+    source_client: input.source_client,
+    source_model: input.source_model,
+    source_agent: input.source_agent,
+  });
+
+  return {
+    created: true,
+    playbook,
+    goal: goalResult.goal,
+    plan: createdPlan.plan,
+    steps: createdPlan.steps,
+  };
+}
+
 export function playbookList(_storage: Storage, input: z.infer<typeof playbookListSchema>) {
   const sourceRepo = input.source_repo?.trim();
   const category = input.category?.trim();
@@ -504,96 +661,52 @@ export async function playbookInstantiate(storage: Storage, input: z.infer<typeo
     tool_name: "playbook.instantiate",
     mutation: input.mutation,
     payload: input,
-    execute: () => {
-      const playbook = getPlaybookDefinition(input.playbook_id);
-      if (!playbook) {
-        throw new Error(`Unknown playbook: ${input.playbook_id}`);
-      }
+    execute: () => instantiatePlaybook(storage, input),
+  });
+}
 
-      const context = {
-        title: input.title,
-        objective: input.objective,
-        repo_root: process.cwd(),
-      };
-      const goalTags = Array.from(new Set([...(input.tags ?? []), ...playbook.tags]));
-      const acceptanceCriteria = Array.from(
-        new Set([...(input.acceptance_criteria ?? []), ...playbook.default_acceptance_criteria])
-      );
-
-      const goalResult = storage.createGoal({
-        goal_id: input.goal_id,
-        title: input.title,
-        objective: input.objective,
-        status: input.goal_status,
-        priority: input.priority,
-        risk_tier: input.risk_tier,
-        autonomy_mode: input.autonomy_mode,
-        target_entity_type: input.target_entity_type,
-        target_entity_id: input.target_entity_id,
-        acceptance_criteria: acceptanceCriteria,
-        constraints: input.constraints,
-        assumptions: input.assumptions,
-        tags: goalTags,
-        metadata: {
-          ...(input.metadata ?? {}),
-          playbook: {
-            playbook_id: playbook.playbook_id,
-            source_repo: playbook.source_repo,
-            category: playbook.category,
-          },
-        },
+export async function playbookRun(
+  storage: Storage,
+  invokeTool: (toolName: string, input: Record<string, unknown>) => Promise<unknown>,
+  input: z.infer<typeof playbookRunSchema>
+) {
+  return runIdempotentMutation({
+    storage,
+    tool_name: "playbook.run",
+    mutation: input.mutation,
+    payload: input,
+    execute: async () => {
+      const instantiated = instantiatePlaybook(storage, input, {
+        workflow_autorun_enabled: true,
+        workflow_autorun_max_passes: input.max_passes ?? 4,
+      });
+      const execution = (await invokeTool("goal.execute", {
+        mutation: buildPlaybookDerivedMutation(input.mutation, "execute"),
+        goal_id: instantiated.goal.goal_id,
+        plan_id: instantiated.plan.plan_id,
+        create_plan_if_missing: false,
+        dry_run: input.dry_run,
+        dispatch_limit: input.dispatch_limit,
+        max_passes: input.max_passes,
+        trichat_agent_ids: input.trichat_agent_ids,
+        trichat_max_rounds: input.trichat_max_rounds,
+        trichat_min_success_agents: input.trichat_min_success_agents,
+        trichat_bridge_timeout_seconds: input.trichat_bridge_timeout_seconds,
+        trichat_bridge_dry_run: input.trichat_bridge_dry_run,
         source_client: input.source_client,
         source_model: input.source_model,
         source_agent: input.source_agent,
-      });
+      })) as Record<string, unknown>;
 
-      const createdPlan = storage.createPlan({
-        plan_id: input.plan_id,
-        goal_id: goalResult.goal.goal_id,
-        title: `${playbook.title}: ${input.title}`,
-        summary: `${playbook.summary} Objective: ${input.objective}`,
-        status: "candidate",
-        planner_kind: "core",
-        selected: input.selected_plan ?? true,
-        assumptions: input.assumptions,
-        success_criteria: acceptanceCriteria,
-        metadata: {
-          playbook_id: playbook.playbook_id,
-          source_repo: playbook.source_repo,
-          category: playbook.category,
-          instantiated_at: new Date().toISOString(),
-        },
-        steps: playbook.steps.map((step) => ({
-          step_id: step.step_id,
-          seq: step.seq,
-          title: materializeValue(step.title, context),
-          step_kind: step.step_kind,
-          executor_kind: step.executor_kind,
-          tool_name: step.tool_name,
-          input: materializeValue(step.input ?? {}, context),
-          expected_artifact_types: step.expected_artifact_types,
-          acceptance_checks: step.acceptance_checks,
-          depends_on: step.depends_on,
-          metadata: materializeValue(
-            {
-              ...(step.metadata ?? {}),
-              playbook_id: playbook.playbook_id,
-              source_repo: playbook.source_repo,
-            },
-            context
-          ),
-        })),
-        source_client: input.source_client,
-        source_model: input.source_model,
-        source_agent: input.source_agent,
-      });
-
+      const planAfter = storage.getPlanById(instantiated.plan.plan_id) ?? instantiated.plan;
+      const goalAfter = storage.getGoalById(instantiated.goal.goal_id) ?? instantiated.goal;
       return {
-        created: true,
-        playbook,
-        goal: goalResult.goal,
-        plan: createdPlan.plan,
-        steps: createdPlan.steps,
+        ok: true,
+        playbook: instantiated.playbook,
+        goal: goalAfter,
+        plan: planAfter,
+        steps: storage.listPlanSteps(planAfter.plan_id),
+        execution,
       };
     },
   });

@@ -98,6 +98,217 @@ function dedupeStrings(values: string[] | undefined): string[] {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeMetricToken(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function buildMetricAliases(metricName: string) {
+  const raw = metricName.trim();
+  const normalized = normalizeMetricToken(raw);
+  const compact = normalized.replace(/_/g, "");
+  return Array.from(
+    new Set(
+      [
+        raw,
+        raw.toLowerCase(),
+        normalized,
+        normalized.replace(/_/g, "-"),
+        normalized.replace(/_/g, " "),
+        compact,
+      ].filter(Boolean)
+    )
+  );
+}
+
+function readValueAtPath(source: unknown, path: string): unknown {
+  if (!path.trim()) {
+    return undefined;
+  }
+  let current: unknown = source;
+  for (const segment of path.split(".").map((value) => value.trim()).filter(Boolean)) {
+    if (!isRecord(current)) {
+      return undefined;
+    }
+    current = current[segment];
+  }
+  return current;
+}
+
+function findMetricInRecord(record: Record<string, unknown>, aliases: string[], depth = 0): number | null {
+  const aliasSet = new Set(aliases.map((value) => value.toLowerCase()));
+  for (const [key, value] of Object.entries(record)) {
+    const direct = toFiniteNumber(value);
+    if (direct === null) {
+      continue;
+    }
+    if (aliasSet.has(key.toLowerCase()) || aliasSet.has(normalizeMetricToken(key))) {
+      return direct;
+    }
+  }
+  if (depth >= 2) {
+    return null;
+  }
+  const preferredContainers = ["metrics", "observed_metrics", "benchmarks", "measurements", "results", "stats"];
+  for (const key of preferredContainers) {
+    const nested = record[key];
+    if (!isRecord(nested)) {
+      continue;
+    }
+    const nestedMatch = findMetricInRecord(nested, aliases, depth + 1);
+    if (nestedMatch !== null) {
+      return nestedMatch;
+    }
+  }
+  return null;
+}
+
+function extractMetricFromSummary(summary: string | undefined, metricName: string): number | null {
+  const text = summary?.trim();
+  if (!text) {
+    return null;
+  }
+  const escapedMetric = metricName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`${escapedMetric}\\s*[:=]\\s*(-?\\d+(?:\\.\\d+)?)`, "i");
+  const match = regex.exec(text);
+  if (!match) {
+    return null;
+  }
+  return toFiniteNumber(match[1]);
+}
+
+export function deriveExperimentObservation(
+  experiment: ExperimentRecord,
+  input: {
+    observed_metric?: number;
+    observed_metrics?: Record<string, unknown>;
+    result?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+    summary?: string;
+  }
+) {
+  const aliases = buildMetricAliases(experiment.metric_name);
+  const mergedObservedMetrics = isRecord(input.observed_metrics) ? { ...input.observed_metrics } : {};
+
+  if (input.observed_metric !== undefined) {
+    if (mergedObservedMetrics[experiment.metric_name] === undefined) {
+      mergedObservedMetrics[experiment.metric_name] = input.observed_metric;
+    }
+    return {
+      observed_metric: input.observed_metric,
+      observed_metrics: Object.keys(mergedObservedMetrics).length > 0 ? mergedObservedMetrics : undefined,
+      source: "explicit",
+    };
+  }
+
+  const parseStrategy = isRecord(experiment.parse_strategy) ? experiment.parse_strategy : null;
+  const pathCandidates = [
+    readString(parseStrategy?.path),
+    ...(Array.isArray(parseStrategy?.paths)
+      ? parseStrategy.paths
+          .map((value) => (typeof value === "string" ? value.trim() : ""))
+          .filter(Boolean)
+      : []),
+  ].filter(Boolean) as string[];
+
+  for (const path of pathCandidates) {
+    for (const sourceName of ["observed_metrics", "result", "metadata"] as const) {
+      const value = readValueAtPath(input[sourceName], path);
+      const parsed = toFiniteNumber(value);
+      if (parsed === null) {
+        continue;
+      }
+      if (mergedObservedMetrics[experiment.metric_name] === undefined) {
+        mergedObservedMetrics[experiment.metric_name] = parsed;
+      }
+      return {
+        observed_metric: parsed,
+        observed_metrics: Object.keys(mergedObservedMetrics).length > 0 ? mergedObservedMetrics : undefined,
+        source: `${sourceName}.path:${path}`,
+      };
+    }
+  }
+
+  for (const sourceName of ["observed_metrics", "result", "metadata"] as const) {
+    const source = input[sourceName];
+    if (!isRecord(source)) {
+      continue;
+    }
+    const parsed = findMetricInRecord(source, aliases);
+    if (parsed === null) {
+      continue;
+    }
+    if (mergedObservedMetrics[experiment.metric_name] === undefined) {
+      mergedObservedMetrics[experiment.metric_name] = parsed;
+    }
+    return {
+      observed_metric: parsed,
+      observed_metrics: Object.keys(mergedObservedMetrics).length > 0 ? mergedObservedMetrics : undefined,
+      source: sourceName,
+    };
+  }
+
+  if (typeof parseStrategy?.summary_regex === "string" && parseStrategy.summary_regex.trim()) {
+    const flags = readString(parseStrategy.summary_regex_flags) ?? "i";
+    const match = new RegExp(parseStrategy.summary_regex, flags).exec(input.summary ?? "");
+    const parsed = match ? toFiniteNumber(match[1] ?? match[0]) : null;
+    if (parsed !== null) {
+      if (mergedObservedMetrics[experiment.metric_name] === undefined) {
+        mergedObservedMetrics[experiment.metric_name] = parsed;
+      }
+      return {
+        observed_metric: parsed,
+        observed_metrics: Object.keys(mergedObservedMetrics).length > 0 ? mergedObservedMetrics : undefined,
+        source: "summary_regex",
+      };
+    }
+  }
+
+  const summaryMetric = extractMetricFromSummary(input.summary, experiment.metric_name);
+  if (summaryMetric !== null) {
+    if (mergedObservedMetrics[experiment.metric_name] === undefined) {
+      mergedObservedMetrics[experiment.metric_name] = summaryMetric;
+    }
+    return {
+      observed_metric: summaryMetric,
+      observed_metrics: Object.keys(mergedObservedMetrics).length > 0 ? mergedObservedMetrics : undefined,
+      source: "summary",
+    };
+  }
+
+  return {
+    observed_metric: undefined,
+    observed_metrics: Object.keys(mergedObservedMetrics).length > 0 ? mergedObservedMetrics : undefined,
+    source: null,
+  };
+}
+
 function resolveComparisonMetric(experiment: ExperimentRecord): number | null {
   return experiment.current_best_metric ?? experiment.baseline_metric;
 }

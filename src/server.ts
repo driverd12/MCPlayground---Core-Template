@@ -110,6 +110,8 @@ import {
   playbookInstantiateSchema,
   playbookList,
   playbookListSchema,
+  playbookRun,
+  playbookRunSchema,
 } from "./tools/playbook.js";
 import {
   planCreate,
@@ -1417,7 +1419,7 @@ registerTool("agent.heartbeat_task", "Renew the currently claimed task lease thr
 );
 
 registerTool("agent.report_result", "Report task completion or failure through a durable agent session and sync plan context.", agentReportResultSchema, (input) =>
-  agentReportResult(storage, input)
+  agentReportResult(storage, invokeRegisteredTool, input)
 );
 
 registerTool("goal.create", "Create a durable goal with acceptance criteria and autonomy settings.", goalCreateSchema, (input) =>
@@ -1518,6 +1520,10 @@ registerTool("playbook.get", "Fetch a built-in workflow playbook by id.", playbo
 
 registerTool("playbook.instantiate", "Instantiate a built-in workflow playbook into a durable goal and plan.", playbookInstantiateSchema, (input) =>
   playbookInstantiate(storage, input)
+);
+
+registerTool("playbook.run", "Instantiate a built-in workflow playbook and immediately enter goal execution.", playbookRunSchema, (input) =>
+  playbookRun(storage, invokeRegisteredTool, input)
 );
 
 registerTool("plan.create", "Create a durable candidate plan with structured steps for a goal.", planCreateSchema, (input) =>
