@@ -211,6 +211,22 @@ type PlanAdaptiveRoutingSummary = {
   }>;
 };
 
+type PlanRiskAssessment = {
+  autonomy_mode: string;
+  worker_step_count: number;
+  risk_score: number;
+  can_auto_execute: boolean;
+  pause_reason: string | null;
+  warnings: string[];
+  adaptive_routing_summary: PlanAdaptiveRoutingSummary;
+};
+
+type GoalExecutionPlanResolutionResult = {
+  plan: PlanRecord | null;
+  resolution: GoalExecutionPlanResolution;
+  assessment: PlanRiskAssessment | null;
+};
+
 const DEFAULT_GOAL_AUTORUN_CONFIG: GoalAutorunDaemonConfig = {
   interval_seconds: 90,
   limit: 10,
@@ -491,7 +507,7 @@ function resolveGoalExecutionPlan(
   storage: Storage,
   input: z.infer<typeof goalExecuteSchema>,
   goal: GoalRecord
-): { plan: PlanRecord | null; resolution: GoalExecutionPlanResolution } {
+): GoalExecutionPlanResolutionResult {
   if (input.plan_id) {
     const plan = storage.getPlanById(input.plan_id);
     if (!plan) {
@@ -500,52 +516,78 @@ function resolveGoalExecutionPlan(
     if (plan.goal_id !== goal.goal_id) {
       throw new Error(`Plan ${input.plan_id} does not belong to goal ${goal.goal_id}`);
     }
+    const steps = storage.listPlanSteps(plan.plan_id);
     return {
       plan,
       resolution: "explicit",
+      assessment: assessPlanRisk(goal, plan, steps),
     };
   }
+
+  const candidates = new Map<string, { plan: PlanRecord; resolution: GoalExecutionPlanResolution; assessment: PlanRiskAssessment }>();
+  const registerCandidate = (plan: PlanRecord, resolution: GoalExecutionPlanResolution) => {
+    if (plan.goal_id !== goal.goal_id || isTerminalPlanStatus(plan.status) || candidates.has(plan.plan_id)) {
+      return;
+    }
+    candidates.set(plan.plan_id, {
+      plan,
+      resolution,
+      assessment: assessPlanRisk(goal, plan, storage.listPlanSteps(plan.plan_id)),
+    });
+  };
 
   if (goal.active_plan_id) {
     const activePlan = storage.getPlanById(goal.active_plan_id);
-    if (activePlan && activePlan.goal_id === goal.goal_id && !isTerminalPlanStatus(activePlan.status)) {
-      return {
-        plan: activePlan,
-        resolution: "active",
-      };
+    if (activePlan) {
+      registerCandidate(activePlan, "active");
     }
   }
 
-  const selectedPlan = storage
-    .listPlans({
-      goal_id: goal.goal_id,
-      selected_only: true,
-      limit: 20,
-    })
-    .find((plan) => !isTerminalPlanStatus(plan.status));
-  if (selectedPlan) {
-    return {
-      plan: selectedPlan,
-      resolution: "selected",
-    };
+  for (const selectedPlan of storage.listPlans({
+    goal_id: goal.goal_id,
+    selected_only: true,
+    limit: 20,
+  })) {
+    registerCandidate(selectedPlan, "selected");
   }
 
-  const latestPlan = storage
-    .listPlans({
-      goal_id: goal.goal_id,
-      limit: 20,
-    })
-    .find((plan) => !isTerminalPlanStatus(plan.status));
-  if (latestPlan) {
+  for (const latestPlan of storage.listPlans({
+    goal_id: goal.goal_id,
+    limit: 20,
+  })) {
+    registerCandidate(latestPlan, "latest");
+  }
+
+  const rankedCandidates = [...candidates.values()].sort(compareGoalExecutionPlanCandidates);
+  if (rankedCandidates.length > 0) {
+    const activeCandidate = rankedCandidates.find((candidate) => candidate.resolution === "active");
+    if (activeCandidate?.assessment.can_auto_execute) {
+      return {
+        plan: activeCandidate.plan,
+        resolution: activeCandidate.resolution,
+        assessment: activeCandidate.assessment,
+      };
+    }
+    const selectedCandidate = rankedCandidates.find((candidate) => candidate.resolution === "selected");
+    if (selectedCandidate?.assessment.can_auto_execute) {
+      return {
+        plan: selectedCandidate.plan,
+        resolution: selectedCandidate.resolution,
+        assessment: selectedCandidate.assessment,
+      };
+    }
+    const bestCandidate = rankedCandidates[0];
     return {
-      plan: latestPlan,
-      resolution: "latest",
+      plan: bestCandidate.plan,
+      resolution: bestCandidate.resolution,
+      assessment: bestCandidate.assessment,
     };
   }
 
   return {
     plan: null,
     resolution: "missing",
+    assessment: null,
   };
 }
 
@@ -647,6 +689,74 @@ function summarizePlanAdaptiveRouting(steps: PlanStepRecord[]): PlanAdaptiveRout
     attention,
     steps: summarizedSteps,
   };
+}
+
+function assessPlanRisk(goal: GoalRecord, plan: PlanRecord, steps: PlanStepRecord[]): PlanRiskAssessment {
+  const adaptiveRoutingSummary = summarizePlanAdaptiveRouting(steps);
+  const confidence = typeof plan.confidence === "number" && Number.isFinite(plan.confidence) ? plan.confidence : 0.75;
+  let riskScore =
+    adaptiveRoutingSummary.mode_counts.none * 100 +
+    adaptiveRoutingSummary.mode_counts.fallback_degraded * 35 +
+    Math.max(0, (0.8 - confidence) * 20);
+  if (adaptiveRoutingSummary.worker_step_count === 0) {
+    riskScore -= 10;
+  }
+  riskScore = Number(Math.max(0, riskScore).toFixed(3));
+
+  const warnings = [...adaptiveRoutingSummary.attention];
+  let pauseReason: string | null = null;
+  if (goal.autonomy_mode === "execute_destructive_with_approval") {
+    if (adaptiveRoutingSummary.mode_counts.none > 0) {
+      pauseReason =
+        "Destructive autonomy requires a dispatchable live worker pool, but this plan still has worker steps with no adaptive lane guidance.";
+    } else if (adaptiveRoutingSummary.mode_counts.fallback_degraded > 0) {
+      pauseReason =
+        "Destructive autonomy requires healthier worker lanes, but this plan currently relies on degraded fallback routing.";
+    }
+  } else if (goal.autonomy_mode === "execute_bounded" && adaptiveRoutingSummary.mode_counts.none > 0) {
+    warnings.push(
+      "Execute-bounded mode will queue work, but this plan currently depends on worker lanes that are not yet dispatchable."
+    );
+  }
+
+  return {
+    autonomy_mode: goal.autonomy_mode,
+    worker_step_count: adaptiveRoutingSummary.worker_step_count,
+    risk_score: riskScore,
+    can_auto_execute: pauseReason === null,
+    pause_reason: pauseReason,
+    warnings,
+    adaptive_routing_summary: adaptiveRoutingSummary,
+  };
+}
+
+function compareGoalExecutionPlanCandidates(
+  left: { plan: PlanRecord; resolution: GoalExecutionPlanResolution; assessment: PlanRiskAssessment },
+  right: { plan: PlanRecord; resolution: GoalExecutionPlanResolution; assessment: PlanRiskAssessment }
+) {
+  if (left.assessment.can_auto_execute !== right.assessment.can_auto_execute) {
+    return left.assessment.can_auto_execute ? -1 : 1;
+  }
+  if (left.assessment.risk_score !== right.assessment.risk_score) {
+    return left.assessment.risk_score - right.assessment.risk_score;
+  }
+  const resolutionRank: Record<GoalExecutionPlanResolution, number> = {
+    explicit: 0,
+    active: 1,
+    selected: 2,
+    latest: 3,
+    generated: 4,
+    missing: 5,
+  };
+  if (resolutionRank[left.resolution] !== resolutionRank[right.resolution]) {
+    return resolutionRank[left.resolution] - resolutionRank[right.resolution];
+  }
+  const leftConfidence = typeof left.plan.confidence === "number" && Number.isFinite(left.plan.confidence) ? left.plan.confidence : -1;
+  const rightConfidence = typeof right.plan.confidence === "number" && Number.isFinite(right.plan.confidence) ? right.plan.confidence : -1;
+  if (leftConfidence !== rightConfidence) {
+    return rightConfidence - leftConfidence;
+  }
+  return right.plan.updated_at.localeCompare(left.plan.updated_at);
 }
 
 function listGoalAutorunCandidates(storage: Storage, input: Pick<GoalAutorunLikeInput, "goal_id" | "limit">) {
@@ -788,7 +898,7 @@ export async function goalExecute(
           },
           plan_id: input.plan_id,
           title: input.title,
-          selected: input.selected ?? true,
+          selected: false,
           source_client: input.source_client,
           source_model: input.source_model,
           source_agent: input.source_agent,
@@ -800,19 +910,22 @@ export async function goalExecute(
         const generatedPlanId = String(generated.plan.plan_id);
         const generatedPlan = storage.getPlanById(generatedPlanId);
         if (generatedPlan && plannerSelection) {
+          const updatedPlan = storage.updatePlan({
+            plan_id: generatedPlanId,
+            metadata: {
+              methodology_selection: plannerSelection,
+            },
+          }).plan;
           planResolution = {
             resolution: "generated",
-            plan: storage.updatePlan({
-              plan_id: generatedPlanId,
-              metadata: {
-                methodology_selection: plannerSelection,
-              },
-            }).plan,
+            plan: updatedPlan,
+            assessment: assessPlanRisk(goal, updatedPlan, storage.listPlanSteps(generatedPlanId)),
           };
         } else {
           planResolution = {
             resolution: "generated",
             plan: generatedPlan ?? null,
+            assessment: generatedPlan ? assessPlanRisk(goal, generatedPlan, storage.listPlanSteps(generatedPlan.plan_id)) : null,
           };
         }
       }
@@ -821,8 +934,57 @@ export async function goalExecute(
       if (!plan) {
         throw new Error(`Failed to resolve an execution plan for goal ${goal.goal_id}`);
       }
+      let planAssessment =
+        planResolution.assessment ?? assessPlanRisk(goal, plan, storage.listPlanSteps(plan.plan_id));
 
       let selectedExistingPlan = false;
+      const shouldPauseForWorkerPool = planAssessment.can_auto_execute === false;
+      if (shouldPauseForWorkerPool) {
+        const snapshotGoal = storage.getGoalById(goal.goal_id) ?? goal;
+        const pausedSteps = storage.listPlanSteps(plan.plan_id);
+        const pausedSummary = summarizeGoalExecution(plan, pausedSteps);
+        const pausedAdaptiveRouting = summarizePlanAdaptiveRouting(pausedSteps);
+        storage.appendRuntimeEvent({
+          event_type: "goal.executed",
+          entity_type: "goal",
+          entity_id: goal.goal_id,
+          status: snapshotGoal.status,
+          summary: `Goal ${goal.goal_id} execution paused because the worker pool is too weak for ${goal.autonomy_mode}.`,
+          details: {
+            action: "paused_worker_pool",
+            plan_id: plan.plan_id,
+            plan_status: plan.status,
+            created_plan: generatedPlanResult !== null,
+            plan_resolution: planResolution.resolution,
+            planner_selection: plannerSelection,
+            plan_risk_assessment: planAssessment,
+          },
+          source_client: input.source_client,
+          source_model: input.source_model,
+          source_agent: input.source_agent,
+        });
+        return {
+          ok: true,
+          executed: false,
+          paused_for_worker_pool: true,
+          pause_reason: planAssessment.pause_reason,
+          goal: snapshotGoal,
+          plan,
+          created_plan: generatedPlanResult !== null,
+          generated_plan: generatedPlanResult,
+          plan_resolution: planResolution.resolution,
+          selected_existing_plan: false,
+          message: planAssessment.pause_reason,
+          execution_summary: pausedSummary,
+          adaptive_routing_summary: pausedAdaptiveRouting,
+          plan_risk_assessment: planAssessment,
+          planner_selection: plannerSelection,
+          final_plan: plan,
+          final_steps: pausedSteps,
+          final_readiness: evaluatePlanStepReadiness(pausedSteps),
+        };
+      }
+
       const requiresSelectionAlignment = goal.active_plan_id !== plan.plan_id || !plan.selected;
       if (requiresSelectionAlignment) {
         await invokeTool("plan.select", {
@@ -842,6 +1004,7 @@ export async function goalExecute(
         if (!plan) {
           throw new Error(`Plan disappeared during goal.execute selection alignment: ${goal.goal_id}`);
         }
+        planAssessment = assessPlanRisk(goal, plan, storage.listPlanSteps(plan.plan_id));
         if (planResolution.resolution !== "generated") {
           selectedExistingPlan = true;
         }
@@ -867,6 +1030,7 @@ export async function goalExecute(
             plan_resolution: planResolution.resolution,
             planner_selection: plannerSelection,
             adaptive_routing_summary: initialAdaptiveRouting,
+            plan_risk_assessment: planAssessment,
           },
           source_client: input.source_client,
           source_model: input.source_model,
@@ -884,6 +1048,7 @@ export async function goalExecute(
           message: `Plan ${plan.plan_id} is already ${plan.status}.`,
           execution_summary: initialSummary,
           adaptive_routing_summary: initialAdaptiveRouting,
+          plan_risk_assessment: planAssessment,
           planner_selection: plannerSelection,
           final_plan: plan,
           final_steps: initialSteps,
@@ -935,6 +1100,7 @@ export async function goalExecute(
           dry_run: input.dry_run ?? false,
           execution_summary: executionSummary,
           adaptive_routing_summary: adaptiveRoutingSummary,
+          plan_risk_assessment: planAssessment,
         },
         source_client: input.source_client,
         source_model: input.source_model,
@@ -955,6 +1121,7 @@ export async function goalExecute(
         execution: executionResult,
         execution_summary: executionSummary,
         adaptive_routing_summary: adaptiveRoutingSummary,
+        plan_risk_assessment: planAssessment,
         final_plan: finalPlan,
         final_steps: finalSteps,
         final_readiness: finalReadiness,

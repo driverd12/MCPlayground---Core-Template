@@ -558,6 +558,156 @@ test("goal.execute auto-selects the optimization planner and bootstraps an exper
   }
 });
 
+test("goal.execute pauses destructive autonomy when the generated worker pool is too weak", async () => {
+  const testId = `${Date.now()}-goal-execute-pause-worker-pool`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-execute-pause-worker-pool-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Destructive autonomy goal",
+      objective: "Ship a bounded mutation slice only when a dispatchable live worker pool exists",
+      status: "active",
+      autonomy_mode: "execute_destructive_with_approval",
+      acceptance_criteria: ["A generated plan pauses instead of auto-running against a weak worker pool"],
+      tags: ["agentic", "delivery"],
+    });
+
+    const executedGoal = await callTool(client, "goal.execute", {
+      mutation: nextMutation(testId, "goal.execute", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      max_passes: 4,
+    });
+
+    assert.equal(executedGoal.ok, true);
+    assert.equal(executedGoal.executed, false);
+    assert.equal(executedGoal.paused_for_worker_pool, true);
+    assert.equal(executedGoal.created_plan, true);
+    assert.equal(executedGoal.plan_resolution, "generated");
+    assert.equal(executedGoal.plan.selected, false);
+    assert.equal(executedGoal.plan_risk_assessment.can_auto_execute, false);
+    assert.equal(executedGoal.plan_risk_assessment.adaptive_routing_summary.mode_counts.none, 3);
+    assert.match(executedGoal.pause_reason, /dispatchable live worker pool/i);
+    assert.equal(executedGoal.execution_summary.completed_count, 0);
+    assert.ok(executedGoal.execution_summary.ready_count >= 1);
+
+    const goalState = await callTool(client, "goal.get", {
+      goal_id: createdGoal.goal.goal_id,
+    });
+    assert.equal(goalState.goal.active_plan_id, null);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("goal.execute prefers a lower-risk existing plan when the active plan is autonomy-blocked", async () => {
+  const testId = `${Date.now()}-goal-execute-lower-risk-plan`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-execute-lower-risk-plan-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Prefer lower-risk plan goal",
+      objective: "Choose the safer existing plan when destructive autonomy rejects the active worker lane",
+      status: "active",
+      autonomy_mode: "execute_destructive_with_approval",
+      acceptance_criteria: ["A safer existing plan is selected over the risky active plan"],
+    });
+
+    const riskyPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create.risky", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      title: "Risky worker plan",
+      summary: "Selected plan with no dispatchable worker lane guidance",
+      selected: true,
+      confidence: 0.84,
+      metadata: {
+        adaptive_plan_routing_summary: {
+          worker_step_count: 1,
+          mode_counts: {
+            preferred_pool: 0,
+            fallback_degraded: 0,
+            none: 1,
+          },
+        },
+      },
+      steps: [
+        {
+          step_id: "risky-worker",
+          seq: 1,
+          title: "Risky worker lane",
+          step_kind: "mutation",
+          executor_kind: "worker",
+          input: {
+            objective: "Attempt a mutation with no live worker pool",
+            project_dir: REPO_ROOT,
+          },
+          metadata: {
+            adaptive_assignment: {
+              mode: "none",
+              lane_kind: "implementation",
+              rationale: "No dispatchable worker pool exists.",
+            },
+          },
+        },
+      ],
+    });
+    assert.equal(riskyPlan.plan.selected, true);
+
+    const safePlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create.safe", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      title: "Safe synchronous plan",
+      summary: "Use a synchronous MCP step that does not depend on weak worker lanes",
+      confidence: 0.72,
+      steps: [
+        {
+          step_id: "safe-read",
+          seq: 1,
+          title: "Read the goal safely",
+          step_kind: "analysis",
+          executor_kind: "tool",
+          tool_name: "goal.get",
+          input: {
+            goal_id: createdGoal.goal.goal_id,
+          },
+        },
+      ],
+    });
+    assert.equal(safePlan.plan.selected, false);
+
+    const executedGoal = await callTool(client, "goal.execute", {
+      mutation: nextMutation(testId, "goal.execute", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      max_passes: 4,
+    });
+
+    assert.equal(executedGoal.ok, true);
+    assert.equal(executedGoal.executed, true);
+    assert.equal(executedGoal.plan.plan_id, safePlan.plan.plan_id);
+    assert.equal(executedGoal.plan_resolution, "latest");
+    assert.equal(executedGoal.selected_existing_plan, true);
+    assert.equal(executedGoal.final_plan.status, "completed");
+    assert.equal(executedGoal.plan_risk_assessment.can_auto_execute, true);
+    assert.equal(executedGoal.plan_risk_assessment.worker_step_count, 0);
+
+    const goalState = await callTool(client, "goal.get", {
+      goal_id: createdGoal.goal.goal_id,
+    });
+    assert.equal(goalState.goal.active_plan_id, safePlan.plan.plan_id);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("goal.execute can run an existing synchronous plan to terminal completion", async () => {
   const testId = `${Date.now()}-goal-execute-complete`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-execute-complete-test-"));
