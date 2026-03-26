@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { type GoalRecord, type PlanRecord, type PlanStepRecord, Storage } from "../storage.js";
+import { summarizeAdaptiveSessionHealth } from "./agent_session.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { evaluatePlanStepReadiness, getPlanStepApprovalGateKind } from "./plan.js";
 
@@ -275,6 +276,14 @@ function readString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function readFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
 function buildGoalExecuteDerivedMutation(
   mutation: { idempotency_key: string; side_effect_fingerprint: string },
   phase: string
@@ -495,6 +504,110 @@ function resolveDefaultPlannerSelection(goal: GoalRecord, options?: Record<strin
     evidence: {
       optimization_hits: optimizationHits,
       delivery_hits: deliveryHits,
+    },
+  };
+}
+
+function hasViableWorkerPoolForRecovery(storage: Storage) {
+  return storage
+    .listAgentSessions({
+      active_only: true,
+      limit: 100,
+    })
+    .some((session) => {
+      const adaptiveState = summarizeAdaptiveSessionHealth(session).adaptive_state;
+      return adaptiveState === "healthy" || adaptiveState === "unproven";
+    });
+}
+
+function shouldRetryPlanningForWorkerPoolRecovery(
+  storage: Storage,
+  input: z.infer<typeof goalExecuteSchema>,
+  plan: PlanRecord,
+  assessment: PlanRiskAssessment
+) {
+  if (input.plan_id || input.create_plan_if_missing === false || assessment.can_auto_execute) {
+    return false;
+  }
+  if (!isRecord(plan.metadata.worker_pool_pause)) {
+    return false;
+  }
+  return hasViableWorkerPoolForRecovery(storage);
+}
+
+async function generateGoalExecutionPlanCandidate(
+  storage: Storage,
+  invokeTool: (toolName: string, input: Record<string, unknown>) => Promise<unknown>,
+  params: {
+    input: z.infer<typeof goalExecuteSchema>;
+    goal: GoalRecord;
+    planner_selection: PlannerSelection;
+    source: {
+      source_client?: string;
+      source_model?: string;
+      source_agent?: string;
+    };
+    generation_reason: "missing_plan" | "worker_pool_recovery";
+    previous_plan_id?: string;
+  }
+) {
+  const generated = await invokeTool("pack.plan.generate", {
+    mutation: buildGoalExecuteDerivedMutation(
+      params.input.mutation,
+      params.generation_reason === "missing_plan" ? "plan-generate" : "plan-recover"
+    ),
+    pack_id: params.input.pack_id,
+    hook_name: params.planner_selection.hook_name,
+    target: {
+      entity_type: "goal",
+      entity_id: params.goal.goal_id,
+    },
+    goal_id: params.goal.goal_id,
+    context_artifact_ids: params.input.context_artifact_ids,
+    options: {
+      ...(params.input.options ?? {}),
+      methodology_selection: params.planner_selection,
+    },
+    plan_id: params.input.plan_id,
+    title: params.input.title,
+    selected: false,
+    source_client: params.input.source_client,
+    source_model: params.input.source_model,
+    source_agent: params.input.source_agent,
+  });
+  if (!isRecord(generated) || !isRecord(generated.plan) || !readString(generated.plan.plan_id)) {
+    throw new Error(`pack.plan.generate did not return a plan for goal ${params.goal.goal_id}`);
+  }
+
+  const generatedPlanId = String(generated.plan.plan_id);
+  const generatedPlan = storage.getPlanById(generatedPlanId);
+  if (!generatedPlan) {
+    return {
+      generated_plan_result: generated,
+      plan_resolution: {
+        resolution: "generated" as GoalExecutionPlanResolution,
+        plan: null,
+        assessment: null,
+      },
+    };
+  }
+
+  const updatedPlan = storage.updatePlan({
+    plan_id: generatedPlanId,
+    metadata: {
+      methodology_selection: params.planner_selection,
+      goal_execute_generation_reason: params.generation_reason,
+      replanned_from_plan_id: params.previous_plan_id ?? null,
+    },
+    ...params.source,
+  }).plan;
+
+  return {
+    generated_plan_result: generated,
+    plan_resolution: {
+      resolution: "generated" as GoalExecutionPlanResolution,
+      plan: updatedPlan,
+      assessment: assessPlanRisk(params.goal, updatedPlan, storage.listPlanSteps(generatedPlanId)),
     },
   };
 }
@@ -759,6 +872,120 @@ function compareGoalExecutionPlanCandidates(
   return right.plan.updated_at.localeCompare(left.plan.updated_at);
 }
 
+function sameAdaptiveModeCounts(
+  left: Record<AdaptiveRoutingMode, number> | null | undefined,
+  right: Record<AdaptiveRoutingMode, number> | null | undefined
+) {
+  return (
+    (left?.preferred_pool ?? 0) === (right?.preferred_pool ?? 0) &&
+    (left?.fallback_degraded ?? 0) === (right?.fallback_degraded ?? 0) &&
+    (left?.none ?? 0) === (right?.none ?? 0)
+  );
+}
+
+function sameStringArray(left: string[] | null | undefined, right: string[]) {
+  if (!Array.isArray(left) || left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+}
+
+function hasMatchingPersistedPlanRiskAssessment(
+  plan: PlanRecord,
+  goal: GoalRecord,
+  assessment: PlanRiskAssessment
+) {
+  const existingAssessment = isRecord(plan.metadata.last_plan_risk_assessment) ? plan.metadata.last_plan_risk_assessment : null;
+  const existingPause = isRecord(plan.metadata.worker_pool_pause) ? plan.metadata.worker_pool_pause : null;
+  const existingAssessmentSummary = isRecord(existingAssessment?.adaptive_routing_summary)
+    ? existingAssessment.adaptive_routing_summary
+    : null;
+  const existingAssessmentModeCounts = isRecord(existingAssessmentSummary?.mode_counts)
+    ? {
+        preferred_pool: readFiniteNumber(existingAssessmentSummary.mode_counts.preferred_pool) ?? 0,
+        fallback_degraded: readFiniteNumber(existingAssessmentSummary.mode_counts.fallback_degraded) ?? 0,
+        none: readFiniteNumber(existingAssessmentSummary.mode_counts.none) ?? 0,
+      }
+    : null;
+  const assessmentMatches =
+    existingAssessment !== null &&
+    readString(existingAssessment.autonomy_mode) === assessment.autonomy_mode &&
+    readFiniteNumber(existingAssessment.risk_score) === assessment.risk_score &&
+    readBoolean(existingAssessment.can_auto_execute) === assessment.can_auto_execute &&
+    readString(existingAssessment.pause_reason) === assessment.pause_reason &&
+    sameStringArray(Array.isArray(existingAssessment.warnings) ? existingAssessment.warnings : null, assessment.warnings) &&
+    sameAdaptiveModeCounts(existingAssessmentModeCounts, assessment.adaptive_routing_summary.mode_counts);
+
+  const pauseMatches = assessment.can_auto_execute
+    ? plan.metadata.worker_pool_pause === null || plan.metadata.worker_pool_pause === undefined
+    : existingPause !== null &&
+      readString(existingPause.goal_id) === goal.goal_id &&
+      readString(existingPause.autonomy_mode) === goal.autonomy_mode &&
+      readString(existingPause.reason) === assessment.pause_reason &&
+      readFiniteNumber(existingPause.risk_score) === assessment.risk_score &&
+      readFiniteNumber(existingPause.worker_step_count) === assessment.worker_step_count &&
+      sameAdaptiveModeCounts(
+        isRecord(existingPause.mode_counts)
+          ? {
+              preferred_pool: readFiniteNumber(existingPause.mode_counts.preferred_pool) ?? 0,
+              fallback_degraded: readFiniteNumber(existingPause.mode_counts.fallback_degraded) ?? 0,
+              none: readFiniteNumber(existingPause.mode_counts.none) ?? 0,
+            }
+          : null,
+        assessment.adaptive_routing_summary.mode_counts
+      );
+
+  return assessmentMatches && pauseMatches;
+}
+
+function persistPlanRiskAssessment(
+  storage: Storage,
+  goal: GoalRecord,
+  plan: PlanRecord,
+  assessment: PlanRiskAssessment,
+  source?: {
+    source_client?: string;
+    source_model?: string;
+    source_agent?: string;
+  }
+) {
+  const now = new Date().toISOString();
+  const workerPoolPause = assessment.can_auto_execute
+    ? null
+    : {
+        paused_at: now,
+        goal_id: goal.goal_id,
+        autonomy_mode: goal.autonomy_mode,
+        reason: assessment.pause_reason,
+        risk_score: assessment.risk_score,
+        worker_step_count: assessment.worker_step_count,
+        mode_counts: assessment.adaptive_routing_summary.mode_counts,
+      };
+
+  if (hasMatchingPersistedPlanRiskAssessment(plan, goal, assessment)) {
+    return plan;
+  }
+
+  return storage.updatePlan({
+    plan_id: plan.plan_id,
+    metadata: {
+      last_plan_risk_assessment: {
+        evaluated_at: now,
+        autonomy_mode: assessment.autonomy_mode,
+        risk_score: assessment.risk_score,
+        can_auto_execute: assessment.can_auto_execute,
+        pause_reason: assessment.pause_reason,
+        warnings: assessment.warnings,
+        adaptive_routing_summary: assessment.adaptive_routing_summary,
+      },
+      worker_pool_pause: workerPoolPause,
+    },
+    source_client: source?.source_client,
+    source_model: source?.source_model,
+    source_agent: source?.source_agent,
+  }).plan;
+}
+
 function listGoalAutorunCandidates(storage: Storage, input: Pick<GoalAutorunLikeInput, "goal_id" | "limit">) {
   if (input.goal_id) {
     const goal = storage.getGoalById(input.goal_id);
@@ -860,10 +1087,16 @@ export async function goalExecute(
       if (!goal) {
         throw new Error(`Goal not found: ${input.goal_id}`);
       }
+      const source = {
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      };
 
       let planResolution = resolveGoalExecutionPlan(storage, input, goal);
       let generatedPlanResult: Record<string, unknown> | null = null;
       let plannerSelection: PlannerSelection | null = null;
+      let generatedPlanReason: "missing_plan" | "worker_pool_recovery" | null = null;
 
       if (!planResolution.plan) {
         if (!input.create_plan_if_missing) {
@@ -882,52 +1115,16 @@ export async function goalExecute(
         plannerSelection = input.hook_name
           ? buildExplicitPlannerSelection(input.hook_name)
           : resolveDefaultPlannerSelection(goal, input.options);
-        const generated = await invokeTool("pack.plan.generate", {
-          mutation: buildGoalExecuteDerivedMutation(input.mutation, "plan-generate"),
-          pack_id: input.pack_id,
-          hook_name: plannerSelection.hook_name,
-          target: {
-            entity_type: "goal",
-            entity_id: goal.goal_id,
-          },
-          goal_id: goal.goal_id,
-          context_artifact_ids: input.context_artifact_ids,
-          options: {
-            ...(input.options ?? {}),
-            methodology_selection: plannerSelection,
-          },
-          plan_id: input.plan_id,
-          title: input.title,
-          selected: false,
-          source_client: input.source_client,
-          source_model: input.source_model,
-          source_agent: input.source_agent,
+        generatedPlanReason = "missing_plan";
+        const generatedCandidate = await generateGoalExecutionPlanCandidate(storage, invokeTool, {
+          input,
+          goal,
+          planner_selection: plannerSelection,
+          source,
+          generation_reason: generatedPlanReason,
         });
-        if (!isRecord(generated) || !isRecord(generated.plan) || !readString(generated.plan.plan_id)) {
-          throw new Error(`pack.plan.generate did not return a plan for goal ${goal.goal_id}`);
-        }
-        generatedPlanResult = generated;
-        const generatedPlanId = String(generated.plan.plan_id);
-        const generatedPlan = storage.getPlanById(generatedPlanId);
-        if (generatedPlan && plannerSelection) {
-          const updatedPlan = storage.updatePlan({
-            plan_id: generatedPlanId,
-            metadata: {
-              methodology_selection: plannerSelection,
-            },
-          }).plan;
-          planResolution = {
-            resolution: "generated",
-            plan: updatedPlan,
-            assessment: assessPlanRisk(goal, updatedPlan, storage.listPlanSteps(generatedPlanId)),
-          };
-        } else {
-          planResolution = {
-            resolution: "generated",
-            plan: generatedPlan ?? null,
-            assessment: generatedPlan ? assessPlanRisk(goal, generatedPlan, storage.listPlanSteps(generatedPlan.plan_id)) : null,
-          };
-        }
+        generatedPlanResult = generatedCandidate.generated_plan_result;
+        planResolution = generatedCandidate.plan_resolution;
       }
 
       let plan = planResolution.plan;
@@ -936,6 +1133,44 @@ export async function goalExecute(
       }
       let planAssessment =
         planResolution.assessment ?? assessPlanRisk(goal, plan, storage.listPlanSteps(plan.plan_id));
+      if (shouldRetryPlanningForWorkerPoolRecovery(storage, input, plan, planAssessment)) {
+        plannerSelection = input.hook_name
+          ? buildExplicitPlannerSelection(input.hook_name)
+          : resolveDefaultPlannerSelection(goal, input.options);
+        generatedPlanReason = "worker_pool_recovery";
+        const generatedCandidate = await generateGoalExecutionPlanCandidate(storage, invokeTool, {
+          input,
+          goal,
+          planner_selection: plannerSelection,
+          source,
+          generation_reason: generatedPlanReason,
+          previous_plan_id: plan.plan_id,
+        });
+        generatedPlanResult = generatedCandidate.generated_plan_result;
+        const rankedCandidates = [
+          {
+            plan,
+            resolution: planResolution.resolution,
+            assessment: planAssessment,
+          },
+          ...(generatedCandidate.plan_resolution.plan && generatedCandidate.plan_resolution.assessment
+            ? [
+                {
+                  plan: generatedCandidate.plan_resolution.plan,
+                  resolution: generatedCandidate.plan_resolution.resolution,
+                  assessment: generatedCandidate.plan_resolution.assessment,
+                },
+              ]
+            : []),
+        ].sort(compareGoalExecutionPlanCandidates);
+        const bestCandidate = rankedCandidates[0];
+        if (bestCandidate) {
+          planResolution = bestCandidate;
+          plan = bestCandidate.plan;
+          planAssessment = bestCandidate.assessment;
+        }
+      }
+      plan = persistPlanRiskAssessment(storage, goal, plan, planAssessment, source);
 
       let selectedExistingPlan = false;
       const shouldPauseForWorkerPool = planAssessment.can_auto_execute === false;
@@ -955,13 +1190,12 @@ export async function goalExecute(
             plan_id: plan.plan_id,
             plan_status: plan.status,
             created_plan: generatedPlanResult !== null,
+            generated_plan_reason: generatedPlanReason,
             plan_resolution: planResolution.resolution,
             planner_selection: plannerSelection,
             plan_risk_assessment: planAssessment,
           },
-          source_client: input.source_client,
-          source_model: input.source_model,
-          source_agent: input.source_agent,
+          ...source,
         });
         return {
           ok: true,
@@ -972,6 +1206,7 @@ export async function goalExecute(
           plan,
           created_plan: generatedPlanResult !== null,
           generated_plan: generatedPlanResult,
+          generated_plan_reason: generatedPlanReason,
           plan_resolution: planResolution.resolution,
           selected_existing_plan: false,
           message: planAssessment.pause_reason,
@@ -1005,6 +1240,7 @@ export async function goalExecute(
           throw new Error(`Plan disappeared during goal.execute selection alignment: ${goal.goal_id}`);
         }
         planAssessment = assessPlanRisk(goal, plan, storage.listPlanSteps(plan.plan_id));
+        plan = persistPlanRiskAssessment(storage, goal, plan, planAssessment, source);
         if (planResolution.resolution !== "generated") {
           selectedExistingPlan = true;
         }
@@ -1027,14 +1263,13 @@ export async function goalExecute(
             plan_id: plan.plan_id,
             plan_status: plan.status,
             created_plan: generatedPlanResult !== null,
+            generated_plan_reason: generatedPlanReason,
             plan_resolution: planResolution.resolution,
             planner_selection: plannerSelection,
             adaptive_routing_summary: initialAdaptiveRouting,
             plan_risk_assessment: planAssessment,
           },
-          source_client: input.source_client,
-          source_model: input.source_model,
-          source_agent: input.source_agent,
+          ...source,
         });
         return {
           ok: true,
@@ -1043,6 +1278,7 @@ export async function goalExecute(
           plan,
           created_plan: generatedPlanResult !== null,
           generated_plan: generatedPlanResult,
+          generated_plan_reason: generatedPlanReason,
           plan_resolution: planResolution.resolution,
           selected_existing_plan: selectedExistingPlan,
           message: `Plan ${plan.plan_id} is already ${plan.status}.`,
@@ -1074,14 +1310,16 @@ export async function goalExecute(
       })) as Record<string, unknown>;
 
       const finalGoal = storage.getGoalById(goal.goal_id) ?? goal;
-      const finalPlan = storage.getPlanById(plan.plan_id);
+      let finalPlan = storage.getPlanById(plan.plan_id);
       if (!finalPlan) {
         throw new Error(`Plan disappeared during goal.execute: ${plan.plan_id}`);
       }
       const finalSteps = storage.listPlanSteps(plan.plan_id);
       const finalReadiness = evaluatePlanStepReadiness(finalSteps);
       const executionSummary = summarizeGoalExecution(finalPlan, finalSteps);
-      const adaptiveRoutingSummary = summarizePlanAdaptiveRouting(finalSteps);
+      const finalPlanAssessment = assessPlanRisk(finalGoal, finalPlan, finalSteps);
+      finalPlan = persistPlanRiskAssessment(storage, finalGoal, finalPlan, finalPlanAssessment, source);
+      const adaptiveRoutingSummary = finalPlanAssessment.adaptive_routing_summary;
 
       storage.appendRuntimeEvent({
         event_type: "goal.executed",
@@ -1093,6 +1331,7 @@ export async function goalExecute(
           plan_id: finalPlan.plan_id,
           plan_status: finalPlan.status,
           created_plan: generatedPlanResult !== null,
+          generated_plan_reason: generatedPlanReason,
           plan_resolution: planResolution.resolution,
           selected_existing_plan: selectedExistingPlan,
           planner_selection: plannerSelection,
@@ -1100,11 +1339,9 @@ export async function goalExecute(
           dry_run: input.dry_run ?? false,
           execution_summary: executionSummary,
           adaptive_routing_summary: adaptiveRoutingSummary,
-          plan_risk_assessment: planAssessment,
+          plan_risk_assessment: finalPlanAssessment,
         },
-        source_client: input.source_client,
-        source_model: input.source_model,
-        source_agent: input.source_agent,
+        ...source,
       });
 
       return {
@@ -1114,6 +1351,7 @@ export async function goalExecute(
         plan: finalPlan,
         created_plan: generatedPlanResult !== null,
         generated_plan: generatedPlanResult,
+        generated_plan_reason: generatedPlanReason,
         plan_resolution: planResolution.resolution,
         selected_existing_plan: selectedExistingPlan,
         planner_selection: plannerSelection,
@@ -1121,7 +1359,7 @@ export async function goalExecute(
         execution: executionResult,
         execution_summary: executionSummary,
         adaptive_routing_summary: adaptiveRoutingSummary,
-        plan_risk_assessment: planAssessment,
+        plan_risk_assessment: finalPlanAssessment,
         final_plan: finalPlan,
         final_steps: finalSteps,
         final_readiness: finalReadiness,
@@ -1215,8 +1453,28 @@ async function executeGoalAutorunPass(
       continue;
     }
 
+    let planRecord = plan;
     const steps = storage.listPlanSteps(plan.plan_id);
-    const summary = summarizeGoalExecution(plan, steps);
+    const planAssessment = planResolution.assessment ?? assessPlanRisk(goal, planRecord, steps);
+    planRecord = persistPlanRiskAssessment(storage, goal, planRecord, planAssessment, {
+      source_client: input.source_client,
+      source_model: input.source_model,
+      source_agent: input.source_agent,
+    });
+    if (!planAssessment.can_auto_execute) {
+      skippedCount += 1;
+      results.push({
+        goal_id: goal.goal_id,
+        plan_id: planRecord.plan_id,
+        action: "skipped",
+        reason: "worker_pool_paused",
+        pause_reason: planAssessment.pause_reason,
+        plan_risk_assessment: planAssessment,
+      });
+      continue;
+    }
+
+    const summary = summarizeGoalExecution(planRecord, steps);
     const runningWorkerStep = steps.find(
       (step) => step.status === "running" && (step.executor_kind === "worker" || step.executor_kind === "task")
     );
@@ -1227,7 +1485,7 @@ async function executeGoalAutorunPass(
       skippedCount += 1;
       results.push({
         goal_id: goal.goal_id,
-        plan_id: plan.plan_id,
+        plan_id: planRecord.plan_id,
         action: "skipped",
         reason: blockedApprovalStep.gate_type === "policy" ? "policy_gate" : "human_gate",
         blocked_step: blockedApprovalStep,
@@ -1240,7 +1498,7 @@ async function executeGoalAutorunPass(
       skippedCount += 1;
       results.push({
         goal_id: goal.goal_id,
-        plan_id: plan.plan_id,
+        plan_id: planRecord.plan_id,
         action: "skipped",
         reason: "running_worker",
         running_step: {
@@ -1257,7 +1515,7 @@ async function executeGoalAutorunPass(
       skippedCount += 1;
       results.push({
         goal_id: goal.goal_id,
-        plan_id: plan.plan_id,
+        plan_id: planRecord.plan_id,
         action: "skipped",
         reason: "idle_no_ready_work",
         execution_summary: summary,
@@ -1268,7 +1526,7 @@ async function executeGoalAutorunPass(
     const executed = (await invokeTool("goal.execute", {
       mutation: buildGoalExecuteDerivedMutation(mutation, `autorun:${goal.goal_id}`),
       goal_id: goal.goal_id,
-      plan_id: plan.plan_id,
+      plan_id: planRecord.plan_id,
       create_plan_if_missing: input.create_plan_if_missing,
       pack_id: input.pack_id,
       hook_name: input.hook_name,
@@ -1292,7 +1550,7 @@ async function executeGoalAutorunPass(
     executedCount += 1;
     results.push({
       goal_id: goal.goal_id,
-      plan_id: plan.plan_id,
+      plan_id: planRecord.plan_id,
       action: "executed",
       reason: hasRunningTriChat ? "continue_trichat_backend" : "ready_work",
       execution: executed,

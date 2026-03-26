@@ -35,6 +35,7 @@ type GoalExecutionSnapshot = {
   pending_count: number;
   blocked_approval_count: number;
   blocked_human_count: number;
+  worker_pool_paused: boolean;
   next_action: string;
 };
 
@@ -120,6 +121,7 @@ function summarizeGoalExecution(plan: PlanRecord | null, steps: PlanStepRecord[]
       pending_count: 0,
       blocked_approval_count: 0,
       blocked_human_count: 0,
+      worker_pool_paused: false,
       next_action: "No active plan exists for this goal.",
     };
   }
@@ -135,12 +137,15 @@ function summarizeGoalExecution(plan: PlanRecord | null, steps: PlanStepRecord[]
   const blockedHumanCount = blockedApprovalSteps.filter((step) => getPlanStepApprovalGateKind(step) === "human").length;
   const runningCount = counts.running ?? 0;
   const failedCount = counts.failed ?? 0;
+  const workerPoolPause = isRecord(plan.metadata.worker_pool_pause) ? plan.metadata.worker_pool_pause : null;
 
   let nextAction = "Plan is idle.";
   if (plan.status === "completed") {
     nextAction = "Plan completed; review artifacts and close the goal if acceptance criteria are satisfied.";
   } else if (failedCount > 0) {
     nextAction = "Inspect failed steps and retry or resume only after the blocking issue is fixed.";
+  } else if (workerPoolPause) {
+    nextAction = "Execution is paused until healthier worker lanes are available or a safer plan is selected.";
   } else if (blockedApprovalCount > 0) {
     nextAction =
       blockedHumanCount === blockedApprovalCount
@@ -163,6 +168,7 @@ function summarizeGoalExecution(plan: PlanRecord | null, steps: PlanStepRecord[]
     pending_count: counts.pending ?? 0,
     blocked_approval_count: blockedApprovalCount,
     blocked_human_count: blockedHumanCount,
+    worker_pool_paused: workerPoolPause !== null,
     next_action: nextAction,
   };
 }
@@ -351,6 +357,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       acc.blocked_approval_count += summary.execution_summary.blocked_approval_count;
       acc.blocked_human_count += summary.execution_summary.blocked_human_count;
       acc.failed_step_count += summary.execution_summary.failed_count;
+      acc.worker_pool_paused_count += summary.execution_summary.worker_pool_paused ? 1 : 0;
       acc.adaptive_preferred_pool_count += summary.adaptive_routing_summary.mode_counts.preferred_pool;
       acc.adaptive_fallback_degraded_count += summary.adaptive_routing_summary.mode_counts.fallback_degraded;
       acc.adaptive_none_count += summary.adaptive_routing_summary.mode_counts.none;
@@ -362,6 +369,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       blocked_approval_count: 0,
       blocked_human_count: 0,
       failed_step_count: 0,
+      worker_pool_paused_count: 0,
       adaptive_preferred_pool_count: 0,
       adaptive_fallback_degraded_count: 0,
       adaptive_none_count: 0,
@@ -402,6 +410,9 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
         ? `Human approval is blocking ${totals.blocked_human_count} plan step(s).`
         : `Approval gates are blocking ${totals.blocked_approval_count} plan step(s).`
     );
+  }
+  if (totals.worker_pool_paused_count > 0) {
+    attention.push(`Worker-pool risk is pausing ${totals.worker_pool_paused_count} open plan(s).`);
   }
   if (activeSessions.length === 0 && ((taskSummary.counts.pending ?? 0) > 0 || totals.ready_step_count > 0)) {
     attention.push("Work is queued or ready, but no active agent sessions are available to claim it.");
@@ -455,6 +466,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       running_step_count: totals.running_step_count,
       blocked_approval_count: totals.blocked_approval_count,
       blocked_human_count: totals.blocked_human_count,
+      worker_pool_paused_count: totals.worker_pool_paused_count,
       failed_step_count: totals.failed_step_count,
     },
     open_goals: goalSummaries,

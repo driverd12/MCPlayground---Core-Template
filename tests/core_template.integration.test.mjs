@@ -594,10 +594,159 @@ test("goal.execute pauses destructive autonomy when the generated worker pool is
     assert.equal(executedGoal.execution_summary.completed_count, 0);
     assert.ok(executedGoal.execution_summary.ready_count >= 1);
 
+    const pausedPlan = await callTool(client, "plan.get", {
+      plan_id: executedGoal.plan.plan_id,
+    });
+    assert.equal(pausedPlan.plan.metadata.last_plan_risk_assessment.can_auto_execute, false);
+    assert.equal(pausedPlan.plan.metadata.last_plan_risk_assessment.pause_reason, executedGoal.pause_reason);
+    assert.equal(pausedPlan.plan.metadata.worker_pool_pause.goal_id, createdGoal.goal.goal_id);
+    assert.equal(pausedPlan.plan.metadata.worker_pool_pause.autonomy_mode, "execute_destructive_with_approval");
+    assert.equal(pausedPlan.plan.metadata.worker_pool_pause.mode_counts.none, 3);
+
+    const kernelSummary = await callTool(client, "kernel.summary", {
+      goal_limit: 10,
+      event_limit: 20,
+    });
+    assert.ok(kernelSummary.attention.some((entry) => /worker-pool risk is pausing/i.test(entry)));
+    assert.ok(kernelSummary.overview.worker_pool_paused_count >= 1);
+    const pausedGoalSummary = kernelSummary.open_goals.find((entry) => entry.goal_id === createdGoal.goal.goal_id);
+    assert.ok(pausedGoalSummary);
+    assert.equal(pausedGoalSummary.execution_summary.worker_pool_paused, true);
+    assert.match(pausedGoalSummary.execution_summary.next_action, /healthier worker lanes|safer plan/i);
+
     const goalState = await callTool(client, "goal.get", {
       goal_id: createdGoal.goal.goal_id,
     });
     assert.equal(goalState.goal.active_plan_id, null);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("goal.autorun skips plans that are already paused for weak worker pools", async () => {
+  const testId = `${Date.now()}-goal-autorun-worker-pool-paused`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-autorun-worker-pool-paused-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Autorun paused worker pool goal",
+      objective: "Skip re-entering worker-pool-paused plans during bounded autorun scans",
+      status: "active",
+      autonomy_mode: "execute_destructive_with_approval",
+      acceptance_criteria: ["goal.autorun records a worker-pool pause and skips it on the next pass"],
+      tags: ["agentic", "delivery"],
+    });
+
+    const firstAutorun = await callTool(client, "goal.autorun", {
+      mutation: nextMutation(testId, "goal.autorun.first", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      max_passes: 4,
+    });
+    assert.equal(firstAutorun.executed_count, 1);
+    assert.equal(firstAutorun.skipped_count, 0);
+    assert.equal(firstAutorun.results[0].action, "executed");
+    assert.equal(firstAutorun.results[0].reason, "generated_plan");
+    assert.equal(firstAutorun.results[0].execution.paused_for_worker_pool, true);
+
+    const pausedPlanId = firstAutorun.results[0].execution.plan.plan_id;
+    const pausedPlan = await callTool(client, "plan.get", {
+      plan_id: pausedPlanId,
+    });
+    assert.equal(pausedPlan.plan.metadata.last_plan_risk_assessment.can_auto_execute, false);
+    assert.equal(pausedPlan.plan.metadata.worker_pool_pause.goal_id, createdGoal.goal.goal_id);
+
+    const secondAutorun = await callTool(client, "goal.autorun", {
+      mutation: nextMutation(testId, "goal.autorun.second", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      max_passes: 4,
+    });
+    assert.equal(secondAutorun.executed_count, 0);
+    assert.equal(secondAutorun.skipped_count, 1);
+    assert.equal(secondAutorun.results[0].action, "skipped");
+    assert.equal(secondAutorun.results[0].reason, "worker_pool_paused");
+    assert.equal(secondAutorun.results[0].plan_id, pausedPlanId);
+    assert.match(secondAutorun.results[0].pause_reason, /worker pool/i);
+    assert.equal(secondAutorun.results[0].plan_risk_assessment.can_auto_execute, false);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("goal.execute replans paused worker-pool goals when a viable live session appears", async () => {
+  const testId = `${Date.now()}-goal-execute-worker-pool-recovery`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-execute-worker-pool-recovery-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Worker-pool recovery goal",
+      objective: "Replan automatically when viable live worker lanes return",
+      status: "active",
+      autonomy_mode: "execute_destructive_with_approval",
+      acceptance_criteria: ["A paused plan can be replaced with a lower-risk replanned candidate"],
+      tags: ["agentic", "delivery"],
+    });
+
+    const initialExecute = await callTool(client, "goal.execute", {
+      mutation: nextMutation(testId, "goal.execute.initial", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      max_passes: 4,
+    });
+    assert.equal(initialExecute.executed, false);
+    assert.equal(initialExecute.paused_for_worker_pool, true);
+    const pausedPlanId = initialExecute.plan.plan_id;
+
+    await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open.codex", () => mutationCounter++),
+      session_id: "goal-execute-recovery-codex",
+      agent_id: "codex",
+      client_kind: "codex",
+      transport_kind: "stdio",
+      workspace_root: REPO_ROOT,
+      status: "active",
+      capabilities: {
+        worker: true,
+        coding: true,
+        planning: true,
+      },
+    });
+
+    const recoveredExecute = await callTool(client, "goal.execute", {
+      mutation: nextMutation(testId, "goal.execute.recovered", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      max_passes: 4,
+    });
+
+    assert.equal(recoveredExecute.ok, true);
+    assert.equal(recoveredExecute.executed, true);
+    assert.equal(recoveredExecute.created_plan, true);
+    assert.equal(recoveredExecute.generated_plan_reason, "worker_pool_recovery");
+    assert.equal(recoveredExecute.plan_resolution, "generated");
+    assert.notEqual(recoveredExecute.plan.plan_id, pausedPlanId);
+    assert.equal(recoveredExecute.plan_risk_assessment.can_auto_execute, true);
+    assert.ok(recoveredExecute.plan_risk_assessment.adaptive_routing_summary.mode_counts.preferred_pool >= 1);
+    assert.equal(recoveredExecute.selected_existing_plan, false);
+
+    const recoveredPlan = await callTool(client, "plan.get", {
+      plan_id: recoveredExecute.plan.plan_id,
+    });
+    assert.equal(recoveredPlan.plan.metadata.goal_execute_generation_reason, "worker_pool_recovery");
+    assert.equal(recoveredPlan.plan.metadata.replanned_from_plan_id, pausedPlanId);
+    assert.equal(recoveredPlan.plan.metadata.last_plan_risk_assessment.can_auto_execute, true);
+
+    const goalState = await callTool(client, "goal.get", {
+      goal_id: createdGoal.goal.goal_id,
+    });
+    assert.equal(goalState.goal.active_plan_id, recoveredExecute.plan.plan_id);
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
