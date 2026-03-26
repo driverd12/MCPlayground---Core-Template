@@ -38,6 +38,10 @@ function dedupeStrings(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function readString(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
@@ -97,6 +101,14 @@ type PlannerAdaptivePlanSummary = {
   worker_step_count: number;
   mode_counts: Record<AdaptiveDispatchRoutingGuidance["mode"], number>;
   attention: string[];
+};
+
+type PlannerRecoveryOutlook = {
+  state: "dispatchable_now" | "recoverable_now" | "waiting_on_pool_change" | "blocked_by_no_viable_lane";
+  reason: string;
+  current_pool_fingerprint: string | null;
+  last_attempted_pool_fingerprint: string | null;
+  viable_session_count: number;
 };
 
 function listPreferredCouncilAgents(storage: Storage): string[] {
@@ -249,6 +261,99 @@ function summarizePlannerAdaptivePlan(lanes: PlannerWorkerLaneResolution[]): Pla
   };
 }
 
+function resolveActiveGoalPlan(storage: Storage, goal: GoalRecord) {
+  if (goal.active_plan_id) {
+    const activePlan = storage.getPlanById(goal.active_plan_id);
+    if (activePlan) {
+      return activePlan;
+    }
+  }
+  return (
+    storage.listPlans({ goal_id: goal.goal_id, selected_only: true, limit: 1 })[0] ??
+    storage.listPlans({ goal_id: goal.goal_id, limit: 1 })[0] ??
+    null
+  );
+}
+
+function buildWorkerPoolRecoveryFingerprint(storage: Storage) {
+  const activeSessions = storage.listAgentSessions({
+    active_only: true,
+    limit: 100,
+  });
+  if (activeSessions.length === 0) {
+    return null;
+  }
+  return activeSessions
+    .map((session) => {
+      const adaptiveState = summarizeAdaptiveSessionHealth(session).adaptive_state;
+      return [session.session_id, session.agent_id, session.client_kind ?? "", session.status, adaptiveState].join(":");
+    })
+    .sort()
+    .join("|");
+}
+
+function summarizePlannerRecoveryOutlook(
+  storage: Storage,
+  goal: GoalRecord,
+  adaptivePlanSummary: PlannerAdaptivePlanSummary
+): PlannerRecoveryOutlook {
+  const currentPoolFingerprint = buildWorkerPoolRecoveryFingerprint(storage);
+  const activeSessions = storage.listAgentSessions({
+    active_only: true,
+    limit: 100,
+  });
+  const viableSessionCount = activeSessions.filter((session) => {
+    const adaptiveState = summarizeAdaptiveSessionHealth(session).adaptive_state;
+    return adaptiveState === "healthy" || adaptiveState === "unproven";
+  }).length;
+  const activePlan = resolveActiveGoalPlan(storage, goal);
+  const recoveryAttempt = activePlan && isRecord(activePlan.metadata.worker_pool_recovery_attempt)
+    ? activePlan.metadata.worker_pool_recovery_attempt
+    : null;
+  const lastAttemptedPoolFingerprint = readString(recoveryAttempt?.pool_fingerprint);
+
+  if (adaptivePlanSummary.mode_counts.none === 0) {
+    return {
+      state: "dispatchable_now",
+      reason:
+        adaptivePlanSummary.mode_counts.fallback_degraded > 0
+          ? "Worker steps are dispatchable now, but some lanes still depend on degraded fallback routing."
+          : "Worker steps are dispatchable now against the current live session pool.",
+      current_pool_fingerprint: currentPoolFingerprint,
+      last_attempted_pool_fingerprint: lastAttemptedPoolFingerprint,
+      viable_session_count: viableSessionCount,
+    };
+  }
+
+  if (viableSessionCount === 0 || !currentPoolFingerprint) {
+    return {
+      state: "blocked_by_no_viable_lane",
+      reason: "No healthy or unproven live worker lane exists right now for the missing worker assignments.",
+      current_pool_fingerprint: currentPoolFingerprint,
+      last_attempted_pool_fingerprint: lastAttemptedPoolFingerprint,
+      viable_session_count: viableSessionCount,
+    };
+  }
+
+  if (lastAttemptedPoolFingerprint && lastAttemptedPoolFingerprint === currentPoolFingerprint) {
+    return {
+      state: "waiting_on_pool_change",
+      reason: "The current live worker pool has already been tried for recovery and has not changed materially yet.",
+      current_pool_fingerprint: currentPoolFingerprint,
+      last_attempted_pool_fingerprint: lastAttemptedPoolFingerprint,
+      viable_session_count: viableSessionCount,
+    };
+  }
+
+  return {
+    state: "recoverable_now",
+    reason: "A viable worker pool exists now, so a fresh recovery planning pass can be attempted immediately.",
+    current_pool_fingerprint: currentPoolFingerprint,
+    last_attempted_pool_fingerprint: lastAttemptedPoolFingerprint,
+    viable_session_count: viableSessionCount,
+  };
+}
+
 function resolveAdaptivePlanningConfidence(baseConfidence: number, summary: PlannerAdaptivePlanSummary) {
   const adjusted =
     baseConfidence -
@@ -325,6 +430,7 @@ function buildDeliveryPlan(goal: GoalRecord, storage: Storage, repoRoot: string)
     implementSliceLane,
     verifySliceLane,
   ]);
+  const recoveryOutlook = summarizePlannerRecoveryOutlook(storage, goal, adaptivePlanSummary);
   const confidence = resolveAdaptivePlanningConfidence(0.84, adaptivePlanSummary);
 
   return {
@@ -337,6 +443,7 @@ function buildDeliveryPlan(goal: GoalRecord, storage: Storage, repoRoot: string)
         ? "Existing goal acceptance criteria remain the top-level finish condition."
         : "Acceptance criteria will be refined during planning before broad execution begins.",
       ...buildAdaptivePlanningAssumptions(adaptivePlanSummary),
+      recoveryOutlook.reason,
     ]),
     success_criteria:
       goal.acceptance_criteria.length > 0
@@ -356,6 +463,7 @@ function buildDeliveryPlan(goal: GoalRecord, storage: Storage, repoRoot: string)
       council_agents: councilAgents,
       repo_root: repoRoot,
       adaptive_plan_routing_summary: adaptivePlanSummary,
+      worker_pool_recovery_outlook: recoveryOutlook,
     },
     steps: [
       {
@@ -518,6 +626,7 @@ function buildOptimizationPlan(goal: GoalRecord, storage: Storage, repoRoot: str
     preferred_capabilities: ["coding", "worker"],
   });
   const adaptivePlanSummary = summarizePlannerAdaptivePlan([baselineLane, variantLane]);
+  const recoveryOutlook = summarizePlannerRecoveryOutlook(storage, goal, adaptivePlanSummary);
   const confidence = resolveAdaptivePlanningConfidence(0.8, adaptivePlanSummary);
 
   return {
@@ -528,6 +637,7 @@ function buildOptimizationPlan(goal: GoalRecord, storage: Storage, repoRoot: str
       "Only one bounded candidate should be in flight per loop unless the user explicitly expands the search.",
       "The same measurement protocol should be used for both baseline and candidate runs.",
       ...buildAdaptivePlanningAssumptions(adaptivePlanSummary),
+      recoveryOutlook.reason,
     ]),
     success_criteria: [
       "A durable experiment record exists before running the variant.",
@@ -546,6 +656,7 @@ function buildOptimizationPlan(goal: GoalRecord, storage: Storage, repoRoot: str
       metric_direction: metricDirection,
       repo_root: repoRoot,
       adaptive_plan_routing_summary: adaptivePlanSummary,
+      worker_pool_recovery_outlook: recoveryOutlook,
     },
     steps: [
       {
@@ -673,6 +784,40 @@ function buildOptimizationPlan(goal: GoalRecord, storage: Storage, repoRoot: str
   };
 }
 
+function summarizeExistingPlanAdaptiveRouting(
+  steps: Array<{ executor_kind: string | null; metadata: Record<string, unknown> }>
+) {
+  const modeCounts: Record<AdaptiveDispatchRoutingGuidance["mode"], number> = {
+    preferred_pool: 0,
+    fallback_degraded: 0,
+    none: 0,
+  };
+  for (const step of steps) {
+    if (step.executor_kind !== "worker" && step.executor_kind !== "task") {
+      continue;
+    }
+    const adaptiveAssignment = isRecord(step.metadata.adaptive_assignment) ? step.metadata.adaptive_assignment : null;
+    const mode = readString(adaptiveAssignment?.mode);
+    if (mode !== "preferred_pool" && mode !== "fallback_degraded" && mode !== "none") {
+      modeCounts.none += 1;
+      continue;
+    }
+    modeCounts[mode] += 1;
+  }
+  const attention: string[] = [];
+  if (modeCounts.fallback_degraded > 0) {
+    attention.push(`Existing plan relies on degraded fallback routing for ${modeCounts.fallback_degraded} worker step(s).`);
+  }
+  if (modeCounts.none > 0) {
+    attention.push(`Existing plan still has ${modeCounts.none} worker step(s) with no adaptive lane guidance.`);
+  }
+  return {
+    worker_step_count: modeCounts.preferred_pool + modeCounts.fallback_degraded + modeCounts.none,
+    mode_counts: modeCounts,
+    attention,
+  };
+}
+
 function verifyExecutionReadiness(storage: Storage, target: { entity_type: string; entity_id: string }, expectations?: Record<string, unknown>) {
   const requireActiveSessions = readBoolean(expectations?.require_active_sessions) === true;
   const minimumActiveSessions = Math.max(0, Math.trunc(readNumber(expectations?.minimum_active_sessions) ?? 0));
@@ -714,6 +859,15 @@ function verifyExecutionReadiness(storage: Storage, target: { entity_type: strin
   const councilAgents = listPreferredCouncilAgents(storage);
   const readyStepIds = readiness.filter((entry) => entry.ready).map((entry) => entry.step_id);
   const verificationStepCount = steps.filter((step) => step.step_kind === "verification").length;
+  const recoveryOutlook = activePlan
+    ? summarizePlannerRecoveryOutlook(storage, goal, summarizeExistingPlanAdaptiveRouting(steps))
+    : {
+        state: "blocked_by_no_viable_lane" as const,
+        reason: "No active plan is attached to the goal yet, so worker-pool recovery cannot be evaluated meaningfully.",
+        current_pool_fingerprint: buildWorkerPoolRecoveryFingerprint(storage),
+        last_attempted_pool_fingerprint: null,
+        viable_session_count: dispatchableSessions.length,
+      };
 
   const checks = [
     {
@@ -767,6 +921,24 @@ function verifyExecutionReadiness(storage: Storage, target: { entity_type: strin
             : "No active sessions are available for adaptive worker dispatch right now.",
     },
     {
+      name: "worker_pool_recovery_outlook",
+      pass: recoveryOutlook.state === "dispatchable_now",
+      severity:
+        recoveryOutlook.state === "recoverable_now"
+          ? ("warn" as const)
+          : recoveryOutlook.state === "dispatchable_now"
+            ? ("info" as const)
+            : ("error" as const),
+      details:
+        recoveryOutlook.state === "dispatchable_now"
+          ? `Worker pool outlook: dispatchable now. ${recoveryOutlook.reason}`
+          : recoveryOutlook.state === "recoverable_now"
+            ? `Worker pool outlook: recoverable now. ${recoveryOutlook.reason}`
+            : recoveryOutlook.state === "waiting_on_pool_change"
+              ? `Worker pool outlook: waiting on pool change. ${recoveryOutlook.reason}`
+              : `Worker pool outlook: blocked by no viable lane. ${recoveryOutlook.reason}`,
+    },
+    {
       name: "ready_execution_lane",
       pass: !requireReadyStep || readyStepIds.length > 0,
       severity: requireReadyStep ? "error" as const : "info" as const,
@@ -784,7 +956,13 @@ function verifyExecutionReadiness(storage: Storage, target: { entity_type: strin
   return {
     summary: pass
       ? `Goal ${goal.goal_id} is execution-ready for bounded agentic work.`
-      : `Goal ${goal.goal_id} is missing one or more execution readiness requirements.`,
+      : recoveryOutlook.state === "recoverable_now"
+        ? `Goal ${goal.goal_id} can recover now, but the current plan should be regenerated before bounded execution begins.`
+        : recoveryOutlook.state === "waiting_on_pool_change"
+          ? `Goal ${goal.goal_id} is waiting on a worker-pool change before recovery can proceed.`
+          : recoveryOutlook.state === "blocked_by_no_viable_lane"
+            ? `Goal ${goal.goal_id} is blocked because no viable worker lane is available right now.`
+            : `Goal ${goal.goal_id} is missing one or more execution readiness requirements.`,
     pass,
     score,
     checks,
@@ -803,6 +981,7 @@ function verifyExecutionReadiness(storage: Storage, target: { entity_type: strin
           dispatchable_agent_ids: dispatchableSessions.map((session) => session.agent_id),
           degraded_agent_ids: degradedSessions.map((session) => session.agent_id),
           suppressed_agent_ids: suppressedSessions.map((session) => session.agent_id),
+          worker_pool_recovery_outlook: recoveryOutlook,
           preferred_council_agents: councilAgents,
           ready_step_ids: readyStepIds,
           blocked_step_ids: readiness.filter((entry) => !entry.ready).map((entry) => entry.step_id),
@@ -826,6 +1005,7 @@ function verifyExecutionReadiness(storage: Storage, target: { entity_type: strin
       dispatchable_session_count: dispatchableSessions.length,
       degraded_session_count: degradedSessions.length,
       suppressed_session_count: suppressedSessions.length,
+      worker_pool_recovery_outlook: recoveryOutlook,
     },
   };
 }

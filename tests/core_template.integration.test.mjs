@@ -2276,6 +2276,8 @@ test("pack.plan.generate shapes worker lanes from adaptive session health", asyn
     assert.equal(verifySlice.metadata.adaptive_assignment.health_counts.healthy_count, 1);
     assert.equal(verifySlice.metadata.adaptive_assignment.health_counts.suppressed_count, 1);
     assert.equal(generatedPlan.plan.metadata.adaptive_plan_routing_summary.mode_counts.preferred_pool, 3);
+    assert.equal(generatedPlan.plan.metadata.worker_pool_recovery_outlook.state, "dispatchable_now");
+    assert.match(generatedPlan.plan.metadata.worker_pool_recovery_outlook.reason, /dispatchable now/i);
     assert.equal(generatedPlan.plan.confidence, 0.84);
     assert.deepEqual(
       verifySlice.metadata.adaptive_assignment.preferred_lane_hints.preferred_agent_ids,
@@ -2415,6 +2417,14 @@ test("pack.verify.run surfaces suppressed worker pools in execution readiness", 
     assert.equal(adaptivePoolCheck.pass, false);
     assert.equal(adaptivePoolCheck.severity, "error");
     assert.match(adaptivePoolCheck.details, /adaptive routing currently marks them all degraded or suppressed/i);
+    const recoveryOutlookCheck = verification.verification.checks.find(
+      (check) => check.name === "worker_pool_recovery_outlook"
+    );
+    assert.ok(recoveryOutlookCheck);
+    assert.equal(recoveryOutlookCheck.pass, false);
+    assert.equal(recoveryOutlookCheck.severity, "error");
+    assert.match(recoveryOutlookCheck.details, /blocked by no viable lane/i);
+    assert.match(verification.verification.summary, /blocked because no viable worker lane is available/i);
 
     const readinessArtifact = verification.artifacts.find(
       (artifact) => artifact.artifact_type === "agentic.execution_readiness"
@@ -2422,6 +2432,7 @@ test("pack.verify.run surfaces suppressed worker pools in execution readiness", 
     assert.ok(readinessArtifact);
     assert.deepEqual(readinessArtifact.content_json.dispatchable_agent_ids, []);
     assert.deepEqual(readinessArtifact.content_json.suppressed_agent_ids, ["cursor"]);
+    assert.equal(readinessArtifact.content_json.worker_pool_recovery_outlook.state, "blocked_by_no_viable_lane");
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
