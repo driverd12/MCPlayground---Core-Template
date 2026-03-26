@@ -522,7 +522,10 @@ function hasViableWorkerPoolForRecovery(storage: Storage) {
 
 function shouldRetryPlanningForWorkerPoolRecovery(
   storage: Storage,
-  input: z.infer<typeof goalExecuteSchema>,
+  input: {
+    plan_id?: string;
+    create_plan_if_missing?: boolean;
+  },
   plan: PlanRecord,
   assessment: PlanRiskAssessment
 ) {
@@ -1462,6 +1465,49 @@ async function executeGoalAutorunPass(
       source_agent: input.source_agent,
     });
     if (!planAssessment.can_auto_execute) {
+      const shouldAttemptRecovery = shouldRetryPlanningForWorkerPoolRecovery(
+        storage,
+        {
+          create_plan_if_missing: input.create_plan_if_missing,
+        },
+        planRecord,
+        planAssessment
+      );
+      if (shouldAttemptRecovery) {
+        const executed = (await invokeTool("goal.execute", {
+          mutation: buildGoalExecuteDerivedMutation(mutation, `autorun-recover:${goal.goal_id}`),
+          goal_id: goal.goal_id,
+          create_plan_if_missing: input.create_plan_if_missing ?? true,
+          pack_id: input.pack_id,
+          hook_name: input.hook_name,
+          context_artifact_ids: input.context_artifact_ids,
+          options: input.options,
+          title: input.title,
+          selected: input.selected,
+          dispatch_limit: input.dispatch_limit,
+          dry_run: input.dry_run,
+          autorun: true,
+          max_passes: input.max_passes,
+          trichat_agent_ids: input.trichat_agent_ids,
+          trichat_max_rounds: input.trichat_max_rounds,
+          trichat_min_success_agents: input.trichat_min_success_agents,
+          trichat_bridge_timeout_seconds: input.trichat_bridge_timeout_seconds,
+          trichat_bridge_dry_run: input.trichat_bridge_dry_run,
+          source_client: input.source_client,
+          source_model: input.source_model,
+          source_agent: input.source_agent,
+        })) as Record<string, unknown>;
+        executedCount += 1;
+        results.push({
+          goal_id: goal.goal_id,
+          plan_id: planRecord.plan_id,
+          action: "executed",
+          reason: "worker_pool_recovery",
+          execution: executed,
+        });
+        continue;
+      }
+
       skippedCount += 1;
       results.push({
         goal_id: goal.goal_id,

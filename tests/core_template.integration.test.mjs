@@ -753,6 +753,68 @@ test("goal.execute replans paused worker-pool goals when a viable live session a
   }
 });
 
+test("goal.autorun can recover paused worker-pool goals when a viable live session appears", async () => {
+  const testId = `${Date.now()}-goal-autorun-worker-pool-recovery`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-autorun-worker-pool-recovery-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Autorun worker-pool recovery goal",
+      objective: "Recover paused destructive plans automatically once a viable lane returns",
+      status: "active",
+      autonomy_mode: "execute_destructive_with_approval",
+      acceptance_criteria: ["goal.autorun can trigger recovery replanning against the live worker pool"],
+      tags: ["agentic", "delivery"],
+    });
+
+    const firstAutorun = await callTool(client, "goal.autorun", {
+      mutation: nextMutation(testId, "goal.autorun.first", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      max_passes: 4,
+    });
+    assert.equal(firstAutorun.executed_count, 1);
+    assert.equal(firstAutorun.results[0].execution.paused_for_worker_pool, true);
+    const pausedPlanId = firstAutorun.results[0].execution.plan.plan_id;
+
+    await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open.codex", () => mutationCounter++),
+      session_id: "goal-autorun-recovery-codex",
+      agent_id: "codex",
+      client_kind: "codex",
+      transport_kind: "stdio",
+      workspace_root: REPO_ROOT,
+      status: "active",
+      capabilities: {
+        worker: true,
+        coding: true,
+        planning: true,
+      },
+    });
+
+    const recoveredAutorun = await callTool(client, "goal.autorun", {
+      mutation: nextMutation(testId, "goal.autorun.second", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      max_passes: 4,
+    });
+
+    assert.equal(recoveredAutorun.executed_count, 1);
+    assert.equal(recoveredAutorun.skipped_count, 0);
+    assert.equal(recoveredAutorun.results[0].action, "executed");
+    assert.equal(recoveredAutorun.results[0].reason, "worker_pool_recovery");
+    assert.equal(recoveredAutorun.results[0].execution.executed, true);
+    assert.equal(recoveredAutorun.results[0].execution.generated_plan_reason, "worker_pool_recovery");
+    assert.notEqual(recoveredAutorun.results[0].execution.plan.plan_id, pausedPlanId);
+    assert.equal(recoveredAutorun.results[0].execution.plan_risk_assessment.can_auto_execute, true);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("goal.execute prefers a lower-risk existing plan when the active plan is autonomy-blocked", async () => {
   const testId = `${Date.now()}-goal-execute-lower-risk-plan`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-execute-lower-risk-plan-test-"));
