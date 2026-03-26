@@ -1479,6 +1479,205 @@ test("adaptive worker scoring penalizes repeated failure and stagnation history 
   }
 });
 
+test("plan.dispatch injects adaptive assignment guidance into worker tasks", async () => {
+  const testId = `${Date.now()}-dispatch-adaptive-assignment`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-dispatch-adaptive-assignment-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open.steady", () => mutationCounter++),
+      session_id: "dispatch-adaptive-steady",
+      agent_id: "codex",
+      client_kind: "codex",
+      transport_kind: "stdio",
+      workspace_root: REPO_ROOT,
+      status: "active",
+      capabilities: {
+        worker: true,
+        coding: true,
+        planning: true,
+      },
+    });
+
+    await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open.suppressed", () => mutationCounter++),
+      session_id: "dispatch-adaptive-suppressed",
+      agent_id: "cursor",
+      client_kind: "cursor",
+      transport_kind: "stdio",
+      workspace_root: REPO_ROOT,
+      status: "active",
+      capabilities: {
+        worker: true,
+        coding: true,
+        planning: true,
+      },
+    });
+
+    const createAdaptiveTrainingTask = async (label) =>
+      callTool(client, "task.create", {
+        mutation: nextMutation(testId, `task.create.${label}`, () => mutationCounter++),
+        objective: `Debug adaptive dispatch routing history shaping for ${label}`,
+        project_dir: REPO_ROOT,
+        priority: 5,
+        tags: ["adaptive-routing"],
+      });
+
+    const suppressedTaskOne = await createAdaptiveTrainingTask("suppressed-one");
+    await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.suppressed.one", () => mutationCounter++),
+      session_id: "dispatch-adaptive-suppressed",
+      task_id: suppressedTaskOne.task.task_id,
+    });
+    await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.suppressed.one", () => mutationCounter++),
+      session_id: "dispatch-adaptive-suppressed",
+      task_id: suppressedTaskOne.task.task_id,
+      outcome: "failed",
+      error: "Seed one failed",
+      summary: "First suppressed history seed failed",
+      result: {
+        failed: true,
+      },
+    });
+
+    const suppressedTaskTwo = await createAdaptiveTrainingTask("suppressed-two");
+    await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.suppressed.two", () => mutationCounter++),
+      session_id: "dispatch-adaptive-suppressed",
+      task_id: suppressedTaskTwo.task.task_id,
+    });
+    await callTool(client, "agent.heartbeat_task", {
+      mutation: nextMutation(testId, "agent.heartbeat_task.suppressed.one", () => mutationCounter++),
+      session_id: "dispatch-adaptive-suppressed",
+      task_id: suppressedTaskTwo.task.task_id,
+    });
+    await callTool(client, "agent.heartbeat_task", {
+      mutation: nextMutation(testId, "agent.heartbeat_task.suppressed.two", () => mutationCounter++),
+      session_id: "dispatch-adaptive-suppressed",
+      task_id: suppressedTaskTwo.task.task_id,
+    });
+    await callTool(client, "agent.heartbeat_task", {
+      mutation: nextMutation(testId, "agent.heartbeat_task.suppressed.three", () => mutationCounter++),
+      session_id: "dispatch-adaptive-suppressed",
+      task_id: suppressedTaskTwo.task.task_id,
+    });
+    await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.suppressed.two", () => mutationCounter++),
+      session_id: "dispatch-adaptive-suppressed",
+      task_id: suppressedTaskTwo.task.task_id,
+      outcome: "failed",
+      error: "Seed two failed after stagnation",
+      summary: "Second suppressed history seed failed",
+      result: {
+        failed: true,
+      },
+    });
+
+    const steadyTaskOne = await createAdaptiveTrainingTask("steady-one");
+    await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.steady.one", () => mutationCounter++),
+      session_id: "dispatch-adaptive-steady",
+      task_id: steadyTaskOne.task.task_id,
+    });
+    await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.steady.one", () => mutationCounter++),
+      session_id: "dispatch-adaptive-steady",
+      task_id: steadyTaskOne.task.task_id,
+      outcome: "completed",
+      summary: "Healthy history seed one completed",
+      result: {
+        completed: true,
+      },
+    });
+
+    const steadyTaskTwo = await createAdaptiveTrainingTask("steady-two");
+    await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.steady.two", () => mutationCounter++),
+      session_id: "dispatch-adaptive-steady",
+      task_id: steadyTaskTwo.task.task_id,
+    });
+    await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.steady.two", () => mutationCounter++),
+      session_id: "dispatch-adaptive-steady",
+      task_id: steadyTaskTwo.task.task_id,
+      outcome: "completed",
+      summary: "Healthy history seed two completed",
+      result: {
+        completed: true,
+      },
+    });
+
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Adaptive dispatch guidance goal",
+      objective: "Dispatch a worker task with adaptive session assignment guidance",
+      status: "active",
+      autonomy_mode: "execute_bounded",
+      acceptance_criteria: ["Dispatch-time routing prefers healthy sessions and excludes suppressed ones"],
+    });
+
+    const createdPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      title: "Adaptive assignment plan",
+      summary: "Create one worker step with no explicit routing so dispatch must inject adaptive guidance",
+      selected: true,
+      steps: [
+        {
+          step_id: "adaptive-worker",
+          seq: 1,
+          title: "Dispatch the adaptive worker lane",
+          step_kind: "mutation",
+          executor_kind: "worker",
+          input: {
+            objective: "Debug the adaptive routing kernel path and verify dispatch assignment guidance",
+            project_dir: REPO_ROOT,
+            priority: 6,
+            tags: ["adaptive-routing"],
+          },
+        },
+      ],
+    });
+
+    const dispatched = await callTool(client, "plan.dispatch", {
+      mutation: nextMutation(testId, "plan.dispatch", () => mutationCounter++),
+      plan_id: createdPlan.plan.plan_id,
+    });
+    assert.equal(dispatched.dispatched_count, 1);
+    assert.equal(dispatched.results[0].adaptive_assignment.mode, "preferred_pool");
+    assert.equal(dispatched.results[0].adaptive_assignment.summary.healthy_count, 1);
+    assert.equal(dispatched.results[0].adaptive_assignment.summary.suppressed_count, 1);
+
+    const taskRouting = dispatched.results[0].task.task.metadata.task_routing;
+    assert.deepEqual(taskRouting.allowed_agent_ids, ["codex"]);
+    assert.deepEqual(taskRouting.preferred_agent_ids, ["codex"]);
+
+    const suppressedClaim = await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.suppressed.target", () => mutationCounter++),
+      session_id: "dispatch-adaptive-suppressed",
+      task_id: dispatched.results[0].task_id,
+    });
+    assert.equal(suppressedClaim.claimed, false);
+    assert.match(suppressedClaim.reason, /^routing-ineligible:/);
+    assert.match(suppressedClaim.reason, /agent_id_not_allowed/);
+
+    const steadyClaim = await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.steady.target", () => mutationCounter++),
+      session_id: "dispatch-adaptive-steady",
+      task_id: dispatched.results[0].task_id,
+    });
+    assert.equal(steadyClaim.claimed, true);
+    assert.equal(steadyClaim.task.task_id, dispatched.results[0].task_id);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("agent.claim_next and agent.report_result close the worker loop back into plan steps", async () => {
   const testId = `${Date.now()}-agent-worker-loop`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-agent-worker-loop-test-"));

@@ -241,11 +241,56 @@ export type AdaptiveSessionPerformanceSummary = {
   complexity_stats: AdaptiveComplexityStats;
 };
 
+export type AdaptiveSessionHealthState = "unproven" | "healthy" | "degraded" | "suppressed";
+
+export type AdaptiveSessionHealthSummary = {
+  adaptive_state: AdaptiveSessionHealthState;
+  adaptive_reasons: string[];
+  performance: {
+    low: AdaptiveSessionPerformanceSummary;
+    medium: AdaptiveSessionPerformanceSummary;
+    high: AdaptiveSessionPerformanceSummary;
+  };
+};
+
 type AdaptiveRoutingSignal = {
   adjustment: number;
   blockers: string[];
   matched_preferences: string[];
   summary: AdaptiveSessionPerformanceSummary;
+};
+
+type AdaptiveDispatchCandidate = {
+  session: AgentSessionRecord;
+  capability_tier: "low" | "medium" | "high";
+  health: AdaptiveSessionHealthSummary;
+  score: number;
+  eligible: boolean;
+  blockers: string[];
+  reasons: string[];
+};
+
+export type AdaptiveDispatchRoutingGuidance = {
+  task_profile: TaskExecutionProfile;
+  routing: TaskRoutingRule | null;
+  mode: "preferred_pool" | "fallback_degraded" | "none";
+  recommended_sessions: Array<{
+    session_id: string;
+    agent_id: string;
+    client_kind: string | null;
+    adaptive_state: AdaptiveSessionHealthState;
+    score: number;
+    capability_tier: "low" | "medium" | "high";
+  }>;
+  summary: {
+    healthy_count: number;
+    unproven_count: number;
+    degraded_count: number;
+    suppressed_count: number;
+    eligible_count: number;
+    mode: "preferred_pool" | "fallback_degraded" | "none";
+    rationale: string;
+  };
 };
 
 export const ADAPTIVE_WORKER_PROFILE_KEY = "adaptive_worker_profile";
@@ -567,6 +612,209 @@ export function summarizeAdaptiveWorkerProfile(
     average_completion_seconds: profile.average_completion_seconds,
     complexity,
     complexity_stats: getAdaptiveComplexityStats(profile, complexity),
+  };
+}
+
+export function summarizeAdaptiveSessionHealth(session: AgentSessionRecord): AdaptiveSessionHealthSummary {
+  const profile = getAdaptiveWorkerProfile(session);
+  const performance = {
+    low: summarizeAdaptiveWorkerProfile(profile, "low"),
+    medium: summarizeAdaptiveWorkerProfile(profile, "medium"),
+    high: summarizeAdaptiveWorkerProfile(profile, "high"),
+  };
+  const reasons: string[] = [];
+  let adaptiveState: AdaptiveSessionHealthState = "unproven";
+
+  if (profile.total_claims === 0) {
+    adaptiveState = "unproven";
+    reasons.push("No adaptive routing history has been recorded yet.");
+  } else if (profile.consecutive_failures >= 2 || profile.consecutive_stagnation_signals >= 1) {
+    adaptiveState = "suppressed";
+    if (profile.consecutive_failures >= 2) {
+      reasons.push(`Suppressed after ${profile.consecutive_failures} consecutive failures.`);
+    }
+    if (profile.consecutive_stagnation_signals >= 1) {
+      reasons.push(`Suppressed after ${profile.consecutive_stagnation_signals} recent stagnation signal(s).`);
+    }
+  } else if (
+    profile.total_failed > 0 ||
+    profile.total_stagnation_signals > 0 ||
+    profile.total_evidence_blocks > 0
+  ) {
+    adaptiveState = "degraded";
+    if (profile.total_failed > 0) {
+      reasons.push(`${profile.total_failed} failed task report(s) are in history.`);
+    }
+    if (profile.total_stagnation_signals > 0) {
+      reasons.push(`${profile.total_stagnation_signals} stagnation signal(s) are in history.`);
+    }
+    if (profile.total_evidence_blocks > 0) {
+      reasons.push(`${profile.total_evidence_blocks} evidence-blocked completion(s) are in history.`);
+    }
+  } else {
+    adaptiveState = "healthy";
+    reasons.push("Recent routing history is stable.");
+  }
+
+  return {
+    adaptive_state: adaptiveState,
+    adaptive_reasons: reasons,
+    performance,
+  };
+}
+
+function canCapabilityTierHandleTask(
+  capabilityTier: "low" | "medium" | "high",
+  taskProfile: TaskExecutionProfile
+) {
+  if (taskProfile.complexity === "high") {
+    return capabilityTier === "high";
+  }
+  if (taskProfile.complexity === "medium") {
+    return capabilityTier !== "low";
+  }
+  return true;
+}
+
+function evaluateAdaptiveDispatchCandidate(
+  session: AgentSessionRecord,
+  taskProfile: TaskExecutionProfile,
+  projectDir: string | null
+): AdaptiveDispatchCandidate {
+  const capabilityTier = resolveSessionCapabilityTier(session);
+  const health = summarizeAdaptiveSessionHealth(session);
+  const blockers: string[] = [];
+  const reasons: string[] = [];
+  let score = 0;
+
+  if (!canCapabilityTierHandleTask(capabilityTier, taskProfile)) {
+    blockers.push(`insufficient_capability_tier:${taskProfile.complexity}`);
+  } else {
+    score += taskProfile.complexity === "high" ? 15 : taskProfile.complexity === "medium" ? 8 : 4;
+    reasons.push(`capability_tier:${capabilityTier}`);
+  }
+
+  if (projectDir && session.workspace_root && session.workspace_root === projectDir) {
+    score += 3;
+    reasons.push("workspace_root_match");
+  }
+
+  if (session.status === "busy") {
+    score -= 6;
+    reasons.push("session_busy");
+  } else if (session.status === "idle" || session.status === "active") {
+    score += 3;
+    reasons.push(`session_status:${session.status}`);
+  }
+
+  if (health.adaptive_state === "healthy") {
+    score += 35;
+    reasons.push("adaptive_state:healthy");
+  } else if (health.adaptive_state === "unproven") {
+    score += 12;
+    reasons.push("adaptive_state:unproven");
+  } else if (health.adaptive_state === "degraded") {
+    score -= 6;
+    reasons.push("adaptive_state:degraded");
+  } else {
+    score -= 25;
+    reasons.push("adaptive_state:suppressed");
+  }
+
+  return {
+    session,
+    capability_tier: capabilityTier,
+    health,
+    score,
+    eligible: blockers.length === 0,
+    blockers,
+    reasons,
+  };
+}
+
+function compareAdaptiveDispatchCandidates(left: AdaptiveDispatchCandidate, right: AdaptiveDispatchCandidate) {
+  const scoreDiff = right.score - left.score;
+  if (scoreDiff !== 0) {
+    return scoreDiff;
+  }
+  return left.session.updated_at.localeCompare(right.session.updated_at);
+}
+
+export function recommendAdaptiveDispatchRouting(
+  storage: Storage,
+  task: Pick<TaskRecord, "objective" | "project_dir" | "payload" | "tags" | "metadata">
+): AdaptiveDispatchRoutingGuidance {
+  const taskProfile = resolveTaskExecutionProfile(task);
+  const sessions = storage.listAgentSessions({
+    active_only: true,
+    limit: 100,
+  });
+  const candidates = sessions
+    .map((session) => evaluateAdaptiveDispatchCandidate(session, taskProfile, task.project_dir ?? null))
+    .filter((candidate) => candidate.eligible)
+    .sort(compareAdaptiveDispatchCandidates);
+
+  const healthy = candidates.filter((candidate) => candidate.health.adaptive_state === "healthy");
+  const unproven = candidates.filter((candidate) => candidate.health.adaptive_state === "unproven");
+  const degraded = candidates.filter((candidate) => candidate.health.adaptive_state === "degraded");
+  const suppressed = candidates.filter((candidate) => candidate.health.adaptive_state === "suppressed");
+
+  let pool: AdaptiveDispatchCandidate[] = [];
+  let mode: AdaptiveDispatchRoutingGuidance["mode"] = "none";
+  let rationale = "No eligible active sessions are available for adaptive assignment guidance.";
+
+  if (healthy.length > 0 || unproven.length > 0) {
+    pool = [...healthy, ...unproven].sort(compareAdaptiveDispatchCandidates);
+    mode = "preferred_pool";
+    rationale =
+      healthy.length > 0
+        ? "Healthy or unproven sessions are available, so degraded and suppressed sessions are excluded."
+        : "Only unproven sessions are available, so they are preferred over degraded history.";
+  } else if (degraded.length > 0) {
+    pool = [...degraded].sort(compareAdaptiveDispatchCandidates);
+    mode = "fallback_degraded";
+    rationale = "Only degraded sessions are available, so dispatch falls back to them explicitly.";
+  }
+
+  const preferred = pool.slice(0, 2);
+  const allowed = pool.slice(0, 4);
+  const routing =
+    pool.length > 0
+      ? {
+          preferred_agent_ids: preferred.map((candidate) => candidate.session.agent_id),
+          allowed_agent_ids: allowed.map((candidate) => candidate.session.agent_id),
+          preferred_client_kinds: preferred
+            .map((candidate) => readString(candidate.session.client_kind))
+            .filter((value): value is string => Boolean(value)),
+          allowed_client_kinds: allowed
+            .map((candidate) => readString(candidate.session.client_kind))
+            .filter((value): value is string => Boolean(value)),
+          required_capabilities: [],
+          preferred_capabilities: [],
+        }
+      : null;
+
+  return {
+    task_profile: taskProfile,
+    routing,
+    mode,
+    recommended_sessions: pool.map((candidate) => ({
+      session_id: candidate.session.session_id,
+      agent_id: candidate.session.agent_id,
+      client_kind: candidate.session.client_kind,
+      adaptive_state: candidate.health.adaptive_state,
+      score: candidate.score,
+      capability_tier: candidate.capability_tier,
+    })),
+    summary: {
+      healthy_count: healthy.length,
+      unproven_count: unproven.length,
+      degraded_count: degraded.length,
+      suppressed_count: suppressed.length,
+      eligible_count: candidates.length,
+      mode,
+      rationale,
+    },
   };
 }
 

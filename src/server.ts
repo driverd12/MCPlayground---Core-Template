@@ -18,6 +18,7 @@ import {
   agentHeartbeatTaskSchema,
   agentReportResult,
   agentReportResultSchema,
+  recommendAdaptiveDispatchRouting,
   agentWorklist,
   agentWorklistSchema,
   agentSessionCloseSchema,
@@ -399,6 +400,53 @@ function readInteger(value: unknown): number | undefined {
 
 function readBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function normalizeRoutingRule(value: unknown) {
+  if (!isRecord(value)) {
+    return {
+      preferred_agent_ids: [] as string[],
+      allowed_agent_ids: [] as string[],
+      preferred_client_kinds: [] as string[],
+      allowed_client_kinds: [] as string[],
+      required_capabilities: [] as string[],
+      preferred_capabilities: [] as string[],
+    };
+  }
+  return {
+    preferred_agent_ids: readStringArray(value.preferred_agent_ids) ?? [],
+    allowed_agent_ids: readStringArray(value.allowed_agent_ids) ?? [],
+    preferred_client_kinds: readStringArray(value.preferred_client_kinds) ?? [],
+    allowed_client_kinds: readStringArray(value.allowed_client_kinds) ?? [],
+    required_capabilities: readStringArray(value.required_capabilities) ?? [],
+    preferred_capabilities: readStringArray(value.preferred_capabilities) ?? [],
+  };
+}
+
+function mergeAdaptiveDispatchRouting(
+  explicitRouting: unknown,
+  adaptiveRouting: ReturnType<typeof normalizeRoutingRule> | null
+) {
+  const explicit = normalizeRoutingRule(explicitRouting);
+  if (!adaptiveRouting) {
+    return explicit;
+  }
+  return {
+    preferred_agent_ids: Array.from(new Set([...explicit.preferred_agent_ids, ...adaptiveRouting.preferred_agent_ids])),
+    allowed_agent_ids:
+      explicit.allowed_agent_ids.length > 0 ? explicit.allowed_agent_ids : adaptiveRouting.allowed_agent_ids,
+    preferred_client_kinds: Array.from(
+      new Set([...explicit.preferred_client_kinds, ...adaptiveRouting.preferred_client_kinds])
+    ),
+    allowed_client_kinds:
+      explicit.allowed_client_kinds.length > 0 ? explicit.allowed_client_kinds : adaptiveRouting.allowed_client_kinds,
+    required_capabilities: Array.from(
+      new Set([...explicit.required_capabilities, ...adaptiveRouting.required_capabilities])
+    ),
+    preferred_capabilities: Array.from(
+      new Set([...explicit.preferred_capabilities, ...adaptiveRouting.preferred_capabilities])
+    ),
+  };
 }
 
 type ExecutionPolicyProfile = "strict" | "bounded" | "aggressive";
@@ -865,7 +913,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
             const rawInput = isRecord(step.input) ? step.input : {};
             const payload = isRecord(rawInput.payload) ? rawInput.payload : {};
             const rawMetadata = isRecord(rawInput.metadata) ? rawInput.metadata : {};
-            const routing =
+            const explicitRouting =
               isRecord(rawInput.routing)
                 ? rawInput.routing
                 : isRecord(rawMetadata.task_routing)
@@ -873,6 +921,17 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
                   : isRecord(rawMetadata.routing)
                     ? rawMetadata.routing
                     : undefined;
+            const adaptiveAssignment = recommendAdaptiveDispatchRouting(storage, {
+              objective: readString(rawInput.objective) ?? step.title,
+              project_dir: readString(rawInput.project_dir) ?? ".",
+              payload,
+              tags: readStringArray(rawInput.tags) ?? ["plan.dispatch", executorKind],
+              metadata: rawMetadata,
+            });
+            const routing = mergeAdaptiveDispatchRouting(
+              explicitRouting,
+              adaptiveAssignment.routing ? normalizeRoutingRule(adaptiveAssignment.routing) : null
+            );
             const taskResult = await invokeRegisteredTool("task.create", {
               mutation: buildPlanDispatchDerivedMutation(input.mutation, executorKind, step.step_id),
               task_id: readString(rawInput.task_id),
@@ -895,6 +954,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               tags: readStringArray(rawInput.tags) ?? ["plan.dispatch", executorKind],
               metadata: {
                 ...rawMetadata,
+                adaptive_assignment: adaptiveAssignment,
                 plan_dispatch: {
                   plan_id: plan.plan_id,
                   step_id: step.step_id,
@@ -918,6 +978,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
                   dispatched_at: nowIso,
                   task_id: taskId,
                   objective: readString(rawInput.objective) ?? step.title,
+                  adaptive_assignment: adaptiveAssignment,
                 },
               },
             });
@@ -935,6 +996,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
                 action: "task_created",
                 task_id: taskId,
                 objective: readString(rawInput.objective) ?? step.title,
+                adaptive_assignment: adaptiveAssignment,
               },
               source_client: input.source_client,
               source_model: input.source_model,
@@ -947,6 +1009,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               dispatched: true,
               action: "task_created",
               task_id: taskId,
+              adaptive_assignment: adaptiveAssignment,
               step_status_after: updated.step.status,
               task: taskResult,
               event: dispatchEvent,

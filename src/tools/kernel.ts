@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { type AgentSessionRecord, type GoalRecord, type PlanRecord, type PlanStepRecord, Storage } from "../storage.js";
-import { getAdaptiveWorkerProfile, summarizeAdaptiveWorkerProfile } from "./agent_session.js";
+import { getAdaptiveWorkerProfile, summarizeAdaptiveSessionHealth, summarizeAdaptiveWorkerProfile } from "./agent_session.js";
 import { evaluatePlanStepReadiness, getPlanStepApprovalGateKind } from "./plan.js";
 
 const goalStatusSchema = z.enum([
@@ -179,61 +179,25 @@ function listOpenGoals(storage: Storage, limit: number) {
 }
 
 function summarizeAdaptiveSession(session: AgentSessionRecord): AdaptiveSessionSnapshot {
+  const adaptive = summarizeAdaptiveSessionHealth(session);
+  const performance = adaptive.performance.high;
   const profile = getAdaptiveWorkerProfile(session);
-  const complexity = {
-    low: summarizeAdaptiveWorkerProfile(profile, "low"),
-    medium: summarizeAdaptiveWorkerProfile(profile, "medium"),
-    high: summarizeAdaptiveWorkerProfile(profile, "high"),
-  };
-  const reasons: string[] = [];
-  let adaptiveState: AdaptiveSessionState = "unproven";
-
-  if (profile.total_claims === 0) {
-    adaptiveState = "unproven";
-    reasons.push("No adaptive routing history has been recorded yet.");
-  } else if (profile.consecutive_failures >= 2 || profile.consecutive_stagnation_signals >= 1) {
-    adaptiveState = "suppressed";
-    if (profile.consecutive_failures >= 2) {
-      reasons.push(`Suppressed after ${profile.consecutive_failures} consecutive failures.`);
-    }
-    if (profile.consecutive_stagnation_signals >= 1) {
-      reasons.push(`Suppressed after ${profile.consecutive_stagnation_signals} recent stagnation signal(s).`);
-    }
-  } else if (
-    profile.total_failed > 0 ||
-    profile.total_stagnation_signals > 0 ||
-    profile.total_evidence_blocks > 0
-  ) {
-    adaptiveState = "degraded";
-    if (profile.total_failed > 0) {
-      reasons.push(`${profile.total_failed} failed task report(s) are in history.`);
-    }
-    if (profile.total_stagnation_signals > 0) {
-      reasons.push(`${profile.total_stagnation_signals} stagnation signal(s) are in history.`);
-    }
-    if (profile.total_evidence_blocks > 0) {
-      reasons.push(`${profile.total_evidence_blocks} evidence-blocked completion(s) are in history.`);
-    }
-  } else {
-    adaptiveState = "healthy";
-    reasons.push("Recent routing history is stable.");
-  }
 
   return {
     session_id: session.session_id,
     agent_id: session.agent_id,
     client_kind: session.client_kind,
     status: session.status,
-    adaptive_state: adaptiveState,
-    adaptive_reasons: reasons,
-    total_claims: profile.total_claims,
-    total_completed: profile.total_completed,
-    total_failed: profile.total_failed,
-    total_stagnation_signals: profile.total_stagnation_signals,
-    total_evidence_blocks: profile.total_evidence_blocks,
-    consecutive_failures: profile.consecutive_failures,
-    consecutive_stagnation_signals: profile.consecutive_stagnation_signals,
-    average_completion_seconds: profile.average_completion_seconds,
+    adaptive_state: adaptive.adaptive_state,
+    adaptive_reasons: adaptive.adaptive_reasons,
+    total_claims: performance.total_claims,
+    total_completed: performance.total_completed,
+    total_failed: performance.total_failed,
+    total_stagnation_signals: performance.total_stagnation_signals,
+    total_evidence_blocks: performance.total_evidence_blocks,
+    consecutive_failures: performance.consecutive_failures,
+    consecutive_stagnation_signals: performance.consecutive_stagnation_signals,
+    average_completion_seconds: performance.average_completion_seconds,
     current_task: {
       task_id: profile.current_task.task_id,
       claimed_at: profile.current_task.claimed_at,
@@ -242,7 +206,7 @@ function summarizeAdaptiveSession(session: AgentSessionRecord): AdaptiveSessionS
       stagnation_signaled: profile.current_task.stagnation_signaled,
       stagnation_signaled_at: profile.current_task.stagnation_signaled_at,
     },
-    complexity,
+    complexity: adaptive.performance,
   };
 }
 
