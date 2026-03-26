@@ -17,6 +17,8 @@ The runtime now has the minimum building blocks needed for a real automated pipe
   - `goal.create`
   - `goal.execute`
   - `goal.autorun`
+  - `goal.autorun_daemon`
+  - `kernel.summary`
   - `plan.*`
   - `dispatch.autorun`
 - execution lanes:
@@ -47,7 +49,7 @@ GSD and autoresearch should be selected as planning modes, not as separate syste
   - generate or instantiate a plan
   - dispatch work into tools, workers, TriChat, and approvals
   - persist artifacts and experiment evidence
-  - re-enter execution through `goal.autorun` until the plan is blocked, failed, or complete
+  - re-enter execution through `goal.autorun` or `goal.autorun_daemon` until the plan is blocked, failed, or complete
 
 ## Robust Automatic Flow
 
@@ -154,35 +156,48 @@ Best fit:
 - cost and latency optimization
 - benchmark-driven code changes
 
-## What Must Be Automatic Today
+## What Is Automatic Now
 
-To have something testable over the next four days, these behaviors should be considered required:
+These behaviors are now implemented in the shipped runtime:
 
 - `goal.execute` can generate and dispatch methodology-aligned plans
 - `goal.autorun` can re-enter eligible goals after async work finishes
+- `goal.autorun_daemon` can run bounded unattended continuation ticks with persisted config
 - `playbook.run` can create and enter methodology flows in one call
 - worker completions attach artifacts, can derive experiment observations, and can re-enter bounded goals automatically
 - the methodology can be inferred from goal metadata and tags
+- optimization-oriented flows create the durable experiment ledger automatically
+- `kernel.summary` reports goals, tasks, sessions, experiments, artifacts, and recent event pressure in one call
+- worker completion is blocked when required `expected_artifact_types` are missing
+- weak background lanes are prevented from silently owning higher-complexity tasks
 - the pipeline can stop cleanly at human gates instead of free-running past them
 
-## Remaining Implementation Work
+## Current Operator Loop
 
-Highest-value next patches:
+For immediate use, the recommended loop is:
 
-1. Method selector.
-   Add a compact objective classifier that chooses `delivery_path` vs `optimization_loop` before plan generation.
+1. Create a goal directly, or use `playbook.run` when you want an opinionated GSD/autoresearch entrypoint.
+2. Let `goal.execute` or `goal.autorun_daemon` generate and continue the plan.
+3. Let agents claim work through `agent.claim_next` and report through `agent.report_result`.
+4. Inspect `kernel.summary` when you want the whole operator picture.
+5. Use `plan.approve` when a human gate is expected.
+6. Run `npm run agentic:micro-soak` when you want a fast confidence check against the latest build.
 
-2. Autoresearch bootstrap.
-   Add a one-shot helper that creates the experiment record and binds benchmark/variant steps to it automatically when the selected playbook is optimization-oriented.
+## Remaining Hardening Opportunities
 
-3. Periodic goal continuation.
-   Add a bounded daemon or inbox path that re-runs `goal.autorun` on active workflow goals so long-lived overnight pipelines do not depend only on task completion callbacks.
+The highest-value follow-ons after this slice are:
 
-4. Artifact expectations.
-   Enforce `expected_artifact_types` more strictly at report time so GSD/autoresearch plans can detect when a worker completed without enough evidence.
+1. Approval policy profiles.
+   Make strict/bounded/aggressive policy modes first-class so approval behavior is configurable rather than only plan-shaped.
 
-5. Approval policy profiles.
-   Let the user opt into strict, bounded, or fully autonomous execution modes without rewriting planners.
+2. Richer evidence policies.
+   Expand artifact expectations from presence checks into stronger verifier semantics, freshness, and artifact trust rules.
+
+3. Adaptive worker assignment.
+   Use live success/failure history to downgrade weak sessions automatically instead of only relying on static capability-tier inference.
+
+4. Longer unattended burn-in.
+   Use repeated micro-soaks and bounded daemon sessions to build confidence before longer overnight runs.
 
 ## Recommended Daily Test Loop
 
@@ -192,8 +207,8 @@ For the next four days, test this pipeline the same way every day:
 2. Create one autoresearch-style optimization goal with a real metric.
 3. Run `goal.execute` once for each.
 4. Let workers progress naturally.
-5. Run `goal.autorun` to continue eligible work.
+5. Run `goal.autorun` or start `goal.autorun_daemon` to continue eligible work.
 6. Review artifacts, events, and experiment verdicts.
-7. Record where the pipeline stalled or needed manual patching.
+7. Check `kernel.summary` and record where the pipeline stalled or needed manual patching.
 
 That gives you a real feedback loop on orchestration quality instead of only checking whether tools exist.

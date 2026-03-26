@@ -67,7 +67,8 @@ Methodology automation: [Automated GSD + autoresearch Pipeline](./docs/AUTOMATED
 
 Practical entrypoint:
 - use `playbook.run` to instantiate a GSD/autoresearch workflow and immediately enter `goal.execute`
-- let `agent.report_result` feed artifacts, experiment observations, and bounded `goal.autorun` continuation back into the kernel
+- let `agent.report_result` feed artifacts, experiment observations, evidence gates, and bounded `goal.autorun` continuation back into the kernel
+- use `kernel.summary` for one-shot operator state and `goal.autorun_daemon` for bounded unattended continuation
 
 ## Quick Start
 
@@ -202,7 +203,7 @@ Core runtime tools include:
 - Memory and continuity: `memory.*`, `transcript.*`, `who_knows`, `knowledge.query`, `retrieval.hybrid`
 - Governance and safety: `policy.evaluate`, `preflight.check`, `postflight.verify`, `mutation.check`
 - Durable execution: `run.*`, `task.*`, `lock.*`
-- Agentic kernel: `goal.*` including `goal.execute` and `goal.autorun`, `plan.*`, `artifact.*`, `experiment.*`, `event.*`, `agent.session.*`, `dispatch.autorun`
+- Agentic kernel: `goal.*` including `goal.execute`, `goal.autorun`, and `goal.autorun_daemon`, `kernel.summary`, `plan.*`, `artifact.*`, `experiment.*`, `event.*`, `agent.session.*`, `dispatch.autorun`
 - Workflow methodology: `playbook.*` including `playbook.run`, `pack.hooks.list`, `pack.plan.generate`, `pack.verify.run`
 - Decision and incident logging: `adr.create`, `decision.link`, `incident.*`
 - Runtime ops: `health.*`, `migration.status`, `imprint.*`, `imprint.inbox.*`
@@ -271,6 +272,7 @@ How to publish an agentic-development-focused fork from this template:
 ```bash
 npm test
 npm run mvp:smoke
+npm run agentic:micro-soak
 ```
 
 Local HTTP teammate validation:
