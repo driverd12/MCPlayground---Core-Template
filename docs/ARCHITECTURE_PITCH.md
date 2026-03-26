@@ -11,6 +11,34 @@ The architecture deliberately separates:
 
 This pattern reduces project risk and accelerates new MCP server development.
 
+```mermaid
+flowchart LR
+  A["Cursor / Codex / IDE Clients"] --> K["Local MCP Kernel"]
+  B["Inbox Workers / Background Automation"] --> K
+  C["TriChat / Council UI"] --> K
+  D["External Adapters"] --> K
+
+  K --> E["Coordination
+  agent.session.*
+  goal.*
+  plan.*
+  dispatch.autorun"]
+  K --> F["Execution
+  task.*
+  run.*
+  lock.*
+  event.*"]
+  K --> G["Evidence
+  artifact.*
+  experiment.*
+  pack hooks
+  playbook.*"]
+
+  G --> H["GSD delivery planner / verifier"]
+  G --> I["autoresearch optimization loop"]
+  K --> J[("SQLite + local state authority")]
+```
+
 ## Problem It Solves
 
 Without a reusable core, each MCP project tends to duplicate:
@@ -37,13 +65,19 @@ This template solves those once, then allows domain packs to focus on actual bus
   - STDIO for single-client integrations.
   - HTTP for multi-client local access with bearer auth.
 - SQLite durability layer:
-  - Notes, transcripts, memories, tasks, run events, decisions, incidents, ADR metadata.
+  - Notes, transcripts, memories, tasks, runs, goals, plans, artifacts, experiments, events, and hook runs.
+- Agentic kernel:
+  - `agent.session.*`, `goal.*`, `plan.*`, `dispatch.autorun`.
+- Evidence and measurement:
+  - `artifact.*`, `experiment.*`, `event.*`.
 - Governance and safety:
   - `policy.evaluate`, `preflight.check`, `postflight.verify`, `mutation.check`.
 - Continuity and retrieval:
   - `memory.*`, `transcript.*`, `knowledge.query`, `retrieval.hybrid`, `who_knows`.
 - Domain pack loader:
   - runtime registration from `MCP_DOMAIN_PACKS`.
+- Workflow hooks and playbooks:
+  - planner/verifier hooks plus methodology playbooks for GSD-style delivery and autoresearch-style optimization.
 
 ## Domain Pack Model
 
@@ -63,6 +97,8 @@ For continuity across IDEs and agents:
 - require stable identifiers (`project_id`, `case_id`, `run_id`, `session_id`) in domain tools
 - preserve source attribution (`source_client`, `source_model`, `source_agent`)
 - route all writes through MCP tools, not direct DB writes
+- treat TriChat as one backend client of the kernel, not the owner of orchestration
+- let background workers and IDE clients claim the same routed task queue through `agent.session.*`
 
 ## Reliability and Auditability Narrative
 
@@ -70,6 +106,8 @@ For continuity across IDEs and agents:
 - Mutations are replay-safe with idempotency metadata.
 - Governance tools persist checks and recommendations.
 - ADR and decision links provide explicit rationale chains.
+- Goals, plans, experiments, and artifacts provide a durable evidence graph instead of transcript-only reasoning.
+- GSD and autoresearch can both execute through the same kernel because methodology is expressed as plans, hooks, tasks, and evidence, not separate chat silos.
 
 ## Stakeholder Talk Track
 

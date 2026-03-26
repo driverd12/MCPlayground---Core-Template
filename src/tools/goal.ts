@@ -89,6 +89,28 @@ export const goalExecuteSchema = z.object({
   ...sourceSchema.shape,
 });
 
+export const goalAutorunSchema = z.object({
+  mutation: mutationSchema,
+  goal_id: z.string().min(1).optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+  create_plan_if_missing: z.boolean().optional(),
+  dry_run: z.boolean().optional(),
+  dispatch_limit: z.number().int().min(1).max(100).optional(),
+  max_passes: z.number().int().min(1).max(20).optional(),
+  pack_id: z.string().min(1).optional(),
+  hook_name: z.string().min(1).optional(),
+  context_artifact_ids: z.array(z.string().min(1)).optional(),
+  options: z.record(z.unknown()).optional(),
+  title: z.string().min(1).optional(),
+  selected: z.boolean().optional(),
+  trichat_agent_ids: z.array(z.string().min(1)).max(50).optional(),
+  trichat_max_rounds: z.number().int().min(1).max(10).optional(),
+  trichat_min_success_agents: z.number().int().min(1).max(10).optional(),
+  trichat_bridge_timeout_seconds: z.number().int().min(5).max(1800).optional(),
+  trichat_bridge_dry_run: z.boolean().optional(),
+  ...sourceSchema.shape,
+});
+
 export const goalListSchema = z
   .object({
     status: goalStatusSchema.optional(),
@@ -268,6 +290,31 @@ function summarizeGoalExecution(plan: PlanRecord, steps: PlanStepRecord[]) {
     failed_step_ids: failedStepIds,
     next_action: nextAction,
   };
+}
+
+function listGoalAutorunCandidates(storage: Storage, input: z.infer<typeof goalAutorunSchema>) {
+  if (input.goal_id) {
+    const goal = storage.getGoalById(input.goal_id);
+    return goal ? [goal] : [];
+  }
+
+  const statuses: Array<z.infer<typeof goalStatusSchema>> = ["active", "waiting", "blocked"];
+  const seen = new Set<string>();
+  const goals: GoalRecord[] = [];
+  const perStatusLimit = Math.max(25, input.limit ?? 25);
+
+  for (const status of statuses) {
+    for (const goal of storage.listGoals({ status, limit: perStatusLimit })) {
+      if (seen.has(goal.goal_id)) {
+        continue;
+      }
+      seen.add(goal.goal_id);
+      goals.push(goal);
+    }
+  }
+
+  goals.sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+  return goals.slice(0, input.limit ?? 25);
 }
 
 export async function goalCreate(storage: Storage, input: z.infer<typeof goalCreateSchema>) {
@@ -522,6 +569,206 @@ export async function goalExecute(
         final_plan: finalPlan,
         final_steps: finalSteps,
         final_readiness: finalReadiness,
+      };
+    },
+  });
+}
+
+export async function goalAutorun(
+  storage: Storage,
+  invokeTool: (toolName: string, input: Record<string, unknown>) => Promise<unknown>,
+  input: z.infer<typeof goalAutorunSchema>
+) {
+  return runIdempotentMutation({
+    storage,
+    tool_name: "goal.autorun",
+    mutation: input.mutation,
+    payload: input,
+    execute: async () => {
+      const candidates = listGoalAutorunCandidates(storage, input);
+      const results: Array<Record<string, unknown>> = [];
+      let executedCount = 0;
+      let skippedCount = 0;
+
+      for (const goal of candidates) {
+        const planResolution = resolveGoalExecutionPlan(
+          storage,
+          {
+            ...input,
+            mutation: input.mutation,
+            goal_id: goal.goal_id,
+            create_plan_if_missing: input.create_plan_if_missing ?? !input.goal_id,
+            pack_id: input.pack_id ?? "agentic",
+            autorun: true,
+          },
+          goal
+        );
+
+        const plan = planResolution.plan;
+        if (!plan) {
+          if (input.create_plan_if_missing === false) {
+            skippedCount += 1;
+            results.push({
+              goal_id: goal.goal_id,
+              action: "skipped",
+              reason: "missing_plan",
+              plan_resolution: planResolution.resolution,
+            });
+            continue;
+          }
+          const executed = (await invokeTool("goal.execute", {
+            mutation: buildGoalExecuteDerivedMutation(input.mutation, `autorun:${goal.goal_id}`),
+            goal_id: goal.goal_id,
+            create_plan_if_missing: true,
+            pack_id: input.pack_id,
+            hook_name: input.hook_name,
+            context_artifact_ids: input.context_artifact_ids,
+            options: input.options,
+            title: input.title,
+            selected: input.selected,
+            dispatch_limit: input.dispatch_limit,
+            dry_run: input.dry_run,
+            autorun: true,
+            max_passes: input.max_passes,
+            trichat_agent_ids: input.trichat_agent_ids,
+            trichat_max_rounds: input.trichat_max_rounds,
+            trichat_min_success_agents: input.trichat_min_success_agents,
+            trichat_bridge_timeout_seconds: input.trichat_bridge_timeout_seconds,
+            trichat_bridge_dry_run: input.trichat_bridge_dry_run,
+            source_client: input.source_client,
+            source_model: input.source_model,
+            source_agent: input.source_agent,
+          })) as Record<string, unknown>;
+          executedCount += 1;
+          results.push({
+            goal_id: goal.goal_id,
+            action: "executed",
+            reason: "generated_plan",
+            execution: executed,
+          });
+          continue;
+        }
+
+        if (isTerminalPlanStatus(plan.status)) {
+          skippedCount += 1;
+          results.push({
+            goal_id: goal.goal_id,
+            plan_id: plan.plan_id,
+            action: "skipped",
+            reason: "terminal_plan",
+            plan_status: plan.status,
+          });
+          continue;
+        }
+
+        const steps = storage.listPlanSteps(plan.plan_id);
+        const summary = summarizeGoalExecution(plan, steps);
+        const runningWorkerStep = steps.find(
+          (step) => step.status === "running" && (step.executor_kind === "worker" || step.executor_kind === "task")
+        );
+        const blockedHumanStep = summary.blocked_human_steps[0] ?? null;
+        const hasRunningTriChat = steps.some((step) => step.status === "running" && step.executor_kind === "trichat");
+
+        if (blockedHumanStep) {
+          skippedCount += 1;
+          results.push({
+            goal_id: goal.goal_id,
+            plan_id: plan.plan_id,
+            action: "skipped",
+            reason: "human_gate",
+            blocked_step: blockedHumanStep,
+            execution_summary: summary,
+          });
+          continue;
+        }
+
+        if (runningWorkerStep) {
+          skippedCount += 1;
+          results.push({
+            goal_id: goal.goal_id,
+            plan_id: plan.plan_id,
+            action: "skipped",
+            reason: "running_worker",
+            running_step: {
+              step_id: runningWorkerStep.step_id,
+              title: runningWorkerStep.title,
+              task_id: runningWorkerStep.task_id,
+            },
+            execution_summary: summary,
+          });
+          continue;
+        }
+
+        if (summary.ready_count === 0 && !hasRunningTriChat) {
+          skippedCount += 1;
+          results.push({
+            goal_id: goal.goal_id,
+            plan_id: plan.plan_id,
+            action: "skipped",
+            reason: "idle_no_ready_work",
+            execution_summary: summary,
+          });
+          continue;
+        }
+
+        const executed = (await invokeTool("goal.execute", {
+          mutation: buildGoalExecuteDerivedMutation(input.mutation, `autorun:${goal.goal_id}`),
+          goal_id: goal.goal_id,
+          plan_id: plan.plan_id,
+          create_plan_if_missing: input.create_plan_if_missing,
+          pack_id: input.pack_id,
+          hook_name: input.hook_name,
+          context_artifact_ids: input.context_artifact_ids,
+          options: input.options,
+          title: input.title,
+          selected: input.selected,
+          dispatch_limit: input.dispatch_limit,
+          dry_run: input.dry_run,
+          autorun: true,
+          max_passes: input.max_passes,
+          trichat_agent_ids: input.trichat_agent_ids,
+          trichat_max_rounds: input.trichat_max_rounds,
+          trichat_min_success_agents: input.trichat_min_success_agents,
+          trichat_bridge_timeout_seconds: input.trichat_bridge_timeout_seconds,
+          trichat_bridge_dry_run: input.trichat_bridge_dry_run,
+          source_client: input.source_client,
+          source_model: input.source_model,
+          source_agent: input.source_agent,
+        })) as Record<string, unknown>;
+        executedCount += 1;
+        results.push({
+          goal_id: goal.goal_id,
+          plan_id: plan.plan_id,
+          action: "executed",
+          reason: hasRunningTriChat ? "continue_trichat_backend" : "ready_work",
+          execution: executed,
+        });
+      }
+
+      const event = storage.appendRuntimeEvent({
+        event_type: "goal.autorun",
+        entity_type: "goal",
+        entity_id: input.goal_id ?? null,
+        summary: `goal.autorun scanned ${candidates.length} goal(s) and executed ${executedCount}.`,
+        details: {
+          goal_id: input.goal_id ?? null,
+          scanned_count: candidates.length,
+          executed_count: executedCount,
+          skipped_count: skippedCount,
+          dry_run: input.dry_run ?? false,
+        },
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      });
+
+      return {
+        ok: true,
+        scanned_count: candidates.length,
+        executed_count: executedCount,
+        skipped_count: skippedCount,
+        results,
+        event,
       };
     },
   });

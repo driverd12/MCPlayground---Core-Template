@@ -22,6 +22,7 @@ test("server starts with default agentic workflow hooks and exposes core + TriCh
 
     assert.equal(names.has("memory.append"), true);
     assert.equal(names.has("goal.create"), true);
+    assert.equal(names.has("goal.autorun"), true);
     assert.equal(names.has("goal.execute"), true);
     assert.equal(names.has("goal.get"), true);
     assert.equal(names.has("goal.list"), true);
@@ -524,6 +525,123 @@ test("goal.execute can run an existing synchronous plan to terminal completion",
     });
     assert.equal(completedPlan.plan.status, "completed");
     assert.ok(completedPlan.steps.every((step) => step.status === "completed"));
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("goal.autorun executes eligible goals and skips running-worker or human-gated plans", async () => {
+  const testId = `${Date.now()}-goal-autorun`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-autorun-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const generatedGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create.generated", () => mutationCounter++),
+      title: "Autorun generated goal",
+      objective: "Allow goal.autorun to create and execute a plan",
+      status: "active",
+      autonomy_mode: "execute_bounded",
+      acceptance_criteria: ["goal.autorun can enter goal.execute for a goal without a plan"],
+      tags: ["agentic"],
+    });
+
+    const humanGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create.human", () => mutationCounter++),
+      title: "Autorun human gate goal",
+      objective: "Ensure goal.autorun skips explicit human gates",
+      status: "active",
+      acceptance_criteria: ["Blocked human gates are surfaced without execution thrash"],
+    });
+    const humanPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create.human", () => mutationCounter++),
+      goal_id: humanGoal.goal.goal_id,
+      title: "Human approval plan",
+      summary: "Block on one human step",
+      selected: true,
+      steps: [
+        {
+          step_id: "needs-human",
+          seq: 1,
+          title: "Await approval",
+          step_kind: "handoff",
+          executor_kind: "human",
+          input: {
+            approval_summary: "Human approval required before continuing.",
+          },
+        },
+      ],
+    });
+    await callTool(client, "plan.dispatch", {
+      mutation: nextMutation(testId, "plan.dispatch.human", () => mutationCounter++),
+      plan_id: humanPlan.plan.plan_id,
+    });
+
+    const runningGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create.running", () => mutationCounter++),
+      title: "Autorun running worker goal",
+      objective: "Ensure goal.autorun skips goals that already have an in-flight worker step",
+      status: "active",
+      acceptance_criteria: ["Running worker steps are not re-entered prematurely"],
+    });
+    const runningPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create.running", () => mutationCounter++),
+      goal_id: runningGoal.goal.goal_id,
+      title: "Running worker plan",
+      summary: "Dispatch one worker step and leave it in flight",
+      selected: true,
+      steps: [
+        {
+          step_id: "worker-in-flight",
+          seq: 1,
+          title: "Run the worker step",
+          step_kind: "mutation",
+          executor_kind: "worker",
+          input: {
+            objective: "Longer-running worker step for autorun skip coverage",
+            project_dir: ".",
+            priority: 5,
+            tags: ["goal-autorun", "worker"],
+          },
+        },
+      ],
+    });
+    await callTool(client, "plan.dispatch", {
+      mutation: nextMutation(testId, "plan.dispatch.running", () => mutationCounter++),
+      plan_id: runningPlan.plan.plan_id,
+    });
+
+    const autorun = await callTool(client, "goal.autorun", {
+      mutation: nextMutation(testId, "goal.autorun", () => mutationCounter++),
+      limit: 10,
+      max_passes: 4,
+    });
+
+    assert.equal(autorun.ok, true);
+    assert.equal(autorun.scanned_count, 3);
+    assert.equal(autorun.executed_count, 1);
+    assert.equal(autorun.skipped_count, 2);
+
+    const resultByGoalId = new Map(autorun.results.map((result) => [result.goal_id, result]));
+
+    const generatedResult = resultByGoalId.get(generatedGoal.goal.goal_id);
+    assert.equal(generatedResult.action, "executed");
+    assert.equal(generatedResult.reason, "generated_plan");
+    assert.equal(generatedResult.execution.executed, true);
+    assert.equal(generatedResult.execution.created_plan, true);
+
+    const humanResult = resultByGoalId.get(humanGoal.goal.goal_id);
+    assert.equal(humanResult.action, "skipped");
+    assert.equal(humanResult.reason, "human_gate");
+    assert.equal(humanResult.blocked_step.title, "Await approval");
+
+    const runningResult = resultByGoalId.get(runningGoal.goal.goal_id);
+    assert.equal(runningResult.action, "skipped");
+    assert.equal(runningResult.reason, "running_worker");
+    assert.equal(runningResult.running_step.title, "Run the worker step");
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

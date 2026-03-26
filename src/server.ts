@@ -79,6 +79,8 @@ import {
 } from "./tools/experiment.js";
 import { eventPublish, eventPublishSchema, eventSummary, eventSummarySchema, eventTail, eventTailSchema } from "./tools/event.js";
 import {
+  goalAutorun,
+  goalAutorunSchema,
   goalCreate,
   goalCreateSchema,
   goalExecute,
@@ -1428,6 +1430,10 @@ registerTool("goal.get", "Fetch a durable goal by id.", goalGetSchema, (input) =
 
 registerTool("goal.list", "List durable goals by status or target filters.", goalListSchema, (input) =>
   goalList(storage, input)
+);
+
+registerTool("goal.autorun", "Scan eligible goals and re-enter goal.execute where unattended progress is possible.", goalAutorunSchema, (input) =>
+  goalAutorun(storage, invokeRegisteredTool, input)
 );
 
 registerTool("goal.plan_generate", "Generate and persist a durable plan for a goal through a registered pack planner hook.", goalPlanGenerateSchema, (input) =>

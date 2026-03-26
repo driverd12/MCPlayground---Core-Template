@@ -35,19 +35,35 @@ Use this framing with stakeholders:
 
 ```mermaid
 flowchart LR
-  A["IDE / Agent Client A"] --> D["Local MCP Runtime"]
-  B["IDE / Agent Client B"] --> D
-  C["Automation Worker"] --> D
+  A["Cursor / Codex / IDE Clients"] --> K["Local MCP Kernel"]
+  B["Inbox Workers / tmux / Background Automation"] --> K
+  C["TriChat / Council UI"] --> K
+  D["Future External Adapters"] --> K
 
-  D --> E["Core: memory, transcript, tasks, runs, governance"]
-  D --> F["Workflow Pack API"]
-  F --> G["Agentic Workflow Pack (default)"]
+  K --> E["Control Plane
+  agent.session.*
+  goal.*
+  plan.*
+  dispatch.autorun"]
+  K --> F["Execution + Audit
+  task.*
+  run.*
+  lock.*
+  event.*"]
+  K --> G["Evidence + Methodology
+  artifact.*
+  experiment.*
+  playbook.*
+  pack hooks"]
 
-  E --> H[("SQLite: ./data/hub.sqlite")]
-  G --> I["Domain artifacts + reports"]
+  G --> H["GSD Delivery Flow"]
+  G --> I["autoresearch Optimization Loop"]
+  K --> J[("SQLite + local runtime state")]
 ```
 
 More detail: [Architecture Pitch](./docs/ARCHITECTURE_PITCH.md)
+
+Methodology automation: [Automated GSD + autoresearch Pipeline](./docs/AUTOMATED_GSD_AUTORESEARCH_PIPELINE.md)
 
 ## Quick Start
 
@@ -182,7 +198,7 @@ Core runtime tools include:
 - Memory and continuity: `memory.*`, `transcript.*`, `who_knows`, `knowledge.query`, `retrieval.hybrid`
 - Governance and safety: `policy.evaluate`, `preflight.check`, `postflight.verify`, `mutation.check`
 - Durable execution: `run.*`, `task.*`, `lock.*`
-- Agentic kernel: `goal.*`, `plan.*`, `artifact.*`, `experiment.*`, `event.*`, `agent.session.*`, `dispatch.autorun`
+- Agentic kernel: `goal.*` including `goal.execute` and `goal.autorun`, `plan.*`, `artifact.*`, `experiment.*`, `event.*`, `agent.session.*`, `dispatch.autorun`
 - Workflow methodology: `playbook.*`, `pack.hooks.list`, `pack.plan.generate`, `pack.verify.run`
 - Decision and incident logging: `adr.create`, `decision.link`, `incident.*`
 - Runtime ops: `health.*`, `migration.status`, `imprint.*`, `imprint.inbox.*`
