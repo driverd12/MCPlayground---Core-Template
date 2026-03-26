@@ -170,6 +170,8 @@ type TaskRoutingEvaluation = {
   routing: TaskRoutingRule;
   task_profile: TaskExecutionProfile;
   session_capability_tier: "low" | "medium" | "high";
+  adaptive_score_adjustment: number;
+  session_performance: AdaptiveSessionPerformanceSummary;
 };
 
 type AgentTaskCandidate = {
@@ -184,6 +186,450 @@ type ExpectedArtifactCheck = {
   missing_artifact_types: string[];
   satisfied: boolean;
 };
+
+type AdaptiveComplexityStats = {
+  claims: number;
+  completions: number;
+  failures: number;
+  stagnations: number;
+  evidence_blocks: number;
+  average_completion_seconds: number | null;
+  last_completion_seconds: number | null;
+};
+
+type AdaptiveCurrentTaskState = {
+  task_id: string | null;
+  claimed_at: string | null;
+  heartbeat_count: number;
+  complexity: TaskExecutionProfile["complexity"] | null;
+  stagnation_signaled: boolean;
+  stagnation_signaled_at: string | null;
+};
+
+type AdaptiveWorkerProfile = {
+  total_claims: number;
+  total_completed: number;
+  total_failed: number;
+  total_stagnation_signals: number;
+  total_evidence_blocks: number;
+  consecutive_failures: number;
+  consecutive_stagnation_signals: number;
+  average_completion_seconds: number | null;
+  last_completion_seconds: number | null;
+  last_claimed_at: string | null;
+  last_completed_at: string | null;
+  last_failed_at: string | null;
+  last_stagnation_at: string | null;
+  complexity: Record<TaskExecutionProfile["complexity"], AdaptiveComplexityStats>;
+  current_task: AdaptiveCurrentTaskState;
+  recent_outcomes: Array<Record<string, unknown>>;
+};
+
+type AdaptiveSessionPerformanceSummary = {
+  total_claims: number;
+  total_completed: number;
+  total_failed: number;
+  total_stagnation_signals: number;
+  total_evidence_blocks: number;
+  consecutive_failures: number;
+  consecutive_stagnation_signals: number;
+  completion_rate: number | null;
+  failure_rate: number | null;
+  stagnation_rate: number | null;
+  average_completion_seconds: number | null;
+  complexity: TaskExecutionProfile["complexity"];
+  complexity_stats: AdaptiveComplexityStats;
+};
+
+type AdaptiveRoutingSignal = {
+  adjustment: number;
+  blockers: string[];
+  matched_preferences: string[];
+  summary: AdaptiveSessionPerformanceSummary;
+};
+
+const ADAPTIVE_WORKER_PROFILE_KEY = "adaptive_worker_profile";
+
+function readNonNegativeInt(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    return null;
+  }
+  return value;
+}
+
+function readNonNegativeNumber(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return null;
+  }
+  return value;
+}
+
+function emptyAdaptiveComplexityStats(): AdaptiveComplexityStats {
+  return {
+    claims: 0,
+    completions: 0,
+    failures: 0,
+    stagnations: 0,
+    evidence_blocks: 0,
+    average_completion_seconds: null,
+    last_completion_seconds: null,
+  };
+}
+
+function emptyAdaptiveCurrentTaskState(): AdaptiveCurrentTaskState {
+  return {
+    task_id: null,
+    claimed_at: null,
+    heartbeat_count: 0,
+    complexity: null,
+    stagnation_signaled: false,
+    stagnation_signaled_at: null,
+  };
+}
+
+function emptyAdaptiveWorkerProfile(): AdaptiveWorkerProfile {
+  return {
+    total_claims: 0,
+    total_completed: 0,
+    total_failed: 0,
+    total_stagnation_signals: 0,
+    total_evidence_blocks: 0,
+    consecutive_failures: 0,
+    consecutive_stagnation_signals: 0,
+    average_completion_seconds: null,
+    last_completion_seconds: null,
+    last_claimed_at: null,
+    last_completed_at: null,
+    last_failed_at: null,
+    last_stagnation_at: null,
+    complexity: {
+      low: emptyAdaptiveComplexityStats(),
+      medium: emptyAdaptiveComplexityStats(),
+      high: emptyAdaptiveComplexityStats(),
+    },
+    current_task: emptyAdaptiveCurrentTaskState(),
+    recent_outcomes: [],
+  };
+}
+
+function normalizeAdaptiveComplexityStats(value: unknown): AdaptiveComplexityStats {
+  const profile = isRecord(value) ? value : {};
+  return {
+    claims: readNonNegativeInt(profile.claims) ?? 0,
+    completions: readNonNegativeInt(profile.completions) ?? 0,
+    failures: readNonNegativeInt(profile.failures) ?? 0,
+    stagnations: readNonNegativeInt(profile.stagnations) ?? 0,
+    evidence_blocks: readNonNegativeInt(profile.evidence_blocks) ?? 0,
+    average_completion_seconds: readNonNegativeNumber(profile.average_completion_seconds),
+    last_completion_seconds: readNonNegativeNumber(profile.last_completion_seconds),
+  };
+}
+
+function normalizeAdaptiveWorkerProfile(value: unknown): AdaptiveWorkerProfile {
+  const profile = isRecord(value) ? value : {};
+  const complexity = isRecord(profile.complexity) ? profile.complexity : {};
+  const currentTask = isRecord(profile.current_task) ? profile.current_task : {};
+  return {
+    total_claims: readNonNegativeInt(profile.total_claims) ?? 0,
+    total_completed: readNonNegativeInt(profile.total_completed) ?? 0,
+    total_failed: readNonNegativeInt(profile.total_failed) ?? 0,
+    total_stagnation_signals: readNonNegativeInt(profile.total_stagnation_signals) ?? 0,
+    total_evidence_blocks: readNonNegativeInt(profile.total_evidence_blocks) ?? 0,
+    consecutive_failures: readNonNegativeInt(profile.consecutive_failures) ?? 0,
+    consecutive_stagnation_signals: readNonNegativeInt(profile.consecutive_stagnation_signals) ?? 0,
+    average_completion_seconds: readNonNegativeNumber(profile.average_completion_seconds),
+    last_completion_seconds: readNonNegativeNumber(profile.last_completion_seconds),
+    last_claimed_at: readString(profile.last_claimed_at),
+    last_completed_at: readString(profile.last_completed_at),
+    last_failed_at: readString(profile.last_failed_at),
+    last_stagnation_at: readString(profile.last_stagnation_at),
+    complexity: {
+      low: normalizeAdaptiveComplexityStats(complexity.low),
+      medium: normalizeAdaptiveComplexityStats(complexity.medium),
+      high: normalizeAdaptiveComplexityStats(complexity.high),
+    },
+    current_task: {
+      task_id: readString(currentTask.task_id),
+      claimed_at: readString(currentTask.claimed_at),
+      heartbeat_count: readNonNegativeInt(currentTask.heartbeat_count) ?? 0,
+      complexity:
+        readString(currentTask.complexity) === "low" ||
+        readString(currentTask.complexity) === "medium" ||
+        readString(currentTask.complexity) === "high"
+          ? (readString(currentTask.complexity) as TaskExecutionProfile["complexity"])
+          : null,
+      stagnation_signaled: readBoolean(currentTask.stagnation_signaled) ?? false,
+      stagnation_signaled_at: readString(currentTask.stagnation_signaled_at),
+    },
+    recent_outcomes: Array.isArray(profile.recent_outcomes)
+      ? profile.recent_outcomes.filter((entry): entry is Record<string, unknown> => isRecord(entry)).slice(-10)
+      : [],
+  };
+}
+
+function getAdaptiveWorkerProfile(session: AgentSessionRecord): AdaptiveWorkerProfile {
+  return normalizeAdaptiveWorkerProfile(session.metadata[ADAPTIVE_WORKER_PROFILE_KEY]);
+}
+
+function getAdaptiveComplexityStats(
+  profile: AdaptiveWorkerProfile,
+  complexity: TaskExecutionProfile["complexity"]
+): AdaptiveComplexityStats {
+  return {
+    ...profile.complexity[complexity],
+  };
+}
+
+function setAdaptiveComplexityStats(
+  profile: AdaptiveWorkerProfile,
+  complexity: TaskExecutionProfile["complexity"],
+  stats: AdaptiveComplexityStats
+) {
+  profile.complexity = {
+    ...profile.complexity,
+    [complexity]: stats,
+  };
+}
+
+function updateRollingAverage(currentAverage: number | null, sampleCountBefore: number, sample: number): number {
+  if (!Number.isFinite(sample) || sample < 0) {
+    return currentAverage ?? 0;
+  }
+  if (currentAverage === null || sampleCountBefore <= 0) {
+    return Math.round(sample * 1000) / 1000;
+  }
+  return Math.round((((currentAverage * sampleCountBefore) + sample) / (sampleCountBefore + 1)) * 1000) / 1000;
+}
+
+function getStagnationHeartbeatThreshold(complexity: TaskExecutionProfile["complexity"]): number {
+  if (complexity === "low") {
+    return 2;
+  }
+  if (complexity === "medium") {
+    return 3;
+  }
+  return 4;
+}
+
+function updateAdaptiveWorkerProfileOnClaim(
+  session: AgentSessionRecord,
+  taskId: string,
+  taskProfile: TaskExecutionProfile,
+  claimedAt: string
+): AdaptiveWorkerProfile {
+  const profile = getAdaptiveWorkerProfile(session);
+  const stats = getAdaptiveComplexityStats(profile, taskProfile.complexity);
+  stats.claims += 1;
+  setAdaptiveComplexityStats(profile, taskProfile.complexity, stats);
+  profile.total_claims += 1;
+  profile.last_claimed_at = claimedAt;
+  profile.current_task = {
+    task_id: taskId,
+    claimed_at: claimedAt,
+    heartbeat_count: 0,
+    complexity: taskProfile.complexity,
+    stagnation_signaled: false,
+    stagnation_signaled_at: null,
+  };
+  return profile;
+}
+
+function updateAdaptiveWorkerProfileOnHeartbeat(
+  session: AgentSessionRecord,
+  taskId: string,
+  taskProfile: TaskExecutionProfile,
+  heartbeatAt: string
+): { profile: AdaptiveWorkerProfile; stagnation_signaled: boolean } {
+  const profile = getAdaptiveWorkerProfile(session);
+  const currentTask =
+    profile.current_task.task_id === taskId
+      ? { ...profile.current_task }
+      : {
+          task_id: taskId,
+          claimed_at: heartbeatAt,
+          heartbeat_count: 0,
+          complexity: taskProfile.complexity,
+          stagnation_signaled: false,
+          stagnation_signaled_at: null,
+        };
+  currentTask.task_id = taskId;
+  currentTask.complexity = taskProfile.complexity;
+  currentTask.heartbeat_count += 1;
+
+  let stagnationSignaled = false;
+  if (!currentTask.stagnation_signaled && currentTask.heartbeat_count >= getStagnationHeartbeatThreshold(taskProfile.complexity)) {
+    currentTask.stagnation_signaled = true;
+    currentTask.stagnation_signaled_at = heartbeatAt;
+    stagnationSignaled = true;
+
+    const stats = getAdaptiveComplexityStats(profile, taskProfile.complexity);
+    stats.stagnations += 1;
+    setAdaptiveComplexityStats(profile, taskProfile.complexity, stats);
+    profile.total_stagnation_signals += 1;
+    profile.consecutive_stagnation_signals += 1;
+    profile.last_stagnation_at = heartbeatAt;
+  }
+
+  profile.current_task = currentTask;
+  return {
+    profile,
+    stagnation_signaled: stagnationSignaled,
+  };
+}
+
+function updateAdaptiveWorkerProfileOnReport(
+  session: AgentSessionRecord,
+  task: TaskRecord,
+  taskProfile: TaskExecutionProfile,
+  outcome: "completed" | "failed",
+  reportedAt: string,
+  options: {
+    missing_expected_artifacts: boolean;
+  }
+): { profile: AdaptiveWorkerProfile; completion_seconds: number | null } {
+  const profile = getAdaptiveWorkerProfile(session);
+  const stats = getAdaptiveComplexityStats(profile, taskProfile.complexity);
+  const currentTask = profile.current_task.task_id === task.task_id ? profile.current_task : emptyAdaptiveCurrentTaskState();
+  const completionSeconds =
+    currentTask.claimed_at && Number.isFinite(Date.parse(currentTask.claimed_at))
+      ? Math.max(0, Math.round((Date.parse(reportedAt) - Date.parse(currentTask.claimed_at)) / 1000))
+      : null;
+
+  if (outcome === "completed") {
+    stats.completions += 1;
+    profile.total_completed += 1;
+    profile.consecutive_failures = 0;
+    profile.consecutive_stagnation_signals = 0;
+    profile.last_completed_at = reportedAt;
+    if (completionSeconds !== null) {
+      stats.average_completion_seconds = updateRollingAverage(
+        stats.average_completion_seconds,
+        Math.max(stats.completions - 1, 0),
+        completionSeconds
+      );
+      stats.last_completion_seconds = completionSeconds;
+      profile.average_completion_seconds = updateRollingAverage(
+        profile.average_completion_seconds,
+        Math.max(profile.total_completed - 1, 0),
+        completionSeconds
+      );
+      profile.last_completion_seconds = completionSeconds;
+    }
+    if (options.missing_expected_artifacts) {
+      stats.evidence_blocks += 1;
+      profile.total_evidence_blocks += 1;
+    }
+  } else {
+    stats.failures += 1;
+    profile.total_failed += 1;
+    profile.consecutive_failures += 1;
+    profile.last_failed_at = reportedAt;
+  }
+
+  setAdaptiveComplexityStats(profile, taskProfile.complexity, stats);
+  profile.current_task = emptyAdaptiveCurrentTaskState();
+  profile.recent_outcomes = [
+    ...profile.recent_outcomes.slice(-9),
+    {
+      task_id: task.task_id,
+      objective: task.objective,
+      outcome,
+      reported_at: reportedAt,
+      complexity: taskProfile.complexity,
+      missing_expected_artifacts: options.missing_expected_artifacts,
+      completion_seconds: completionSeconds,
+      stagnation_signaled: currentTask.stagnation_signaled,
+    },
+  ];
+
+  return {
+    profile,
+    completion_seconds: completionSeconds,
+  };
+}
+
+function summarizeAdaptiveWorkerProfile(
+  profile: AdaptiveWorkerProfile,
+  complexity: TaskExecutionProfile["complexity"]
+): AdaptiveSessionPerformanceSummary {
+  const totalClaims = Math.max(profile.total_claims, 0);
+  return {
+    total_claims: profile.total_claims,
+    total_completed: profile.total_completed,
+    total_failed: profile.total_failed,
+    total_stagnation_signals: profile.total_stagnation_signals,
+    total_evidence_blocks: profile.total_evidence_blocks,
+    consecutive_failures: profile.consecutive_failures,
+    consecutive_stagnation_signals: profile.consecutive_stagnation_signals,
+    completion_rate: totalClaims > 0 ? profile.total_completed / totalClaims : null,
+    failure_rate: totalClaims > 0 ? profile.total_failed / totalClaims : null,
+    stagnation_rate: totalClaims > 0 ? profile.total_stagnation_signals / totalClaims : null,
+    average_completion_seconds: profile.average_completion_seconds,
+    complexity,
+    complexity_stats: getAdaptiveComplexityStats(profile, complexity),
+  };
+}
+
+function evaluateAdaptiveRoutingSignal(
+  session: AgentSessionRecord,
+  taskProfile: TaskExecutionProfile,
+  explicitlyTargetedSession: boolean
+): AdaptiveRoutingSignal {
+  const profile = getAdaptiveWorkerProfile(session);
+  const summary = summarizeAdaptiveWorkerProfile(profile, taskProfile.complexity);
+  const blockers: string[] = [];
+  const matchedPreferences: string[] = [];
+  let adjustment = 0;
+
+  if (summary.total_claims > 0) {
+    adjustment += Math.round((summary.completion_rate ?? 0) * 8);
+    adjustment -= Math.round((summary.failure_rate ?? 0) * 10);
+    adjustment -= Math.round((summary.stagnation_rate ?? 0) * 10);
+    adjustment -= Math.round((summary.total_evidence_blocks / summary.total_claims) * 6);
+  }
+
+  const complexityClaims = summary.complexity_stats.claims;
+  if (complexityClaims >= 2) {
+    adjustment += Math.round((summary.complexity_stats.completions / complexityClaims) * 8);
+    adjustment -= Math.round((summary.complexity_stats.failures / complexityClaims) * 10);
+    adjustment -= Math.round((summary.complexity_stats.stagnations / complexityClaims) * 10);
+    matchedPreferences.push(`adaptive_history:${taskProfile.complexity}:${complexityClaims}`);
+  }
+
+  if (summary.consecutive_failures > 0) {
+    adjustment -= Math.min(summary.consecutive_failures * 4, 12);
+  }
+  if (summary.consecutive_stagnation_signals > 0) {
+    adjustment -= Math.min(summary.consecutive_stagnation_signals * 3, 9);
+  }
+
+  if (!explicitlyTargetedSession && complexityClaims >= 2) {
+    if (
+      taskProfile.complexity === "high" &&
+      (summary.consecutive_failures >= 2 || summary.consecutive_stagnation_signals >= 1)
+    ) {
+      blockers.push("performance_high_risk");
+    } else if (
+      taskProfile.complexity === "medium" &&
+      (summary.consecutive_failures >= 2 || summary.consecutive_stagnation_signals >= 1)
+    ) {
+      blockers.push("performance_medium_risk");
+    }
+  }
+
+  if (adjustment > 0) {
+    matchedPreferences.push(`adaptive_bonus:${adjustment}`);
+  } else if (adjustment < 0) {
+    matchedPreferences.push(`adaptive_penalty:${adjustment}`);
+  }
+
+  return {
+    adjustment,
+    blockers,
+    matched_preferences: matchedPreferences,
+    summary,
+  };
+}
 
 function resolveTaskPlanContext(
   storage: Storage,
@@ -620,6 +1066,11 @@ function evaluateTaskRouting(session: AgentSessionRecord, task: TaskRecord): Tas
     score += 2;
   }
 
+  const adaptiveSignal = evaluateAdaptiveRoutingSignal(session, taskProfile, explicitlyTargetedSession);
+  blockers.push(...adaptiveSignal.blockers);
+  matchedPreferences.push(...adaptiveSignal.matched_preferences);
+  score += adaptiveSignal.adjustment;
+
   return {
     eligible: blockers.length === 0,
     score,
@@ -628,6 +1079,8 @@ function evaluateTaskRouting(session: AgentSessionRecord, task: TaskRecord): Tas
     routing,
     task_profile: taskProfile,
     session_capability_tier: sessionCapabilityTier,
+    adaptive_score_adjustment: adaptiveSignal.adjustment,
+    session_performance: adaptiveSignal.summary,
   };
 }
 
@@ -946,10 +1399,12 @@ export function agentWorklist(storage: Storage, input: z.infer<typeof agentWorkl
       available_at: entry.task.available_at,
       tags: entry.task.tags,
       routing_score: entry.routing.score,
+      adaptive_score_adjustment: entry.routing.adaptive_score_adjustment,
       matched_preferences: entry.routing.matched_preferences,
       routing: entry.routing.routing,
       task_profile: entry.routing.task_profile,
       session_capability_tier: entry.routing.session_capability_tier,
+      session_performance: entry.routing.session_performance,
       task: entry.task,
     })),
     ineligible_count: ineligible.length,
@@ -960,9 +1415,11 @@ export function agentWorklist(storage: Storage, input: z.infer<typeof agentWorkl
           priority: entry.task.priority,
           reason: entry.reason,
           blockers: entry.routing.blockers,
+          adaptive_score_adjustment: entry.routing.adaptive_score_adjustment,
           routing: entry.routing.routing,
           task_profile: entry.routing.task_profile,
           session_capability_tier: entry.routing.session_capability_tier,
+          session_performance: entry.routing.session_performance,
           task: entry.task,
         }))
       : [],
@@ -1046,6 +1503,16 @@ export async function agentClaimNext(storage: Storage, input: z.infer<typeof age
         lease_seconds: input.lease_seconds ?? 300,
         task_id: selection.candidate.task.task_id,
       });
+      const claimedAt = new Date().toISOString();
+      const adaptiveWorkerProfile =
+        claimed.claimed && claimed.task
+          ? updateAdaptiveWorkerProfileOnClaim(
+              session,
+              claimed.task.task_id,
+              selection.candidate.routing.task_profile,
+              claimedAt
+            )
+          : getAdaptiveWorkerProfile(session);
 
       const nextStatus =
         claimed.claimed ? "busy" : claimed.reason === "none-available" || claimed.reason === "none-eligible" ? "idle" : session.status;
@@ -1054,6 +1521,7 @@ export async function agentClaimNext(storage: Storage, input: z.infer<typeof age
         lease_seconds: input.lease_seconds ?? 300,
         status: nextStatus,
         metadata: {
+          ...(input.metadata ?? {}),
           current_task_id: claimed.claimed ? claimed.task?.task_id ?? null : null,
           last_claim_attempt_at: new Date().toISOString(),
           last_claim_reason: claimed.reason,
@@ -1061,7 +1529,11 @@ export async function agentClaimNext(storage: Storage, input: z.infer<typeof age
           scanned_task_count: selection.scanned,
           last_claim_routing_score: selection.candidate.routing.score,
           last_claim_routing_matches: selection.candidate.routing.matched_preferences,
-          ...(input.metadata ?? {}),
+          last_claim_adaptive_adjustment: selection.candidate.routing.adaptive_score_adjustment,
+          current_task_claimed_at: claimed.claimed ? claimedAt : null,
+          current_task_profile: claimed.claimed ? selection.candidate.routing.task_profile : null,
+          session_performance_snapshot: selection.candidate.routing.session_performance,
+          [ADAPTIVE_WORKER_PROFILE_KEY]: adaptiveWorkerProfile,
         },
       });
 
@@ -1080,7 +1552,9 @@ export async function agentClaimNext(storage: Storage, input: z.infer<typeof age
                 task_id: claimed.task.task_id,
                 lease_expires_at: claimed.lease_expires_at ?? null,
                 routing_score: selection.candidate.routing.score,
+                adaptive_score_adjustment: selection.candidate.routing.adaptive_score_adjustment,
                 matched_preferences: selection.candidate.routing.matched_preferences,
+                session_performance: selection.candidate.routing.session_performance,
               },
               source_client: session.source_client ?? input.source_client,
               source_model: session.source_model ?? input.source_model,
@@ -1152,6 +1626,16 @@ export async function agentHeartbeatTask(storage: Storage, input: z.infer<typeof
         worker_id: session.session_id,
         lease_seconds: input.lease_seconds ?? 300,
       });
+      const heartbeatAt = new Date().toISOString();
+      const heartbeatTaskRecord = heartbeat.ok ? storage.getTaskById(taskId) ?? activeTask : activeTask ?? storage.getTaskById(taskId);
+      const heartbeatTaskProfile = heartbeatTaskRecord ? resolveTaskExecutionProfile(heartbeatTaskRecord) : null;
+      const adaptiveHeartbeat =
+        heartbeat.ok && heartbeatTaskRecord && heartbeatTaskProfile
+          ? updateAdaptiveWorkerProfileOnHeartbeat(session, taskId, heartbeatTaskProfile, heartbeatAt)
+          : {
+              profile: getAdaptiveWorkerProfile(session),
+              stagnation_signaled: false,
+            };
       const renewedSession =
         heartbeat.ok
           ? storage.heartbeatAgentSession({
@@ -1159,9 +1643,11 @@ export async function agentHeartbeatTask(storage: Storage, input: z.infer<typeof
               lease_seconds: input.lease_seconds ?? 300,
               status: "busy",
               metadata: {
-                current_task_id: taskId,
-                last_task_heartbeat_at: new Date().toISOString(),
                 ...(input.metadata ?? {}),
+                current_task_id: taskId,
+                last_task_heartbeat_at: heartbeatAt,
+                current_task_profile: heartbeatTaskProfile,
+                [ADAPTIVE_WORKER_PROFILE_KEY]: adaptiveHeartbeat.profile,
               },
             })
           : { session };
@@ -1179,6 +1665,27 @@ export async function agentHeartbeatTask(storage: Storage, input: z.infer<typeof
                 task_id: taskId,
                 lease_expires_at: heartbeat.lease_expires_at ?? null,
                 heartbeat_at: heartbeat.heartbeat_at ?? null,
+                stagnation_signaled: adaptiveHeartbeat.stagnation_signaled,
+              },
+              source_client: session.source_client ?? input.source_client,
+              source_model: session.source_model ?? input.source_model,
+              source_agent: session.agent_id,
+            })
+          : null;
+      const stagnationEvent =
+        heartbeat.ok && taskId && adaptiveHeartbeat.stagnation_signaled
+          ? storage.appendRuntimeEvent({
+              event_type: "agent.task_stagnation_detected",
+              entity_type: "task",
+              entity_id: taskId,
+              status: "running",
+              summary: `Task ${taskId} shows stagnation risk for agent session ${session.session_id}.`,
+              details: {
+                session_id: session.session_id,
+                agent_id: session.agent_id,
+                task_id: taskId,
+                task_profile: heartbeatTaskProfile,
+                heartbeat_count: adaptiveHeartbeat.profile.current_task.heartbeat_count,
               },
               source_client: session.source_client ?? input.source_client,
               source_model: session.source_model ?? input.source_model,
@@ -1188,8 +1695,13 @@ export async function agentHeartbeatTask(storage: Storage, input: z.infer<typeof
       return {
         ...heartbeat,
         session: renewedSession.session ?? session,
-        task: heartbeat.ok ? storage.getTaskById(taskId) : activeTask ?? storage.getTaskById(taskId),
-        event,
+        task: heartbeatTaskRecord,
+        adaptive_worker_profile: adaptiveHeartbeat.profile,
+        stagnation_signaled: adaptiveHeartbeat.stagnation_signaled,
+        events: {
+          heartbeat: event,
+          stagnation: stagnationEvent,
+        },
       };
     },
   });
@@ -1268,6 +1780,7 @@ export async function agentReportResult(
       if (!task) {
         throw new Error(`Task missing after agent report: ${input.task_id}`);
       }
+      const taskProfile = resolveTaskExecutionProfile(task);
 
       const planContext = resolveTaskPlanContext(storage, task);
       const autoReportArtifact = recordAgentReportArtifact(storage, {
@@ -1307,6 +1820,16 @@ export async function agentReportResult(
         expectedArtifactCheck !== null &&
         expectedArtifactCheck.expected_artifact_types.length > 0 &&
         !expectedArtifactCheck.satisfied;
+      const adaptiveReport = updateAdaptiveWorkerProfileOnReport(
+        session,
+        task,
+        taskProfile,
+        input.outcome,
+        new Date().toISOString(),
+        {
+          missing_expected_artifacts: missingExpectedArtifacts,
+        }
+      );
 
       const planStepUpdate = planContext
         ? storage.updatePlanStep({
@@ -1432,13 +1955,16 @@ export async function agentReportResult(
         lease_seconds: 300,
         status: input.next_session_status ?? "idle",
         metadata: {
+          ...(input.metadata ?? {}),
           current_task_id: null,
           last_reported_task_id: task.task_id,
           last_reported_at: new Date().toISOString(),
           last_report_outcome: input.outcome,
           last_run_id: input.run_id ?? null,
           last_produced_artifact_ids: producedArtifactIds,
-          ...(input.metadata ?? {}),
+          last_report_completion_seconds: adaptiveReport.completion_seconds,
+          current_task_profile: null,
+          [ADAPTIVE_WORKER_PROFILE_KEY]: adaptiveReport.profile,
         },
       });
       const goalAutorunTrigger = shouldTriggerGoalAutorun(storage, task, planContext);
@@ -1477,17 +2003,18 @@ export async function agentReportResult(
           session_id: session.session_id,
           agent_id: session.agent_id,
           task_id: task.task_id,
-                outcome: input.outcome,
-                run_id: input.run_id ?? null,
-                produced_artifact_ids: producedArtifactIds,
-                artifact_links_created: artifactLinks.length,
-                auto_report_artifact_id: autoReportArtifact.artifact_id,
-                experiment_run_id: experimentRun?.experiment_run_id ?? null,
-                goal_autorun_triggered: goalAutorunTrigger.enabled && input.outcome === "completed",
-                expected_artifacts: expectedArtifactCheck,
-              },
-              source_client: input.source_client,
-              source_model: input.source_model,
+          outcome: input.outcome,
+          run_id: input.run_id ?? null,
+          produced_artifact_ids: producedArtifactIds,
+          artifact_links_created: artifactLinks.length,
+          auto_report_artifact_id: autoReportArtifact.artifact_id,
+          experiment_run_id: experimentRun?.experiment_run_id ?? null,
+          goal_autorun_triggered: goalAutorunTrigger.enabled && input.outcome === "completed",
+          expected_artifacts: expectedArtifactCheck,
+          adaptive_worker_profile: summarizeAdaptiveWorkerProfile(adaptiveReport.profile, taskProfile.complexity),
+        },
+        source_client: input.source_client,
+        source_model: input.source_model,
         source_agent: session.agent_id,
       });
 
@@ -1503,6 +2030,7 @@ export async function agentReportResult(
         artifact_links: artifactLinks,
         experiment: experimentUpdate,
         evidence_gate: expectedArtifactCheck,
+        adaptive_worker_profile: adaptiveReport.profile,
         goal_autorun: goalAutorun,
         events: {
           task: agentTaskEvent,

@@ -1279,6 +1279,187 @@ test("worker hardening keeps low-tier and generic lanes away from high-complexit
   }
 });
 
+test("adaptive worker scoring penalizes repeated failure and stagnation history during routing", async () => {
+  const testId = `${Date.now()}-adaptive-worker-scoring`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-adaptive-worker-scoring-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open.steady", () => mutationCounter++),
+      session_id: "adaptive-steady-session",
+      agent_id: "codex",
+      client_kind: "codex",
+      transport_kind: "stdio",
+      workspace_root: REPO_ROOT,
+      status: "active",
+      capabilities: {
+        worker: true,
+        coding: true,
+        planning: true,
+      },
+    });
+
+    await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open.struggling", () => mutationCounter++),
+      session_id: "adaptive-struggling-session",
+      agent_id: "cursor",
+      client_kind: "cursor",
+      transport_kind: "stdio",
+      workspace_root: REPO_ROOT,
+      status: "active",
+      capabilities: {
+        worker: true,
+        coding: true,
+        planning: true,
+      },
+    });
+
+    const createMediumTask = async (label) =>
+      callTool(client, "task.create", {
+        mutation: nextMutation(testId, `task.create.${label}`, () => mutationCounter++),
+        objective: `Debug the adaptive routing kernel path and verify the scoring adjustments for ${label}`,
+        project_dir: REPO_ROOT,
+        priority: 5,
+        tags: ["adaptive-routing"],
+      });
+
+    const strugglingTaskOne = await createMediumTask("struggling-one");
+    await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.struggling.one", () => mutationCounter++),
+      session_id: "adaptive-struggling-session",
+      task_id: strugglingTaskOne.task.task_id,
+    });
+    await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.struggling.one", () => mutationCounter++),
+      session_id: "adaptive-struggling-session",
+      task_id: strugglingTaskOne.task.task_id,
+      outcome: "failed",
+      error: "First routed task failed during execution",
+      summary: "Failed the first adaptive routing task",
+      result: {
+        failed: true,
+      },
+    });
+
+    const strugglingTaskTwo = await createMediumTask("struggling-two");
+    await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.struggling.two", () => mutationCounter++),
+      session_id: "adaptive-struggling-session",
+      task_id: strugglingTaskTwo.task.task_id,
+    });
+    await callTool(client, "agent.heartbeat_task", {
+      mutation: nextMutation(testId, "agent.heartbeat_task.struggling.one", () => mutationCounter++),
+      session_id: "adaptive-struggling-session",
+      task_id: strugglingTaskTwo.task.task_id,
+    });
+    await callTool(client, "agent.heartbeat_task", {
+      mutation: nextMutation(testId, "agent.heartbeat_task.struggling.two", () => mutationCounter++),
+      session_id: "adaptive-struggling-session",
+      task_id: strugglingTaskTwo.task.task_id,
+    });
+    const stagnationHeartbeat = await callTool(client, "agent.heartbeat_task", {
+      mutation: nextMutation(testId, "agent.heartbeat_task.struggling.three", () => mutationCounter++),
+      session_id: "adaptive-struggling-session",
+      task_id: strugglingTaskTwo.task.task_id,
+    });
+    assert.equal(stagnationHeartbeat.stagnation_signaled, true);
+    await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.struggling.two", () => mutationCounter++),
+      session_id: "adaptive-struggling-session",
+      task_id: strugglingTaskTwo.task.task_id,
+      outcome: "failed",
+      error: "Second routed task failed after repeated stalled heartbeats",
+      summary: "Failed the second adaptive routing task after stagnation",
+      result: {
+        failed: true,
+      },
+    });
+
+    const steadyTaskOne = await createMediumTask("steady-one");
+    await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.steady.one", () => mutationCounter++),
+      session_id: "adaptive-steady-session",
+      task_id: steadyTaskOne.task.task_id,
+    });
+    await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.steady.one", () => mutationCounter++),
+      session_id: "adaptive-steady-session",
+      task_id: steadyTaskOne.task.task_id,
+      outcome: "completed",
+      summary: "Completed the first adaptive routing task",
+      result: {
+        completed: true,
+      },
+    });
+
+    const steadyTaskTwo = await createMediumTask("steady-two");
+    await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.steady.two", () => mutationCounter++),
+      session_id: "adaptive-steady-session",
+      task_id: steadyTaskTwo.task.task_id,
+    });
+    await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.steady.two", () => mutationCounter++),
+      session_id: "adaptive-steady-session",
+      task_id: steadyTaskTwo.task.task_id,
+      outcome: "completed",
+      summary: "Completed the second adaptive routing task",
+      result: {
+        completed: true,
+      },
+    });
+
+    const targetTask = await createMediumTask("target");
+
+    const steadyWorklist = await callTool(client, "agent.worklist", {
+      session_id: "adaptive-steady-session",
+      limit: 10,
+    });
+    const strugglingWorklist = await callTool(client, "agent.worklist", {
+      session_id: "adaptive-struggling-session",
+      limit: 10,
+      include_ineligible: true,
+    });
+
+    const steadyEntry = steadyWorklist.tasks.find((task) => task.task_id === targetTask.task.task_id);
+    assert.ok(steadyEntry);
+    assert.equal(steadyEntry.task_profile.complexity, "medium");
+    assert.ok(steadyEntry.adaptive_score_adjustment >= 0);
+    assert.equal(steadyEntry.session_performance.total_completed, 2);
+
+    const strugglingEntry = strugglingWorklist.ineligible_tasks.find((task) => task.task_id === targetTask.task.task_id);
+    assert.ok(strugglingEntry);
+    assert.ok(strugglingEntry.blockers.some((blocker) => blocker.startsWith("performance_medium_risk")));
+    assert.ok(strugglingEntry.adaptive_score_adjustment < steadyEntry.adaptive_score_adjustment);
+    assert.equal(strugglingEntry.session_performance.total_failed, 2);
+    assert.equal(strugglingEntry.session_performance.total_stagnation_signals, 1);
+
+    const rejectedStrugglingClaim = await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.struggling.target", () => mutationCounter++),
+      session_id: "adaptive-struggling-session",
+      task_id: targetTask.task.task_id,
+    });
+    assert.equal(rejectedStrugglingClaim.claimed, false);
+    assert.match(rejectedStrugglingClaim.reason, /^routing-ineligible:performance_medium_risk/);
+
+    const steadyClaim = await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.steady.target", () => mutationCounter++),
+      session_id: "adaptive-steady-session",
+      task_id: targetTask.task.task_id,
+    });
+    assert.equal(steadyClaim.claimed, true);
+    assert.equal(steadyClaim.task.task_id, targetTask.task.task_id);
+    assert.ok(steadyClaim.routing.adaptive_score_adjustment >= 0);
+    assert.equal(steadyClaim.routing.session_performance.total_completed, 2);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("agent.claim_next and agent.report_result close the worker loop back into plan steps", async () => {
   const testId = `${Date.now()}-agent-worker-loop`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-agent-worker-loop-test-"));
