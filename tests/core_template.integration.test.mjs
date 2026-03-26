@@ -433,6 +433,11 @@ test("goal.execute generates a default agentic plan and dispatches the first run
     assert.equal(executedGoal.execution_summary.running_count, 1);
     assert.equal(executedGoal.execution_summary.failed_count, 0);
     assert.match(executedGoal.execution_summary.next_action, /Wait for running tasks or turns to finish/);
+    assert.ok(executedGoal.adaptive_routing_summary.worker_step_count >= 3);
+    assert.ok(executedGoal.adaptive_routing_summary.mode_counts.none >= 1);
+    assert.ok(
+      executedGoal.adaptive_routing_summary.attention.some((entry) => /no dispatchable adaptive lane guidance/i.test(entry))
+    );
 
     const generatedPlan = await callTool(client, "plan.get", {
       plan_id: executedGoal.plan.plan_id,
@@ -891,12 +896,15 @@ test("kernel.summary reports operator-facing state across goals, tasks, sessions
     assert.ok(summary.overview.task_counts.pending >= 1);
     assert.equal(summary.overview.active_session_count, 0);
     assert.ok(summary.attention.some((entry) => /no active agent sessions/i.test(entry)));
+    assert.ok(summary.attention.some((entry) => /no dispatchable adaptive lane guidance/i.test(entry)));
+    assert.ok(summary.overview.adaptive_plan_routing_counts.none >= 1);
     assert.ok(summary.recent_events.length >= 1);
 
     const goalEntry = summary.open_goals.find((goal) => goal.goal_id === createdGoal.goal.goal_id);
     assert.ok(goalEntry);
     assert.equal(goalEntry.execution_summary.running_count, 1);
     assert.match(goalEntry.execution_summary.next_action, /wait for running work/i);
+    assert.ok(goalEntry.adaptive_routing_summary.mode_counts.none >= 1);
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -1672,6 +1680,294 @@ test("plan.dispatch injects adaptive assignment guidance into worker tasks", asy
     });
     assert.equal(steadyClaim.claimed, true);
     assert.equal(steadyClaim.task.task_id, dispatched.results[0].task_id);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("pack.plan.generate shapes worker lanes from adaptive session health", async () => {
+  const testId = `${Date.now()}-planner-adaptive-lanes`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-planner-adaptive-lanes-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open.codex", () => mutationCounter++),
+      session_id: "planner-adaptive-codex",
+      agent_id: "codex",
+      client_kind: "codex",
+      transport_kind: "stdio",
+      workspace_root: REPO_ROOT,
+      status: "active",
+      capabilities: {
+        worker: true,
+        coding: true,
+        planning: true,
+      },
+    });
+
+    await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open.cursor", () => mutationCounter++),
+      session_id: "planner-adaptive-cursor",
+      agent_id: "cursor",
+      client_kind: "cursor",
+      transport_kind: "stdio",
+      workspace_root: REPO_ROOT,
+      status: "active",
+      capabilities: {
+        worker: true,
+        coding: true,
+        review: true,
+      },
+    });
+
+    const codexTrainingTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.codex.seed", () => mutationCounter++),
+      objective: "Seed healthy adaptive history for the codex implementation lane",
+      project_dir: REPO_ROOT,
+      priority: 4,
+      tags: ["adaptive-routing", "planner"],
+    });
+    await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.codex.seed", () => mutationCounter++),
+      session_id: "planner-adaptive-codex",
+      task_id: codexTrainingTask.task.task_id,
+    });
+    await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.codex.seed", () => mutationCounter++),
+      session_id: "planner-adaptive-codex",
+      task_id: codexTrainingTask.task.task_id,
+      outcome: "completed",
+      summary: "Healthy codex seed completed",
+      result: {
+        completed: true,
+      },
+    });
+
+    const cursorTrainingTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.cursor.seed", () => mutationCounter++),
+      objective: "Seed suppressed adaptive history for the cursor verification lane",
+      project_dir: REPO_ROOT,
+      priority: 4,
+      tags: ["adaptive-routing", "planner"],
+    });
+    await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.cursor.seed", () => mutationCounter++),
+      session_id: "planner-adaptive-cursor",
+      task_id: cursorTrainingTask.task.task_id,
+    });
+    await callTool(client, "agent.heartbeat_task", {
+      mutation: nextMutation(testId, "agent.heartbeat_task.cursor.one", () => mutationCounter++),
+      session_id: "planner-adaptive-cursor",
+      task_id: cursorTrainingTask.task.task_id,
+    });
+    await callTool(client, "agent.heartbeat_task", {
+      mutation: nextMutation(testId, "agent.heartbeat_task.cursor.two", () => mutationCounter++),
+      session_id: "planner-adaptive-cursor",
+      task_id: cursorTrainingTask.task.task_id,
+    });
+    await callTool(client, "agent.heartbeat_task", {
+      mutation: nextMutation(testId, "agent.heartbeat_task.cursor.three", () => mutationCounter++),
+      session_id: "planner-adaptive-cursor",
+      task_id: cursorTrainingTask.task.task_id,
+    });
+    await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.cursor.seed", () => mutationCounter++),
+      session_id: "planner-adaptive-cursor",
+      task_id: cursorTrainingTask.task.task_id,
+      outcome: "failed",
+      error: "Cursor seed stagnated and failed",
+      summary: "Suppressed cursor seed failed after stagnation",
+      result: {
+        failed: true,
+      },
+    });
+
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Planner adaptive routing goal",
+      objective: "Generate a delivery plan that routes work away from weak live lanes",
+      status: "active",
+      autonomy_mode: "execute_bounded",
+      acceptance_criteria: ["Planner output prefers healthy sessions before dispatch runs"],
+    });
+
+    const generatedPlan = await callTool(client, "pack.plan.generate", {
+      mutation: nextMutation(testId, "pack.plan.generate", () => mutationCounter++),
+      pack_id: "agentic",
+      hook_name: "delivery_path",
+      target: {
+        entity_type: "goal",
+        entity_id: createdGoal.goal.goal_id,
+      },
+      goal_id: createdGoal.goal.goal_id,
+      selected: true,
+    });
+
+    assert.equal(generatedPlan.ok, true);
+    const mapCodebase = generatedPlan.steps.find((step) => /Map the relevant codebase/.test(step.title));
+    const implementSlice = generatedPlan.steps.find((step) => /Implement the approved bounded slice/.test(step.title));
+    const verifySlice = generatedPlan.steps.find((step) => /Verify behavior, wiring, and quality gates/.test(step.title));
+    assert.ok(mapCodebase);
+    assert.ok(implementSlice);
+    assert.ok(verifySlice);
+
+    assert.deepEqual(mapCodebase.input.routing.preferred_agent_ids, ["codex"]);
+    assert.deepEqual(implementSlice.input.routing.preferred_agent_ids, ["codex"]);
+    assert.deepEqual(verifySlice.input.routing.preferred_agent_ids, ["codex"]);
+    assert.deepEqual(verifySlice.input.routing.allowed_agent_ids, ["codex"]);
+    assert.equal(verifySlice.metadata.adaptive_assignment.mode, "preferred_pool");
+    assert.equal(verifySlice.metadata.adaptive_assignment.lane_kind, "verification");
+    assert.equal(verifySlice.metadata.adaptive_assignment.health_counts.healthy_count, 1);
+    assert.equal(verifySlice.metadata.adaptive_assignment.health_counts.suppressed_count, 1);
+    assert.deepEqual(
+      verifySlice.metadata.adaptive_assignment.preferred_lane_hints.preferred_agent_ids,
+      ["cursor", "codex"]
+    );
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("pack.verify.run surfaces suppressed worker pools in execution readiness", async () => {
+  const testId = `${Date.now()}-execution-readiness-adaptive`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-execution-readiness-adaptive-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open.cursor", () => mutationCounter++),
+      session_id: "readiness-adaptive-cursor",
+      agent_id: "cursor",
+      client_kind: "cursor",
+      transport_kind: "stdio",
+      workspace_root: REPO_ROOT,
+      status: "active",
+      capabilities: {
+        worker: true,
+        coding: true,
+        review: true,
+      },
+    });
+
+    const suppressedTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.suppressed", () => mutationCounter++),
+      objective: "Seed a suppressed adaptive state for readiness verification",
+      project_dir: REPO_ROOT,
+      priority: 4,
+      tags: ["adaptive-routing", "readiness"],
+    });
+    await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.cursor", () => mutationCounter++),
+      session_id: "readiness-adaptive-cursor",
+      task_id: suppressedTask.task.task_id,
+    });
+    await callTool(client, "agent.heartbeat_task", {
+      mutation: nextMutation(testId, "agent.heartbeat_task.one", () => mutationCounter++),
+      session_id: "readiness-adaptive-cursor",
+      task_id: suppressedTask.task.task_id,
+    });
+    await callTool(client, "agent.heartbeat_task", {
+      mutation: nextMutation(testId, "agent.heartbeat_task.two", () => mutationCounter++),
+      session_id: "readiness-adaptive-cursor",
+      task_id: suppressedTask.task.task_id,
+    });
+    await callTool(client, "agent.heartbeat_task", {
+      mutation: nextMutation(testId, "agent.heartbeat_task.three", () => mutationCounter++),
+      session_id: "readiness-adaptive-cursor",
+      task_id: suppressedTask.task.task_id,
+    });
+    await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.cursor", () => mutationCounter++),
+      session_id: "readiness-adaptive-cursor",
+      task_id: suppressedTask.task.task_id,
+      outcome: "failed",
+      error: "Suppressed readiness seed failed after stagnation",
+      summary: "Suppressed readiness seed failed",
+      result: {
+        failed: true,
+      },
+    });
+
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Execution readiness adaptive goal",
+      objective: "Surface the adaptive worker pool as a first-class readiness signal",
+      status: "active",
+      acceptance_criteria: ["A selected plan exists", "A verification step exists"],
+    });
+
+    const createdPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      title: "Execution readiness adaptive plan",
+      summary: "Keep one ready worker step and one verification step so readiness can evaluate the pool",
+      selected: true,
+      steps: [
+        {
+          step_id: "ready-worker",
+          seq: 1,
+          title: "Ready worker step",
+          step_kind: "mutation",
+          executor_kind: "worker",
+          input: {
+            objective: "Run the ready worker step once a dispatchable worker exists",
+            project_dir: REPO_ROOT,
+          },
+        },
+        {
+          step_id: "verification-step",
+          seq: 2,
+          title: "Verification step",
+          step_kind: "verification",
+          executor_kind: "tool",
+          tool_name: "goal.get",
+          depends_on: ["ready-worker"],
+          input: {
+            goal_id: createdGoal.goal.goal_id,
+          },
+        },
+      ],
+    });
+    assert.equal(createdPlan.created, true);
+
+    const verification = await callTool(client, "pack.verify.run", {
+      mutation: nextMutation(testId, "pack.verify.run", () => mutationCounter++),
+      pack_id: "agentic",
+      hook_name: "execution_readiness",
+      target: {
+        entity_type: "goal",
+        entity_id: createdGoal.goal.goal_id,
+      },
+      goal_id: createdGoal.goal.goal_id,
+      plan_id: createdPlan.plan.plan_id,
+      expectations: {
+        require_dispatchable_worker_session: true,
+      },
+    });
+
+    assert.equal(verification.ok, true);
+    assert.equal(verification.verification.pass, false);
+    const adaptivePoolCheck = verification.verification.checks.find(
+      (check) => check.name === "dispatchable_worker_pool"
+    );
+    assert.ok(adaptivePoolCheck);
+    assert.equal(adaptivePoolCheck.pass, false);
+    assert.equal(adaptivePoolCheck.severity, "error");
+    assert.match(adaptivePoolCheck.details, /adaptive routing currently marks them all degraded or suppressed/i);
+
+    const readinessArtifact = verification.artifacts.find(
+      (artifact) => artifact.artifact_type === "agentic.execution_readiness"
+    );
+    assert.ok(readinessArtifact);
+    assert.deepEqual(readinessArtifact.content_json.dispatchable_agent_ids, []);
+    assert.deepEqual(readinessArtifact.content_json.suppressed_agent_ids, ["cursor"]);
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

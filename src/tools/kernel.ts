@@ -38,6 +38,14 @@ type GoalExecutionSnapshot = {
   next_action: string;
 };
 
+type AdaptiveRoutingMode = "preferred_pool" | "fallback_degraded" | "none";
+
+type GoalAdaptiveRoutingSnapshot = {
+  worker_step_count: number;
+  mode_counts: Record<AdaptiveRoutingMode, number>;
+  attention: string[];
+};
+
 type AdaptiveSessionState = "unproven" | "healthy" | "degraded" | "suppressed";
 
 type AdaptiveSessionSnapshot = {
@@ -159,6 +167,52 @@ function summarizeGoalExecution(plan: PlanRecord | null, steps: PlanStepRecord[]
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function summarizePlanAdaptiveRouting(steps: PlanStepRecord[]): GoalAdaptiveRoutingSnapshot {
+  const modeCounts: Record<AdaptiveRoutingMode, number> = {
+    preferred_pool: 0,
+    fallback_degraded: 0,
+    none: 0,
+  };
+
+  for (const step of steps) {
+    if (step.executor_kind !== "worker" && step.executor_kind !== "task") {
+      continue;
+    }
+    const adaptiveAssignment = isRecord(step.metadata.adaptive_assignment) ? step.metadata.adaptive_assignment : null;
+    const mode = readString(adaptiveAssignment?.mode);
+    if (mode !== "preferred_pool" && mode !== "fallback_degraded" && mode !== "none") {
+      continue;
+    }
+    modeCounts[mode] += 1;
+  }
+
+  const attention: string[] = [];
+  if (modeCounts.fallback_degraded > 0) {
+    attention.push(`Plan uses degraded fallback lanes for ${modeCounts.fallback_degraded} worker step(s).`);
+  }
+  if (modeCounts.none > 0) {
+    attention.push(`Plan has ${modeCounts.none} worker step(s) with no dispatchable adaptive lane guidance.`);
+  }
+
+  return {
+    worker_step_count: modeCounts.preferred_pool + modeCounts.fallback_degraded + modeCounts.none,
+    mode_counts: modeCounts,
+    attention,
+  };
+}
+
 function listOpenGoals(storage: Storage, limit: number) {
   const statuses: Array<z.infer<typeof goalStatusSchema>> = ["active", "waiting", "blocked", "draft", "failed"];
   const seen = new Set<string>();
@@ -276,6 +330,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     const plan = resolveGoalPlan(storage, goal);
     const steps = plan ? storage.listPlanSteps(plan.plan_id) : [];
     const executionSummary = summarizeGoalExecution(plan, steps);
+    const adaptiveRoutingSummary = summarizePlanAdaptiveRouting(steps);
     return {
       goal_id: goal.goal_id,
       title: goal.title,
@@ -285,6 +340,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       updated_at: goal.updated_at,
       tags: goal.tags,
       execution_summary: executionSummary,
+      adaptive_routing_summary: adaptiveRoutingSummary,
     };
   });
 
@@ -295,6 +351,9 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       acc.blocked_approval_count += summary.execution_summary.blocked_approval_count;
       acc.blocked_human_count += summary.execution_summary.blocked_human_count;
       acc.failed_step_count += summary.execution_summary.failed_count;
+      acc.adaptive_preferred_pool_count += summary.adaptive_routing_summary.mode_counts.preferred_pool;
+      acc.adaptive_fallback_degraded_count += summary.adaptive_routing_summary.mode_counts.fallback_degraded;
+      acc.adaptive_none_count += summary.adaptive_routing_summary.mode_counts.none;
       return acc;
     },
     {
@@ -303,6 +362,9 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       blocked_approval_count: 0,
       blocked_human_count: 0,
       failed_step_count: 0,
+      adaptive_preferred_pool_count: 0,
+      adaptive_fallback_degraded_count: 0,
+      adaptive_none_count: 0,
     }
   );
 
@@ -357,6 +419,16 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   ) {
     attention.push("Queued work may stall because no active session is currently marked healthy by adaptive routing.");
   }
+  if (totals.adaptive_fallback_degraded_count > 0) {
+    attention.push(
+      `Open plans still rely on degraded fallback routing for ${totals.adaptive_fallback_degraded_count} worker step(s).`
+    );
+  }
+  if (totals.adaptive_none_count > 0) {
+    attention.push(
+      `Open plans contain ${totals.adaptive_none_count} worker step(s) with no dispatchable adaptive lane guidance.`
+    );
+  }
   if (attention.length === 0 && state === "active") {
     attention.push("Kernel is progressing normally.");
   }
@@ -374,6 +446,11 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       experiment_counts: experimentCounts,
       active_session_count: activeSessions.length,
       adaptive_session_counts: adaptiveSessionCounts,
+      adaptive_plan_routing_counts: {
+        preferred_pool: totals.adaptive_preferred_pool_count,
+        fallback_degraded: totals.adaptive_fallback_degraded_count,
+        none: totals.adaptive_none_count,
+      },
       ready_step_count: totals.ready_step_count,
       running_step_count: totals.running_step_count,
       blocked_approval_count: totals.blocked_approval_count,

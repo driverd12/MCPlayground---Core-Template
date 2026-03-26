@@ -1,5 +1,11 @@
 import crypto from "node:crypto";
 import { type GoalRecord, type Storage } from "../storage.js";
+import {
+  recommendAdaptiveDispatchRouting,
+  summarizeAdaptiveSessionHealth,
+  type AdaptiveDispatchRoutingGuidance,
+  type AdaptiveSessionHealthState,
+} from "../tools/agent_session.js";
 import { evaluatePlanStepReadiness } from "../tools/plan.js";
 import { DomainPack } from "./types.js";
 
@@ -51,20 +57,71 @@ function readBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
 }
 
+type PlannerLaneIntent = {
+  lane_kind: "discovery" | "implementation" | "verification" | "baseline" | "variant";
+  preferred_agent_ids: string[];
+  preferred_client_kinds: string[];
+  preferred_capabilities: string[];
+  required_capabilities?: string[];
+};
+
+type PlannerWorkerRouting = {
+  preferred_agent_ids: string[];
+  allowed_agent_ids: string[];
+  preferred_client_kinds: string[];
+  allowed_client_kinds: string[];
+  required_capabilities: string[];
+  preferred_capabilities: string[];
+};
+
+type PlannerAdaptiveAssignment = {
+  mode: AdaptiveDispatchRoutingGuidance["mode"];
+  lane_kind: PlannerLaneIntent["lane_kind"];
+  rationale: string;
+  task_profile: AdaptiveDispatchRoutingGuidance["task_profile"];
+  preferred_lane_hints: {
+    preferred_agent_ids: string[];
+    preferred_client_kinds: string[];
+    preferred_capabilities: string[];
+  };
+  health_counts: AdaptiveDispatchRoutingGuidance["summary"];
+  recommended_sessions: AdaptiveDispatchRoutingGuidance["recommended_sessions"];
+};
+
+type PlannerWorkerLaneResolution = {
+  routing: PlannerWorkerRouting;
+  adaptive_assignment: PlannerAdaptiveAssignment;
+};
+
 function listPreferredCouncilAgents(storage: Storage): string[] {
   const sessions = storage.listAgentSessions({ active_only: true, limit: 100 });
-  const activeIds = new Set(
+  const preferredAgentOrder = ["codex", "cursor", "local-imprint"];
+  const adaptiveStateRank: Record<AdaptiveSessionHealthState, number> = {
+    healthy: 0,
+    unproven: 1,
+    degraded: 2,
+    suppressed: 3,
+  };
+  const ordered = dedupeStrings(
     sessions
-      .map((session) => session.agent_id.trim())
-      .filter(Boolean)
+      .filter((session) => session.agent_id.trim().length > 0)
+      .sort((left, right) => {
+        const adaptiveDiff =
+          adaptiveStateRank[summarizeAdaptiveSessionHealth(left).adaptive_state] -
+          adaptiveStateRank[summarizeAdaptiveSessionHealth(right).adaptive_state];
+        if (adaptiveDiff !== 0) {
+          return adaptiveDiff;
+        }
+        const preferredLeft = preferredAgentOrder.indexOf(left.agent_id);
+        const preferredRight = preferredAgentOrder.indexOf(right.agent_id);
+        if (preferredLeft !== preferredRight) {
+          return (preferredLeft === -1 ? preferredAgentOrder.length : preferredLeft) -
+            (preferredRight === -1 ? preferredAgentOrder.length : preferredRight);
+        }
+        return left.agent_id.localeCompare(right.agent_id);
+      })
+      .map((session) => session.agent_id)
   );
-
-  const ordered = [
-    ...["codex", "cursor", "local-imprint"].filter((agentId) => activeIds.has(agentId)),
-    ...Array.from(activeIds)
-      .filter((agentId) => !["codex", "cursor", "local-imprint"].includes(agentId))
-      .sort((left, right) => left.localeCompare(right)),
-  ];
 
   return ordered.length > 0 ? ordered.slice(0, 3) : ["codex", "cursor"];
 }
@@ -102,8 +159,115 @@ function resolveAcceptanceDelta(goal: GoalRecord, options?: Record<string, unkno
   return preferred !== null && preferred >= 0 ? preferred : undefined;
 }
 
+function orderByPreference(values: string[], preferenceOrder: string[]) {
+  const preferred = preferenceOrder.filter((value) => values.includes(value));
+  const preferredSet = new Set(preferred);
+  return [...preferred, ...values.filter((value) => !preferredSet.has(value))];
+}
+
+function buildPlannerWorkerLaneResolution(
+  storage: Storage,
+  taskLike: {
+    objective: string;
+    project_dir: string;
+    payload?: Record<string, unknown>;
+    tags?: string[];
+    metadata?: Record<string, unknown>;
+  },
+  intent: PlannerLaneIntent
+): PlannerWorkerLaneResolution {
+  const adaptive = recommendAdaptiveDispatchRouting(storage, {
+    objective: taskLike.objective,
+    project_dir: taskLike.project_dir,
+    payload: taskLike.payload ?? {},
+    tags: taskLike.tags ?? [],
+    metadata: taskLike.metadata ?? {},
+  });
+  const adaptiveRouting = adaptive.routing;
+  const routing: PlannerWorkerRouting = {
+    preferred_agent_ids: adaptiveRouting
+      ? orderByPreference(adaptiveRouting.preferred_agent_ids, intent.preferred_agent_ids)
+      : [],
+    allowed_agent_ids: adaptiveRouting
+      ? orderByPreference(adaptiveRouting.allowed_agent_ids, intent.preferred_agent_ids)
+      : [],
+    preferred_client_kinds:
+      adaptiveRouting && adaptiveRouting.preferred_client_kinds.length > 0
+        ? orderByPreference(adaptiveRouting.preferred_client_kinds, intent.preferred_client_kinds)
+        : [...intent.preferred_client_kinds],
+    allowed_client_kinds: adaptiveRouting
+      ? orderByPreference(adaptiveRouting.allowed_client_kinds, intent.preferred_client_kinds)
+      : [],
+    required_capabilities: dedupeStrings(intent.required_capabilities ?? []),
+    preferred_capabilities: dedupeStrings(intent.preferred_capabilities),
+  };
+
+  return {
+    routing,
+    adaptive_assignment: {
+      mode: adaptive.mode,
+      lane_kind: intent.lane_kind,
+      rationale: adaptive.summary.rationale,
+      task_profile: adaptive.task_profile,
+      preferred_lane_hints: {
+        preferred_agent_ids: [...intent.preferred_agent_ids],
+        preferred_client_kinds: [...intent.preferred_client_kinds],
+        preferred_capabilities: [...intent.preferred_capabilities],
+      },
+      health_counts: adaptive.summary,
+      recommended_sessions: adaptive.recommended_sessions,
+    },
+  };
+}
+
 function buildDeliveryPlan(goal: GoalRecord, storage: Storage, repoRoot: string) {
   const councilAgents = listPreferredCouncilAgents(storage);
+  const mapCodebaseTask = {
+    objective: `Map the repository structure, relevant files, current workflows, and continuity constraints for goal ${goal.goal_id}: ${goal.objective}`,
+    project_dir: repoRoot,
+    payload: {
+      focus: "codebase_map",
+      goal_id: goal.goal_id,
+      methodology_source: "gsd-build/get-shit-done",
+    },
+    tags: ["agentic", "gsd", "discovery"],
+  };
+  const mapCodebaseLane = buildPlannerWorkerLaneResolution(storage, mapCodebaseTask, {
+    lane_kind: "discovery",
+    preferred_agent_ids: ["codex", "cursor"],
+    preferred_client_kinds: ["codex", "cursor"],
+    preferred_capabilities: ["coding", "planning"],
+  });
+  const implementSliceTask = {
+    objective: `Implement the approved bounded slice for goal ${goal.goal_id}: ${goal.objective}`,
+    project_dir: repoRoot,
+    payload: {
+      focus: "implementation",
+      goal_id: goal.goal_id,
+    },
+    tags: ["agentic", "gsd", "execute"],
+  };
+  const implementSliceLane = buildPlannerWorkerLaneResolution(storage, implementSliceTask, {
+    lane_kind: "implementation",
+    preferred_agent_ids: ["codex", "cursor"],
+    preferred_client_kinds: ["codex", "cursor"],
+    preferred_capabilities: ["coding", "worker"],
+  });
+  const verifySliceTask = {
+    objective: `Verify the implementation for goal ${goal.goal_id} with explicit evidence for behavior, tests, and quality gates.`,
+    project_dir: repoRoot,
+    payload: {
+      focus: "verification",
+      goal_id: goal.goal_id,
+    },
+    tags: ["agentic", "gsd", "verify"],
+  };
+  const verifySliceLane = buildPlannerWorkerLaneResolution(storage, verifySliceTask, {
+    lane_kind: "verification",
+    preferred_agent_ids: ["cursor", "codex"],
+    preferred_client_kinds: ["cursor", "codex"],
+    preferred_capabilities: ["review", "verify"],
+  });
 
   return {
     summary: `Built a spec-driven delivery path for goal ${goal.goal_id} using the active local agent lanes.`,
@@ -153,18 +317,14 @@ function buildDeliveryPlan(goal: GoalRecord, storage: Storage, repoRoot: string)
         executor_kind: "worker" as const,
         depends_on: ["load-goal-context"],
         input: {
-          objective: `Map the repository structure, relevant files, current workflows, and continuity constraints for goal ${goal.goal_id}: ${goal.objective}`,
+          objective: mapCodebaseTask.objective,
           project_dir: repoRoot,
-          routing: {
-            preferred_agent_ids: ["codex"],
-            preferred_capabilities: ["coding", "planning"],
-          },
-          payload: {
-            focus: "codebase_map",
-            goal_id: goal.goal_id,
-            methodology_source: "gsd-build/get-shit-done",
-          },
-          tags: ["agentic", "gsd", "discovery"],
+          routing: mapCodebaseLane.routing,
+          payload: mapCodebaseTask.payload,
+          tags: mapCodebaseTask.tags,
+        },
+        metadata: {
+          adaptive_assignment: mapCodebaseLane.adaptive_assignment,
         },
         expected_artifact_types: ["codebase_map", "notes"],
       },
@@ -221,17 +381,14 @@ function buildDeliveryPlan(goal: GoalRecord, storage: Storage, repoRoot: string)
         executor_kind: "worker" as const,
         depends_on: ["approve-scope"],
         input: {
-          objective: `Implement the approved bounded slice for goal ${goal.goal_id}: ${goal.objective}`,
+          objective: implementSliceTask.objective,
           project_dir: repoRoot,
-          routing: {
-            preferred_agent_ids: ["codex"],
-            preferred_capabilities: ["coding", "worker"],
-          },
-          payload: {
-            focus: "implementation",
-            goal_id: goal.goal_id,
-          },
-          tags: ["agentic", "gsd", "execute"],
+          routing: implementSliceLane.routing,
+          payload: implementSliceTask.payload,
+          tags: implementSliceTask.tags,
+        },
+        metadata: {
+          adaptive_assignment: implementSliceLane.adaptive_assignment,
         },
         expected_artifact_types: ["code", "diff"],
       },
@@ -242,17 +399,14 @@ function buildDeliveryPlan(goal: GoalRecord, storage: Storage, repoRoot: string)
         executor_kind: "worker" as const,
         depends_on: ["implement-slice"],
         input: {
-          objective: `Verify the implementation for goal ${goal.goal_id} with explicit evidence for behavior, tests, and quality gates.`,
+          objective: verifySliceTask.objective,
           project_dir: repoRoot,
-          routing: {
-            preferred_agent_ids: ["cursor"],
-            preferred_capabilities: ["review", "verify"],
-          },
-          payload: {
-            focus: "verification",
-            goal_id: goal.goal_id,
-          },
-          tags: ["agentic", "gsd", "verify"],
+          routing: verifySliceLane.routing,
+          payload: verifySliceTask.payload,
+          tags: verifySliceTask.tags,
+        },
+        metadata: {
+          adaptive_assignment: verifySliceLane.adaptive_assignment,
         },
         expected_artifact_types: ["verification_report"],
       },
@@ -270,6 +424,39 @@ function buildOptimizationPlan(goal: GoalRecord, storage: Storage, repoRoot: str
       goal_metric_direction: readString(goal.metadata.preferred_metric_direction) ?? undefined,
     });
   const acceptanceDelta = resolveAcceptanceDelta(goal, options);
+  const baselineTask = {
+    objective: `Establish the baseline measurement for goal ${goal.goal_id} using the ${metricDirection} ${metricName} metric.`,
+    project_dir: repoRoot,
+    payload: {
+      focus: "baseline_measurement",
+      experiment_id: experimentId,
+      metric_name: metricName,
+      metric_direction: metricDirection,
+    },
+    tags: ["agentic", "autoresearch", "baseline"],
+  };
+  const baselineLane = buildPlannerWorkerLaneResolution(storage, baselineTask, {
+    lane_kind: "baseline",
+    preferred_agent_ids: ["codex", "cursor"],
+    preferred_client_kinds: ["codex", "cursor"],
+    preferred_capabilities: ["benchmark", "analysis", "verify"],
+  });
+  const variantTask = {
+    objective: `Implement the bounded candidate variant for goal ${goal.goal_id} before benchmarking.`,
+    project_dir: repoRoot,
+    payload: {
+      focus: "candidate_variant",
+      experiment_id: experimentId,
+      metric_name: metricName,
+    },
+    tags: ["agentic", "autoresearch", "variant"],
+  };
+  const variantLane = buildPlannerWorkerLaneResolution(storage, variantTask, {
+    lane_kind: "variant",
+    preferred_agent_ids: ["codex", "cursor"],
+    preferred_client_kinds: ["codex", "cursor"],
+    preferred_capabilities: ["coding", "worker"],
+  });
 
   return {
     summary: `Built an experiment-driven optimization loop for goal ${goal.goal_id} with a durable experiment ledger and review gate.`,
@@ -342,15 +529,14 @@ function buildOptimizationPlan(goal: GoalRecord, storage: Storage, repoRoot: str
         executor_kind: "worker" as const,
         depends_on: ["create-experiment-ledger"],
         input: {
-          objective: `Establish the baseline measurement for goal ${goal.goal_id} using the ${metricDirection} ${metricName} metric.`,
+          objective: baselineTask.objective,
           project_dir: repoRoot,
-          payload: {
-            focus: "baseline_measurement",
-            experiment_id: experimentId,
-            metric_name: metricName,
-            metric_direction: metricDirection,
-          },
-          tags: ["agentic", "autoresearch", "baseline"],
+          routing: baselineLane.routing,
+          payload: baselineTask.payload,
+          tags: baselineTask.tags,
+        },
+        metadata: {
+          adaptive_assignment: baselineLane.adaptive_assignment,
         },
         expected_artifact_types: ["baseline_report"],
       },
@@ -375,14 +561,14 @@ function buildOptimizationPlan(goal: GoalRecord, storage: Storage, repoRoot: str
         executor_kind: "worker" as const,
         depends_on: ["propose-variant"],
         input: {
-          objective: `Implement the bounded candidate variant for goal ${goal.goal_id} before benchmarking.`,
+          objective: variantTask.objective,
           project_dir: repoRoot,
-          payload: {
-            focus: "candidate_variant",
-            experiment_id: experimentId,
-            metric_name: metricName,
-          },
-          tags: ["agentic", "autoresearch", "variant"],
+          routing: variantLane.routing,
+          payload: variantTask.payload,
+          tags: variantTask.tags,
+        },
+        metadata: {
+          adaptive_assignment: variantLane.adaptive_assignment,
         },
         expected_artifact_types: ["code", "diff"],
       },
@@ -426,6 +612,8 @@ function buildOptimizationPlan(goal: GoalRecord, storage: Storage, repoRoot: str
 function verifyExecutionReadiness(storage: Storage, target: { entity_type: string; entity_id: string }, expectations?: Record<string, unknown>) {
   const requireActiveSessions = readBoolean(expectations?.require_active_sessions) === true;
   const minimumActiveSessions = Math.max(0, Math.trunc(readNumber(expectations?.minimum_active_sessions) ?? 0));
+  const requireDispatchableWorkerSession = readBoolean(expectations?.require_dispatchable_worker_session) === true;
+  const minimumDispatchableSessions = Math.max(0, Math.trunc(readNumber(expectations?.minimum_dispatchable_sessions) ?? 0));
   const requireReadyStep = readBoolean(expectations?.require_ready_step) === true;
 
   const plan =
@@ -448,6 +636,17 @@ function verifyExecutionReadiness(storage: Storage, target: { entity_type: strin
   const steps = activePlan ? storage.listPlanSteps(activePlan.plan_id) : [];
   const readiness = evaluatePlanStepReadiness(steps);
   const activeSessions = storage.listAgentSessions({ active_only: true, limit: 100 });
+  const sessionHealth = activeSessions.map((session) => ({
+    session_id: session.session_id,
+    agent_id: session.agent_id,
+    client_kind: session.client_kind,
+    adaptive_state: summarizeAdaptiveSessionHealth(session).adaptive_state,
+  }));
+  const dispatchableSessions = sessionHealth.filter(
+    (session) => session.adaptive_state === "healthy" || session.adaptive_state === "unproven"
+  );
+  const degradedSessions = sessionHealth.filter((session) => session.adaptive_state === "degraded");
+  const suppressedSessions = sessionHealth.filter((session) => session.adaptive_state === "suppressed");
   const councilAgents = listPreferredCouncilAgents(storage);
   const readyStepIds = readiness.filter((entry) => entry.ready).map((entry) => entry.step_id);
   const verificationStepCount = steps.filter((step) => step.step_kind === "verification").length;
@@ -491,6 +690,19 @@ function verifyExecutionReadiness(storage: Storage, target: { entity_type: strin
           : "No active agent sessions are registered right now.",
     },
     {
+      name: "dispatchable_worker_pool",
+      pass:
+        dispatchableSessions.length >=
+        Math.max(1, requireDispatchableWorkerSession ? minimumDispatchableSessions || 1 : 1),
+      severity: requireDispatchableWorkerSession ? "error" as const : "warn" as const,
+      details:
+        dispatchableSessions.length > 0
+          ? `Dispatchable sessions: ${dispatchableSessions.map((session) => session.agent_id).join(", ")}.`
+          : activeSessions.length > 0
+            ? `Active sessions exist, but adaptive routing currently marks them all degraded or suppressed. Degraded: ${degradedSessions.map((session) => session.agent_id).join(", ") || "none"}. Suppressed: ${suppressedSessions.map((session) => session.agent_id).join(", ") || "none"}.`
+            : "No active sessions are available for adaptive worker dispatch right now.",
+    },
+    {
       name: "ready_execution_lane",
       pass: !requireReadyStep || readyStepIds.length > 0,
       severity: requireReadyStep ? "error" as const : "info" as const,
@@ -522,6 +734,11 @@ function verifyExecutionReadiness(storage: Storage, target: { entity_type: strin
           selected_plan_id: activePlan?.plan_id ?? null,
           active_session_ids: activeSessions.map((session) => session.session_id),
           active_agent_ids: activeSessions.map((session) => session.agent_id),
+          adaptive_session_health: sessionHealth,
+          dispatchable_session_ids: dispatchableSessions.map((session) => session.session_id),
+          dispatchable_agent_ids: dispatchableSessions.map((session) => session.agent_id),
+          degraded_agent_ids: degradedSessions.map((session) => session.agent_id),
+          suppressed_agent_ids: suppressedSessions.map((session) => session.agent_id),
           preferred_council_agents: councilAgents,
           ready_step_ids: readyStepIds,
           blocked_step_ids: readiness.filter((entry) => !entry.ready).map((entry) => entry.step_id),
@@ -531,6 +748,8 @@ function verifyExecutionReadiness(storage: Storage, target: { entity_type: strin
           methodology_source: "gsd-build/get-shit-done",
           require_active_sessions: requireActiveSessions,
           minimum_active_sessions: minimumActiveSessions,
+          require_dispatchable_worker_session: requireDispatchableWorkerSession,
+          minimum_dispatchable_sessions: minimumDispatchableSessions,
           require_ready_step: requireReadyStep,
         },
       },
@@ -540,6 +759,9 @@ function verifyExecutionReadiness(storage: Storage, target: { entity_type: strin
       active_plan_id: activePlan?.plan_id ?? null,
       ready_step_count: readyStepIds.length,
       active_session_count: activeSessions.length,
+      dispatchable_session_count: dispatchableSessions.length,
+      degraded_session_count: degradedSessions.length,
+      suppressed_session_count: suppressedSessions.length,
     },
   };
 }

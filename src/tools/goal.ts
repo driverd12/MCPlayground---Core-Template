@@ -164,6 +164,7 @@ export const goalListSchema = z
   });
 
 type GoalExecutionPlanResolution = "explicit" | "active" | "selected" | "latest" | "generated" | "missing";
+type AdaptiveRoutingMode = "preferred_pool" | "fallback_degraded" | "none";
 type GoalAutorunLikeInput = Omit<z.infer<typeof goalAutorunSchema>, "mutation"> & {
   mutation?: { idempotency_key: string; side_effect_fingerprint: string };
 };
@@ -195,6 +196,19 @@ type GoalAutorunDaemonConfig = {
   source_client?: string;
   source_model?: string;
   source_agent?: string;
+};
+
+type PlanAdaptiveRoutingSummary = {
+  worker_step_count: number;
+  mode_counts: Record<AdaptiveRoutingMode, number>;
+  attention: string[];
+  steps: Array<{
+    step_id: string;
+    title: string;
+    lane_kind: string | null;
+    mode: AdaptiveRoutingMode;
+    rationale: string | null;
+  }>;
 };
 
 const DEFAULT_GOAL_AUTORUN_CONFIG: GoalAutorunDaemonConfig = {
@@ -592,6 +606,49 @@ function summarizeGoalExecution(plan: PlanRecord, steps: PlanStepRecord[]) {
   };
 }
 
+function summarizePlanAdaptiveRouting(steps: PlanStepRecord[]): PlanAdaptiveRoutingSummary {
+  const modeCounts: Record<AdaptiveRoutingMode, number> = {
+    preferred_pool: 0,
+    fallback_degraded: 0,
+    none: 0,
+  };
+  const summarizedSteps = steps
+    .map((step) => {
+      if (step.executor_kind !== "worker" && step.executor_kind !== "task") {
+        return null;
+      }
+      const adaptiveAssignment = isRecord(step.metadata.adaptive_assignment) ? step.metadata.adaptive_assignment : null;
+      const mode = readString(adaptiveAssignment?.mode);
+      if (mode !== "preferred_pool" && mode !== "fallback_degraded" && mode !== "none") {
+        return null;
+      }
+      modeCounts[mode] += 1;
+      return {
+        step_id: step.step_id,
+        title: step.title,
+        lane_kind: readString(adaptiveAssignment?.lane_kind),
+        mode,
+        rationale: readString(adaptiveAssignment?.rationale),
+      };
+    })
+    .filter((entry): entry is PlanAdaptiveRoutingSummary["steps"][number] => entry !== null);
+
+  const attention: string[] = [];
+  if (modeCounts.fallback_degraded > 0) {
+    attention.push(`Plan uses degraded fallback lanes for ${modeCounts.fallback_degraded} worker step(s).`);
+  }
+  if (modeCounts.none > 0) {
+    attention.push(`Plan has ${modeCounts.none} worker step(s) with no dispatchable adaptive lane guidance.`);
+  }
+
+  return {
+    worker_step_count: summarizedSteps.length,
+    mode_counts: modeCounts,
+    attention,
+    steps: summarizedSteps,
+  };
+}
+
 function listGoalAutorunCandidates(storage: Storage, input: Pick<GoalAutorunLikeInput, "goal_id" | "limit">) {
   if (input.goal_id) {
     const goal = storage.getGoalById(input.goal_id);
@@ -793,6 +850,7 @@ export async function goalExecute(
       const snapshotGoal = storage.getGoalById(goal.goal_id) ?? goal;
       const initialSteps = storage.listPlanSteps(plan.plan_id);
       const initialSummary = summarizeGoalExecution(plan, initialSteps);
+      const initialAdaptiveRouting = summarizePlanAdaptiveRouting(initialSteps);
 
       if (isTerminalPlanStatus(plan.status)) {
         storage.appendRuntimeEvent({
@@ -808,6 +866,7 @@ export async function goalExecute(
             created_plan: generatedPlanResult !== null,
             plan_resolution: planResolution.resolution,
             planner_selection: plannerSelection,
+            adaptive_routing_summary: initialAdaptiveRouting,
           },
           source_client: input.source_client,
           source_model: input.source_model,
@@ -824,6 +883,7 @@ export async function goalExecute(
           selected_existing_plan: selectedExistingPlan,
           message: `Plan ${plan.plan_id} is already ${plan.status}.`,
           execution_summary: initialSummary,
+          adaptive_routing_summary: initialAdaptiveRouting,
           planner_selection: plannerSelection,
           final_plan: plan,
           final_steps: initialSteps,
@@ -856,6 +916,7 @@ export async function goalExecute(
       const finalSteps = storage.listPlanSteps(plan.plan_id);
       const finalReadiness = evaluatePlanStepReadiness(finalSteps);
       const executionSummary = summarizeGoalExecution(finalPlan, finalSteps);
+      const adaptiveRoutingSummary = summarizePlanAdaptiveRouting(finalSteps);
 
       storage.appendRuntimeEvent({
         event_type: "goal.executed",
@@ -873,6 +934,7 @@ export async function goalExecute(
           dispatch_mode: input.autorun ? "autorun" : "dispatch",
           dry_run: input.dry_run ?? false,
           execution_summary: executionSummary,
+          adaptive_routing_summary: adaptiveRoutingSummary,
         },
         source_client: input.source_client,
         source_model: input.source_model,
@@ -892,6 +954,7 @@ export async function goalExecute(
         dispatch_mode: input.autorun ? "autorun" : "dispatch",
         execution: executionResult,
         execution_summary: executionSummary,
+        adaptive_routing_summary: adaptiveRoutingSummary,
         final_plan: finalPlan,
         final_steps: finalSteps,
         final_readiness: finalReadiness,
