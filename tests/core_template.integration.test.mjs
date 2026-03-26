@@ -1437,6 +1437,25 @@ test("adaptive worker scoring penalizes repeated failure and stagnation history 
     assert.equal(strugglingEntry.session_performance.total_failed, 2);
     assert.equal(strugglingEntry.session_performance.total_stagnation_signals, 1);
 
+    const kernelSummary = await callTool(client, "kernel.summary", {
+      session_limit: 10,
+      goal_limit: 5,
+      event_limit: 20,
+    });
+    const steadySessionSummary = kernelSummary.adaptive_sessions.find(
+      (session) => session.session_id === "adaptive-steady-session"
+    );
+    const strugglingSessionSummary = kernelSummary.adaptive_sessions.find(
+      (session) => session.session_id === "adaptive-struggling-session"
+    );
+    assert.ok(steadySessionSummary);
+    assert.ok(strugglingSessionSummary);
+    assert.equal(steadySessionSummary.adaptive_state, "healthy");
+    assert.equal(strugglingSessionSummary.adaptive_state, "suppressed");
+    assert.ok(kernelSummary.overview.adaptive_session_counts.healthy >= 1);
+    assert.ok(kernelSummary.overview.adaptive_session_counts.suppressed >= 1);
+    assert.ok(kernelSummary.attention.some((entry) => /adaptive routing is suppressing/i.test(entry)));
+
     const rejectedStrugglingClaim = await callTool(client, "agent.claim_next", {
       mutation: nextMutation(testId, "agent.claim_next.struggling.target", () => mutationCounter++),
       session_id: "adaptive-struggling-session",

@@ -206,7 +206,7 @@ type AdaptiveCurrentTaskState = {
   stagnation_signaled_at: string | null;
 };
 
-type AdaptiveWorkerProfile = {
+export type AdaptiveWorkerProfile = {
   total_claims: number;
   total_completed: number;
   total_failed: number;
@@ -225,7 +225,7 @@ type AdaptiveWorkerProfile = {
   recent_outcomes: Array<Record<string, unknown>>;
 };
 
-type AdaptiveSessionPerformanceSummary = {
+export type AdaptiveSessionPerformanceSummary = {
   total_claims: number;
   total_completed: number;
   total_failed: number;
@@ -248,7 +248,7 @@ type AdaptiveRoutingSignal = {
   summary: AdaptiveSessionPerformanceSummary;
 };
 
-const ADAPTIVE_WORKER_PROFILE_KEY = "adaptive_worker_profile";
+export const ADAPTIVE_WORKER_PROFILE_KEY = "adaptive_worker_profile";
 
 function readNonNegativeInt(value: unknown): number | null {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
@@ -367,7 +367,7 @@ function normalizeAdaptiveWorkerProfile(value: unknown): AdaptiveWorkerProfile {
   };
 }
 
-function getAdaptiveWorkerProfile(session: AgentSessionRecord): AdaptiveWorkerProfile {
+export function getAdaptiveWorkerProfile(session: AgentSessionRecord): AdaptiveWorkerProfile {
   return normalizeAdaptiveWorkerProfile(session.metadata[ADAPTIVE_WORKER_PROFILE_KEY]);
 }
 
@@ -548,7 +548,7 @@ function updateAdaptiveWorkerProfileOnReport(
   };
 }
 
-function summarizeAdaptiveWorkerProfile(
+export function summarizeAdaptiveWorkerProfile(
   profile: AdaptiveWorkerProfile,
   complexity: TaskExecutionProfile["complexity"]
 ): AdaptiveSessionPerformanceSummary {

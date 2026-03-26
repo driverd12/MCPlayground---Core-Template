@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { type GoalRecord, type PlanRecord, type PlanStepRecord, Storage } from "../storage.js";
+import { type AgentSessionRecord, type GoalRecord, type PlanRecord, type PlanStepRecord, Storage } from "../storage.js";
+import { getAdaptiveWorkerProfile, summarizeAdaptiveWorkerProfile } from "./agent_session.js";
 import { evaluatePlanStepReadiness, getPlanStepApprovalGateKind } from "./plan.js";
 
 const goalStatusSchema = z.enum([
@@ -35,6 +36,31 @@ type GoalExecutionSnapshot = {
   blocked_approval_count: number;
   blocked_human_count: number;
   next_action: string;
+};
+
+type AdaptiveSessionState = "unproven" | "healthy" | "degraded" | "suppressed";
+
+type AdaptiveSessionSnapshot = {
+  session_id: string;
+  agent_id: string;
+  client_kind: string | null;
+  status: string;
+  adaptive_state: AdaptiveSessionState;
+  adaptive_reasons: string[];
+  total_claims: number;
+  total_completed: number;
+  total_failed: number;
+  total_stagnation_signals: number;
+  total_evidence_blocks: number;
+  consecutive_failures: number;
+  consecutive_stagnation_signals: number;
+  average_completion_seconds: number | null;
+  current_task: Record<string, unknown>;
+  complexity: {
+    low: ReturnType<typeof summarizeAdaptiveWorkerProfile>;
+    medium: ReturnType<typeof summarizeAdaptiveWorkerProfile>;
+    high: ReturnType<typeof summarizeAdaptiveWorkerProfile>;
+  };
 };
 
 function countByStatus<T extends { status: string }>(records: T[]) {
@@ -152,6 +178,74 @@ function listOpenGoals(storage: Storage, limit: number) {
   return goals.slice(0, limit);
 }
 
+function summarizeAdaptiveSession(session: AgentSessionRecord): AdaptiveSessionSnapshot {
+  const profile = getAdaptiveWorkerProfile(session);
+  const complexity = {
+    low: summarizeAdaptiveWorkerProfile(profile, "low"),
+    medium: summarizeAdaptiveWorkerProfile(profile, "medium"),
+    high: summarizeAdaptiveWorkerProfile(profile, "high"),
+  };
+  const reasons: string[] = [];
+  let adaptiveState: AdaptiveSessionState = "unproven";
+
+  if (profile.total_claims === 0) {
+    adaptiveState = "unproven";
+    reasons.push("No adaptive routing history has been recorded yet.");
+  } else if (profile.consecutive_failures >= 2 || profile.consecutive_stagnation_signals >= 1) {
+    adaptiveState = "suppressed";
+    if (profile.consecutive_failures >= 2) {
+      reasons.push(`Suppressed after ${profile.consecutive_failures} consecutive failures.`);
+    }
+    if (profile.consecutive_stagnation_signals >= 1) {
+      reasons.push(`Suppressed after ${profile.consecutive_stagnation_signals} recent stagnation signal(s).`);
+    }
+  } else if (
+    profile.total_failed > 0 ||
+    profile.total_stagnation_signals > 0 ||
+    profile.total_evidence_blocks > 0
+  ) {
+    adaptiveState = "degraded";
+    if (profile.total_failed > 0) {
+      reasons.push(`${profile.total_failed} failed task report(s) are in history.`);
+    }
+    if (profile.total_stagnation_signals > 0) {
+      reasons.push(`${profile.total_stagnation_signals} stagnation signal(s) are in history.`);
+    }
+    if (profile.total_evidence_blocks > 0) {
+      reasons.push(`${profile.total_evidence_blocks} evidence-blocked completion(s) are in history.`);
+    }
+  } else {
+    adaptiveState = "healthy";
+    reasons.push("Recent routing history is stable.");
+  }
+
+  return {
+    session_id: session.session_id,
+    agent_id: session.agent_id,
+    client_kind: session.client_kind,
+    status: session.status,
+    adaptive_state: adaptiveState,
+    adaptive_reasons: reasons,
+    total_claims: profile.total_claims,
+    total_completed: profile.total_completed,
+    total_failed: profile.total_failed,
+    total_stagnation_signals: profile.total_stagnation_signals,
+    total_evidence_blocks: profile.total_evidence_blocks,
+    consecutive_failures: profile.consecutive_failures,
+    consecutive_stagnation_signals: profile.consecutive_stagnation_signals,
+    average_completion_seconds: profile.average_completion_seconds,
+    current_task: {
+      task_id: profile.current_task.task_id,
+      claimed_at: profile.current_task.claimed_at,
+      heartbeat_count: profile.current_task.heartbeat_count,
+      complexity: profile.current_task.complexity,
+      stagnation_signaled: profile.current_task.stagnation_signaled,
+      stagnation_signaled_at: profile.current_task.stagnation_signaled_at,
+    },
+    complexity,
+  };
+}
+
 function deriveKernelState(params: {
   failed_goal_count: number;
   failed_task_count: number;
@@ -198,6 +292,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     active_only: true,
     limit: sessionLimit,
   });
+  const adaptiveSessions = activeSessions.map((session) => summarizeAdaptiveSession(session));
   const experiments = storage.listExperiments({
     limit: experimentLimit,
   });
@@ -260,6 +355,18 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   });
 
   const attention: string[] = [];
+  const adaptiveSessionCounts = adaptiveSessions.reduce<Record<AdaptiveSessionState, number>>(
+    (acc, session) => {
+      acc[session.adaptive_state] += 1;
+      return acc;
+    },
+    {
+      unproven: 0,
+      healthy: 0,
+      degraded: 0,
+      suppressed: 0,
+    }
+  );
   if ((taskSummary.counts.failed ?? 0) > 0 && taskSummary.last_failed) {
     attention.push(`Failed task detected: ${taskSummary.last_failed.task_id}`);
   }
@@ -272,6 +379,19 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   }
   if (activeSessions.length === 0 && ((taskSummary.counts.pending ?? 0) > 0 || totals.ready_step_count > 0)) {
     attention.push("Work is queued or ready, but no active agent sessions are available to claim it.");
+  }
+  if (adaptiveSessionCounts.suppressed > 0) {
+    attention.push(`Adaptive routing is suppressing ${adaptiveSessionCounts.suppressed} active session(s).`);
+  }
+  if (adaptiveSessionCounts.degraded > 0) {
+    attention.push(`Adaptive routing marks ${adaptiveSessionCounts.degraded} active session(s) as degraded.`);
+  }
+  if (
+    adaptiveSessionCounts.healthy === 0 &&
+    activeSessions.length > 0 &&
+    ((taskSummary.counts.pending ?? 0) > 0 || totals.ready_step_count > 0)
+  ) {
+    attention.push("Queued work may stall because no active session is currently marked healthy by adaptive routing.");
   }
   if (attention.length === 0 && state === "active") {
     attention.push("Kernel is progressing normally.");
@@ -289,6 +409,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       task_counts: taskSummary.counts,
       experiment_counts: experimentCounts,
       active_session_count: activeSessions.length,
+      adaptive_session_counts: adaptiveSessionCounts,
       ready_step_count: totals.ready_step_count,
       running_step_count: totals.running_step_count,
       blocked_approval_count: totals.blocked_approval_count,
@@ -297,6 +418,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     },
     open_goals: goalSummaries,
     active_sessions: activeSessions,
+    adaptive_sessions: adaptiveSessions,
     tasks: taskSummary,
     experiments,
     recent_artifacts: recentArtifacts,
