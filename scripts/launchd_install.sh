@@ -2,6 +2,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO_ROOT}"
+eval "$("${REPO_ROOT}/scripts/export_dotenv_env.sh" "${REPO_ROOT}")"
 LAUNCH_DIR="${HOME}/Library/LaunchAgents"
 LOG_DIR="${REPO_ROOT}/data/imprint/logs"
 DOMAIN="gui/$(id -u)"
@@ -14,7 +16,8 @@ MCP_PLIST="${LAUNCH_DIR}/${MCP_LABEL}.plist"
 AUTO_PLIST="${LAUNCH_DIR}/${AUTO_LABEL}.plist"
 WORKER_PLIST="${LAUNCH_DIR}/${WORKER_LABEL}.plist"
 
-MCP_PORT="${ANAMNESIS_MCP_HTTP_PORT:-8787}"
+MCP_PORT="${MCP_HTTP_PORT:-${ANAMNESIS_MCP_HTTP_PORT:-8787}}"
+MCP_HOST="${MCP_HTTP_HOST:-127.0.0.1}"
 ALLOWED_ORIGINS="${MCP_HTTP_ALLOWED_ORIGINS:-http://localhost,http://127.0.0.1}"
 INBOX_POLL_INTERVAL="${ANAMNESIS_INBOX_POLL_INTERVAL:-5}"
 INBOX_BATCH_SIZE="${ANAMNESIS_INBOX_BATCH_SIZE:-3}"
@@ -74,7 +77,7 @@ cat >"${MCP_PLIST}" <<PLIST
       <key>MCP_HTTP</key>
       <string>1</string>
       <key>MCP_HTTP_HOST</key>
-      <string>127.0.0.1</string>
+      <string>${MCP_HOST}</string>
       <key>MCP_HTTP_PORT</key>
       <string>${MCP_PORT}</string>
       <key>MCP_HTTP_ALLOWED_ORIGINS</key>
@@ -193,7 +196,6 @@ PLIST
 
 chmod 644 "${MCP_PLIST}" "${AUTO_PLIST}" "${WORKER_PLIST}"
 
-cd "${REPO_ROOT}"
 npm run build >/dev/null
 
 launchctl bootout "${DOMAIN}" "${MCP_PLIST}" >/dev/null 2>&1 || true
@@ -218,6 +220,15 @@ for _ in 1 2 3 4 5; do
   fi
   sleep 2
 done
+
+if [[ "${TRICHAT_RING_LEADER_AUTOSTART:-1}" != "0" ]]; then
+  for _ in 1 2 3 4 5; do
+    if "${REPO_ROOT}/scripts/ring_leader_ctl.sh" start >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+  done
+fi
 
 echo "Installed launchd agents:" >&2
 echo "- ${MCP_PLIST}" >&2

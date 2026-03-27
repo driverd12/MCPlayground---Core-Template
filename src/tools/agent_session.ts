@@ -237,8 +237,22 @@ export type AdaptiveSessionPerformanceSummary = {
   failure_rate: number | null;
   stagnation_rate: number | null;
   average_completion_seconds: number | null;
+  recent_claims: number;
+  recent_completed: number;
+  recent_failed: number;
+  recent_stagnation_signals: number;
+  recent_evidence_blocks: number;
+  recent_completion_rate: number | null;
+  recent_failure_rate: number | null;
+  recent_stagnation_rate: number | null;
+  effective_recent_failed: number;
+  effective_recent_stagnation_signals: number;
+  effective_recent_evidence_blocks: number;
+  recovery_streak: number;
+  recovery_credit: number;
   complexity: TaskExecutionProfile["complexity"];
   complexity_stats: AdaptiveComplexityStats;
+  recent_complexity_stats: AdaptiveComplexityStats;
 };
 
 export type AdaptiveSessionHealthState = "unproven" | "healthy" | "degraded" | "suppressed";
@@ -294,6 +308,10 @@ export type AdaptiveDispatchRoutingGuidance = {
 };
 
 export const ADAPTIVE_WORKER_PROFILE_KEY = "adaptive_worker_profile";
+const ADAPTIVE_RECENT_OUTCOME_WINDOW = 6;
+const ADAPTIVE_RECOVERY_FAILURE_CREDIT_EVERY = 2;
+const ADAPTIVE_RECOVERY_STAGNATION_CREDIT_EVERY = 3;
+const ADAPTIVE_RECOVERY_EVIDENCE_CREDIT_EVERY = 2;
 
 function readNonNegativeInt(value: unknown): number | null {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
@@ -409,6 +427,129 @@ function normalizeAdaptiveWorkerProfile(value: unknown): AdaptiveWorkerProfile {
     recent_outcomes: Array.isArray(profile.recent_outcomes)
       ? profile.recent_outcomes.filter((entry): entry is Record<string, unknown> => isRecord(entry)).slice(-10)
       : [],
+  };
+}
+
+type NormalizedAdaptiveRecentOutcome = {
+  task_id: string | null;
+  outcome: "completed" | "failed";
+  reported_at: string | null;
+  complexity: TaskExecutionProfile["complexity"] | null;
+  missing_expected_artifacts: boolean;
+  stagnation_signaled: boolean;
+  completion_seconds: number | null;
+};
+
+type AdaptiveRecentOutcomeSummary = {
+  recent_claims: number;
+  recent_completed: number;
+  recent_failed: number;
+  recent_stagnation_signals: number;
+  recent_evidence_blocks: number;
+  recent_completion_rate: number | null;
+  recent_failure_rate: number | null;
+  recent_stagnation_rate: number | null;
+  effective_recent_failed: number;
+  effective_recent_stagnation_signals: number;
+  effective_recent_evidence_blocks: number;
+  recovery_streak: number;
+  recovery_credit: number;
+  recent_complexity_stats: AdaptiveComplexityStats;
+};
+
+function normalizeAdaptiveRecentOutcome(value: Record<string, unknown>): NormalizedAdaptiveRecentOutcome | null {
+  const outcome = readString(value.outcome);
+  if (outcome !== "completed" && outcome !== "failed") {
+    return null;
+  }
+  const complexityValue = readString(value.complexity);
+  const complexity =
+    complexityValue === "low" || complexityValue === "medium" || complexityValue === "high"
+      ? (complexityValue as TaskExecutionProfile["complexity"])
+      : null;
+  return {
+    task_id: readString(value.task_id),
+    outcome,
+    reported_at: readString(value.reported_at),
+    complexity,
+    missing_expected_artifacts: readBoolean(value.missing_expected_artifacts) ?? false,
+    stagnation_signaled: readBoolean(value.stagnation_signaled) ?? false,
+    completion_seconds: readNonNegativeNumber(value.completion_seconds),
+  };
+}
+
+function summarizeAdaptiveRecentOutcomes(
+  profile: AdaptiveWorkerProfile,
+  complexity: TaskExecutionProfile["complexity"]
+): AdaptiveRecentOutcomeSummary {
+  const recent = profile.recent_outcomes
+    .map((entry) => normalizeAdaptiveRecentOutcome(entry))
+    .filter((entry): entry is NormalizedAdaptiveRecentOutcome => entry !== null)
+    .slice(-ADAPTIVE_RECENT_OUTCOME_WINDOW);
+  const recentComplexity = recent.filter((entry) => entry.complexity === complexity);
+  let recoveryStreak = 0;
+  for (let index = recent.length - 1; index >= 0; index -= 1) {
+    if (recent[index]?.outcome !== "completed") {
+      break;
+    }
+    recoveryStreak += 1;
+  }
+  const recoveryCredit = Math.floor(recoveryStreak / ADAPTIVE_RECOVERY_FAILURE_CREDIT_EVERY);
+  const recentCompleted = recent.filter((entry) => entry.outcome === "completed").length;
+  const recentFailed = recent.filter((entry) => entry.outcome === "failed").length;
+  const recentStagnations = recent.filter((entry) => entry.stagnation_signaled).length;
+  const recentEvidenceBlocks = recent.filter((entry) => entry.missing_expected_artifacts).length;
+  const recentClaims = recent.length;
+  return {
+    recent_claims: recentClaims,
+    recent_completed: recentCompleted,
+    recent_failed: recentFailed,
+    recent_stagnation_signals: recentStagnations,
+    recent_evidence_blocks: recentEvidenceBlocks,
+    recent_completion_rate: recentClaims > 0 ? recentCompleted / recentClaims : null,
+    recent_failure_rate: recentClaims > 0 ? Math.max(0, recentFailed - recoveryCredit) / recentClaims : null,
+    recent_stagnation_rate:
+      recentClaims > 0
+        ? Math.max(0, recentStagnations - Math.floor(recoveryStreak / ADAPTIVE_RECOVERY_STAGNATION_CREDIT_EVERY)) /
+          recentClaims
+        : null,
+    effective_recent_failed: Math.max(0, recentFailed - recoveryCredit),
+    effective_recent_stagnation_signals: Math.max(
+      0,
+      recentStagnations - Math.floor(recoveryStreak / ADAPTIVE_RECOVERY_STAGNATION_CREDIT_EVERY)
+    ),
+    effective_recent_evidence_blocks: Math.max(
+      0,
+      recentEvidenceBlocks - Math.floor(recoveryStreak / ADAPTIVE_RECOVERY_EVIDENCE_CREDIT_EVERY)
+    ),
+    recovery_streak: recoveryStreak,
+    recovery_credit: recoveryCredit,
+    recent_complexity_stats: {
+      claims: recentComplexity.length,
+      completions: recentComplexity.filter((entry) => entry.outcome === "completed").length,
+      failures: recentComplexity.filter((entry) => entry.outcome === "failed").length,
+      stagnations: recentComplexity.filter((entry) => entry.stagnation_signaled).length,
+      evidence_blocks: recentComplexity.filter((entry) => entry.missing_expected_artifacts).length,
+      average_completion_seconds:
+        recentComplexity.filter((entry) => entry.outcome === "completed" && entry.completion_seconds !== null).length > 0
+          ? Math.round(
+              (recentComplexity
+                .filter((entry): entry is NormalizedAdaptiveRecentOutcome & { completion_seconds: number } =>
+                  entry.outcome === "completed" && entry.completion_seconds !== null
+                )
+                .reduce((total, entry) => total + entry.completion_seconds, 0) /
+                recentComplexity.filter(
+                  (entry) => entry.outcome === "completed" && entry.completion_seconds !== null
+                ).length) *
+                1000
+            ) / 1000
+          : null,
+      last_completion_seconds:
+        recentComplexity
+          .slice()
+          .reverse()
+          .find((entry) => entry.outcome === "completed" && entry.completion_seconds !== null)?.completion_seconds ?? null,
+    },
   };
 }
 
@@ -598,6 +739,7 @@ export function summarizeAdaptiveWorkerProfile(
   complexity: TaskExecutionProfile["complexity"]
 ): AdaptiveSessionPerformanceSummary {
   const totalClaims = Math.max(profile.total_claims, 0);
+  const recent = summarizeAdaptiveRecentOutcomes(profile, complexity);
   return {
     total_claims: profile.total_claims,
     total_completed: profile.total_completed,
@@ -610,8 +752,22 @@ export function summarizeAdaptiveWorkerProfile(
     failure_rate: totalClaims > 0 ? profile.total_failed / totalClaims : null,
     stagnation_rate: totalClaims > 0 ? profile.total_stagnation_signals / totalClaims : null,
     average_completion_seconds: profile.average_completion_seconds,
+    recent_claims: recent.recent_claims,
+    recent_completed: recent.recent_completed,
+    recent_failed: recent.recent_failed,
+    recent_stagnation_signals: recent.recent_stagnation_signals,
+    recent_evidence_blocks: recent.recent_evidence_blocks,
+    recent_completion_rate: recent.recent_completion_rate,
+    recent_failure_rate: recent.recent_failure_rate,
+    recent_stagnation_rate: recent.recent_stagnation_rate,
+    effective_recent_failed: recent.effective_recent_failed,
+    effective_recent_stagnation_signals: recent.effective_recent_stagnation_signals,
+    effective_recent_evidence_blocks: recent.effective_recent_evidence_blocks,
+    recovery_streak: recent.recovery_streak,
+    recovery_credit: recent.recovery_credit,
     complexity,
     complexity_stats: getAdaptiveComplexityStats(profile, complexity),
+    recent_complexity_stats: recent.recent_complexity_stats,
   };
 }
 
@@ -622,6 +778,7 @@ export function summarizeAdaptiveSessionHealth(session: AgentSessionRecord): Ada
     medium: summarizeAdaptiveWorkerProfile(profile, "medium"),
     high: summarizeAdaptiveWorkerProfile(profile, "high"),
   };
+  const recentSessionSignals = summarizeAdaptiveRecentOutcomes(profile, "low");
   const reasons: string[] = [];
   let adaptiveState: AdaptiveSessionHealthState = "unproven";
 
@@ -637,23 +794,36 @@ export function summarizeAdaptiveSessionHealth(session: AgentSessionRecord): Ada
       reasons.push(`Suppressed after ${profile.consecutive_stagnation_signals} recent stagnation signal(s).`);
     }
   } else if (
-    profile.total_failed > 0 ||
-    profile.total_stagnation_signals > 0 ||
-    profile.total_evidence_blocks > 0
+    recentSessionSignals.effective_recent_failed > 0 ||
+    recentSessionSignals.effective_recent_stagnation_signals > 0 ||
+    recentSessionSignals.effective_recent_evidence_blocks > 0
   ) {
     adaptiveState = "degraded";
-    if (profile.total_failed > 0) {
-      reasons.push(`${profile.total_failed} failed task report(s) are in history.`);
+    if (recentSessionSignals.effective_recent_failed > 0) {
+      reasons.push(`${recentSessionSignals.effective_recent_failed} recent failed task signal(s) still need recovery.`);
     }
-    if (profile.total_stagnation_signals > 0) {
-      reasons.push(`${profile.total_stagnation_signals} stagnation signal(s) are in history.`);
+    if (recentSessionSignals.effective_recent_stagnation_signals > 0) {
+      reasons.push(
+        `${recentSessionSignals.effective_recent_stagnation_signals} recent stagnation signal(s) still need recovery.`
+      );
     }
-    if (profile.total_evidence_blocks > 0) {
-      reasons.push(`${profile.total_evidence_blocks} evidence-blocked completion(s) are in history.`);
+    if (recentSessionSignals.effective_recent_evidence_blocks > 0) {
+      reasons.push(
+        `${recentSessionSignals.effective_recent_evidence_blocks} recent evidence-blocked completion(s) still need recovery.`
+      );
     }
   } else {
     adaptiveState = "healthy";
-    reasons.push("Recent routing history is stable.");
+    const recoveryStreak = recentSessionSignals.recovery_streak;
+    if (profile.total_failed > 0 || profile.total_stagnation_signals > 0 || profile.total_evidence_blocks > 0) {
+      reasons.push(
+        recoveryStreak > 0
+          ? `Recent routing history is stable and a recovery streak of ${recoveryStreak} completion(s) is offsetting older failures.`
+          : "Recent routing history is stable despite older recovered failures."
+      );
+    } else {
+      reasons.push("Recent routing history is stable.");
+    }
   }
 
   return {
@@ -829,18 +999,22 @@ function evaluateAdaptiveRoutingSignal(
   const matchedPreferences: string[] = [];
   let adjustment = 0;
 
-  if (summary.total_claims > 0) {
-    adjustment += Math.round((summary.completion_rate ?? 0) * 8);
-    adjustment -= Math.round((summary.failure_rate ?? 0) * 10);
-    adjustment -= Math.round((summary.stagnation_rate ?? 0) * 10);
-    adjustment -= Math.round((summary.total_evidence_blocks / summary.total_claims) * 6);
+  const adaptiveClaimCount = summary.recent_claims > 0 ? summary.recent_claims : summary.total_claims;
+  if (adaptiveClaimCount > 0) {
+    adjustment += Math.round((summary.recent_completion_rate ?? summary.completion_rate ?? 0) * 8);
+    adjustment -= Math.round((summary.recent_failure_rate ?? summary.failure_rate ?? 0) * 10);
+    adjustment -= Math.round((summary.recent_stagnation_rate ?? summary.stagnation_rate ?? 0) * 10);
+    adjustment -= Math.round(
+      ((summary.recent_claims > 0 ? summary.effective_recent_evidence_blocks : summary.total_evidence_blocks) / adaptiveClaimCount) * 6
+    );
   }
 
-  const complexityClaims = summary.complexity_stats.claims;
+  const complexitySignals = summary.recent_complexity_stats.claims > 0 ? summary.recent_complexity_stats : summary.complexity_stats;
+  const complexityClaims = complexitySignals.claims;
   if (complexityClaims >= 2) {
-    adjustment += Math.round((summary.complexity_stats.completions / complexityClaims) * 8);
-    adjustment -= Math.round((summary.complexity_stats.failures / complexityClaims) * 10);
-    adjustment -= Math.round((summary.complexity_stats.stagnations / complexityClaims) * 10);
+    adjustment += Math.round((complexitySignals.completions / complexityClaims) * 8);
+    adjustment -= Math.round((complexitySignals.failures / complexityClaims) * 10);
+    adjustment -= Math.round((complexitySignals.stagnations / complexityClaims) * 10);
     matchedPreferences.push(`adaptive_history:${taskProfile.complexity}:${complexityClaims}`);
   }
 
@@ -1235,6 +1409,66 @@ function resolveSessionCapabilityTier(session: AgentSessionRecord): "low" | "med
   return "low";
 }
 
+function readTaskMode(task: TaskRecord): string | null {
+  const metadataMode = isRecord(task.metadata) ? readString(task.metadata.task_mode) : null;
+  if (metadataMode) {
+    return metadataMode;
+  }
+  if (isRecord(task.payload)) {
+    return readString(task.payload.task_mode);
+  }
+  return null;
+}
+
+function isAutopilotSpecialistFallbackTask(task: TaskRecord): boolean {
+  const mode = readTaskMode(task)?.toLowerCase() ?? "";
+  return mode === "autopilot_specialist_fallback";
+}
+
+function evaluateAutopilotQueueDiscipline(
+  session: AgentSessionRecord,
+  task: TaskRecord,
+  explicitlyTargetedSession: boolean
+): {
+  adjustment: number;
+  matched_preferences: string[];
+} {
+  const clientKind = readString(session.client_kind)?.toLowerCase() ?? "";
+  if (clientKind !== "trichat-autopilot") {
+    return {
+      adjustment: 0,
+      matched_preferences: [],
+    };
+  }
+
+  const taskSource = readString(task.source)?.toLowerCase() ?? "";
+  if (isAutopilotSpecialistFallbackTask(task)) {
+    return {
+      adjustment: -70,
+      matched_preferences: ["autopilot_queue:deprioritize_specialist_fallback"],
+    };
+  }
+
+  if (explicitlyTargetedSession) {
+    return {
+      adjustment: 0,
+      matched_preferences: [],
+    };
+  }
+
+  if (taskSource && taskSource !== "trichat.autopilot") {
+    return {
+      adjustment: 12,
+      matched_preferences: [`autopilot_queue:prefer_external:${taskSource}`],
+    };
+  }
+
+  return {
+    adjustment: 0,
+    matched_preferences: [],
+  };
+}
+
 function evaluateTaskRouting(session: AgentSessionRecord, task: TaskRecord): TaskRoutingEvaluation {
   const routing = resolveTaskRouting(task);
   const blockers: string[] = [];
@@ -1313,6 +1547,10 @@ function evaluateTaskRouting(session: AgentSessionRecord, task: TaskRecord): Tas
     matchedPreferences.push("workspace_root_match");
     score += 2;
   }
+
+  const autopilotQueueDiscipline = evaluateAutopilotQueueDiscipline(session, task, explicitlyTargetedSession);
+  matchedPreferences.push(...autopilotQueueDiscipline.matched_preferences);
+  score += autopilotQueueDiscipline.adjustment;
 
   const adaptiveSignal = evaluateAdaptiveRoutingSignal(session, taskProfile, explicitlyTargetedSession);
   blockers.push(...adaptiveSignal.blockers);

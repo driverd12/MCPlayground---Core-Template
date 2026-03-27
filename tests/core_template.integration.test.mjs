@@ -65,6 +65,8 @@ test("server starts with default agentic workflow hooks and exposes core + TriCh
     assert.equal(names.has("agent.session_list"), true);
     assert.equal(names.has("agent.session_heartbeat"), true);
     assert.equal(names.has("agent.session_close"), true);
+    assert.equal(names.has("agent.learning_list"), true);
+    assert.equal(names.has("agent.learning_summary"), true);
     assert.equal(names.has("agent.claim_next"), true);
     assert.equal(names.has("agent.worklist"), true);
     assert.equal(names.has("agent.current_task"), true);
@@ -80,15 +82,48 @@ test("server starts with default agentic workflow hooks and exposes core + TriCh
     assert.equal(names.has("cfd.case.create"), false);
 
     const roster = await callTool(client, "trichat.roster", {});
-    assert.deepEqual(roster.active_agent_ids, ["codex", "cursor", "local-imprint"]);
+    assert.deepEqual(roster.active_agent_ids, [
+      "ring-leader",
+      "implementation-director",
+      "research-director",
+      "verification-director",
+      "local-imprint",
+      "codex",
+    ]);
     assert.equal(Array.isArray(roster.agents), true);
     assert.ok(roster.agents.some((agent) => agent.agent_id === "codex" && agent.active === true));
+    assert.ok(
+      roster.agents.some(
+        (agent) =>
+          agent.agent_id === "implementation-director" &&
+          agent.coordination_tier === "director" &&
+          Array.isArray(agent.managed_agent_ids) &&
+          agent.managed_agent_ids.includes("code-smith")
+      )
+    );
+    assert.ok(
+      roster.agents.some(
+        (agent) =>
+          agent.agent_id === "code-smith" &&
+          agent.coordination_tier === "leaf" &&
+          agent.parent_agent_id === "implementation-director"
+      )
+    );
 
     const packHooks = await callTool(client, "pack.hooks.list", {});
     assert.equal(packHooks.count, 3);
     assert.ok(packHooks.hooks.some((hook) => hook.hook_id === "agentic.delivery_path"));
     assert.ok(packHooks.hooks.some((hook) => hook.hook_id === "agentic.optimization_loop"));
     assert.ok(packHooks.hooks.some((hook) => hook.hook_id === "agentic.execution_readiness"));
+
+    const learningSummary = await callTool(client, "agent.learning_summary", {
+      limit: 25,
+      top_agents_limit: 5,
+      recent_limit: 5,
+    });
+    assert.equal(learningSummary.total_entries, 0);
+    assert.equal(learningSummary.active_entry_count, 0);
+    assert.equal(learningSummary.agent_count, 0);
 
     await callTool(client, "memory.append", {
       mutation: nextMutation(testId, "memory.append", () => mutationCounter++),
@@ -1595,6 +1630,8 @@ test("kernel.summary reports operator-facing state across goals, tasks, sessions
     assert.ok(summary.overview.goal_counts.active >= 1);
     assert.ok(summary.overview.task_counts.pending >= 1);
     assert.equal(summary.overview.active_session_count, 0);
+    assert.equal(summary.overview.learning_entry_count, 0);
+    assert.equal(summary.overview.active_learning_entry_count, 0);
     assert.ok(summary.attention.some((entry) => /no active agent sessions/i.test(entry)));
     assert.ok(summary.attention.some((entry) => /no dispatchable adaptive lane guidance/i.test(entry)));
     assert.ok(summary.overview.adaptive_plan_routing_counts.none >= 1);
@@ -2181,6 +2218,183 @@ test("adaptive worker scoring penalizes repeated failure and stagnation history 
     assert.equal(steadyClaim.task.task_id, targetTask.task.task_id);
     assert.ok(steadyClaim.routing.adaptive_score_adjustment >= 0);
     assert.equal(steadyClaim.routing.session_performance.total_completed, 2);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("adaptive worker health recovers after a completion streak while stale failed tasks stop degrading the kernel", async () => {
+  const testId = `${Date.now()}-adaptive-recovery`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-adaptive-recovery-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open.recovered", () => mutationCounter++),
+      session_id: "adaptive-recovered-session",
+      agent_id: "ring-leader",
+      client_kind: "trichat-autopilot",
+      display_name: "Recovered adaptive session",
+      workspace_root: REPO_ROOT,
+      transport_kind: "daemon",
+      status: "active",
+      capabilities: {
+        capability_tier: "high",
+        planning: true,
+      },
+    });
+
+    const createRecoveryTask = async (label) =>
+      callTool(client, "task.create", {
+        mutation: nextMutation(testId, `task.create.${label}`, () => mutationCounter++),
+        objective: `Recover the adaptive routing baseline for ${label}`,
+        project_dir: REPO_ROOT,
+        priority: 5,
+        tags: ["adaptive-routing", "recovery"],
+      });
+
+    for (const label of ["failed-one", "failed-two"]) {
+      const task = await createRecoveryTask(label);
+      await callTool(client, "agent.claim_next", {
+        mutation: nextMutation(testId, `agent.claim_next.recovered.${label}`, () => mutationCounter++),
+        session_id: "adaptive-recovered-session",
+        task_id: task.task.task_id,
+      });
+      await callTool(client, "agent.report_result", {
+        mutation: nextMutation(testId, `agent.report_result.recovered.${label}`, () => mutationCounter++),
+        session_id: "adaptive-recovered-session",
+        task_id: task.task.task_id,
+        outcome: "failed",
+        error: `${label} failed`,
+        summary: `Recovered session failed ${label}`,
+        result: {
+          failed: true,
+        },
+      });
+    }
+
+    for (const label of ["recovery-one", "recovery-two", "recovery-three", "recovery-four"]) {
+      const task = await createRecoveryTask(label);
+      await callTool(client, "agent.claim_next", {
+        mutation: nextMutation(testId, `agent.claim_next.recovered.${label}`, () => mutationCounter++),
+        session_id: "adaptive-recovered-session",
+        task_id: task.task.task_id,
+      });
+      await callTool(client, "agent.report_result", {
+        mutation: nextMutation(testId, `agent.report_result.recovered.${label}`, () => mutationCounter++),
+        session_id: "adaptive-recovered-session",
+        task_id: task.task.task_id,
+        outcome: "completed",
+        summary: `Recovered session completed ${label}`,
+        result: {
+          completed: true,
+        },
+      });
+    }
+
+    const targetTask = await createRecoveryTask("target");
+    const worklist = await callTool(client, "agent.worklist", {
+      session_id: "adaptive-recovered-session",
+      limit: 10,
+      include_ineligible: true,
+    });
+    const routingEntry = worklist.tasks.find((task) => task.task_id === targetTask.task.task_id);
+    assert.ok(routingEntry);
+    assert.equal(routingEntry.session_performance.total_failed, 2);
+    assert.ok(routingEntry.adaptive_score_adjustment >= 0);
+
+    const kernelSummary = await callTool(client, "kernel.summary", {
+      session_limit: 10,
+      goal_limit: 5,
+      event_limit: 20,
+      task_running_limit: 10,
+    });
+    const recoveredSessionSummary = kernelSummary.adaptive_sessions.find(
+      (session) => session.session_id === "adaptive-recovered-session"
+    );
+    assert.ok(recoveredSessionSummary);
+    assert.equal(recoveredSessionSummary.adaptive_state, "healthy");
+    assert.ok(kernelSummary.overview.adaptive_session_counts.healthy >= 1);
+    assert.equal(kernelSummary.state, "active");
+    assert.ok(kernelSummary.attention.some((entry) => /stale failed task remains in history/i.test(entry)));
+    assert.equal(
+      kernelSummary.attention.some((entry) => /adaptive routing marks .* degraded/i.test(entry)),
+      false
+    );
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("adaptive session health counts recent failure pressure once across complexity lanes", async () => {
+  const testId = `${Date.now()}-adaptive-health-counts-once`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-adaptive-health-counts-once-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open.counts-once", () => mutationCounter++),
+      session_id: "adaptive-counts-once-session",
+      agent_id: "ring-leader",
+      client_kind: "trichat-autopilot",
+      display_name: "Adaptive count once session",
+      workspace_root: REPO_ROOT,
+      transport_kind: "daemon",
+      status: "active",
+      capabilities: {
+        capability_tier: "high",
+        planning: true,
+      },
+    });
+
+    const failedTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.counts-once.failed", () => mutationCounter++),
+      objective: "Capture one bounded adaptive failure",
+      project_dir: REPO_ROOT,
+      priority: 5,
+      tags: ["adaptive-routing", "counts-once"],
+    });
+    await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.counts-once.failed", () => mutationCounter++),
+      session_id: "adaptive-counts-once-session",
+      task_id: failedTask.task.task_id,
+    });
+    await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.counts-once.failed", () => mutationCounter++),
+      session_id: "adaptive-counts-once-session",
+      task_id: failedTask.task.task_id,
+      outcome: "failed",
+      error: "bounded failure",
+      summary: "Bounded failure for count-once coverage",
+      result: {
+        failed: true,
+      },
+    });
+
+    const kernelSummary = await callTool(client, "kernel.summary", {
+      session_limit: 10,
+      goal_limit: 5,
+      event_limit: 20,
+      task_running_limit: 10,
+    });
+    const degradedSessionSummary = kernelSummary.adaptive_sessions.find(
+      (session) => session.session_id === "adaptive-counts-once-session"
+    );
+    assert.ok(degradedSessionSummary);
+    assert.equal(degradedSessionSummary.adaptive_state, "degraded");
+    assert.ok(
+      degradedSessionSummary.adaptive_reasons.some((entry) => /1 recent failed task signal\(s\) still need recovery/i.test(entry))
+    );
+    assert.equal(
+      degradedSessionSummary.adaptive_reasons.some((entry) => /3 recent failed task signal\(s\)/i.test(entry)),
+      false
+    );
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -3981,6 +4195,7 @@ async function openClient(dbPath, extraEnv) {
     cwd: REPO_ROOT,
     env: inheritedEnv({
       ANAMNESIS_HUB_DB_PATH: dbPath,
+      TRICHAT_AGENT_IDS: "",
       ...extraEnv,
     }),
     stderr: "pipe",

@@ -89,12 +89,12 @@ test("default agentic pack generates delivery and optimization hooks for local d
     assert.deepEqual(
       deliveryPlan.steps.find((step) => step.title === "Map the relevant codebase and continuity surface").input.routing
         .preferred_agent_ids,
-      ["codex"]
+      ["codex", "cursor"]
     );
     assert.deepEqual(
       deliveryPlan.steps.find((step) => step.title === "Verify behavior, wiring, and quality gates").input.routing
         .preferred_agent_ids,
-      ["cursor"]
+      ["cursor", "codex"]
     );
     assert.ok(
       deliveryPlan.steps.some(

@@ -8,8 +8,9 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && npm run test:bridges && node --test ./tests/auto_squish.persistence.test.mjs ./tests/core_template.integration.test.mjs ./tests/storage_guard.persistence.test.mjs ./tests/agentic_pack.integration.test.mjs ./tests/trichat_auto_retention.persistence.test.mjs ./tests/trichat_autopilot.persistence.test.mjs ./tests/trichat_autopilot.snappiness.test.mjs ./tests/trichat_autopilot.tmux_backend.test.mjs ./tests/trichat_bus.unixsocket.test.mjs ./tests/trichat_tmux_controller.test.mjs",
-    "test:bridges": "PYTHONWARNINGS=ignore::ResourceWarning python3 -m unittest discover -s bridges -p 'test_*.py'",
+    "test": "npm run build && npm run test:python && node --test ./tests/auto_squish.persistence.test.mjs ./tests/core_template.integration.test.mjs ./tests/storage_guard.persistence.test.mjs ./tests/agentic_pack.integration.test.mjs ./tests/trichat_auto_retention.persistence.test.mjs ./tests/trichat_autopilot.persistence.test.mjs ./tests/trichat_autopilot.snappiness.test.mjs ./tests/trichat_autopilot.tmux_backend.test.mjs ./tests/trichat_bus.unixsocket.test.mjs ./tests/trichat_tmux_controller.test.mjs",
+    "test:python": "PYTHONWARNINGS=ignore::ResourceWarning python3 -m unittest discover -s bridges -p 'test_*.py' && python3 -m unittest discover -s tests -p 'test_*.py'",
+    "test:bridges": "npm run test:python",
     "start": "node dist/server.js",
     "start:stdio": "node dist/server.js",
     "start:http": "MCP_HTTP=1 node dist/server.js --http --http-port 8787",
@@ -23,6 +24,9 @@
     "trichat:http": "TRICHAT_MCP_TRANSPORT=http python3 ./scripts/trichat.py --transport http --url http://127.0.0.1:8787/ --origin http://127.0.0.1 --resume-latest --panel-on-start",
     "trichat:tui": "./scripts/trichat_tui_launch.sh --transport stdio",
     "trichat:tui:http": "./scripts/trichat_tui_launch.sh --transport http",
+    "trichat:office": "python3 ./scripts/agent_office_dashboard.py --resume-latest --view office",
+    "trichat:office:http": "TRICHAT_MCP_TRANSPORT=http python3 ./scripts/agent_office_dashboard.py --resume-latest --view office --transport http --url http://127.0.0.1:8787/ --origin http://127.0.0.1",
+    "trichat:office:tmux": "./scripts/agent_office_tmux.sh",
     "trichat:app:install": "./scripts/install_trichat_app.sh",
     "trichat:roster": "node ./scripts/trichat_roster.mjs",
     "trichat:doctor": "./scripts/trichat_doctor.sh",
@@ -37,7 +41,12 @@
     "launchd:uninstall": "./scripts/launchd_uninstall.sh",
     "agents:on": "./scripts/agents_switch.sh on",
     "agents:off": "./scripts/agents_switch.sh off",
-    "agents:status": "./scripts/agents_switch.sh status"
+    "agents:status": "./scripts/agents_switch.sh status",
+    "ring-leader:status": "./scripts/ring_leader_ctl.sh status",
+    "ring-leader:start": "./scripts/ring_leader_ctl.sh start",
+    "ring-leader:stop": "./scripts/ring_leader_ctl.sh stop",
+    "ring-leader:run": "./scripts/ring_leader_ctl.sh run_once",
+    "codex:mcp:register": "./scripts/codex_mcp_register.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",

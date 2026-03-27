@@ -5,6 +5,11 @@ import { spawn, spawnSync } from "node:child_process";
 import { z } from "zod";
 import {
   Storage,
+  type AgentSessionRecord,
+  type AgentLearningEntryKind,
+  type AgentLearningEntryPolarity,
+  type AgentLearningEntryRecord,
+  type TaskRecord,
   TriChatTmuxControllerStateRecord,
   TriChatTmuxControllerTaskRecord,
 } from "../storage.js";
@@ -19,10 +24,12 @@ import { simulateWorkflow } from "./simulate.js";
 import { incidentOpen } from "./incident.js";
 import { createAdr } from "./adr.js";
 import { appendTranscript, summarizeTranscript } from "./transcript.js";
-import { taskClaim, taskComplete, taskCreate, taskFail } from "./task.js";
+import { agentClaimNext, agentReportResult } from "./agent_session.js";
+import { taskCreate } from "./task.js";
 import { ensureWorkspaceFingerprint } from "./workspace_fingerprint.js";
 import {
   getTriChatActiveAgentIds,
+  getTriChatAgent,
   getTriChatBridgeCandidates,
   getTriChatBridgeEnvVar,
   getTriChatRoleLaneMap,
@@ -404,15 +411,17 @@ export const trichatAutopilotSchema = z
     thread_title: z.string().min(1).optional(),
     thread_status: threadStatusSchema.optional(),
     objective: z.string().min(1).optional(),
-    max_rounds: z.number().int().min(1).max(6).optional(),
-    min_success_agents: z.number().int().min(1).max(3).optional(),
+    lead_agent_id: z.string().min(1).optional(),
+    specialist_agent_ids: z.array(z.string().min(1)).max(32).optional(),
+    max_rounds: z.number().int().min(1).max(12).optional(),
+    min_success_agents: z.number().int().min(1).max(12).optional(),
     bridge_timeout_seconds: z.number().int().min(5).max(7200).optional(),
     bridge_dry_run: z.boolean().optional(),
     execute_enabled: z.boolean().optional(),
     command_allowlist: z.array(z.string().min(1)).max(50).optional(),
     execute_backend: trichatExecuteBackendSchema.optional(),
     tmux_session_name: z.string().min(1).optional(),
-    tmux_worker_count: z.number().int().min(1).max(12).optional(),
+    tmux_worker_count: z.number().int().min(1).max(24).optional(),
     tmux_max_queue_per_worker: z.number().int().min(1).max(200).optional(),
     tmux_auto_scale_workers: z.boolean().optional(),
     tmux_sync_after_dispatch: z.boolean().optional(),
@@ -623,6 +632,8 @@ type TriChatAutopilotConfig = {
   thread_title: string;
   thread_status: "active" | "archived";
   objective: string;
+  lead_agent_id: string | null;
+  specialist_agent_ids: string[];
   max_rounds: number;
   min_success_agents: number;
   bridge_timeout_seconds: number;
@@ -653,7 +664,17 @@ type TriChatAutopilotTickResult = {
   user_message_id: string | null;
   source_task_id: string | null;
   council_confidence: number;
+  plan_substance: number;
   success_agents: number;
+  learning_signal: {
+    evaluated_agents: string[];
+    matched_prefer: number;
+    matched_avoid: number;
+    confidence_adjustment: number;
+    top_prefer: string[];
+    top_avoid: string[];
+    rationale: string[];
+  };
   emergency_brake_triggered: boolean;
   incident_id: string | null;
   verify_status: "passed" | "failed" | "skipped" | "error";
@@ -663,6 +684,7 @@ type TriChatAutopilotTickResult = {
     commands: string[];
     blocked_commands: string[];
     task_id: string | null;
+    task_ids: string[];
     direct_success: boolean;
     tmux: {
       session_name: string | null;
@@ -697,6 +719,7 @@ type TriChatAutopilotTickResult = {
     transcript_entries: number;
     summarize_note_id: string | null;
     memory_id: number | null;
+    learning_entry_count: number;
   };
   governance: {
     adr_id: string | null;
@@ -734,6 +757,13 @@ const DEFAULT_AUTOPILOT_COMMAND_ALLOWLIST = [
   "deno ",
 ];
 
+const DEFAULT_AUTOPILOT_LEAD_AGENT_ID = DEFAULT_CONSENSUS_AGENT_IDS.includes("ring-leader")
+  ? "ring-leader"
+  : DEFAULT_CONSENSUS_AGENT_IDS[0] ?? null;
+const DEFAULT_AUTOPILOT_SPECIALIST_AGENT_IDS = DEFAULT_CONSENSUS_AGENT_IDS.filter(
+  (agentId) => agentId !== DEFAULT_AUTOPILOT_LEAD_AGENT_ID
+);
+
 const DEFAULT_AUTOPILOT_CONFIG: TriChatAutopilotConfig = {
   away_mode: "normal",
   interval_seconds: 300,
@@ -741,7 +771,9 @@ const DEFAULT_AUTOPILOT_CONFIG: TriChatAutopilotConfig = {
   thread_title: "TriChat Autopilot",
   thread_status: "archived",
   objective:
-    "Autopilot heartbeat: propose one high-leverage improvement for MCP server reliability and TriChat interop.",
+    "Ring leader heartbeat: inspect kernel state, choose one high-leverage bounded action, and delegate specialist work with explicit safety and rollback awareness.",
+  lead_agent_id: DEFAULT_AUTOPILOT_LEAD_AGENT_ID,
+  specialist_agent_ids: [...DEFAULT_AUTOPILOT_SPECIALIST_AGENT_IDS],
   max_rounds: 2,
   min_success_agents: 2,
   bridge_timeout_seconds: 180,
@@ -778,6 +810,7 @@ const autopilotRuntime: {
   last_session_key: string | null;
   last_tick: TriChatAutopilotTickResult | null;
   pause_reason: string | null;
+  invoke_tool: AutopilotInvokeTool | null;
 } = {
   running: false,
   timer: null,
@@ -795,12 +828,12 @@ const autopilotRuntime: {
   last_session_key: null,
   last_tick: null,
   pause_reason: null,
+  invoke_tool: null,
 };
 
 const AUTOPILOT_WORKER_ID = "trichat-autopilot";
 const AUTOPILOT_TICK_LOCK_KEY = "trichat.autopilot.tick";
 const AUTOPILOT_OWNER_NONCE = `${process.pid}-${crypto.randomUUID().slice(0, 12)}`;
-const AUTOPILOT_AGENT_ROLE_LANES: Record<string, string> = getTriChatRoleLaneMap(DEFAULT_CONSENSUS_AGENT_IDS);
 const AUTOPILOT_STEP_ORDER = [
   "goal_intake",
   "council",
@@ -952,6 +985,14 @@ type TriChatTmuxSyncResult = {
   };
 };
 
+type TriChatTmuxReconcileResult = {
+  state: TriChatTmuxControllerStateRecord;
+  summary: {
+    orphaned_cancelled: number;
+    superseded_cancelled: number;
+  };
+};
+
 const TMUX_CONTROLLER_DEFAULTS = {
   session_name: "trichat-controller",
   workspace: process.cwd(),
@@ -966,6 +1007,7 @@ const TMUX_CONTROLLER_TOOL_NAME = "trichat.tmux_controller";
 const TMUX_CONTROLLER_EXEC_OWNER = `trichat-tmux-controller:${process.pid}:${crypto.randomUUID().slice(0, 10)}`;
 const TMUX_TASK_START_MARKER = "__TRICHAT_TASK_START__";
 const TMUX_TASK_END_MARKER = "__TRICHAT_TASK_END__";
+const TMUX_RECONCILED_ORPHAN_REASON_PREFIX = "tmux session unavailable";
 
 export function trichatThreadOpen(storage: Storage, input: z.infer<typeof trichatThreadOpenSchema>) {
   return storage.upsertTriChatThread({
@@ -1336,9 +1378,16 @@ export async function trichatTurnAutorun(
     user_message_id: turn.user_message_id,
     turn_id: turn.turn_id,
     project_dir: projectDir,
+    delegation_brief: null,
+    target_agent_ids: resolveAutopilotAgentPool(config).council_agent_ids,
+    task_routing: {
+      preferred_agent_ids: [],
+      allowed_agent_ids: [],
+    },
   };
   const council = await runAutopilotCouncil(storage, {
     session_key: sessionKey,
+    run_id: buildAutopilotRunId(sessionKey),
     config,
     intake,
     target_agents: effectiveAgents,
@@ -2047,13 +2096,20 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
   }
 
   if (input.action === "tail") {
-    const state = resolveTmuxControllerState(storage, input);
+    const resolved = resolveTmuxControllerState(storage, input);
+    const runtime = getTmuxRuntimeInfo();
+    const sessionActive = runtime.dry_run ? true : tmuxSessionExists(resolved.session_name);
+    const reconciled = reconcileTmuxTaskResidue(resolved, {
+      session_active: sessionActive,
+    });
+    const state = reconciled.state;
     const summarized = summarizeTmuxState(state, input.include_completed ?? false);
     return {
       generated_at: new Date().toISOString(),
       action: "tail",
       state: summarized,
       dashboard: buildTmuxDashboard(state, summarized.workers),
+      reconciliation: reconciled.summary,
       panes: captureTmuxWorkerPanes(state, {
         worker_id: input.worker_id,
         capture_lines: input.capture_lines ?? 200,
@@ -2073,7 +2129,7 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
     payload: input,
     execute: async () => {
       if (input.action === "start") {
-        const desired = resolveTmuxControllerState(storage, input);
+        const desired = reconcileTmuxTaskResidue(resolveTmuxControllerState(storage, input)).state;
         ensureTmuxSession(desired);
         const persisted = storage.setTriChatTmuxControllerState({
           ...desired,
@@ -2092,11 +2148,17 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
       if (input.action === "stop") {
         const desired = resolveTmuxControllerState(storage, input);
         const stopResult = stopTmuxSession(desired.session_name);
-        const persisted = storage.setTriChatTmuxControllerState({
-          ...desired,
-          enabled: false,
-          last_error: stopResult.ok ? null : stopResult.error,
-        });
+        const reconciled = reconcileTmuxTaskResidue(
+          {
+            ...desired,
+            enabled: false,
+            last_error: stopResult.ok ? null : stopResult.error,
+          },
+          {
+            session_active: false,
+          }
+        );
+        const persisted = storage.setTriChatTmuxControllerState(reconciled.state);
         const summarized = summarizeTmuxState(persisted, true);
         return {
           action: "stop",
@@ -2112,9 +2174,10 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
         const synced = syncTmuxTaskStatusFromPanes(desired, {
           capture_lines: input.capture_lines ?? 400,
         });
+        const reconciled = reconcileTmuxTaskResidue(synced.state);
         const persisted = storage.setTriChatTmuxControllerState({
-          ...synced.state,
-          tasks: pruneTmuxTaskHistory(synced.state.tasks),
+          ...reconciled.state,
+          tasks: pruneTmuxTaskHistory(reconciled.state.tasks),
         });
         const summarized = summarizeTmuxState(persisted, true);
         return {
@@ -2183,7 +2246,7 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
           const sync = syncTmuxTaskStatusFromPanes(nextState, {
             capture_lines: input.capture_lines ?? 400,
           });
-          nextState = sync.state;
+          nextState = reconcileTmuxTaskResidue(sync.state).state;
           const scaleDecision = maybeScaleUpTmuxWorkers(nextState, {
             auto_scale_workers: input.auto_scale_workers ?? true,
             min_worker_count: input.min_worker_count,
@@ -2265,7 +2328,7 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
         const syncBefore = syncTmuxTaskStatusFromPanes(desired, {
           capture_lines: input.capture_lines ?? 400,
         });
-        let nextState = { ...syncBefore.state };
+        let nextState = reconcileTmuxTaskResidue(syncBefore.state).state;
         const materialized = materializeTmuxInputTasks(input.tasks ?? [], nextState.next_task_seq, {
           default_thread_id: null,
           default_turn_id: null,
@@ -2275,6 +2338,7 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
           next_task_seq: materialized.next_task_seq,
           tasks: [...nextState.tasks, ...materialized.tasks],
         };
+        nextState = reconcileTmuxTaskResidue(nextState).state;
 
         const assignment = assignQueuedTmuxTasks(nextState);
         nextState = assignment.state;
@@ -2384,15 +2448,31 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
 }
 
 type AutopilotStepName = (typeof AUTOPILOT_STEP_ORDER)[number];
+type AutopilotInvokeTool = (toolName: string, input: Record<string, unknown>) => Promise<unknown>;
+type AutopilotClaimResult = Awaited<ReturnType<typeof agentClaimNext>>;
+
+type AutopilotDelegationBrief = {
+  delegate_agent_id: string | null;
+  task_objective: string | null;
+  success_criteria: string[];
+  evidence_requirements: string[];
+  rollback_notes: string[];
+};
 
 type AutopilotGoalIntakeResult = {
-  source_task: Awaited<ReturnType<typeof taskClaim>>["task"] | null;
+  source_task: TaskRecord | null;
   objective: string;
   objective_source: "task" | "heartbeat" | "plan.dispatch";
   thread_id: string;
   user_message_id: string;
   turn_id: string;
   project_dir: string;
+  delegation_brief: AutopilotDelegationBrief | null;
+  target_agent_ids: string[];
+  task_routing: {
+    preferred_agent_ids: string[];
+    allowed_agent_ids: string[];
+  };
 };
 
 type AutopilotProposal = {
@@ -2403,6 +2483,13 @@ type AutopilotProposal = {
   strategy: string;
   commands: string[];
   confidence: number;
+  mentorship_note: string | null;
+  delegate_agent_id: string | null;
+  task_objective: string | null;
+  success_criteria: string[];
+  evidence_requirements: string[];
+  rollback_notes: string[];
+  delegations: AutopilotDelegationBrief[];
   message_id: string;
   artifact_id: string;
 };
@@ -2414,7 +2501,21 @@ type AutopilotCouncilResult = {
   decision_summary: string;
   decision_score: number | null;
   council_confidence: number;
+  plan_substance: number;
   success_agents: string[];
+  selected_delegate_agent_id: string | null;
+  selected_task_objective: string | null;
+  selected_delegation_brief: AutopilotDelegationBrief | null;
+  selected_delegation_briefs: AutopilotDelegationBrief[];
+  learning_signal: {
+    evaluated_agents: string[];
+    matched_prefer: number;
+    matched_avoid: number;
+    confidence_adjustment: number;
+    top_prefer: string[];
+    top_avoid: string[];
+    rationale: string[];
+  };
 };
 
 type AutopilotCommandPlan = {
@@ -2461,7 +2562,21 @@ type AutopilotMentorshipResult = TriChatAutopilotTickResult["mentorship"] & {
   };
 };
 
-export function initializeTriChatAutopilotDaemon(storage: Storage) {
+type AutopilotAgentLearningDraft = {
+  agent_id: string;
+  lesson_kind: AgentLearningEntryKind;
+  polarity: AgentLearningEntryPolarity;
+  scope: string | null;
+  summary: string;
+  lesson: string;
+  evidence: string | null;
+  confidence: number | null;
+  weight: number;
+  metadata: Record<string, unknown>;
+};
+
+export function initializeTriChatAutopilotDaemon(storage: Storage, invokeTool?: AutopilotInvokeTool) {
+  autopilotRuntime.invoke_tool = invokeTool ?? autopilotRuntime.invoke_tool;
   const persisted = storage.getTriChatAutopilotState();
   if (!persisted) {
     autopilotRuntime.config = { ...DEFAULT_AUTOPILOT_CONFIG };
@@ -2492,9 +2607,14 @@ export function initializeTriChatAutopilotDaemon(storage: Storage) {
   };
 }
 
-export function trichatAutopilotControl(storage: Storage, input: z.infer<typeof trichatAutopilotSchema>) {
+export function trichatAutopilotControl(
+  storage: Storage,
+  invokeTool: AutopilotInvokeTool,
+  input: z.infer<typeof trichatAutopilotSchema>
+) {
+  autopilotRuntime.invoke_tool = invokeTool;
   if (input.action === "status") {
-    return getAutopilotStatus();
+    return getAutopilotStatus(storage);
   }
 
   if (!input.mutation) {
@@ -2520,6 +2640,8 @@ export function trichatAutopilotControl(storage: Storage, input: z.infer<typeof 
           thread_title: autopilotRuntime.config.thread_title,
           thread_status: autopilotRuntime.config.thread_status,
           objective: autopilotRuntime.config.objective,
+          lead_agent_id: autopilotRuntime.config.lead_agent_id,
+          specialist_agent_ids: [...autopilotRuntime.config.specialist_agent_ids],
           max_rounds: autopilotRuntime.config.max_rounds,
           min_success_agents: autopilotRuntime.config.min_success_agents,
           bridge_timeout_seconds: autopilotRuntime.config.bridge_timeout_seconds,
@@ -2553,13 +2675,14 @@ export function trichatAutopilotControl(storage: Storage, input: z.infer<typeof 
           config: { ...autopilotRuntime.config },
           persisted,
           initial_tick: initialTick,
-          status: getAutopilotStatus(),
+          status: getAutopilotStatus(storage),
         };
       }
 
       if (input.action === "stop") {
         const wasRunning = autopilotRuntime.running;
         stopAutopilotDaemon();
+        closeAutopilotAgentSession(storage, autopilotRuntime.config, autopilotRuntime.pause_reason ?? "manual stop");
         const persisted = storage.setTriChatAutopilotState({
           enabled: false,
           away_mode: autopilotRuntime.config.away_mode,
@@ -2568,6 +2691,8 @@ export function trichatAutopilotControl(storage: Storage, input: z.infer<typeof 
           thread_title: autopilotRuntime.config.thread_title,
           thread_status: autopilotRuntime.config.thread_status,
           objective: autopilotRuntime.config.objective,
+          lead_agent_id: autopilotRuntime.config.lead_agent_id,
+          specialist_agent_ids: [...autopilotRuntime.config.specialist_agent_ids],
           max_rounds: autopilotRuntime.config.max_rounds,
           min_success_agents: autopilotRuntime.config.min_success_agents,
           bridge_timeout_seconds: autopilotRuntime.config.bridge_timeout_seconds,
@@ -2591,7 +2716,7 @@ export function trichatAutopilotControl(storage: Storage, input: z.infer<typeof 
           running: false,
           stopped: wasRunning,
           persisted,
-          status: getAutopilotStatus(),
+          status: getAutopilotStatus(storage),
         };
       }
 
@@ -2602,7 +2727,7 @@ export function trichatAutopilotControl(storage: Storage, input: z.infer<typeof 
       return {
         running: autopilotRuntime.running,
         tick,
-        status: getAutopilotStatus(),
+        status: getAutopilotStatus(storage),
       };
     },
   });
@@ -2660,6 +2785,7 @@ async function runAutopilotTick(
     commands: [],
     blocked_commands: [],
     task_id: null,
+    task_ids: [],
     direct_success: false,
     tmux: null,
     command_results: [],
@@ -2673,6 +2799,7 @@ async function runAutopilotTick(
     transcript_entries: 0,
     summarize_note_id: null,
     memory_id: null,
+    learning_entry_count: 0,
     postflight: {
       executed: false,
       pass: true,
@@ -2685,17 +2812,45 @@ async function runAutopilotTick(
     skipped_reason: "not-run",
   };
   let sourceTaskId: string | null = null;
+  let sourceTaskObjective: string | null = null;
   let successAgents = 0;
   let turnId: string | null = null;
   let userMessageId: string | null = null;
   let failureReason: string | null = null;
   let finalStatus: "succeeded" | "failed" | "aborted" = "succeeded";
+  let selectedAgentId: string | null = null;
+  let selectedStrategy = "";
+  let selectedDelegateAgentId: string | null = null;
+  let selectedDelegationBrief: AutopilotDelegationBrief | null = null;
+  let selectedDelegationBriefs: AutopilotDelegationBrief[] = [];
 
   try {
-    const claimedTask = await taskClaim(storage, {
-      mutation: buildAutopilotMutation(heartbeatSessionKey, "goal_intake.task_claim", AUTOPILOT_WORKER_ID),
-      worker_id: AUTOPILOT_WORKER_ID,
+    const session = syncAutopilotAgentSession(storage, config, "active", {
+      daemon_running: autopilotRuntime.running,
+      pause_reason: autopilotRuntime.pause_reason,
+      current_task_id: null,
+      current_task_claimed_at: null,
+      current_task_profile: null,
+    });
+    const initialClaim = await agentClaimNext(storage, {
+      mutation: buildAutopilotMutation(heartbeatSessionKey, "goal_intake.agent_claim_next", session.session_id),
+      session_id: session.session_id,
       lease_seconds: config.lock_lease_seconds,
+      metadata: {
+        daemon_running: autopilotRuntime.running,
+        thread_id: config.thread_id,
+        trigger: options.trigger,
+      },
+      source_client: "trichat.autopilot",
+      source_agent: session.agent_id,
+    });
+    const claimedTask = await ensureFreshAutopilotClaim(storage, {
+      heartbeat_session_key: heartbeatSessionKey,
+      claim: initialClaim,
+      session,
+      config,
+      trigger: options.trigger,
+      invocation_id: invocationId,
     });
     if (claimedTask.claimed && claimedTask.task) {
       sessionKey = buildAutopilotTaskSessionKey(claimedTask.task.task_id, claimedTask.task.attempt_count);
@@ -2719,6 +2874,15 @@ async function runAutopilotTick(
     });
 
     mentorshipResult.session_id = runId;
+    if (autopilotRuntime.running) {
+      syncAutopilotAgentSession(storage, config, sourceTaskId ? "busy" : "active", {
+        daemon_running: true,
+        pause_reason: null,
+        current_task_id: sourceTaskId,
+        last_run_id: runId,
+        last_session_key: sessionKey,
+      });
+    }
 
     const activeIntake = await runAutopilotGoalIntake(storage, {
       session_key: sessionKey,
@@ -2727,6 +2891,7 @@ async function runAutopilotTick(
     });
     intakeResult = activeIntake;
     sourceTaskId = activeIntake.source_task?.task_id ?? null;
+    sourceTaskObjective = sanitizeAutopilotObjectiveSeed(activeIntake.objective, 800);
     turnId = activeIntake.turn_id;
     userMessageId = activeIntake.user_message_id;
     await appendAutopilotRunStep(storage, {
@@ -2747,28 +2912,40 @@ async function runAutopilotTick(
 
     const council = await runAutopilotCouncil(storage, {
       session_key: sessionKey,
+      run_id: runId,
       config,
       intake: activeIntake,
+      target_agents: activeIntake.target_agent_ids,
     });
     councilConfidence = council.council_confidence;
     successAgents = council.success_agents.length;
+    selectedAgentId = council.selected_agent;
+    selectedStrategy = council.selected_strategy;
+    selectedDelegateAgentId = council.selected_delegate_agent_id;
+    selectedDelegationBrief = council.selected_delegation_brief;
+    selectedDelegationBriefs = [...council.selected_delegation_briefs];
     await appendAutopilotRunStep(storage, {
       session_key: sessionKey,
       run_id: runId,
       step_name: "council",
       status: "completed",
-      summary: `council complete confidence=${council.council_confidence.toFixed(3)}`,
+      summary: `council complete confidence=${council.council_confidence.toFixed(3)} substance=${council.plan_substance.toFixed(3)}`,
       details: {
         selected_agent: council.selected_agent,
+        selected_delegate_agent_id: council.selected_delegate_agent_id,
         selected_strategy: council.selected_strategy,
+        plan_substance: council.plan_substance,
+        learning_signal: council.learning_signal,
+        selected_delegation_brief: council.selected_delegation_brief,
+        selected_delegation_briefs: council.selected_delegation_briefs,
         decision_summary: council.decision_summary,
         success_agents: council.success_agents,
+        target_agents: activeIntake.target_agent_ids,
       },
       step_status: stepStatus,
     });
 
     if (councilConfidence < config.confidence_threshold) {
-      emergencyBrakeTriggered = true;
       failureReason = `confidence below threshold (${councilConfidence.toFixed(3)} < ${config.confidence_threshold.toFixed(3)})`;
     }
 
@@ -2786,6 +2963,7 @@ async function runAutopilotTick(
       intake: activeIntake,
       council,
       confidence: councilConfidence,
+      plan_substance: council.plan_substance,
     });
     if (!failureReason && !safetyGate.pass) {
       failureReason = safetyGate.reason ?? "safety gate failed";
@@ -2805,6 +2983,7 @@ async function runAutopilotTick(
           command_count: commandPlan.commands.length,
           blocked_count: commandPlan.blocked_commands.length,
           classification: commandPlan.classification,
+          plan_substance: council.plan_substance,
         },
       },
       step_status: stepStatus,
@@ -2816,7 +2995,12 @@ async function runAutopilotTick(
       intake: activeIntake,
       command_plan: commandPlan,
       execute_allowed: !failureReason && safetyGate.pass,
+      selected_agent: council.selected_agent,
+      selected_delegate_agent_id: council.selected_delegate_agent_id,
       selected_strategy: council.selected_strategy,
+      selected_task_objective: council.selected_task_objective,
+      selected_delegation_brief: council.selected_delegation_brief,
+      selected_delegation_briefs: council.selected_delegation_briefs,
     });
     if (!failureReason && executionResult.reason) {
       failureReason = executionResult.reason;
@@ -2834,13 +3018,14 @@ async function runAutopilotTick(
                 executionResult.tmux?.session_name ?? "n/a"
               }`
           : executionResult.mode === "task_fallback"
-            ? "execute fallback task.create"
+            ? `execute fallback task.create x${Math.max(1, executionResult.task_ids.length)}`
             : "execute skipped",
       details: {
         mode: executionResult.mode,
         commands: executionResult.commands,
         blocked_commands: executionResult.blocked_commands,
         task_id: executionResult.task_id,
+        task_ids: executionResult.task_ids,
         direct_success: executionResult.direct_success,
         tmux: executionResult.tmux,
         reason: executionResult.reason,
@@ -2878,6 +3063,7 @@ async function runAutopilotTick(
             command_count: executionResult.commands.length,
             blocked_count: executionResult.blocked_commands.length,
             task_id: executionResult.task_id,
+            task_ids: executionResult.task_ids,
             tmux: executionResult.tmux,
           },
           allow_phase_skip: true,
@@ -2919,6 +3105,7 @@ async function runAutopilotTick(
         transcript_entries: mentorshipResult.transcript_entries,
         summarize_note_id: mentorshipResult.summarize_note_id,
         memory_id: mentorshipResult.memory_id,
+        learning_entry_count: mentorshipResult.learning_entry_count,
         postflight: mentorshipResult.postflight,
       },
       step_status: stepStatus,
@@ -2951,6 +3138,7 @@ async function runAutopilotTick(
     const failureLower = String(failureReason ?? "").toLowerCase();
     const shouldOpenImmediateIncident =
       Boolean(failureReason) &&
+      !isAutopilotConfidenceFailure(failureReason) &&
       (config.away_mode === "normal" || (config.away_mode === "aggressive" && failureLower.includes("policy denied")));
     if (shouldOpenImmediateIncident) {
       incidentId = await openAutopilotIncident(storage, {
@@ -2978,10 +3166,10 @@ async function runAutopilotTick(
 
     if (sourceTaskId) {
       if (failureReason || emergencyBrakeTriggered) {
-        await taskFail(storage, {
-          mutation: buildAutopilotMutation(sessionKey, "task.fail", sourceTaskId),
+        const reported = await reportAutopilotSourceTask(storage, config, {
+          mutation: buildAutopilotMutation(sessionKey, "agent.report_result.failed", sourceTaskId),
           task_id: sourceTaskId,
-          worker_id: AUTOPILOT_WORKER_ID,
+          outcome: "failed",
           error: compactConsensusText(failureReason ?? "autopilot execution failed", 300),
           result: {
             run_id: runId,
@@ -2989,20 +3177,31 @@ async function runAutopilotTick(
             incident_id: incidentId,
           },
           summary: "trichat.autopilot failed execution",
+          run_id: runId,
+          next_session_status: autopilotRuntime.running ? "active" : "idle",
         });
+        if (!reported.reported) {
+          throw new Error(`autopilot agent.report_result failed for ${sourceTaskId}: ${reported.reason}`);
+        }
       } else {
-        await taskComplete(storage, {
-          mutation: buildAutopilotMutation(sessionKey, "task.complete", sourceTaskId),
+        const reported = await reportAutopilotSourceTask(storage, config, {
+          mutation: buildAutopilotMutation(sessionKey, "agent.report_result.completed", sourceTaskId),
           task_id: sourceTaskId,
-          worker_id: AUTOPILOT_WORKER_ID,
+          outcome: "completed",
           summary: "trichat.autopilot completed execution",
           result: {
             run_id: runId,
             verify_status: verifyStatus,
             execution_mode: executionResult.mode,
             task_id: executionResult.task_id,
+            task_ids: executionResult.task_ids,
           },
+          run_id: runId,
+          next_session_status: autopilotRuntime.running ? "active" : "idle",
         });
+        if (!reported.reported) {
+          throw new Error(`autopilot agent.report_result failed for ${sourceTaskId}: ${reported.reason}`);
+        }
       }
     }
 
@@ -3074,7 +3273,9 @@ async function runAutopilotTick(
       user_message_id: activeIntake.user_message_id,
       source_task_id: sourceTaskId,
       council_confidence: councilConfidence,
+      plan_substance: council.plan_substance,
       success_agents: successAgents,
+      learning_signal: council.learning_signal,
       emergency_brake_triggered: emergencyBrakeTriggered,
       incident_id: incidentId,
       verify_status: verifyStatus,
@@ -3084,6 +3285,7 @@ async function runAutopilotTick(
         commands: [...executionResult.commands],
         blocked_commands: [...executionResult.blocked_commands],
         task_id: executionResult.task_id,
+        task_ids: [...executionResult.task_ids],
         direct_success: executionResult.direct_success,
         tmux: executionResult.tmux,
         command_results: executionResult.command_results,
@@ -3093,12 +3295,37 @@ async function runAutopilotTick(
         transcript_entries: mentorshipResult.transcript_entries,
         summarize_note_id: mentorshipResult.summarize_note_id,
         memory_id: mentorshipResult.memory_id,
+        learning_entry_count: mentorshipResult.learning_entry_count,
       },
       governance: governanceResult,
       step_status: stepStatus,
       reason: finalStatus === "succeeded" ? null : failureReason ?? "autopilot failed",
     };
     finalizeAutopilotRuntimeFromTick(tickResult);
+    if (autopilotRuntime.running) {
+      syncAutopilotAgentSession(storage, config, "active", {
+        daemon_running: true,
+        pause_reason: null,
+        current_task_id: null,
+        last_run_id: runId,
+        last_session_key: sessionKey,
+        last_tick_ok: tickResult.ok,
+        last_tick_at: tickResult.completed_at,
+        last_tick_reason: tickResult.reason,
+        last_learning_signal: tickResult.learning_signal,
+        last_learning_entry_count: tickResult.mentorship.learning_entry_count,
+        last_source_task_id: sourceTaskId,
+        last_source_task_objective: sourceTaskObjective,
+        last_selected_agent_id: selectedAgentId,
+        last_selected_strategy: selectedStrategy || null,
+        last_selected_delegate_agent_id: selectedDelegateAgentId,
+        last_selected_delegation_brief: selectedDelegationBrief,
+        last_selected_delegation_briefs: selectedDelegationBriefs,
+        last_execution_mode: executionResult.mode,
+        last_execution_task_id: executionResult.task_id,
+        last_execution_task_ids: executionResult.task_ids,
+      });
+    }
     return tickResult;
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -3132,7 +3359,17 @@ async function runAutopilotTick(
       user_message_id: intakeResult?.user_message_id ?? null,
       source_task_id: sourceTaskId,
       council_confidence: councilConfidence,
+      plan_substance: 0,
       success_agents: successAgents,
+      learning_signal: {
+        evaluated_agents: [],
+        matched_prefer: 0,
+        matched_avoid: 0,
+        confidence_adjustment: 0,
+        top_prefer: [],
+        top_avoid: [],
+        rationale: [],
+      },
       emergency_brake_triggered: false,
       incident_id: incidentId,
       verify_status: "error",
@@ -3142,6 +3379,7 @@ async function runAutopilotTick(
         commands: executionResult.commands,
         blocked_commands: executionResult.blocked_commands,
         task_id: executionResult.task_id,
+        task_ids: executionResult.task_ids,
         direct_success: executionResult.direct_success,
         tmux: executionResult.tmux,
         command_results: executionResult.command_results,
@@ -3151,6 +3389,7 @@ async function runAutopilotTick(
         transcript_entries: mentorshipResult.transcript_entries,
         summarize_note_id: mentorshipResult.summarize_note_id,
         memory_id: mentorshipResult.memory_id,
+        learning_entry_count: mentorshipResult.learning_entry_count,
       },
       governance: governanceResult,
       step_status: stepStatus,
@@ -3159,16 +3398,18 @@ async function runAutopilotTick(
     finalizeAutopilotRuntimeFromTick(tickResult);
     if (sourceTaskId) {
       try {
-        await taskFail(storage, {
-          mutation: buildAutopilotMutation(sessionKey, "task.fail.panic", sourceTaskId),
+        await reportAutopilotSourceTask(storage, config, {
+          mutation: buildAutopilotMutation(sessionKey, "agent.report_result.panic", sourceTaskId),
           task_id: sourceTaskId,
-          worker_id: AUTOPILOT_WORKER_ID,
+          outcome: "failed",
           error: compactConsensusText(reason, 300),
           result: {
             run_id: fallbackRunId,
             verify_status: "error",
           },
           summary: "trichat.autopilot panic failure",
+          run_id: fallbackRunId,
+          next_session_status: autopilotRuntime.running ? "active" : "idle",
         });
       } catch {
         // ignore secondary failures while failing claimed task on panic path.
@@ -3188,6 +3429,30 @@ async function runAutopilotTick(
     if (autopilotRuntime.consecutive_error_count >= config.max_consecutive_errors) {
       await pauseAutopilotDaemon(storage, config, `consecutive error threshold reached (${config.max_consecutive_errors})`);
       tickResult.emergency_brake_triggered = true;
+    }
+    if (autopilotRuntime.running) {
+      syncAutopilotAgentSession(storage, config, "active", {
+        daemon_running: true,
+        pause_reason: null,
+        current_task_id: null,
+        last_run_id: fallbackRunId,
+        last_session_key: sessionKey,
+        last_tick_ok: false,
+        last_tick_at: tickResult.completed_at,
+        last_tick_reason: reason,
+        last_learning_signal: tickResult.learning_signal,
+        last_learning_entry_count: tickResult.mentorship.learning_entry_count,
+        last_source_task_id: sourceTaskId,
+        last_source_task_objective: sourceTaskObjective,
+        last_selected_agent_id: selectedAgentId,
+        last_selected_strategy: selectedStrategy || null,
+        last_selected_delegate_agent_id: selectedDelegateAgentId,
+        last_selected_delegation_brief: selectedDelegationBrief,
+        last_selected_delegation_briefs: selectedDelegationBriefs,
+        last_execution_mode: executionResult.mode,
+        last_execution_task_id: executionResult.task_id,
+        last_execution_task_ids: executionResult.task_ids,
+      });
     }
     return tickResult;
   } finally {
@@ -3215,16 +3480,17 @@ async function runAutopilotGoalIntake(
   input: {
     session_key: string;
     config: TriChatAutopilotConfig;
-    claimed_task: Awaited<ReturnType<typeof taskClaim>>;
+    claimed_task: AutopilotClaimResult;
   }
 ): Promise<AutopilotGoalIntakeResult> {
   const sourceTask = input.claimed_task.claimed && input.claimed_task.task ? input.claimed_task.task : null;
+  const delegationBrief = resolveAutopilotTaskDelegationBrief(sourceTask);
   const objectiveSource = sourceTask ? "task" : "heartbeat";
-  const objective = compactConsensusText(
-    sourceTask?.objective?.trim() || input.config.objective.trim(),
-    600
-  );
+  const objective =
+    sanitizeAutopilotObjectiveSeed(sourceTask?.objective?.trim() || input.config.objective.trim(), 600) ||
+    compactConsensusText(sourceTask?.objective?.trim() || input.config.objective.trim(), 600);
   const projectDir = sourceTask?.project_dir?.trim() || process.cwd();
+  const intakeTargets = resolveAutopilotIntakeTargetAgents(input.config, sourceTask);
   await runAutopilotIdempotent(storage, {
     tool_name: "memory.append",
     session_key: input.session_key,
@@ -3279,6 +3545,7 @@ async function runAutopilotGoalIntake(
           source: "trichat.autopilot",
           objective_source: objectiveSource,
           source_task_id: sourceTask?.task_id ?? null,
+          delegation_brief: delegationBrief,
         },
       }),
   });
@@ -3297,11 +3564,15 @@ async function runAutopilotGoalIntake(
         thread_id: thread.thread.thread_id,
         user_message_id: userMessage.message.message_id,
         user_prompt: objective,
-        expected_agents: [...DEFAULT_CONSENSUS_AGENT_IDS],
+        expected_agents: [...intakeTargets.target_agent_ids],
         min_agents: input.config.min_success_agents,
         metadata: {
           source: "trichat.autopilot",
           project_dir: projectDir,
+          lead_agent_id: intakeTargets.agent_pool.lead_agent_id,
+          specialist_agent_ids: intakeTargets.agent_pool.specialist_agent_ids,
+          source_task_routing: intakeTargets.task_routing,
+          delegation_brief: delegationBrief,
         },
       }),
   });
@@ -3331,6 +3602,9 @@ async function runAutopilotGoalIntake(
     user_message_id: userMessage.message.message_id,
     turn_id: started.turn.turn_id,
     project_dir: projectDir,
+    delegation_brief: delegationBrief,
+    target_agent_ids: intakeTargets.target_agent_ids,
+    task_routing: intakeTargets.task_routing,
   };
 }
 
@@ -3338,6 +3612,7 @@ async function runAutopilotCouncil(
   storage: Storage,
   input: {
     session_key: string;
+    run_id: string;
     config: TriChatAutopilotConfig;
     intake: AutopilotGoalIntakeResult;
     target_agents?: string[];
@@ -3350,6 +3625,7 @@ async function runAutopilotCouncil(
   for (let round = 1; round <= input.config.max_rounds; round += 1) {
     const roundOutcome = await runAutopilotCouncilRoundParallel(storage, {
       session_key: input.session_key,
+      run_id: input.run_id,
       config: input.config,
       intake: input.intake,
       round,
@@ -3415,6 +3691,12 @@ async function runAutopilotCouncil(
               commands: askResult.commands,
               confidence: askResult.confidence,
               mentorship_note: askResult.mentorship_note,
+              delegate_agent_id: askResult.delegate_agent_id,
+              task_objective: askResult.task_objective,
+              success_criteria: askResult.success_criteria,
+              evidence_requirements: askResult.evidence_requirements,
+              rollback_notes: askResult.rollback_notes,
+              delegations: askResult.delegations,
               quorum_reached: roundOutcome.quorum_reached,
               aborted_agents: roundOutcome.aborted_agents,
             },
@@ -3433,6 +3715,13 @@ async function runAutopilotCouncil(
         strategy: askResult.strategy,
         commands: askResult.commands,
         confidence: askResult.confidence,
+        mentorship_note: askResult.mentorship_note,
+        delegate_agent_id: askResult.delegate_agent_id,
+        task_objective: askResult.task_objective,
+        success_criteria: askResult.success_criteria,
+        evidence_requirements: askResult.evidence_requirements,
+        rollback_notes: askResult.rollback_notes,
+        delegations: askResult.delegations,
         message_id: message.message.message_id,
         artifact_id: artifact.artifact.artifact_id,
       });
@@ -3483,10 +3772,52 @@ async function runAutopilotCouncil(
   const selectedProposal = selectedAgent ? proposalsByAgent.get(selectedAgent) ?? null : null;
   const decisionScore = asFiniteNumber(decision.score);
   const fallbackConfidence = selectedProposal?.confidence ?? inferProposalConfidence(selectedStrategy);
-  const confidenceSeed = decisionScore ?? fallbackConfidence;
-  const adjustedConfidence =
-    successAgents.size >= input.config.min_success_agents ? confidenceSeed : Math.min(confidenceSeed, 0.39);
-
+  const confidenceSeed =
+    decisionScore !== null ? Math.max(clamp(decisionScore, 0.05, 0.99), fallbackConfidence) : fallbackConfidence;
+  const councilCommandPlan = buildAutopilotCommandPlan({
+    selected_strategy: selectedStrategy,
+    selected_agent: selectedAgent,
+    proposals: [...proposalsByAgent.values()],
+    allowlist: input.config.command_allowlist,
+  });
+  const delegationSelection = resolveAutopilotDelegationSelection({
+    selected_agent: selectedAgent,
+    selected_strategy: selectedStrategy,
+    selected_delegate_agent_id: selectedProposal?.delegate_agent_id ?? null,
+    selected_task_objective: selectedProposal?.task_objective ?? null,
+    selected_success_criteria: selectedProposal?.success_criteria ?? [],
+    selected_evidence_requirements: selectedProposal?.evidence_requirements ?? [],
+    selected_rollback_notes: selectedProposal?.rollback_notes ?? [],
+    selected_delegations: selectedProposal?.delegations ?? [],
+    source_delegation_brief: input.intake.delegation_brief,
+    intake_objective: input.intake.objective,
+  });
+  const planSubstance = scoreAutopilotPlanSubstance({
+    objective: input.intake.objective,
+    selected_strategy: selectedStrategy,
+    selected_task_objective: delegationSelection.task_objective,
+    selected_delegation_briefs: delegationSelection.delegation_briefs,
+    command_plan: councilCommandPlan,
+  });
+  const learningSignal = evaluateAutopilotLearningSignal(storage, {
+    agent_ids: [
+      input.config.lead_agent_id ?? "",
+      selectedAgent ?? "",
+      delegationSelection.delegate_agent_id ?? "",
+    ],
+    objective: input.intake.objective,
+    selected_strategy: selectedStrategy,
+    selected_task_objective: delegationSelection.task_objective,
+    selected_delegation_briefs: delegationSelection.delegation_briefs,
+    plan_substance: planSubstance,
+  });
+  const adjustedConfidence = scoreAutopilotCouncilConfidence({
+    confidence_seed: confidenceSeed + learningSignal.confidence_adjustment,
+    success_agents: successAgents.size,
+    min_success_agents: input.config.min_success_agents,
+    plan_substance: planSubstance,
+    command_plan: councilCommandPlan,
+  });
   return {
     proposals: [...proposalsByAgent.values()],
     selected_agent: selectedAgent,
@@ -3494,14 +3825,1521 @@ async function runAutopilotCouncil(
     decision_summary: compactConsensusText(String(decision.decision_summary ?? ""), 500),
     decision_score: decisionScore,
     council_confidence: clamp(adjustedConfidence, 0.05, 0.99),
+    plan_substance: planSubstance,
     success_agents: [...successAgents].sort(),
+    selected_delegate_agent_id: delegationSelection.delegate_agent_id,
+    selected_task_objective: delegationSelection.task_objective,
+    selected_delegation_brief: delegationSelection.delegation_brief,
+    selected_delegation_briefs: delegationSelection.delegation_briefs,
+    learning_signal: learningSignal,
   };
+}
+
+function resolveAutopilotDelegationSelection(input: {
+  selected_agent: string | null;
+  selected_strategy: string;
+  selected_delegate_agent_id: string | null;
+  selected_task_objective: string | null;
+  selected_success_criteria: string[];
+  selected_evidence_requirements: string[];
+  selected_rollback_notes: string[];
+  selected_delegations: AutopilotDelegationBrief[];
+  source_delegation_brief: AutopilotDelegationBrief | null;
+  intake_objective: string;
+}): {
+  delegate_agent_id: string | null;
+  task_objective: string | null;
+  delegation_brief: AutopilotDelegationBrief | null;
+  delegation_briefs: AutopilotDelegationBrief[];
+} {
+  const sourceDelegationBrief = finalizeAutopilotDelegationBrief(input.source_delegation_brief);
+  const explicitDelegations = dedupeAutopilotDelegationBriefs(input.selected_delegations);
+  const resolvedBatch = dedupeAutopilotDelegationBriefs(
+    explicitDelegations
+      .map((delegation) =>
+        resolveSingleAutopilotDelegationSelection({
+          selected_agent: input.selected_agent,
+          selected_strategy: input.selected_strategy,
+          selected_delegate_agent_id: delegation.delegate_agent_id,
+          selected_task_objective: delegation.task_objective,
+          selected_success_criteria: delegation.success_criteria,
+          selected_evidence_requirements: delegation.evidence_requirements,
+          selected_rollback_notes: delegation.rollback_notes,
+          source_delegation_brief: shouldApplyAutopilotSourceDelegationFallback({
+            source_delegation_brief: sourceDelegationBrief,
+            selected_delegate_agent_id: delegation.delegate_agent_id,
+            batch_size: explicitDelegations.length,
+          })
+            ? sourceDelegationBrief
+            : null,
+          intake_objective: input.intake_objective,
+        }).delegation_brief
+      )
+      .filter((brief): brief is AutopilotDelegationBrief => Boolean(brief))
+  );
+  const primarySelection = resolveSingleAutopilotDelegationSelection({
+    selected_agent: input.selected_agent,
+    selected_strategy: input.selected_strategy,
+    selected_delegate_agent_id: input.selected_delegate_agent_id,
+    selected_task_objective: input.selected_task_objective,
+    selected_success_criteria: input.selected_success_criteria,
+    selected_evidence_requirements: input.selected_evidence_requirements,
+    selected_rollback_notes: input.selected_rollback_notes,
+    source_delegation_brief: sourceDelegationBrief,
+    intake_objective: input.intake_objective,
+  });
+  const delegationBriefs =
+    resolvedBatch.length > 0
+      ? resolvedBatch
+      : dedupeAutopilotDelegationBriefs(
+          primarySelection.delegation_brief ? [primarySelection.delegation_brief] : []
+        );
+  const primaryBrief = delegationBriefs[0] ?? primarySelection.delegation_brief ?? null;
+  return {
+    delegate_agent_id: primaryBrief?.delegate_agent_id ?? primarySelection.delegate_agent_id,
+    task_objective: primaryBrief?.task_objective ?? primarySelection.task_objective,
+    delegation_brief: primaryBrief,
+    delegation_briefs: delegationBriefs,
+  };
+}
+
+function resolveSingleAutopilotDelegationSelection(input: {
+  selected_agent: string | null;
+  selected_strategy: string;
+  selected_delegate_agent_id: string | null;
+  selected_task_objective: string | null;
+  selected_success_criteria: string[];
+  selected_evidence_requirements: string[];
+  selected_rollback_notes: string[];
+  source_delegation_brief: AutopilotDelegationBrief | null;
+  intake_objective: string;
+}): {
+  delegate_agent_id: string | null;
+  task_objective: string | null;
+  delegation_brief: AutopilotDelegationBrief | null;
+} {
+  const explicitDelegateAgentId = normalizeConsensusAgentId(input.selected_delegate_agent_id);
+  const explicitTaskObjective = compactConsensusText(String(input.selected_task_objective ?? ""), 800) || null;
+  const explicitSuccessCriteria = normalizeAutopilotDelegationItems(input.selected_success_criteria, 5, 160);
+  const explicitEvidenceRequirements = normalizeAutopilotDelegationItems(input.selected_evidence_requirements, 5, 160);
+  const explicitRollbackNotes = normalizeAutopilotDelegationItems(input.selected_rollback_notes, 4, 160);
+  const selectedAgentId = normalizeConsensusAgentId(input.selected_agent);
+  const sourceDelegateAgentId = normalizeConsensusAgentId(input.source_delegation_brief?.delegate_agent_id);
+  const sourceTaskObjective = compactConsensusText(String(input.source_delegation_brief?.task_objective ?? ""), 800) || null;
+  if (!selectedAgentId) {
+    const fallbackBrief = finalizeAutopilotDelegationBrief({
+      delegate_agent_id:
+        preserveAutopilotLeafDelegate(sourceDelegateAgentId, explicitDelegateAgentId) ||
+        explicitDelegateAgentId ||
+        sourceDelegateAgentId ||
+        null,
+      task_objective:
+        shouldPreferSourceDelegationTaskObjective({
+          resolved_delegate_agent_id:
+            preserveAutopilotLeafDelegate(sourceDelegateAgentId, explicitDelegateAgentId) ||
+            explicitDelegateAgentId ||
+            sourceDelegateAgentId,
+          explicit_task_objective: explicitTaskObjective,
+          source_task_objective: sourceTaskObjective,
+        })
+          ? sourceTaskObjective
+          : explicitTaskObjective || sourceTaskObjective || null,
+      success_criteria:
+        explicitSuccessCriteria.length > 0
+          ? explicitSuccessCriteria
+          : (input.source_delegation_brief?.success_criteria ?? []),
+      evidence_requirements:
+        explicitEvidenceRequirements.length > 0
+          ? explicitEvidenceRequirements
+          : (input.source_delegation_brief?.evidence_requirements ?? []),
+      rollback_notes:
+        explicitRollbackNotes.length > 0
+          ? explicitRollbackNotes
+          : (input.source_delegation_brief?.rollback_notes ?? []),
+    });
+    return {
+      delegate_agent_id: fallbackBrief?.delegate_agent_id ?? explicitDelegateAgentId ?? null,
+      task_objective: fallbackBrief?.task_objective ?? explicitTaskObjective,
+      delegation_brief: fallbackBrief,
+    };
+  }
+
+  const preservedSourceDelegateAgentId = preserveAutopilotLeafDelegate(sourceDelegateAgentId, explicitDelegateAgentId);
+  const inferredDelegateAgentId =
+    preservedSourceDelegateAgentId ||
+    explicitDelegateAgentId ||
+    sourceDelegateAgentId ||
+    inferAutopilotDelegateAgentIdFromStrategy(selectedAgentId, input.selected_strategy);
+  const preferredSourceObjective = shouldPreferSourceDelegationTaskObjective({
+    resolved_delegate_agent_id: inferredDelegateAgentId,
+    explicit_task_objective: explicitTaskObjective,
+    source_task_objective: sourceTaskObjective,
+  });
+  const resolvedTaskObjective =
+    (preferredSourceObjective ? sourceTaskObjective : explicitTaskObjective) ||
+    sourceTaskObjective ||
+    (inferredDelegateAgentId
+      ? buildAutopilotInferredTaskObjective({
+          delegate_agent_id: inferredDelegateAgentId,
+          selected_agent: selectedAgentId,
+          selected_strategy: input.selected_strategy,
+          intake_objective: input.intake_objective,
+        })
+      : null);
+  const delegationBrief = finalizeAutopilotDelegationBrief({
+    delegate_agent_id: inferredDelegateAgentId || null,
+    task_objective: resolvedTaskObjective,
+    success_criteria:
+      explicitSuccessCriteria.length > 0 ? explicitSuccessCriteria : (input.source_delegation_brief?.success_criteria ?? []),
+    evidence_requirements:
+      explicitEvidenceRequirements.length > 0
+        ? explicitEvidenceRequirements
+        : (input.source_delegation_brief?.evidence_requirements ?? []),
+    rollback_notes:
+      explicitRollbackNotes.length > 0 ? explicitRollbackNotes : (input.source_delegation_brief?.rollback_notes ?? []),
+  });
+  return {
+    delegate_agent_id: delegationBrief?.delegate_agent_id ?? inferredDelegateAgentId ?? null,
+    task_objective: delegationBrief?.task_objective ?? resolvedTaskObjective,
+    delegation_brief: delegationBrief,
+  };
+}
+
+function shouldApplyAutopilotSourceDelegationFallback(input: {
+  source_delegation_brief: AutopilotDelegationBrief | null;
+  selected_delegate_agent_id: string | null;
+  batch_size: number;
+}): boolean {
+  if (!input.source_delegation_brief) {
+    return false;
+  }
+  if (input.batch_size <= 1) {
+    return true;
+  }
+  const sourceDelegateAgentId = normalizeConsensusAgentId(input.source_delegation_brief.delegate_agent_id);
+  const selectedDelegateAgentId = normalizeConsensusAgentId(input.selected_delegate_agent_id);
+  if (!sourceDelegateAgentId) {
+    return false;
+  }
+  return (
+    selectedDelegateAgentId === sourceDelegateAgentId ||
+    preserveAutopilotLeafDelegate(sourceDelegateAgentId, selectedDelegateAgentId) === sourceDelegateAgentId
+  );
+}
+
+function preserveAutopilotLeafDelegate(
+  sourceDelegateAgentId: string | null,
+  explicitDelegateAgentId: string | null
+): string | null {
+  if (!sourceDelegateAgentId || !explicitDelegateAgentId || sourceDelegateAgentId === explicitDelegateAgentId) {
+    return null;
+  }
+  return doesAutopilotAgentManage(explicitDelegateAgentId, sourceDelegateAgentId) ? sourceDelegateAgentId : null;
+}
+
+function shouldPreferSourceDelegationTaskObjective(input: {
+  resolved_delegate_agent_id: string | null;
+  explicit_task_objective: string | null;
+  source_task_objective: string | null;
+}): boolean {
+  const sourceTaskObjective = sanitizeAutopilotObjectiveSeed(input.source_task_objective, 800);
+  if (!sourceTaskObjective) {
+    return false;
+  }
+  const explicitTaskObjective = sanitizeAutopilotObjectiveSeed(input.explicit_task_objective, 800);
+  if (!explicitTaskObjective) {
+    return true;
+  }
+  const delegateAgentId = normalizeConsensusAgentId(input.resolved_delegate_agent_id);
+  if (!delegateAgentId) {
+    return false;
+  }
+  const delegateHint = normalizeAutopilotDelegationHint(delegateAgentId).trim();
+  if (!delegateHint) {
+    return false;
+  }
+  const sourceMentionsDelegate = normalizeAutopilotDelegationHint(sourceTaskObjective).includes(` ${delegateHint} `);
+  const explicitMentionsDelegate = normalizeAutopilotDelegationHint(explicitTaskObjective).includes(` ${delegateHint} `);
+  if (sourceMentionsDelegate && !explicitMentionsDelegate) {
+    return true;
+  }
+  return /^(implement|handle|take|own|continue|pursue|work on)\b/i.test(explicitTaskObjective) && sourceMentionsDelegate;
+}
+
+function normalizeAutopilotDelegationItems(value: unknown, limit: number, itemLimit: number): string[] {
+  const rawValues = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+  return dedupeNonEmptyCommands(
+    rawValues
+      .map((entry) => compactConsensusText(String(entry ?? ""), itemLimit))
+      .filter((entry): entry is string => Boolean(entry))
+  ).slice(0, limit);
+}
+
+function normalizeAutopilotDelegationBriefBatch(value: unknown, limit: number): AutopilotDelegationBrief[] {
+  const rawValues = Array.isArray(value) ? value : isRecord(value) ? [value] : [];
+  const briefs: AutopilotDelegationBrief[] = [];
+  for (const entry of rawValues) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const brief = finalizeAutopilotDelegationBrief({
+      delegate_agent_id: asNullableTrimmed(entry.delegate_agent_id),
+      task_objective: asNullableTrimmed(entry.task_objective),
+      success_criteria: normalizeAutopilotDelegationItems(entry.success_criteria, 8, 160),
+      evidence_requirements: normalizeAutopilotDelegationItems(entry.evidence_requirements, 8, 160),
+      rollback_notes: normalizeAutopilotDelegationItems(entry.rollback_notes, 6, 160),
+    });
+    if (brief) {
+      briefs.push(brief);
+    }
+  }
+  return dedupeAutopilotDelegationBriefs(briefs).slice(0, limit);
+}
+
+function dedupeAutopilotDelegationBriefs(briefs: AutopilotDelegationBrief[]): AutopilotDelegationBrief[] {
+  const seen = new Set<string>();
+  const output: AutopilotDelegationBrief[] = [];
+  for (const brief of briefs) {
+    const finalized = finalizeAutopilotDelegationBrief(brief);
+    if (!finalized) {
+      continue;
+    }
+    const key = [
+      finalized.delegate_agent_id ?? "",
+      finalized.task_objective ?? "",
+      finalized.success_criteria.join("|"),
+      finalized.evidence_requirements.join("|"),
+      finalized.rollback_notes.join("|"),
+    ].join("::");
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(finalized);
+  }
+  return output;
+}
+
+function finalizeAutopilotDelegationBrief(
+  input: Partial<AutopilotDelegationBrief> | null | undefined
+): AutopilotDelegationBrief | null {
+  const delegateAgentId = normalizeConsensusAgentId(input?.delegate_agent_id);
+  const taskObjective = compactConsensusText(String(input?.task_objective ?? ""), 800) || null;
+  const repartitioned = repartitionAutopilotDelegationBriefItems({
+    success_criteria: normalizeAutopilotDelegationItems(input?.success_criteria, 8, 160),
+    evidence_requirements: normalizeAutopilotDelegationItems(input?.evidence_requirements, 8, 160),
+    rollback_notes: normalizeAutopilotDelegationItems(input?.rollback_notes, 6, 160),
+  });
+  const successCriteria = repartitioned.success_criteria.slice(0, 5);
+  const evidenceRequirements = repartitioned.evidence_requirements.slice(0, 5);
+  const rollbackNotes = repartitioned.rollback_notes.slice(0, 4);
+  if (!delegateAgentId && !taskObjective && successCriteria.length === 0 && evidenceRequirements.length === 0 && rollbackNotes.length === 0) {
+    return null;
+  }
+  return {
+    delegate_agent_id: delegateAgentId || null,
+    task_objective: taskObjective,
+    success_criteria: successCriteria,
+    evidence_requirements: evidenceRequirements,
+    rollback_notes: rollbackNotes,
+  };
+}
+
+function repartitionAutopilotDelegationBriefItems(input: {
+  success_criteria: string[];
+  evidence_requirements: string[];
+  rollback_notes: string[];
+}): {
+  success_criteria: string[];
+  evidence_requirements: string[];
+  rollback_notes: string[];
+} {
+  const successCriteria: string[] = [];
+  const evidenceRequirements: string[] = [];
+  const rollbackNotes: string[] = [];
+
+  const pushUnique = (bucket: string[], item: string) => {
+    if (!bucket.includes(item)) {
+      bucket.push(item);
+    }
+  };
+
+  const routeItem = (item: string, fallbackBucket: "success" | "evidence" | "rollback") => {
+    const bucket = classifyAutopilotDelegationBriefItem(item) ?? fallbackBucket;
+    if (bucket === "rollback") {
+      pushUnique(rollbackNotes, item);
+      return;
+    }
+    if (bucket === "evidence") {
+      pushUnique(evidenceRequirements, item);
+      return;
+    }
+    pushUnique(successCriteria, item);
+  };
+
+  for (const item of input.success_criteria) {
+    routeItem(item, "success");
+  }
+  for (const item of input.evidence_requirements) {
+    routeItem(item, "evidence");
+  }
+  for (const item of input.rollback_notes) {
+    routeItem(item, "rollback");
+  }
+
+  return {
+    success_criteria: successCriteria,
+    evidence_requirements: evidenceRequirements,
+    rollback_notes: rollbackNotes,
+  };
+}
+
+function classifyAutopilotDelegationBriefItem(item: string): "success" | "evidence" | "rollback" | null {
+  const normalized = normalizeAutopilotDelegationHint(item).trim();
+  if (!normalized) {
+    return null;
+  }
+  if (/\b(stop|spill|rollback|broaden|expand|escalate|immediately|abort|beyond)\b/.test(normalized)) {
+    return "rollback";
+  }
+  if (/\b(evidence|verify|verification|command|output|result|results|log|logs|diff|changed files|git status|test|tests)\b/.test(normalized)) {
+    return "evidence";
+  }
+  return "success";
+}
+
+function resolveAutopilotTaskDelegationBrief(task: TaskRecord | null): AutopilotDelegationBrief | null {
+  const records = [
+    isRecord(task?.payload) ? task?.payload.delegation_brief : null,
+    isRecord(task?.metadata) ? task?.metadata.delegation_brief : null,
+    task?.payload,
+    task?.metadata,
+  ];
+  let delegateAgentId: string | null = null;
+  let taskObjective: string | null = null;
+  let successCriteria: string[] = [];
+  let evidenceRequirements: string[] = [];
+  let rollbackNotes: string[] = [];
+
+  for (const candidate of records) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+    delegateAgentId = delegateAgentId || normalizeConsensusAgentId(asNullableTrimmed(candidate.delegate_agent_id));
+    taskObjective = taskObjective || (compactConsensusText(String(candidate.task_objective ?? ""), 800) || null);
+    if (successCriteria.length === 0) {
+      successCriteria = normalizeAutopilotDelegationItems(
+        candidate.success_criteria ?? candidate.task_success_criteria,
+        5,
+        160
+      );
+    }
+    if (evidenceRequirements.length === 0) {
+      evidenceRequirements = normalizeAutopilotDelegationItems(
+        candidate.evidence_requirements ?? candidate.verification_requirements,
+        5,
+        160
+      );
+    }
+    if (rollbackNotes.length === 0) {
+      rollbackNotes = normalizeAutopilotDelegationItems(
+        candidate.rollback_notes ?? candidate.rollback ?? candidate.rollback_requirements,
+        4,
+        160
+      );
+    }
+  }
+
+  return finalizeAutopilotDelegationBrief({
+    delegate_agent_id: delegateAgentId,
+    task_objective: taskObjective,
+    success_criteria: successCriteria,
+    evidence_requirements: evidenceRequirements,
+    rollback_notes: rollbackNotes,
+  });
+}
+
+function sanitizeAutopilotObjectiveSeed(value: string | null | undefined, limit: number): string {
+  let normalized = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return "";
+  }
+  normalized = normalized.replace(/^(?:(?:Autopilot delegated follow-up|Autopilot follow-up):\s*)+/i, "").trim();
+  normalized = normalized.replace(/\b(?:Autopilot delegated follow-up|Autopilot follow-up):\s*/gi, "").trim();
+  const strategyMarker = /\bStrategy:\s*/i.exec(normalized);
+  if (strategyMarker && strategyMarker.index > 0) {
+    normalized = normalized.slice(0, strategyMarker.index).trim();
+  }
+  normalized = normalized.replace(/[.;:,\- ]+$/g, "").trim();
+  return compactConsensusText(normalized, limit);
+}
+
+function sanitizeAutopilotStrategyText(value: string | null | undefined, limit: number): string {
+  const normalized = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/^(?:Strategy:\s*)+/i, "")
+    .trim();
+  return compactConsensusText(normalized, limit);
+}
+
+function describeAutopilotDelegatedResponsibility(agentId: string): string {
+  switch (normalizeConsensusAgentId(agentId)) {
+    case "code-smith":
+      return "implement the next bounded code change and report verification evidence";
+    case "research-scout":
+      return "investigate the next bounded unknown and return decision-ready findings";
+    case "quality-guard":
+      return "run the next bounded verification pass and report concrete failure modes";
+    case "implementation-director":
+      return "break the work into one bounded implementation slice and delegate it cleanly";
+    case "research-director":
+      return "turn the next unknown into one bounded research assignment and delegate it cleanly";
+    case "verification-director":
+      return "turn the next risk into one bounded verification assignment and delegate it cleanly";
+    default:
+      return "own the next bounded follow-up and report concise evidence";
+  }
+}
+
+function buildAutopilotDefaultSuccessCriteria(delegateAgentId: string | null, taskObjective: string | null): string[] {
+  switch (normalizeConsensusAgentId(delegateAgentId)) {
+    case "code-smith":
+      return [
+        "Keep the implementation slice minimal and directly tied to the assigned objective.",
+        "Report the verification command you ran, or explain why no verification command was appropriate.",
+      ];
+    case "research-scout":
+      return [
+        "Return concise findings directly tied to the assigned question.",
+        "Call out the top remaining assumption or unknown that could change the answer.",
+      ];
+    case "quality-guard":
+      return [
+        "Run the highest-leverage bounded verification pass for the assigned risk.",
+        "Report concrete blockers, or clearly state that no new blocker was found.",
+      ];
+    case "implementation-director":
+    case "research-director":
+    case "verification-director":
+      return [
+        "Convert the work into one bounded assignment with a clear owner.",
+        "Report upward with concise evidence and the next safest follow-up.",
+      ];
+    default:
+      return [
+        taskObjective ? `Complete the bounded objective: ${taskObjective}` : "Complete one bounded follow-up.",
+        "Return concise evidence that the work was completed safely.",
+      ];
+  }
+}
+
+function buildAutopilotObjectiveScopedSuccessCriterion(taskObjective: string | null): string | null {
+  const objective = compactConsensusText(String(taskObjective ?? ""), 220);
+  if (!objective) {
+    return null;
+  }
+  const normalized = normalizeAutopilotDelegationHint(objective).trim();
+  if (normalized.includes("dashboard")) {
+    return "Keep the work bounded to the delegated dashboard slice described in the objective.";
+  }
+  if (normalized.includes("handoff") || normalized.includes("delegation")) {
+    return "Keep the work bounded to the delegated handoff slice described in the objective.";
+  }
+  return "Keep the work bounded to the delegated slice described in the objective.";
+}
+
+function ensureAutopilotDelegationSuccessCriteriaContext(
+  criteria: string[],
+  taskObjective: string | null
+): string[] {
+  const normalizedCriteria = dedupeNonEmptyCommands(criteria);
+  const alreadyScoped = normalizedCriteria.some((entry) =>
+    /\b(slice|delegated|handoff|dashboard|implementation slice|bounded objective)\b/i.test(entry)
+  );
+  if (alreadyScoped) {
+    return normalizedCriteria;
+  }
+  const scopedCriterion = buildAutopilotObjectiveScopedSuccessCriterion(taskObjective);
+  if (!scopedCriterion) {
+    return normalizedCriteria;
+  }
+  return dedupeNonEmptyCommands([scopedCriterion, ...normalizedCriteria]).slice(0, 5);
+}
+
+function buildAutopilotDefaultEvidenceRequirements(delegateAgentId: string | null): string[] {
+  switch (normalizeConsensusAgentId(delegateAgentId)) {
+    case "code-smith":
+      return ["Include the changed file paths or diff scope.", "Include verification output or the exact verification command."];
+    case "research-scout":
+      return ["Include the specific observations or sources used.", "State what is still uncertain."];
+    case "quality-guard":
+      return ["Include the command or check that was run.", "Include the failing surface area if a blocker is found."];
+    default:
+      return ["Include concise evidence for the outcome.", "Surface the next blocker if the task could not be completed."];
+  }
+}
+
+function buildAutopilotDefaultRollbackNotes(
+  delegateAgentId: string | null,
+  classification: AutopilotCommandPlan["classification"]
+): string[] {
+  if (classification === "read") {
+    return ["Do not mutate the workspace; escalate instead of writing if the task expands."];
+  }
+  switch (normalizeConsensusAgentId(delegateAgentId)) {
+    case "code-smith":
+      return ["Keep the diff isolated to the bounded slice.", "Stop and report if the change spills into unrelated files or behavior."];
+    case "quality-guard":
+      return ["Do not fix code while verifying unless explicitly re-tasked.", "Report the blocker instead of broadening scope."];
+    default:
+      return ["Keep the task bounded.", "Escalate instead of broadening scope when the objective stops being narrow."];
+  }
+}
+
+function materializeAutopilotDelegationBrief(input: {
+  brief: AutopilotDelegationBrief | null;
+  delegate_agent_id: string | null;
+  task_objective: string | null;
+  command_classification: AutopilotCommandPlan["classification"];
+}): AutopilotDelegationBrief | null {
+  const baseBrief = finalizeAutopilotDelegationBrief({
+    delegate_agent_id: input.delegate_agent_id ?? input.brief?.delegate_agent_id ?? null,
+    task_objective: input.task_objective ?? input.brief?.task_objective ?? null,
+    success_criteria: input.brief?.success_criteria ?? [],
+    evidence_requirements: input.brief?.evidence_requirements ?? [],
+    rollback_notes: input.brief?.rollback_notes ?? [],
+  });
+  if (!baseBrief) {
+    return null;
+  }
+  return {
+    delegate_agent_id: baseBrief.delegate_agent_id,
+    task_objective: baseBrief.task_objective,
+    success_criteria:
+      ensureAutopilotDelegationSuccessCriteriaContext(
+        baseBrief.success_criteria.length > 0
+          ? baseBrief.success_criteria
+          : buildAutopilotDefaultSuccessCriteria(baseBrief.delegate_agent_id, baseBrief.task_objective),
+        baseBrief.task_objective
+      ),
+    evidence_requirements:
+      baseBrief.evidence_requirements.length > 0
+        ? baseBrief.evidence_requirements
+        : buildAutopilotDefaultEvidenceRequirements(baseBrief.delegate_agent_id),
+    rollback_notes:
+      baseBrief.rollback_notes.length > 0
+        ? baseBrief.rollback_notes
+        : buildAutopilotDefaultRollbackNotes(baseBrief.delegate_agent_id, input.command_classification),
+  };
+}
+
+function materializeAutopilotDelegationBriefs(input: {
+  briefs: AutopilotDelegationBrief[];
+  fallback_brief: AutopilotDelegationBrief | null;
+  delegate_agent_id: string | null;
+  task_objective: string | null;
+  command_classification: AutopilotCommandPlan["classification"];
+}): AutopilotDelegationBrief[] {
+  const materialized = dedupeAutopilotDelegationBriefs(
+    input.briefs
+      .map((brief) =>
+        materializeAutopilotDelegationBrief({
+          brief,
+          delegate_agent_id: brief.delegate_agent_id ?? null,
+          task_objective: brief.task_objective ?? null,
+          command_classification: input.command_classification,
+        })
+      )
+      .filter((brief): brief is AutopilotDelegationBrief => Boolean(brief))
+  );
+  if (materialized.length > 0) {
+    return materialized;
+  }
+  const fallback = materializeAutopilotDelegationBrief({
+    brief: input.fallback_brief,
+    delegate_agent_id: input.delegate_agent_id,
+    task_objective: input.task_objective,
+    command_classification: input.command_classification,
+  });
+  return fallback ? [fallback] : [];
+}
+
+function buildAutopilotFallbackTaskId(input: {
+  session_key: string;
+  index: number;
+  delegate_agent_id: string | null;
+  task_objective: string | null;
+}): string {
+  const fingerprint = [
+    input.session_key,
+    String(input.index),
+    normalizeConsensusAgentId(input.delegate_agent_id) ?? "none",
+    sanitizeAutopilotObjectiveSeed(input.task_objective, 120) || "none",
+  ].join(":");
+  return `trichat-autopilot-${autopilotHash(fingerprint).slice(0, 20)}`;
+}
+
+function buildAutopilotFallbackObjective(input: {
+  intake_objective: string;
+  selected_strategy: string;
+  selected_agent: string | null;
+  selected_delegate_agent_id: string | null;
+  selected_task_objective: string | null;
+}): string {
+  const explicitObjective = sanitizeAutopilotObjectiveSeed(input.selected_task_objective, 800);
+  if (explicitObjective) {
+    return explicitObjective;
+  }
+  const baseObjective = sanitizeAutopilotObjectiveSeed(input.intake_objective, 320);
+  const strategy = sanitizeAutopilotStrategyText(input.selected_strategy, 360);
+  const selectedAgent = normalizeConsensusAgentId(input.selected_agent);
+  const delegateAgent = normalizeConsensusAgentId(input.selected_delegate_agent_id);
+  if (delegateAgent) {
+    const taskLine = baseObjective
+      ? `For ${delegateAgent}: ${describeAutopilotDelegatedResponsibility(delegateAgent)} for ${baseObjective}`
+      : `For ${delegateAgent}: ${describeAutopilotDelegatedResponsibility(delegateAgent)}`;
+    const planLine = strategy ? `Plan: ${strategy}` : "";
+    return compactConsensusText([taskLine, planLine].filter(Boolean).join(". "), 800);
+  }
+  if (strategy && baseObjective) {
+    return compactConsensusText(
+      `${selectedAgent || "Autopilot"} should pursue this bounded next action: ${baseObjective}. Plan: ${strategy}`,
+      800
+    );
+  }
+  return baseObjective || strategy || "Inspect kernel state and choose one high-leverage bounded next action.";
+}
+
+function inferAutopilotDelegateAgentIdFromStrategy(selectedAgentId: string, strategy: string): string | null {
+  const selectedAgent = getTriChatAgent(selectedAgentId);
+  const managedAgentIds =
+    selectedAgent?.managed_agent_ids
+      ?.map((agentId) => normalizeConsensusAgentId(agentId))
+      .filter((agentId): agentId is string => Boolean(agentId)) ?? [];
+  if (managedAgentIds.length === 0) {
+    return null;
+  }
+
+  const normalizedStrategy = normalizeAutopilotDelegationHint(strategy);
+  for (const managedAgentId of managedAgentIds) {
+    const managedAgent = getTriChatAgent(managedAgentId);
+    const aliases = dedupeNonEmptyCommands(
+      [
+        managedAgentId,
+        String(managedAgent?.display_name ?? ""),
+        String(managedAgent?.display_name ?? "").replace(/\s+/g, "-"),
+      ]
+        .map((value) => normalizeAutopilotDelegationHint(value).trim())
+        .filter((value): value is string => Boolean(value))
+    );
+    if (aliases.some((alias) => normalizedStrategy.includes(` ${alias} `))) {
+      return managedAgentId;
+    }
+  }
+
+  if (managedAgentIds.length === 1 && strategyShowsDelegationIntent(strategy)) {
+    return managedAgentIds[0] ?? null;
+  }
+  return null;
+}
+
+function buildAutopilotInferredTaskObjective(input: {
+  delegate_agent_id: string;
+  selected_agent: string;
+  selected_strategy: string;
+  intake_objective: string;
+}): string | null {
+  return (
+    buildAutopilotFallbackObjective({
+      intake_objective: input.intake_objective,
+      selected_strategy: input.selected_strategy,
+      selected_agent: input.selected_agent,
+      selected_delegate_agent_id: input.delegate_agent_id,
+      selected_task_objective: null,
+    }) || null
+  );
+}
+
+function doesAutopilotAgentManage(managerAgentId: string | null, candidateAgentId: string | null): boolean {
+  const managerId = normalizeConsensusAgentId(managerAgentId);
+  const candidateId = normalizeConsensusAgentId(candidateAgentId);
+  if (!managerId || !candidateId || managerId === candidateId) {
+    return false;
+  }
+
+  const directManager = getTriChatAgent(managerId);
+  const managedAgentIds =
+    directManager?.managed_agent_ids
+      ?.map((agentId) => normalizeConsensusAgentId(agentId))
+      .filter((agentId): agentId is string => Boolean(agentId)) ?? [];
+  if (managedAgentIds.includes(candidateId)) {
+    return true;
+  }
+
+  const seen = new Set<string>();
+  let currentAgentId: string | null = candidateId;
+  while (currentAgentId && !seen.has(currentAgentId)) {
+    seen.add(currentAgentId);
+    const currentAgent = getTriChatAgent(currentAgentId);
+    const parentAgentId = normalizeConsensusAgentId(currentAgent?.parent_agent_id);
+    if (!parentAgentId) {
+      return false;
+    }
+    if (parentAgentId === managerId) {
+      return true;
+    }
+    currentAgentId = parentAgentId;
+  }
+  return false;
+}
+
+function normalizeAutopilotDelegationHint(value: string): string {
+  const compact = String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  return compact ? ` ${compact} ` : "";
+}
+
+function strategyShowsDelegationIntent(value: string): boolean {
+  const normalized = normalizeAutopilotDelegationHint(value).trim();
+  if (!normalized) {
+    return false;
+  }
+  return /\b(delegate|delegated|delegating|assign|assigned|route|routed|handoff|hand off|pass|passed|queue|queued|ask|have|let)\b/.test(
+    normalized
+  );
+}
+
+function scoreAutopilotCouncilConfidence(input: {
+  confidence_seed: number;
+  success_agents: number;
+  min_success_agents: number;
+  plan_substance: number;
+  command_plan: Pick<AutopilotCommandPlan, "classification" | "allowed_commands" | "blocked_commands">;
+}) {
+  const applySubstanceGuard = (value: number) => {
+    if (input.plan_substance < 0.34) {
+      return clamp(Math.min(value, 0.34), 0.05, 0.99);
+    }
+    if (input.plan_substance < 0.46) {
+      return clamp(Math.min(value, 0.46), 0.05, 0.99);
+    }
+    if (input.plan_substance < 0.58) {
+      return clamp(Math.min(value, 0.58), 0.05, 0.99);
+    }
+    return clamp(value, 0.05, 0.99);
+  };
+  if (input.success_agents >= input.min_success_agents) {
+    return applySubstanceGuard(input.confidence_seed);
+  }
+
+  const hasUsableReadOnlyPlan =
+    input.success_agents > 0 &&
+    input.command_plan.classification === "read" &&
+    input.command_plan.blocked_commands.length === 0 &&
+    input.command_plan.allowed_commands.length > 0;
+  if (!hasUsableReadOnlyPlan) {
+    return applySubstanceGuard(Math.min(input.confidence_seed, 0.39));
+  }
+
+  const quorumShortfall = Math.max(0, input.min_success_agents - input.success_agents);
+  const softenedPenalty = quorumShortfall * 0.18;
+  return applySubstanceGuard(input.confidence_seed - softenedPenalty);
+}
+
+const AUTOPILOT_SUBSTANCE_STOPWORDS = new Set([
+  "about",
+  "after",
+  "agent",
+  "agents",
+  "bounded",
+  "clear",
+  "delegate",
+  "delegated",
+  "delegation",
+  "explicit",
+  "high",
+  "leverage",
+  "next",
+  "objective",
+  "owner",
+  "plan",
+  "project",
+  "ring",
+  "safe",
+  "specialist",
+  "state",
+  "task",
+  "tasks",
+  "team",
+  "that",
+  "their",
+  "this",
+  "through",
+  "work",
+]);
+
+function tokenizeAutopilotPlanningText(value: string): string[] {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length >= 4 && !AUTOPILOT_SUBSTANCE_STOPWORDS.has(token));
+}
+
+function calculateAutopilotObjectiveEchoRatio(strategy: string, objective: string): number {
+  const strategyTokens = new Set(tokenizeAutopilotPlanningText(strategy));
+  const objectiveTokens = new Set(tokenizeAutopilotPlanningText(objective));
+  if (strategyTokens.size === 0 || objectiveTokens.size === 0) {
+    return 0;
+  }
+  let overlap = 0;
+  for (const token of strategyTokens) {
+    if (objectiveTokens.has(token)) {
+      overlap += 1;
+    }
+  }
+  return overlap / Math.max(1, objectiveTokens.size);
+}
+
+function scoreAutopilotPlanSubstance(input: {
+  objective: string;
+  selected_strategy: string;
+  selected_task_objective: string | null;
+  selected_delegation_briefs: AutopilotDelegationBrief[];
+  command_plan: Pick<AutopilotCommandPlan, "source" | "classification" | "commands" | "allowed_commands">;
+}): number {
+  const briefs = dedupeAutopilotDelegationBriefs(input.selected_delegation_briefs);
+  const explicitOwners = briefs.filter((brief) => Boolean(brief.delegate_agent_id)).length;
+  const explicitObjectives =
+    briefs.filter((brief) => Boolean(brief.task_objective)).length + (input.selected_task_objective ? 1 : 0);
+  const successCriteriaCount = briefs.reduce((total, brief) => total + brief.success_criteria.length, 0);
+  const evidenceCount = briefs.reduce((total, brief) => total + brief.evidence_requirements.length, 0);
+  const rollbackCount = briefs.reduce((total, brief) => total + brief.rollback_notes.length, 0);
+  const strategySpecificity = tokenizeAutopilotPlanningText(input.selected_strategy).length;
+  const objectiveEcho = calculateAutopilotObjectiveEchoRatio(input.selected_strategy, input.objective);
+  const hasAction = input.command_plan.allowed_commands.length > 0 || explicitOwners > 0 || explicitObjectives > 0;
+
+  let score = 0.16;
+  if (input.command_plan.allowed_commands.length > 0) {
+    score += 0.18;
+  }
+  if (input.command_plan.source === "structured" && input.command_plan.commands.length > 0) {
+    score += 0.06;
+  }
+  if (explicitOwners > 0) {
+    score += Math.min(0.16, explicitOwners * 0.08);
+  }
+  if (explicitObjectives > 0) {
+    score += Math.min(0.12, explicitObjectives * 0.06);
+  }
+  score += Math.min(0.16, successCriteriaCount * 0.04);
+  score += Math.min(0.18, evidenceCount * 0.05);
+  if (input.command_plan.classification !== "read") {
+    score += Math.min(0.12, rollbackCount * 0.06);
+  } else if (rollbackCount > 0) {
+    score += 0.04;
+  }
+  score += Math.min(0.12, strategySpecificity * 0.01);
+
+  if (!hasAction) {
+    score -= 0.16;
+  }
+  if (input.command_plan.classification !== "read" && rollbackCount === 0 && input.command_plan.allowed_commands.length > 0) {
+    score -= 0.12;
+  }
+  if (objectiveEcho > 0.82 && !hasAction) {
+    score -= 0.42;
+  } else if (objectiveEcho > 0.7) {
+    score -= 0.18;
+  }
+  return clamp(score, 0.05, 0.99);
+}
+
+const AUTOPILOT_AGENT_LEARNING_PROMPT_LIMIT = 4;
+const AUTOPILOT_RECURSIVE_IMPROVEMENT_MARKERS = [
+  "recursive self improvement",
+  "recursively improve",
+  "improve yourself",
+  "improve your own",
+  "optimize yourself",
+  "optimize your own",
+  "improve the loop",
+  "optimize the loop",
+  "spawn more agents to improve",
+  "self improvement loop",
+  "self-improvement loop",
+  "self modify",
+  "self-modify",
+];
+
+function looksRecursiveAutopilotLearningText(value: string): boolean {
+  const normalized = String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!normalized) {
+    return false;
+  }
+  return AUTOPILOT_RECURSIVE_IMPROVEMENT_MARKERS.some((marker) => normalized.includes(marker));
+}
+
+function sanitizeAutopilotLearningText(value: string, maxLength = 220): string | null {
+  const compact = compactConsensusText(String(value ?? ""), maxLength);
+  if (!compact || looksRecursiveAutopilotLearningText(compact)) {
+    return null;
+  }
+  return compact;
+}
+
+function scoreAutopilotLearningRelevance(entry: AgentLearningEntryRecord, objective: string): number {
+  const objectiveTokens = new Set(tokenizeAutopilotPlanningText(objective));
+  const entryTokens = new Set(tokenizeAutopilotPlanningText(`${entry.scope ?? ""} ${entry.summary} ${entry.lesson}`));
+  if (entryTokens.size === 0) {
+    return clamp(entry.weight * 0.4, 0, 1);
+  }
+  let overlap = 0;
+  for (const token of objectiveTokens) {
+    if (entryTokens.has(token)) {
+      overlap += 1;
+    }
+  }
+  const overlapScore = objectiveTokens.size > 0 ? overlap / objectiveTokens.size : 0;
+  const confidenceBonus = entry.confidence === null ? 0 : clamp(entry.confidence, 0, 1) * 0.15;
+  return clamp(overlapScore * 0.65 + entry.weight * 0.2 + confidenceBonus, 0, 1);
+}
+
+function buildAutopilotAgentLearningContext(
+  storage: Storage,
+  input: {
+    agent_id: string;
+    objective: string;
+    exclude_run_id?: string | null;
+  }
+): {
+  notes: string[];
+  guardrail: string;
+} {
+  const agentId = normalizeConsensusAgentId(input.agent_id);
+  if (!agentId) {
+    return {
+      notes: [],
+      guardrail: "Use learned patterns only when they materially improve the current external task. Never create self-improvement-only work from memory.",
+    };
+  }
+  const entries = storage
+    .listAgentLearningEntries({
+      agent_id: agentId,
+      status: "active",
+      limit: 12,
+    })
+    .filter(
+      (entry) =>
+        entry.source_run_id !== (input.exclude_run_id ?? null) &&
+        !looksRecursiveAutopilotLearningText(`${entry.summary} ${entry.lesson}`)
+    );
+  if (entries.length === 0) {
+    return {
+      notes: [],
+      guardrail: "Use learned patterns only when they materially improve the current external task. Never create self-improvement-only work from memory.",
+    };
+  }
+
+  const objective = sanitizeAutopilotObjectiveSeed(input.objective, 220) || input.objective;
+  const ranked = entries
+    .map((entry) => ({
+      entry,
+      relevance: scoreAutopilotLearningRelevance(entry, objective),
+    }))
+    .filter((item) => item.relevance >= 0.12 || item.entry.weight >= 0.72)
+    .sort((left, right) => {
+      if (right.relevance !== left.relevance) {
+        return right.relevance - left.relevance;
+      }
+      if (right.entry.weight !== left.entry.weight) {
+        return right.entry.weight - left.entry.weight;
+      }
+      return right.entry.updated_at.localeCompare(left.entry.updated_at);
+    });
+
+  const preferred = ranked.filter((item) => item.entry.polarity === "prefer").slice(0, 2);
+  const avoid = ranked.filter((item) => item.entry.polarity === "avoid").slice(0, 2);
+  const selected = [...preferred, ...avoid].slice(0, AUTOPILOT_AGENT_LEARNING_PROMPT_LIMIT);
+  const notes = selected
+    .map((item) => {
+      const lesson = sanitizeAutopilotLearningText(item.entry.lesson, 220);
+      if (!lesson) {
+        return null;
+      }
+      return `${item.entry.polarity === "avoid" ? "Avoid" : "Prefer"}: ${lesson}`;
+    })
+    .filter((note): note is string => Boolean(note));
+
+  return {
+    notes,
+    guardrail: "Use learned patterns only when they materially improve the current external task. Never create self-improvement-only work from memory.",
+  };
+}
+
+function buildAutopilotLearningComparisonText(input: {
+  objective: string;
+  selected_strategy: string;
+  selected_task_objective: string | null;
+  selected_delegation_briefs: AutopilotDelegationBrief[];
+}): string {
+  const briefText = dedupeAutopilotDelegationBriefs(input.selected_delegation_briefs)
+    .flatMap((brief) => [
+      brief.delegate_agent_id ?? "",
+      brief.task_objective ?? "",
+      ...brief.success_criteria,
+      ...brief.evidence_requirements,
+      ...brief.rollback_notes,
+    ])
+    .filter(Boolean)
+    .join(" ");
+  return compactConsensusText(
+    [input.objective, input.selected_strategy, input.selected_task_objective ?? "", briefText].filter(Boolean).join(" "),
+    1800
+  );
+}
+
+function evaluateAutopilotLearningSignal(
+  storage: Storage,
+  input: {
+    agent_ids: string[];
+    objective: string;
+    selected_strategy: string;
+    selected_task_objective: string | null;
+    selected_delegation_briefs: AutopilotDelegationBrief[];
+    plan_substance: number;
+  }
+): {
+  evaluated_agents: string[];
+  matched_prefer: number;
+  matched_avoid: number;
+  confidence_adjustment: number;
+  top_prefer: string[];
+  top_avoid: string[];
+  rationale: string[];
+} {
+  const evaluatedAgents = dedupeNonEmptyCommands(
+    input.agent_ids
+      .map((agentId) => normalizeConsensusAgentId(agentId))
+      .filter((agentId): agentId is string => Boolean(agentId))
+  );
+  if (evaluatedAgents.length === 0) {
+    return {
+      evaluated_agents: [],
+      matched_prefer: 0,
+      matched_avoid: 0,
+      confidence_adjustment: 0,
+      top_prefer: [],
+      top_avoid: [],
+      rationale: [],
+    };
+  }
+
+  const comparisonText = buildAutopilotLearningComparisonText({
+    objective: input.objective,
+    selected_strategy: input.selected_strategy,
+    selected_task_objective: input.selected_task_objective,
+    selected_delegation_briefs: input.selected_delegation_briefs,
+  });
+  const dedupedEntries = new Map<string, AgentLearningEntryRecord>();
+  for (const agentId of evaluatedAgents) {
+    const entries = storage.listAgentLearningEntries({
+      agent_id: agentId,
+      status: "active",
+      limit: 12,
+    });
+    for (const entry of entries) {
+      dedupedEntries.set(entry.entry_id, entry);
+    }
+  }
+  const ranked = [...dedupedEntries.values()]
+    .map((entry) => ({
+      entry,
+      relevance: scoreAutopilotLearningRelevance(entry, comparisonText),
+    }))
+    .filter((item) => item.relevance >= 0.18 || item.entry.weight >= 0.84)
+    .sort((left, right) => {
+      if (right.relevance !== left.relevance) {
+        return right.relevance - left.relevance;
+      }
+      if (right.entry.weight !== left.entry.weight) {
+        return right.entry.weight - left.entry.weight;
+      }
+      return right.entry.updated_at.localeCompare(left.entry.updated_at);
+    });
+
+  const prefer = ranked.filter((item) => item.entry.polarity === "prefer").slice(0, 2);
+  const avoid = ranked.filter((item) => item.entry.polarity === "avoid").slice(0, 2);
+  const preferStrength = prefer.reduce(
+    (total, item) => total + clamp(item.relevance * 0.65 + item.entry.weight * 0.35, 0, 1),
+    0
+  );
+  const avoidStrength = avoid.reduce(
+    (total, item) => total + clamp(item.relevance * 0.7 + item.entry.weight * 0.4, 0, 1),
+    0
+  );
+
+  let confidenceAdjustment = 0;
+  if (preferStrength > 0) {
+    confidenceAdjustment += Math.min(0.08, preferStrength * 0.05);
+    if (input.plan_substance >= 0.58) {
+      confidenceAdjustment += 0.02;
+    }
+  }
+  if (avoidStrength > 0) {
+    confidenceAdjustment -= Math.min(0.12, avoidStrength * 0.07);
+    if (input.plan_substance < 0.58) {
+      confidenceAdjustment -= 0.02;
+    }
+  }
+
+  const topPrefer = prefer
+    .map((item) => compactSummaryAutopilotLearning(item.entry.summary))
+    .filter((value): value is string => Boolean(value));
+  const topAvoid = avoid
+    .map((item) => compactSummaryAutopilotLearning(item.entry.summary))
+    .filter((value): value is string => Boolean(value));
+  const rationale: string[] = [];
+  if (topPrefer.length > 0) {
+    rationale.push(`Aligned with learned prefers: ${topPrefer.join(" | ")}`);
+  }
+  if (topAvoid.length > 0) {
+    rationale.push(`Plan overlaps learned avoids: ${topAvoid.join(" | ")}`);
+  }
+
+  return {
+    evaluated_agents: evaluatedAgents,
+    matched_prefer: prefer.length,
+    matched_avoid: avoid.length,
+    confidence_adjustment: clamp(confidenceAdjustment, -0.18, 0.1),
+    top_prefer: topPrefer,
+    top_avoid: topAvoid,
+    rationale,
+  };
+}
+
+function compactSummaryAutopilotLearning(value: string | null | undefined, maxLength = 110): string | null {
+  return sanitizeAutopilotLearningText(String(value ?? ""), maxLength);
+}
+
+function buildAutopilotLearningFingerprint(draft: AutopilotAgentLearningDraft): string {
+  return autopilotHash(
+    [
+      normalizeConsensusAgentId(draft.agent_id) ?? draft.agent_id,
+      draft.lesson_kind,
+      draft.polarity,
+      draft.scope ?? "",
+      draft.summary,
+      draft.lesson,
+    ].join("|")
+  );
+}
+
+function appendAutopilotLearningHint(base: string, hint: string | null): string {
+  if (!hint) {
+    return base;
+  }
+  return compactConsensusText(`${base} Retain: ${hint}`, 360);
+}
+
+function deriveAutopilotLearningDrafts(input: {
+  config: TriChatAutopilotConfig;
+  intake: AutopilotGoalIntakeResult;
+  council: AutopilotCouncilResult;
+  execution: AutopilotExecutionResult;
+  verify_status: TriChatAutopilotTickResult["verify_status"];
+  verify_summary: string;
+}): AutopilotAgentLearningDraft[] {
+  const drafts: AutopilotAgentLearningDraft[] = [];
+  const selectedProposal =
+    input.council.selected_agent
+      ? input.council.proposals.find((proposal) => proposal.agent_id === input.council.selected_agent) ?? null
+      : null;
+  const selectedAgentId = normalizeConsensusAgentId(selectedProposal?.agent_id);
+  const leadAgentId = normalizeConsensusAgentId(input.config.lead_agent_id);
+  const primaryBrief = input.council.selected_delegation_brief
+    ? finalizeAutopilotDelegationBrief(input.council.selected_delegation_brief)
+    : null;
+  const delegateAgentId = normalizeConsensusAgentId(primaryBrief?.delegate_agent_id);
+  const objectiveSeed =
+    sanitizeAutopilotObjectiveSeed(input.intake.objective, 160) ||
+    compactConsensusText(input.intake.objective, 160) ||
+    "the current bounded task";
+  const evidenceText = compactConsensusText(
+    [
+      `verify=${input.verify_status}`,
+      `mode=${input.execution.mode}`,
+      `confidence=${input.council.council_confidence.toFixed(2)}`,
+      `substance=${input.council.plan_substance.toFixed(2)}`,
+      input.execution.commands.length > 0 ? `commands=${input.execution.commands.slice(0, 2).join(" && ")}` : null,
+      input.verify_summary ? `summary=${input.verify_summary}` : null,
+    ]
+      .filter(Boolean)
+      .join("; "),
+    280
+  );
+  const safeMentorship = sanitizeAutopilotLearningText(selectedProposal?.mentorship_note ?? "", 150);
+  const succeeded = input.verify_status === "passed";
+  const safeDelegationSucceeded =
+    input.verify_status === "skipped" &&
+    input.execution.mode === "task_fallback" &&
+    Boolean(delegateAgentId) &&
+    Boolean(primaryBrief?.task_objective);
+
+  if (selectedAgentId && selectedProposal) {
+    if (succeeded || safeDelegationSucceeded) {
+      const baseLesson =
+        delegateAgentId && primaryBrief?.task_objective
+          ? compactConsensusText(
+              [
+                `When handling ${objectiveSeed}, let ${delegateAgentId} own one bounded slice instead of broadening the mission.`,
+                `Keep the handoff objective explicit: ${primaryBrief.task_objective}.`,
+                primaryBrief.evidence_requirements.length > 0
+                  ? `Require evidence: ${primaryBrief.evidence_requirements.join(" | ")}.`
+                  : null,
+                primaryBrief.rollback_notes.length > 0
+                  ? `Require stop or rollback triggers: ${primaryBrief.rollback_notes.join(" | ")}.`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(" "),
+              360
+            )
+          : compactConsensusText(
+              [
+                `For ${objectiveSeed}, keep the plan concrete, single-owner, and verification-ready.`,
+                input.execution.commands.length > 0
+                  ? `Prefer safe commands like ${input.execution.commands.slice(0, 2).join(" && ")} when they materially advance the work.`
+                  : null,
+                `Tie confidence to named evidence and rollback triggers before escalating.`,
+              ]
+                .filter(Boolean)
+                .join(" "),
+              360
+            );
+      const lesson = appendAutopilotLearningHint(baseLesson, safeMentorship);
+      if (lesson) {
+        drafts.push({
+          agent_id: selectedAgentId,
+          lesson_kind: delegateAgentId ? "delegation_pattern" : "execution_pattern",
+          polarity: "prefer",
+          scope: selectedProposal.lane,
+          summary: compactConsensusText(
+            delegateAgentId
+              ? `Use explicit bounded delegation through ${delegateAgentId}`
+              : `Prefer concrete ${selectedProposal.lane} execution plans`,
+            140
+          ),
+          lesson,
+          evidence: evidenceText,
+          confidence: input.council.council_confidence,
+          weight: succeeded ? 0.92 : 0.72,
+          metadata: {
+            selected_agent: selectedAgentId,
+            delegate_agent_id: delegateAgentId,
+            verify_status: input.verify_status,
+          },
+        });
+      }
+    } else {
+      const lesson = sanitizeAutopilotLearningText(
+        [
+          `Do not push ${selectedProposal.lane} work forward when the plan is vague, thinly evidenced, or missing rollback.`,
+          input.council.plan_substance < 0.46
+            ? "Re-slice the task before raising confidence."
+            : "Name a single owner, evidence bar, and stop condition before trying again.",
+        ].join(" "),
+        320
+      );
+      if (lesson) {
+        drafts.push({
+          agent_id: selectedAgentId,
+          lesson_kind: "failure_pattern",
+          polarity: "avoid",
+          scope: selectedProposal.lane,
+          summary: compactConsensusText(`Avoid weak ${selectedProposal.lane} plans without proof`, 140),
+          lesson,
+          evidence: evidenceText,
+          confidence: input.council.council_confidence,
+          weight: 0.84,
+          metadata: {
+            selected_agent: selectedAgentId,
+            verify_status: input.verify_status,
+          },
+        });
+      }
+    }
+  }
+
+  if (leadAgentId) {
+    const lesson = succeeded || safeDelegationSucceeded
+      ? sanitizeAutopilotLearningText(
+          [
+            delegateAgentId && selectedAgentId
+              ? `For ${objectiveSeed}, route planning through ${selectedAgentId} and let ${delegateAgentId} own the bounded delivery slice.`
+              : `For ${objectiveSeed}, favor higher-substance plans with explicit owners, evidence, and rollback over generic motion.`,
+            "Use the smallest safe delegation set that keeps work parallel but non-overlapping.",
+          ].join(" "),
+          340
+        )
+      : sanitizeAutopilotLearningText(
+          "Do not let the council advance plans that restate the objective without explicit ownership, evidence, or rollback. Re-slice or gather proof first.",
+          320
+        );
+    if (lesson) {
+      drafts.push({
+        agent_id: leadAgentId,
+        lesson_kind: succeeded || safeDelegationSucceeded ? "delegation_pattern" : "guardrail",
+        polarity: succeeded || safeDelegationSucceeded ? "prefer" : "avoid",
+        scope: "lead",
+        summary: compactConsensusText(
+          succeeded || safeDelegationSucceeded
+            ? "Prefer director-to-leaf bounded routing with explicit proof bars"
+            : "Avoid low-substance council motion",
+          140
+        ),
+        lesson,
+        evidence: evidenceText,
+        confidence: input.council.council_confidence,
+        weight: succeeded || safeDelegationSucceeded ? 0.9 : 0.88,
+        metadata: {
+          lead_agent_id: leadAgentId,
+          selected_agent: selectedAgentId,
+          delegate_agent_id: delegateAgentId,
+          verify_status: input.verify_status,
+        },
+      });
+    }
+  }
+
+  if (delegateAgentId && primaryBrief?.task_objective) {
+    const lesson = sanitizeAutopilotLearningText(
+      [
+        `Own only the bounded slice: ${primaryBrief.task_objective}.`,
+        primaryBrief.evidence_requirements.length > 0
+          ? `Report proof as: ${primaryBrief.evidence_requirements.join(" | ")}.`
+          : null,
+        primaryBrief.rollback_notes.length > 0
+          ? `Escalate instead of widening scope when: ${primaryBrief.rollback_notes.join(" | ")}.`
+          : "Escalate to your manager if scope expands or proof is thin.",
+      ]
+        .filter(Boolean)
+        .join(" "),
+      340
+    );
+    if (lesson) {
+      drafts.push({
+        agent_id: delegateAgentId,
+        lesson_kind: "delegation_pattern",
+        polarity: succeeded || safeDelegationSucceeded ? "prefer" : "avoid",
+        scope: "leaf",
+        summary: compactConsensusText("Accept only bounded handoffs with explicit proof requirements", 140),
+        lesson,
+        evidence: evidenceText,
+        confidence: succeeded ? input.council.council_confidence : null,
+        weight: succeeded || safeDelegationSucceeded ? 0.82 : 0.74,
+        metadata: {
+          manager_agent_id: selectedAgentId,
+          delegate_agent_id: delegateAgentId,
+          verify_status: input.verify_status,
+        },
+      });
+    }
+  }
+
+  const deduped = new Map<string, AutopilotAgentLearningDraft>();
+  for (const draft of drafts) {
+    const agentId = normalizeConsensusAgentId(draft.agent_id);
+    const summary = sanitizeAutopilotLearningText(draft.summary, 140);
+    const lesson = sanitizeAutopilotLearningText(draft.lesson, 360);
+    if (!agentId || !summary || !lesson) {
+      continue;
+    }
+    const normalizedDraft: AutopilotAgentLearningDraft = {
+      ...draft,
+      agent_id: agentId,
+      summary,
+      lesson,
+    };
+    const key = `${agentId}:${normalizedDraft.lesson_kind}:${normalizedDraft.polarity}:${summary}`;
+    const existing = deduped.get(key);
+    if (!existing || normalizedDraft.weight > existing.weight) {
+      deduped.set(key, normalizedDraft);
+    }
+  }
+  return [...deduped.values()];
+}
+
+async function recordAutopilotLearningEntries(
+  storage: Storage,
+  input: {
+    session_key: string;
+    run_id: string;
+    intake: AutopilotGoalIntakeResult;
+    config: TriChatAutopilotConfig;
+    council: AutopilotCouncilResult;
+    execution: AutopilotExecutionResult;
+    verify_status: TriChatAutopilotTickResult["verify_status"];
+    verify_summary: string;
+  }
+): Promise<AgentLearningEntryRecord[]> {
+  const drafts = deriveAutopilotLearningDrafts(input);
+  const recorded: AgentLearningEntryRecord[] = [];
+  for (let index = 0; index < drafts.length; index += 1) {
+    const draft = drafts[index];
+    const fingerprint = buildAutopilotLearningFingerprint(draft);
+    const result = await runAutopilotIdempotent(storage, {
+      tool_name: "agent.learning.record",
+      session_key: input.session_key,
+      label: `learning.record.${index + 1}.${draft.agent_id}`,
+      fingerprint,
+      payload: {
+        agent_id: draft.agent_id,
+        lesson_kind: draft.lesson_kind,
+        polarity: draft.polarity,
+        summary: draft.summary,
+      },
+      execute: () =>
+        storage.recordAgentLearningEntry({
+          agent_id: draft.agent_id,
+          lesson_kind: draft.lesson_kind,
+          polarity: draft.polarity,
+          scope: draft.scope ?? undefined,
+          summary: draft.summary,
+          lesson: draft.lesson,
+          evidence: draft.evidence ?? undefined,
+          source_run_id: input.run_id,
+          source_task_id: input.intake.source_task?.task_id ?? undefined,
+          thread_id: input.intake.thread_id,
+          turn_id: input.intake.turn_id,
+          confidence: draft.confidence ?? undefined,
+          weight: draft.weight,
+          fingerprint,
+          metadata: {
+            ...draft.metadata,
+            objective_source: input.intake.objective_source,
+            execution_mode: input.execution.mode,
+          },
+          source_client: "trichat.autopilot",
+          source_agent: AUTOPILOT_WORKER_ID,
+        }),
+    });
+    if (result.entry) {
+      recorded.push(result.entry);
+    }
+  }
+  return recorded;
 }
 
 async function runAutopilotCouncilRoundParallel(
   storage: Storage,
   input: {
     session_key: string;
+    run_id: string;
     config: TriChatAutopilotConfig;
     intake: AutopilotGoalIntakeResult;
     round: number;
@@ -3531,15 +5369,19 @@ async function runAutopilotCouncilRoundParallel(
     if (!agentId) {
       continue;
     }
-    const lane = AUTOPILOT_AGENT_ROLE_LANES[agentId] ?? "collaborator";
+    const lane = getTriChatRoleLaneMap(input.target_agents)[agentId] ?? "collaborator";
     const task = runAutopilotBridgeAsk(storage, {
       session_key: input.session_key,
+      run_id: input.run_id,
       config: input.config,
       thread_id: input.intake.thread_id,
       objective: input.intake.objective,
+      objective_source: input.intake.objective_source,
       round: input.round,
       agent_id: agentId,
       lane,
+      target_agent_ids: input.target_agents,
+      delegation_brief: input.intake.delegation_brief,
       signal: abortController.signal,
     })
       .then((result) => ({
@@ -3557,6 +5399,12 @@ async function runAutopilotCouncilRoundParallel(
           commands: [],
           confidence: 0.2,
           mentorship_note: null,
+          delegate_agent_id: null,
+          task_objective: null,
+          success_criteria: [],
+          evidence_requirements: [],
+          rollback_notes: [],
+          delegations: [],
           error: error instanceof Error ? error.message : String(error),
         },
       }));
@@ -3615,6 +5463,7 @@ async function evaluateAutopilotSafetyGate(
     intake: AutopilotGoalIntakeResult;
     council: AutopilotCouncilResult;
     confidence: number;
+    plan_substance: number;
   }
 ): Promise<AutopilotSafetyGateResult> {
   const confirmations = input.council.success_agents.map((agentId) => ({
@@ -3647,6 +5496,7 @@ async function evaluateAutopilotSafetyGate(
           command_count: input.command_plan.commands.length,
           blocked_count: input.command_plan.blocked_commands.length,
           confidence: input.confidence,
+          plan_substance: input.plan_substance,
         },
         source_client: "trichat.autopilot",
         source_agent: AUTOPILOT_WORKER_ID,
@@ -3758,6 +5608,12 @@ async function evaluateAutopilotSafetyGate(
           details: `success_agents=${input.council.success_agents.length} min=${input.config.min_success_agents}`,
           severity: "warn",
         },
+        {
+          name: "plan.substance.meets_floor",
+          met: input.plan_substance >= 0.46,
+          details: `plan_substance=${input.plan_substance.toFixed(3)} floor=0.460`,
+          severity: "warn",
+        },
       ],
     });
     if (!preflight.pass) {
@@ -3822,7 +5678,12 @@ async function runAutopilotExecution(
     intake: AutopilotGoalIntakeResult;
     command_plan: AutopilotCommandPlan;
     execute_allowed: boolean;
+    selected_agent: string | null;
+    selected_delegate_agent_id: string | null;
     selected_strategy: string;
+    selected_task_objective: string | null;
+    selected_delegation_brief: AutopilotDelegationBrief | null;
+    selected_delegation_briefs: AutopilotDelegationBrief[];
   }
 ): Promise<AutopilotExecutionResult> {
   const baseResult: AutopilotExecutionResult = {
@@ -3830,6 +5691,7 @@ async function runAutopilotExecution(
     commands: [...input.command_plan.commands],
     blocked_commands: [...input.command_plan.blocked_commands],
     task_id: null,
+    task_ids: [],
     direct_success: false,
     tmux: null,
     command_results: [],
@@ -3847,33 +5709,96 @@ async function runAutopilotExecution(
     input.command_plan.allowed_commands.length > 0 &&
     input.command_plan.blocked_commands.length === 0;
   if (!canDirectExecute) {
-    const fallbackTaskId = `trichat-autopilot-${autopilotHash(`${input.session_key}:fallback-task`).slice(0, 20)}`;
-    const created = await taskCreate(storage, {
-      mutation: buildAutopilotMutation(input.session_key, "execute.task_create", fallbackTaskId),
-      task_id: fallbackTaskId,
-      objective: compactConsensusText(
-        `Autopilot follow-up: ${input.intake.objective}. Strategy: ${input.selected_strategy}`,
-        800
-      ),
-      project_dir: input.intake.project_dir,
-      payload: {
-        source: "trichat.autopilot",
-        session_key: input.session_key,
-        commands: input.command_plan.commands,
-        blocked_commands: input.command_plan.blocked_commands,
-        blocked_by: input.command_plan.blocked_by,
-        classification: input.command_plan.classification,
-        execute_backend: input.config.execute_backend,
-      },
-      priority: 80,
-      tags: ["trichat", "autopilot", "fallback"],
-      source: "trichat.autopilot",
-      source_agent: AUTOPILOT_WORKER_ID,
+    const agentPool = resolveAutopilotAgentPool(input.config);
+    const fallbackAllowedAgentIds = dedupeNonEmptyCommands(
+      [agentPool.lead_agent_id, AUTOPILOT_WORKER_ID].filter((value): value is string => Boolean(value))
+    );
+    const delegationBriefs = materializeAutopilotDelegationBriefs({
+      briefs: input.selected_delegation_briefs,
+      fallback_brief: input.selected_delegation_brief,
+      delegate_agent_id: input.selected_delegate_agent_id,
+      task_objective: input.selected_task_objective,
+      command_classification: input.command_plan.classification,
     });
+    const fallbackBatch = delegationBriefs.length > 0 ? delegationBriefs : [null];
+    const createdTaskIds: string[] = [];
+    const batchGroupId = autopilotHash(`${input.session_key}:fallback-batch`).slice(0, 20);
+    for (let index = 0; index < fallbackBatch.length; index += 1) {
+      const delegationBrief = fallbackBatch[index];
+      const fallbackObjective = buildAutopilotFallbackObjective({
+        intake_objective: input.intake.objective,
+        selected_strategy: input.selected_strategy,
+        selected_agent: input.selected_agent,
+        selected_delegate_agent_id: delegationBrief?.delegate_agent_id ?? input.selected_delegate_agent_id,
+        selected_task_objective: delegationBrief?.task_objective ?? input.selected_task_objective,
+      });
+      const fallbackTaskId = buildAutopilotFallbackTaskId({
+        session_key: input.session_key,
+        index,
+        delegate_agent_id: delegationBrief?.delegate_agent_id ?? input.selected_delegate_agent_id,
+        task_objective: delegationBrief?.task_objective ?? fallbackObjective,
+      });
+      const fallbackPreferredAgentIds = dedupeNonEmptyCommands(
+        [
+          agentPool.lead_agent_id,
+          delegationBrief?.delegate_agent_id ?? input.selected_delegate_agent_id,
+          input.selected_agent,
+          ...input.intake.task_routing.preferred_agent_ids,
+        ].filter((value): value is string => Boolean(value))
+      );
+      const created = await taskCreate(storage, {
+        mutation: buildAutopilotMutation(input.session_key, `execute.task_create.${index + 1}`, fallbackTaskId),
+        task_id: fallbackTaskId,
+        objective: fallbackObjective,
+        project_dir: input.intake.project_dir,
+        payload: {
+          source: "trichat.autopilot",
+          session_key: input.session_key,
+          commands: input.command_plan.commands,
+          blocked_commands: input.command_plan.blocked_commands,
+          blocked_by: input.command_plan.blocked_by,
+          classification: input.command_plan.classification,
+          execute_backend: input.config.execute_backend,
+          delegate_agent_id: delegationBrief?.delegate_agent_id ?? input.selected_delegate_agent_id,
+          task_objective: delegationBrief?.task_objective ?? fallbackObjective,
+          delegation_brief: delegationBrief,
+          delegation_batch_size: fallbackBatch.length,
+          delegation_batch_index: index,
+          success_criteria: delegationBrief?.success_criteria ?? [],
+          evidence_requirements: delegationBrief?.evidence_requirements ?? [],
+          rollback_notes: delegationBrief?.rollback_notes ?? [],
+          lead_agent_id: input.config.lead_agent_id,
+          selected_agent: input.selected_agent,
+          selected_strategy: input.selected_strategy,
+        },
+        routing: {
+          preferred_agent_ids: fallbackPreferredAgentIds,
+          allowed_agent_ids: fallbackAllowedAgentIds,
+          allowed_client_kinds: [AUTOPILOT_WORKER_ID],
+        },
+        priority: 80,
+        tags: ["trichat", "autopilot", "fallback"],
+        source: "trichat.autopilot",
+        source_agent: AUTOPILOT_WORKER_ID,
+        metadata: {
+          task_mode: "autopilot_specialist_fallback",
+          lead_agent_id: input.config.lead_agent_id,
+          delegate_agent_id: delegationBrief?.delegate_agent_id ?? input.selected_delegate_agent_id,
+          selected_agent: input.selected_agent,
+          selected_strategy: input.selected_strategy,
+          delegation_brief: delegationBrief,
+          delegation_batch_group_id: batchGroupId,
+          delegation_batch_index: index,
+          delegation_batch_size: fallbackBatch.length,
+        },
+      });
+      createdTaskIds.push(created.task.task_id);
+    }
     return {
       ...baseResult,
       mode: "task_fallback",
-      task_id: created.task.task_id,
+      task_id: createdTaskIds[0] ?? null,
+      task_ids: createdTaskIds,
       reason: null,
     };
   }
@@ -3956,6 +5881,7 @@ async function runAutopilotExecution(
       commands: [...input.command_plan.allowed_commands],
       blocked_commands: [],
       task_id: null,
+      task_ids: [],
       direct_success: directSuccess,
       tmux: null,
       command_results: commandResults,
@@ -3994,7 +5920,7 @@ async function runAutopilotExecutionViaTmux(
     turn_id: input.intake.turn_id,
     strategy: input.selected_strategy,
   });
-  const configuredWorkers = clampInt(input.config.tmux_worker_count, 1, 12);
+  const configuredWorkers = clampInt(input.config.tmux_worker_count, 1, 24);
   const workerCount = input.config.tmux_auto_scale_workers
     ? recommendAutopilotTmuxWorkerCount(taskQueue, configuredWorkers)
     : configuredWorkers;
@@ -4005,6 +5931,7 @@ async function runAutopilotExecutionViaTmux(
     commands: [...input.command_plan.allowed_commands],
     blocked_commands: [],
     task_id: null,
+    task_ids: [],
     direct_success: false,
     tmux: {
       session_name: sessionName,
@@ -4182,6 +6109,7 @@ async function runAutopilotExecutionViaTmux(
       commands: [...input.command_plan.allowed_commands],
       blocked_commands: [],
       task_id: null,
+      task_ids: [],
       direct_success: !reason,
       tmux: {
         session_name: sessionName,
@@ -4226,7 +6154,9 @@ async function runAutopilotMentorship(
     `selected_strategy: ${input.council.selected_strategy || "n/a"}`,
     `execution: mode=${input.execution.mode} direct_success=${input.execution.direct_success} commands=${
       input.execution.commands.length
-    } blocked=${input.execution.blocked_commands.length} fallback_task=${input.execution.task_id ?? "none"}`,
+    } blocked=${input.execution.blocked_commands.length} fallback_tasks=${
+      input.execution.task_ids.join(",") || input.execution.task_id || "none"
+    }`,
     `verify: status=${input.verify_status} summary=${input.verify_summary}`,
   ];
   let transcriptEntries = 0;
@@ -4306,6 +6236,16 @@ async function runAutopilotMentorship(
         ],
       }),
   });
+  const learningEntries = await recordAutopilotLearningEntries(storage, {
+    session_key: input.session_key,
+    run_id: input.run_id,
+    intake: input.intake,
+    config: input.config,
+    council: input.council,
+    execution: input.execution,
+    verify_status: input.verify_status,
+    verify_summary: input.verify_summary,
+  });
 
   let postflight = {
     executed: false,
@@ -4347,6 +6287,7 @@ async function runAutopilotMentorship(
     transcript_entries: transcriptEntries,
     summarize_note_id: asNullableTrimmed((summarize as Record<string, unknown>).note_id),
     memory_id: memory.id,
+    learning_entry_count: learningEntries.length,
     postflight,
   };
 }
@@ -4470,12 +6411,16 @@ async function runAutopilotBridgeAsk(
   storage: Storage,
   input: {
     session_key: string;
+    run_id: string;
     config: TriChatAutopilotConfig;
     thread_id: string;
     objective: string;
+    objective_source: AutopilotGoalIntakeResult["objective_source"];
     round: number;
     agent_id: string;
     lane: string;
+    target_agent_ids: string[];
+    delegation_brief: AutopilotDelegationBrief | null;
     signal?: AbortSignal;
   }
 ): Promise<{
@@ -4485,6 +6430,12 @@ async function runAutopilotBridgeAsk(
   commands: string[];
   confidence: number;
   mentorship_note: string | null;
+  delegate_agent_id: string | null;
+  task_objective: string | null;
+  success_criteria: string[];
+  evidence_requirements: string[];
+  rollback_notes: string[];
+  delegations: AutopilotDelegationBrief[];
   error: string | null;
 }> {
   const workspace = process.cwd();
@@ -4507,15 +6458,33 @@ async function runAutopilotBridgeAsk(
       commands: [],
       confidence: 0.2,
       mentorship_note: null,
+      delegate_agent_id: null,
+      task_objective: null,
+      success_criteria: [],
+      evidence_requirements: [],
+      rollback_notes: [],
+      delegations: [],
       error: "bridge command not resolved",
     };
   }
 
   const requestId = buildAutopilotBridgeRequestId(input.session_key, input.round, input.agent_id);
+  const learningContext = buildAutopilotAgentLearningContext(storage, {
+    agent_id: input.agent_id,
+    objective: input.objective,
+    exclude_run_id: input.run_id,
+  });
   const prompt = buildAutopilotCouncilPrompt({
     objective: input.objective,
+    objective_source: input.objective_source,
     lane: input.lane,
     round: input.round,
+    agent_id: input.agent_id,
+    lead_agent_id: input.config.lead_agent_id,
+    specialist_agent_ids: input.config.specialist_agent_ids,
+    target_agent_ids: input.target_agent_ids,
+    delegation_brief: input.delegation_brief,
+    learning_notes: learningContext.notes,
   });
   const execution = await runAutopilotIdempotent(storage, {
     tool_name: "trichat.autopilot.bridge_ask",
@@ -4548,9 +6517,11 @@ async function runAutopilotBridgeAsk(
           timestamp: new Date().toISOString(),
           turn_phase: "propose",
           role_hint: input.lane,
-          role_objective: `lane=${input.lane}`,
+          role_objective: `lane=${input.lane};lead_agent=${input.config.lead_agent_id ?? "none"}`,
           response_mode: "json",
           collaboration_contract: "Trichat autopilot council round",
+          agent_learning_notes: learningContext.notes,
+          learning_guardrail: learningContext.guardrail,
         },
       }),
   });
@@ -4570,6 +6541,12 @@ async function runAutopilotBridgeAsk(
       commands: [],
       confidence: 0.2,
       mentorship_note: null,
+      delegate_agent_id: null,
+      task_objective: null,
+      success_criteria: [],
+      evidence_requirements: [],
+      rollback_notes: [],
+      delegations: [],
       error: execution.error ?? validationError,
     };
   }
@@ -4582,6 +6559,12 @@ async function runAutopilotBridgeAsk(
     commands: parsed.commands,
     confidence: parsed.confidence,
     mentorship_note: parsed.mentorship_note,
+    delegate_agent_id: parsed.delegate_agent_id,
+    task_objective: parsed.task_objective,
+    success_criteria: parsed.success_criteria,
+    evidence_requirements: parsed.evidence_requirements,
+    rollback_notes: parsed.rollback_notes,
+    delegations: parsed.delegations,
     error: null,
   };
 }
@@ -4724,7 +6707,17 @@ async function runAutopilotOverlapSkip(
     user_message_id: null,
     source_task_id: null,
     council_confidence: 0,
+    plan_substance: 0,
     success_agents: 0,
+    learning_signal: {
+      evaluated_agents: [],
+      matched_prefer: 0,
+      matched_avoid: 0,
+      confidence_adjustment: 0,
+      top_prefer: [],
+      top_avoid: [],
+      rationale: [],
+    },
     emergency_brake_triggered: false,
     incident_id: null,
     verify_status: "skipped",
@@ -4734,6 +6727,7 @@ async function runAutopilotOverlapSkip(
         commands: [],
         blocked_commands: [],
         task_id: null,
+        task_ids: [],
         direct_success: false,
         tmux: null,
         command_results: [],
@@ -4743,6 +6737,7 @@ async function runAutopilotOverlapSkip(
       transcript_entries: 0,
       summarize_note_id: null,
       memory_id: null,
+      learning_entry_count: 0,
     },
     governance: {
       adr_id: null,
@@ -4828,6 +6823,11 @@ function startAutopilotDaemon(storage: Storage) {
     });
   }, autopilotRuntime.config.interval_seconds * 1000);
   autopilotRuntime.timer.unref?.();
+  syncAutopilotAgentSession(storage, autopilotRuntime.config, "active", {
+    daemon_running: true,
+    pause_reason: null,
+    current_task_id: null,
+  });
 }
 
 function stopAutopilotDaemon() {
@@ -4850,6 +6850,8 @@ async function pauseAutopilotDaemon(storage: Storage, config: TriChatAutopilotCo
     thread_title: config.thread_title,
     thread_status: config.thread_status,
     objective: config.objective,
+    lead_agent_id: config.lead_agent_id,
+    specialist_agent_ids: [...config.specialist_agent_ids],
     max_rounds: config.max_rounds,
     min_success_agents: config.min_success_agents,
     bridge_timeout_seconds: config.bridge_timeout_seconds,
@@ -4869,13 +6871,23 @@ async function pauseAutopilotDaemon(storage: Storage, config: TriChatAutopilotCo
     adr_policy: config.adr_policy,
     pause_reason: reason,
   });
+  closeAutopilotAgentSession(storage, config, reason);
 }
 
-function getAutopilotStatus() {
+function getAutopilotStatus(storage?: Storage) {
+  const effectiveAgentPool = resolveAutopilotAgentPool(autopilotRuntime.config);
+  const sessionId = buildAutopilotAgentSessionId(autopilotRuntime.config);
+  const session = storage ? storage.getAgentSessionById(sessionId) : null;
   return {
     running: autopilotRuntime.running,
     in_tick: autopilotRuntime.in_tick,
     config: { ...autopilotRuntime.config },
+    effective_agent_pool: effectiveAgentPool,
+    session: {
+      session_id: sessionId,
+      found: Boolean(session),
+      session,
+    },
     pause_reason: autopilotRuntime.pause_reason,
     started_at: autopilotRuntime.started_at,
     last_tick_at: autopilotRuntime.last_tick_at,
@@ -4891,6 +6903,224 @@ function getAutopilotStatus() {
     },
     last_tick: autopilotRuntime.last_tick,
   };
+}
+
+function resolveAutopilotAgentPool(config: Pick<TriChatAutopilotConfig, "lead_agent_id" | "specialist_agent_ids">) {
+  const configuredAgentIds = dedupeNonEmptyCommands(
+    [
+      normalizeConsensusAgentId(config.lead_agent_id),
+      ...normalizeConsensusAgentIds(config.specialist_agent_ids ?? []),
+    ].filter((value): value is string => Boolean(value))
+  );
+  const activeAgentIds = dedupeNonEmptyCommands([
+    ...configuredAgentIds,
+    ...normalizeConsensusAgentIds(getTriChatActiveAgentIds()),
+  ]);
+  const activeSet = new Set(activeAgentIds);
+  const preferredLead = normalizeConsensusAgentId(config.lead_agent_id);
+  const leadAgentId =
+    (preferredLead && activeSet.has(preferredLead) ? preferredLead : null) ??
+    (DEFAULT_AUTOPILOT_LEAD_AGENT_ID && activeSet.has(DEFAULT_AUTOPILOT_LEAD_AGENT_ID)
+      ? DEFAULT_AUTOPILOT_LEAD_AGENT_ID
+      : activeAgentIds[0] ?? null);
+  const configuredSpecialists = (config.specialist_agent_ids ?? [])
+    .map((agentId) => normalizeConsensusAgentId(agentId))
+    .filter((agentId) => agentId && activeSet.has(agentId) && agentId !== leadAgentId);
+  const specialistAgentIds =
+    configuredSpecialists.length > 0
+      ? dedupeNonEmptyCommands(configuredSpecialists)
+      : activeAgentIds.filter((agentId) => agentId !== leadAgentId);
+  const councilAgentIds = dedupeNonEmptyCommands(
+    [leadAgentId, ...specialistAgentIds].filter((value): value is string => Boolean(value))
+  );
+  return {
+    lead_agent_id: leadAgentId,
+    specialist_agent_ids: specialistAgentIds,
+    council_agent_ids: councilAgentIds.length > 0 ? councilAgentIds : activeAgentIds,
+  };
+}
+
+function buildAutopilotAgentSessionId(config: Pick<TriChatAutopilotConfig, "thread_id">) {
+  const normalizedThreadId = config.thread_id
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return `trichat-autopilot:${normalizedThreadId || autopilotHash(config.thread_id).slice(0, 16)}`;
+}
+
+function buildAutopilotAgentSessionSpec(config: TriChatAutopilotConfig) {
+  const agentPool = resolveAutopilotAgentPool(config);
+  const leadAgentId = agentPool.lead_agent_id ?? AUTOPILOT_WORKER_ID;
+  const sessionId = buildAutopilotAgentSessionId(config);
+  return {
+    session_id: sessionId,
+    agent_id: leadAgentId,
+    display_name: `${leadAgentId} autopilot`,
+    client_kind: AUTOPILOT_WORKER_ID,
+    transport_kind: "daemon",
+    workspace_root: process.cwd(),
+    owner_id: AUTOPILOT_OWNER_NONCE,
+    lease_seconds: config.lock_lease_seconds,
+    tags: ["trichat", "autopilot", "ring-leader"],
+    capabilities: {
+      trichat_autopilot: true,
+      orchestration: true,
+      agent_session: true,
+      planning: true,
+      capability_tier: "high",
+      lead_agent_id: leadAgentId,
+      specialist_agent_ids: agentPool.specialist_agent_ids,
+      council_agent_ids: agentPool.council_agent_ids,
+    },
+    metadata: {
+      thread_id: config.thread_id,
+      thread_title: config.thread_title,
+      thread_status: config.thread_status,
+      objective: config.objective,
+      closed_by: null,
+      close_reason: null,
+      lead_agent_id: leadAgentId,
+      specialist_agent_ids: agentPool.specialist_agent_ids,
+      council_agent_ids: agentPool.council_agent_ids,
+      execution_role: "ring-leader",
+    },
+  };
+}
+
+function syncAutopilotAgentSession(
+  storage: Storage,
+  config: TriChatAutopilotConfig,
+  status: "active" | "idle" | "busy",
+  metadata: Record<string, unknown>
+) {
+  const spec = buildAutopilotAgentSessionSpec(config);
+  const mergedMetadata = {
+    ...spec.metadata,
+    ...metadata,
+  };
+  return storage.upsertAgentSession({
+    session_id: spec.session_id,
+    agent_id: spec.agent_id,
+    display_name: spec.display_name,
+    client_kind: spec.client_kind,
+    transport_kind: spec.transport_kind,
+    workspace_root: spec.workspace_root,
+    owner_id: spec.owner_id,
+    lease_seconds: spec.lease_seconds,
+    status,
+    capabilities: spec.capabilities,
+    tags: spec.tags,
+    metadata: mergedMetadata,
+    source_client: "trichat.autopilot",
+    source_agent: AUTOPILOT_WORKER_ID,
+  }).session;
+}
+
+function closeAutopilotAgentSession(storage: Storage, config: TriChatAutopilotConfig, reason: string) {
+  const sessionId = buildAutopilotAgentSessionId(config);
+  return storage.closeAgentSession({
+    session_id: sessionId,
+    metadata: {
+      closed_by: "trichat.autopilot",
+      close_reason: reason,
+      thread_id: config.thread_id,
+    },
+  });
+}
+
+async function reportAutopilotSourceTask(
+  storage: Storage,
+  config: TriChatAutopilotConfig,
+  input: Omit<Parameters<typeof agentReportResult>[2], "session_id" | "source_client" | "source_agent">
+) {
+  const spec = buildAutopilotAgentSessionSpec(config);
+  const invokeTool =
+    autopilotRuntime.invoke_tool ??
+    (async () => ({
+      triggered: false,
+      reason: "autopilot-invoke-tool-unavailable",
+    }));
+  return agentReportResult(storage, invokeTool, {
+    ...input,
+    session_id: spec.session_id,
+    source_client: "trichat.autopilot",
+    source_agent: spec.agent_id,
+  });
+}
+
+function resolveAutopilotTaskRouting(task: TaskRecord | null) {
+  const preferred_agent_ids: string[] = [];
+  const allowed_agent_ids: string[] = [];
+  const candidates = [
+    isRecord(task?.metadata) ? task?.metadata.task_routing : undefined,
+    isRecord(task?.metadata) ? task?.metadata.routing : undefined,
+    isRecord(task?.payload) ? task?.payload.task_routing : undefined,
+    isRecord(task?.payload) ? task?.payload.routing : undefined,
+  ];
+  for (const candidate of candidates) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+    preferred_agent_ids.push(
+      ...normalizeConsensusAgentIds(
+        Array.isArray(candidate.preferred_agent_ids)
+          ? candidate.preferred_agent_ids.map((entry) => String(entry ?? ""))
+          : undefined
+      )
+    );
+    allowed_agent_ids.push(
+      ...normalizeConsensusAgentIds(
+        Array.isArray(candidate.allowed_agent_ids)
+          ? candidate.allowed_agent_ids.map((entry) => String(entry ?? ""))
+          : undefined
+      )
+    );
+  }
+  return {
+    preferred_agent_ids: dedupeNonEmptyCommands(preferred_agent_ids),
+    allowed_agent_ids: dedupeNonEmptyCommands(allowed_agent_ids),
+  };
+}
+
+function resolveAutopilotIntakeTargetAgents(
+  config: Pick<TriChatAutopilotConfig, "lead_agent_id" | "specialist_agent_ids">,
+  sourceTask: TaskRecord | null
+) {
+  const agentPool = resolveAutopilotAgentPool(config);
+  const taskRouting = resolveAutopilotTaskRouting(sourceTask);
+  const taskDelegationBrief = resolveAutopilotTaskDelegationBrief(sourceTask);
+  const taskTargetAgents = taskRouting.preferred_agent_ids.length > 0
+    ? taskRouting.preferred_agent_ids
+    : taskRouting.allowed_agent_ids.filter((agentId) => agentId !== AUTOPILOT_WORKER_ID);
+  const targetAgentIds = dedupeNonEmptyCommands(
+    [
+      agentPool.lead_agent_id,
+      ...expandAutopilotDelegationTargets([
+        ...(taskTargetAgents.length > 0 ? taskTargetAgents : agentPool.specialist_agent_ids),
+        taskDelegationBrief?.delegate_agent_id ?? "",
+      ]),
+    ].filter((value): value is string => Boolean(value))
+  );
+  return {
+    target_agent_ids: targetAgentIds.length > 0 ? targetAgentIds : agentPool.council_agent_ids,
+    task_routing: taskRouting,
+    agent_pool: agentPool,
+  };
+}
+
+function expandAutopilotDelegationTargets(agentIds: string[]): string[] {
+  const expanded = new Set<string>();
+  for (const candidate of normalizeConsensusAgentIds(agentIds)) {
+    expanded.add(candidate);
+    const agent = getTriChatAgent(candidate);
+    const parentAgentId = normalizeConsensusAgentId(agent?.parent_agent_id);
+    if (parentAgentId) {
+      expanded.add(parentAgentId);
+    }
+  }
+  return [...expanded];
 }
 
 function resolveAutopilotConfig(
@@ -4941,17 +7171,28 @@ function resolveAutopilotConfig(
     objective:
       String((input as { objective?: string } | null)?.objective ?? fallback.objective).trim() ||
       DEFAULT_AUTOPILOT_CONFIG.objective,
+    lead_agent_id:
+      asNullableTrimmed((input as { lead_agent_id?: string | null } | null)?.lead_agent_id) ??
+      fallback.lead_agent_id ??
+      DEFAULT_AUTOPILOT_CONFIG.lead_agent_id,
+    specialist_agent_ids: dedupeNonEmptyCommands(
+      Array.isArray((input as { specialist_agent_ids?: string[] } | null)?.specialist_agent_ids)
+        ? ((input as { specialist_agent_ids?: string[] }).specialist_agent_ids ?? []).map((entry) =>
+            normalizeConsensusAgentId(entry)
+          )
+        : fallback.specialist_agent_ids
+    ),
     max_rounds: clampInt(
       Number((input as { max_rounds?: number } | null)?.max_rounds ?? fallback.max_rounds),
       1,
-      6
+      12
     ),
     min_success_agents: clampInt(
       Number(
         (input as { min_success_agents?: number } | null)?.min_success_agents ?? fallback.min_success_agents
       ),
       1,
-      3
+      12
     ),
     bridge_timeout_seconds: clampInt(
       Number(
@@ -4970,7 +7211,7 @@ function resolveAutopilotConfig(
     tmux_worker_count: clampInt(
       Number((input as { tmux_worker_count?: number } | null)?.tmux_worker_count ?? fallback.tmux_worker_count),
       1,
-      12
+      24
     ),
     tmux_max_queue_per_worker: clampInt(
       Number(
@@ -5011,6 +7252,10 @@ function resolveAutopilotConfig(
     ),
     adr_policy: adrPolicy,
   };
+}
+
+function isAutopilotConfidenceFailure(reason: string | null | undefined) {
+  return String(reason ?? "").toLowerCase().includes("confidence below threshold");
 }
 
 async function openAutopilotIncident(
@@ -5078,13 +7323,68 @@ function buildAutopilotTaskSessionKey(taskId: string, attempt: number): string {
   return `task:${normalizedTaskId}:attempt:${normalizedAttempt}`;
 }
 
+function isAutopilotClaimReplayStale(
+  storage: Storage,
+  input: {
+    session_id: string;
+    claim: AutopilotClaimResult;
+  }
+): boolean {
+  if (!input.claim.claimed || !input.claim.task) {
+    return false;
+  }
+  const currentTask = storage.getTaskById(input.claim.task.task_id);
+  if (!currentTask || currentTask.status !== "running" || currentTask.lease?.owner_id !== input.session_id) {
+    return true;
+  }
+  const runningTask = storage.getRunningTaskByWorkerId(input.session_id);
+  if (!runningTask) {
+    return true;
+  }
+  return runningTask.task_id !== input.claim.task.task_id;
+}
+
+async function ensureFreshAutopilotClaim(
+  storage: Storage,
+  input: {
+    heartbeat_session_key: string;
+    claim: AutopilotClaimResult;
+    session: AgentSessionRecord;
+    config: TriChatAutopilotConfig;
+    trigger: "interval" | "start" | "run_once";
+    invocation_id: number;
+  }
+): Promise<AutopilotClaimResult> {
+  if (!isAutopilotClaimReplayStale(storage, { session_id: input.session.session_id, claim: input.claim })) {
+    return input.claim;
+  }
+  return agentClaimNext(storage, {
+    mutation: buildAutopilotMutation(
+      `${input.heartbeat_session_key}:fresh-claim:${input.invocation_id}`,
+      "goal_intake.agent_claim_next.refresh",
+      `${input.session.session_id}:${input.claim.task?.task_id ?? "none"}`
+    ),
+    session_id: input.session.session_id,
+    lease_seconds: input.config.lock_lease_seconds,
+    metadata: {
+      daemon_running: autopilotRuntime.running,
+      thread_id: input.config.thread_id,
+      trigger: input.trigger,
+      stale_replayed_task_id: input.claim.task?.task_id ?? null,
+      stale_replayed_claim_reason: input.claim.reason ?? null,
+    },
+    source_client: "trichat.autopilot",
+    source_agent: input.session.agent_id,
+  });
+}
+
 function buildAutopilotRunId(sessionKey: string): string {
   return `trichat-autopilot-${autopilotHash(sessionKey).slice(0, 24)}`;
 }
 
 function buildAutopilotMutation(sessionKey: string, label: string, fingerprintSeed: string) {
   const normalizedLabel = label.trim().toLowerCase().replace(/[^a-z0-9._:-]+/g, "-");
-  const keyHash = autopilotHash(`${sessionKey}|${normalizedLabel}`).slice(0, 40);
+  const keyHash = autopilotHash(`${sessionKey}|${normalizedLabel}|${fingerprintSeed}`).slice(0, 40);
   const fingerprintHash = autopilotHash(`${sessionKey}|${normalizedLabel}|${fingerprintSeed}`).slice(0, 64);
   return {
     idempotency_key: `trichat-autopilot-${keyHash}`,
@@ -5126,6 +7426,10 @@ function asFiniteNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return value as Record<string, unknown>;
@@ -5145,14 +7449,74 @@ function buildAutopilotBridgeRequestId(sessionKey: string, round: number, agentI
   return `trichat-autopilot-ask-${autopilotHash(`${sessionKey}:${round}:${agentId}`).slice(0, 20)}`;
 }
 
-function buildAutopilotCouncilPrompt(input: { objective: string; lane: string; round: number }): string {
+function buildAutopilotCouncilPrompt(input: {
+  objective: string;
+  objective_source: string;
+  lane: string;
+  round: number;
+  agent_id: string;
+  lead_agent_id: string | null;
+  specialist_agent_ids: string[];
+  target_agent_ids: string[];
+  delegation_brief: AutopilotDelegationBrief | null;
+  learning_notes: string[];
+}): string {
+  const isLeadAgent =
+    Boolean(input.lead_agent_id) && normalizeConsensusAgentId(input.agent_id) === normalizeConsensusAgentId(input.lead_agent_id);
+  const agent = getTriChatAgent(input.agent_id);
+  const coordinationTier = String(agent?.coordination_tier ?? (isLeadAgent ? "lead" : "specialist")).trim() || "specialist";
+  const parentAgentId = normalizeConsensusAgentId(agent?.parent_agent_id);
+  const managedAgentIds =
+    agent?.managed_agent_ids
+      ?.map((agentId) => normalizeConsensusAgentId(agentId))
+      .filter((agentId): agentId is string => Boolean(agentId)) ?? [];
+  const hierarchyInstruction = isLeadAgent
+    ? "You are the ring-leader for this round. Operate in GSD mode: break the objective into the smallest safe independent work packets, delegate to director agents first, then to leaf SMEs when a director is not needed, and emit a delegation batch whenever parallel bounded work will speed up delivery."
+    : coordinationTier === "director"
+      ? `You are a director agent. Operate in GSD mode for your lane: turn broad work into tightly bounded assignments for your managed leaf agents (${managedAgentIds.join(", ") || "none"}) and prefer emitting a delegation batch with one owner per slice when multiple leaf tasks can run in parallel safely.`
+      : coordinationTier === "leaf"
+        ? `You are a leaf SME. Stay narrow, avoid broad orchestration, do not create multi-owner plans unless a single narrowly scoped dependency handoff is unavoidable, and report bounded work back to ${
+            parentAgentId ?? input.lead_agent_id ?? "the ring-leader"
+          }.`
+        : "You are a specialist advisor. You may set delegate_agent_id only when another specialist should own the next bounded task.";
+  const delegationLines =
+    input.delegation_brief && finalizeAutopilotDelegationBrief(input.delegation_brief)
+      ? [
+          `Source delegate target: ${input.delegation_brief.delegate_agent_id ?? "none"}`,
+          `Source task objective: ${input.delegation_brief.task_objective ?? "none"}`,
+          `Source success criteria: ${input.delegation_brief.success_criteria.join(" | ") || "none"}`,
+          `Source evidence requirements: ${input.delegation_brief.evidence_requirements.join(" | ") || "none"}`,
+          `Source rollback notes: ${input.delegation_brief.rollback_notes.join(" | ") || "none"}`,
+        ]
+      : [];
+  const learningLines =
+    input.learning_notes.length > 0
+      ? [
+          "Recent learned patterns:",
+          ...input.learning_notes.map((note) => `- ${note}`),
+          "Use learned patterns only when they improve this external task. Do not create self-improvement-only work from them.",
+        ]
+      : [];
   return [
     `Council round: ${input.round}`,
+    `Agent: ${input.agent_id}`,
     `Lane: ${input.lane}`,
+    `Coordination tier: ${coordinationTier}`,
+    `Reports to: ${parentAgentId ?? input.lead_agent_id ?? "none"}`,
+    `Managed agents: ${managedAgentIds.join(", ") || "none"}`,
+    `Objective source: ${input.objective_source}`,
+    `Lead agent: ${input.lead_agent_id ?? "none"}`,
+    `Specialists: ${input.specialist_agent_ids.join(", ") || "none"}`,
+    `Target council: ${input.target_agent_ids.join(", ") || "default"}`,
     `Objective: ${input.objective}`,
+    ...delegationLines,
+    ...learningLines,
     "Return strict JSON only with keys:",
-    `{"strategy":"...","commands":["..."],"confidence":0.0-1.0,"mentorship_note":"teach local llama what to retain"}`,
-    "Prefer concrete commands and safety-aware reasoning.",
+    `{"strategy":"...","commands":["..."],"confidence":0.0-1.0,"mentorship_note":"teach local llama what to retain","delegate_agent_id":"optional-specialist","task_objective":"optional bounded task","success_criteria":["..."],"evidence_requirements":["..."],"rollback_notes":["..."],"delegations":[{"delegate_agent_id":"owner","task_objective":"bounded task","success_criteria":["..."],"evidence_requirements":["..."],"rollback_notes":["..."]}]}`,
+    hierarchyInstruction,
+    "Prefer concrete commands, bounded delegation, and safety-aware reasoning.",
+    "If more than one bounded assignment is warranted, use delegations with one owner per item and keep the items non-overlapping.",
+    "When you emit delegations, also mirror the highest-priority item into delegate_agent_id/task_objective/success_criteria/evidence_requirements/rollback_notes for backward compatibility.",
     "If no command is safe, return empty commands and explain in strategy.",
   ].join("\n");
 }
@@ -5162,6 +7526,12 @@ function parseAutopilotProposal(content: string): {
   commands: string[];
   confidence: number;
   mentorship_note: string | null;
+  delegate_agent_id: string | null;
+  task_objective: string | null;
+  success_criteria: string[];
+  evidence_requirements: string[];
+  rollback_notes: string[];
+  delegations: AutopilotDelegationBrief[];
 } {
   const jsonSlice = extractJSONObject(content);
   if (!jsonSlice) {
@@ -5170,10 +7540,25 @@ function parseAutopilotProposal(content: string): {
       commands: extractCommandsFromFreeText(content),
       confidence: inferProposalConfidence(content),
       mentorship_note: null,
+      delegate_agent_id: null,
+      task_objective: null,
+      success_criteria: [],
+      evidence_requirements: [],
+      rollback_notes: [],
+      delegations: [],
     };
   }
   try {
     const parsed = JSON.parse(jsonSlice) as Record<string, unknown>;
+    const nestedBrief = isRecord(parsed.delegation_brief) ? parsed.delegation_brief : {};
+    const parsedDelegations = normalizeAutopilotDelegationBriefBatch(
+      parsed.delegations ??
+        parsed.delegation_batch ??
+        parsed.delegation_briefs ??
+        parsed.task_batch ??
+        parsed.work_items,
+      8
+    );
     const strategy =
       compactConsensusText(
         String(parsed.strategy ?? parsed.proposal ?? parsed.plan ?? parsed.summary ?? content),
@@ -5185,11 +7570,48 @@ function parseAutopilotProposal(content: string): {
     const confidenceRaw = asFiniteNumber(parsed.confidence);
     const confidence = clamp(confidenceRaw ?? inferProposalConfidence(content), 0.05, 0.99);
     const mentorship = asNullableTrimmed(parsed.mentorship_note);
+    const delegateAgentId = normalizeConsensusAgentId(
+      asNullableTrimmed(parsed.delegate_agent_id) ?? asNullableTrimmed(nestedBrief.delegate_agent_id)
+    );
+    const taskObjective =
+      compactConsensusText(String(parsed.task_objective ?? nestedBrief.task_objective ?? ""), 800) || null;
+    const successCriteriaPrimary = normalizeAutopilotDelegationItems(parsed.success_criteria, 5, 160);
+    const successCriteria =
+      successCriteriaPrimary.length > 0
+        ? successCriteriaPrimary
+        : normalizeAutopilotDelegationItems(nestedBrief.success_criteria, 5, 160);
+    const evidenceRequirementsPrimary = normalizeAutopilotDelegationItems(parsed.evidence_requirements, 5, 160);
+    const evidenceRequirements =
+      evidenceRequirementsPrimary.length > 0
+        ? evidenceRequirementsPrimary
+        : normalizeAutopilotDelegationItems(nestedBrief.evidence_requirements, 5, 160);
+    const rollbackNotesPrimary = normalizeAutopilotDelegationItems(parsed.rollback_notes, 4, 160);
+    const rollbackNotes =
+      rollbackNotesPrimary.length > 0
+        ? rollbackNotesPrimary
+        : normalizeAutopilotDelegationItems(nestedBrief.rollback_notes, 4, 160);
+    const primaryDelegation = finalizeAutopilotDelegationBrief({
+      delegate_agent_id: delegateAgentId || null,
+      task_objective: taskObjective,
+      success_criteria: successCriteria,
+      evidence_requirements: evidenceRequirements,
+      rollback_notes: rollbackNotes,
+    });
+    const delegations = dedupeAutopilotDelegationBriefs(
+      primaryDelegation ? [primaryDelegation, ...parsedDelegations] : parsedDelegations
+    );
+    const selectedDelegation = delegations[0] ?? primaryDelegation ?? null;
     return {
       strategy,
       commands,
       confidence,
       mentorship_note: mentorship,
+      delegate_agent_id: selectedDelegation?.delegate_agent_id ?? (delegateAgentId || null),
+      task_objective: selectedDelegation?.task_objective ?? taskObjective,
+      success_criteria: selectedDelegation?.success_criteria ?? successCriteria,
+      evidence_requirements: selectedDelegation?.evidence_requirements ?? evidenceRequirements,
+      rollback_notes: selectedDelegation?.rollback_notes ?? rollbackNotes,
+      delegations,
     };
   } catch {
     return {
@@ -5197,6 +7619,12 @@ function parseAutopilotProposal(content: string): {
       commands: extractCommandsFromFreeText(content),
       confidence: inferProposalConfidence(content),
       mentorship_note: null,
+      delegate_agent_id: null,
+      task_objective: null,
+      success_criteria: [],
+      evidence_requirements: [],
+      rollback_notes: [],
+      delegations: [],
     };
   }
 }
@@ -5674,6 +8102,7 @@ type TriChatNoveltyProposal = {
   content: string;
   normalized: string;
   token_count: number;
+  confidence: number | null;
   source: "artifact" | "timeline";
   created_at: string;
 };
@@ -5755,18 +8184,25 @@ function collectLatestProposalsByAgent(
     if (!agentId) {
       continue;
     }
-    const candidateText = extractArtifactProposalText(artifact);
-    if (!candidateText) {
-      continue;
-    }
-    byAgent.set(agentId, {
-      agent_id: agentId,
-      content: compactConsensusText(candidateText, 1200),
-      normalized: normalizeNoveltyText(candidateText),
-      token_count: tokenizeNoveltyText(candidateText).size,
-      source: "artifact",
-      created_at: artifact.created_at,
-    });
+      const candidateText = extractArtifactProposalText(artifact);
+      if (!candidateText) {
+        continue;
+      }
+      const structuredConfidence =
+        typeof artifact.structured?.confidence === "number" && Number.isFinite(artifact.structured.confidence)
+          ? clamp(artifact.structured.confidence, 0.05, 0.99)
+          : typeof artifact.score === "number" && Number.isFinite(artifact.score)
+            ? clamp(artifact.score, 0.05, 0.99)
+            : inferProposalConfidence(String(artifact.content ?? ""));
+      byAgent.set(agentId, {
+        agent_id: agentId,
+        content: compactConsensusText(candidateText, 1200),
+        normalized: normalizeNoveltyText(candidateText),
+        token_count: tokenizeNoveltyText(candidateText).size,
+        confidence: structuredConfidence,
+        source: "artifact",
+        created_at: artifact.created_at,
+      });
   }
 
   if (byAgent.size === 0) {
@@ -5792,6 +8228,7 @@ function collectLatestProposalsByAgent(
         content: text,
         normalized: normalizeNoveltyText(text),
         token_count: tokenizeNoveltyText(text).size,
+        confidence: inferProposalConfidence(text),
         source: "timeline",
         created_at: message.created_at,
       });
@@ -6439,7 +8876,7 @@ function rankDecisionCandidates(
 
   const confidenceByAgent = new Map<string, number>();
   for (const proposal of novelty.proposals) {
-    confidenceByAgent.set(proposal.agent_id, inferProposalConfidence(proposal.content));
+    confidenceByAgent.set(proposal.agent_id, proposal.confidence ?? inferProposalConfidence(proposal.content));
   }
 
   const ranked = novelty.proposals
@@ -7911,16 +10348,22 @@ function evaluateTurnAutoFinalizationInvariants(
 }
 
 function buildTmuxControllerStatus(storage: Storage, input: z.infer<typeof trichatTmuxControllerSchema>) {
-  const state = resolveTmuxControllerState(storage, input);
+  const resolved = resolveTmuxControllerState(storage, input);
   const runtime = getTmuxRuntimeInfo();
+  const sessionActive = runtime.dry_run ? true : tmuxSessionExists(resolved.session_name);
+  const reconciled = reconcileTmuxTaskResidue(resolved, {
+    session_active: sessionActive,
+  });
+  const state = reconciled.state;
   const summarized = summarizeTmuxState(state, input.include_completed ?? false);
   return {
     generated_at: new Date().toISOString(),
     action: "status",
     runtime,
-    session_active: tmuxSessionExists(state.session_name),
+    session_active: sessionActive,
     state: summarized,
     dashboard: buildTmuxDashboard(state, summarized.workers),
+    reconciliation: reconciled.summary,
   };
 }
 
@@ -8225,6 +10668,115 @@ function parseIsoDateMs(value: string | null | undefined): number | null {
     return null;
   }
   return parsed;
+}
+
+function buildTmuxReadOnlySupersessionKey(task: TriChatTmuxControllerTaskRecord): string | null {
+  if (resolveTmuxTaskOwnershipMode(task) !== "read_only") {
+    return null;
+  }
+  const source = String(task.metadata?.source ?? "").trim().toLowerCase();
+  if (source !== "trichat.autopilot") {
+    return null;
+  }
+  const threadId = String(task.thread_id ?? "").trim().toLowerCase();
+  const ownershipScope = String(resolveTmuxTaskOwnershipScope(task) ?? "repo-root")
+    .trim()
+    .toLowerCase();
+  const command = String(task.command ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+  if (!command) {
+    return null;
+  }
+  return [source, threadId, ownershipScope, command].join("|");
+}
+
+function reconcileTmuxTaskResidue(
+  state: TriChatTmuxControllerStateRecord,
+  options?: {
+    session_active?: boolean;
+  }
+): TriChatTmuxReconcileResult {
+  const runtime = getTmuxRuntimeInfo();
+  const sessionActive = options?.session_active ?? (runtime.dry_run ? true : tmuxSessionExists(state.session_name));
+  const now = new Date().toISOString();
+  let orphanedCancelled = 0;
+  let supersededCancelled = 0;
+
+  let tasks = state.tasks.map((task) => ({
+    ...task,
+    metadata: { ...(task.metadata ?? {}) },
+  }));
+
+  if (!sessionActive) {
+    tasks = tasks.map((task) => {
+      if (isTerminalTmuxTaskStatus(task.status)) {
+        return task;
+      }
+      orphanedCancelled += 1;
+      return {
+        ...task,
+        status: "cancelled",
+        completed_at: task.completed_at ?? now,
+        exit_code: null,
+        metadata: {
+          ...(task.metadata ?? {}),
+          tmux_reconciled_at: now,
+          tmux_reconciled_state: "orphaned",
+          tmux_reconciled_reason: `${TMUX_RECONCILED_ORPHAN_REASON_PREFIX} (${state.session_name})`,
+        },
+      };
+    });
+  }
+
+  const keepLatestByKey = new Map<string, string>();
+  for (const task of [...tasks].sort((left, right) => right.seq - left.seq)) {
+    const key = buildTmuxReadOnlySupersessionKey(task);
+    if (!key || keepLatestByKey.has(key)) {
+      continue;
+    }
+    keepLatestByKey.set(key, task.task_id);
+  }
+
+  tasks = tasks.map((task) => {
+    if (isTerminalTmuxTaskStatus(task.status) || task.status === "running") {
+      return task;
+    }
+    const key = buildTmuxReadOnlySupersessionKey(task);
+    if (!key) {
+      return task;
+    }
+    const keeperTaskId = keepLatestByKey.get(key);
+    if (!keeperTaskId || keeperTaskId === task.task_id) {
+      return task;
+    }
+    supersededCancelled += 1;
+    return {
+      ...task,
+      status: "cancelled",
+      completed_at: task.completed_at ?? now,
+      exit_code: null,
+      metadata: {
+        ...(task.metadata ?? {}),
+        tmux_reconciled_at: now,
+        tmux_reconciled_state: "superseded_duplicate",
+        tmux_reconciled_reason: `superseded by newer read-only task ${keeperTaskId}`,
+        tmux_reconciled_by_task_id: keeperTaskId,
+      },
+    };
+  });
+
+  return {
+    state: {
+      ...state,
+      tasks: tasks.sort((left, right) => left.seq - right.seq),
+    },
+    summary: {
+      orphaned_cancelled: orphanedCancelled,
+      superseded_cancelled: supersededCancelled,
+    },
+  };
 }
 
 function buildTmuxWorkerSnapshots(state: TriChatTmuxControllerStateRecord): TriChatTmuxWorkerSnapshot[] {

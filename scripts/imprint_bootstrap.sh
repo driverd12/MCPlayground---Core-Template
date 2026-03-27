@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO_ROOT}"
+eval "$("${REPO_ROOT}/scripts/export_dotenv_env.sh" "${REPO_ROOT}")"
+
 export IMPRINT_TRANSPORT="${IMPRINT_TRANSPORT:-stdio}"
 export IMPRINT_URL="${IMPRINT_URL:-http://127.0.0.1:8787/}"
 export IMPRINT_ORIGIN="${IMPRINT_ORIGIN:-http://127.0.0.1}"

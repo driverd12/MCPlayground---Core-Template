@@ -32,6 +32,12 @@ import {
   listAgentSessions,
   openAgentSession,
 } from "./tools/agent_session.js";
+import {
+  agentLearningListSchema,
+  agentLearningSummarySchema,
+  listAgentLearning,
+  summarizeAgentLearning,
+} from "./tools/agent_learning.js";
 import { dispatchAutorunSchema } from "./tools/dispatch.js";
 import { appendMemory, getMemory, memoryAppendSchema, memoryGetSchema, memorySearchSchema, searchMemory } from "./tools/memory.js";
 import {
@@ -271,7 +277,7 @@ initializeAutoSquishDaemon(storage);
 initializeTaskAutoRetryDaemon(storage);
 initializeTriChatAutoRetentionDaemon(storage);
 initializeTriChatTurnWatchdogDaemon(storage);
-initializeTriChatAutopilotDaemon(storage);
+initializeTriChatAutopilotDaemon(storage, invokeRegisteredTool);
 const triChatBusRuntime = new TriChatBusRuntime(storage, {
   socket_path: process.env.TRICHAT_BUS_SOCKET_PATH
     ? path.resolve(process.env.TRICHAT_BUS_SOCKET_PATH)
@@ -1644,6 +1650,14 @@ registerTool("agent.session_close", "Close a durable agent session and release i
   closeAgentSession(storage, input)
 );
 
+registerTool("agent.learning_list", "List bounded learning entries captured for agents.", agentLearningListSchema, (input) =>
+  listAgentLearning(storage, input)
+);
+
+registerTool("agent.learning_summary", "Summarize bounded learning coverage and recent lessons across agents.", agentLearningSummarySchema, (input) =>
+  summarizeAgentLearning(storage, input)
+);
+
 registerTool("agent.claim_next", "Claim the next runnable task through a durable agent session lease.", agentClaimNextSchema, (input) =>
   agentClaimNext(storage, input)
 );
@@ -2475,7 +2489,7 @@ registerTool(
   "trichat.autopilot",
   "Manage autonomous TriChat daemon loops with away-mode safety gates, emergency brake, and mentorship persistence.",
   trichatAutopilotSchema,
-  (input) => trichatAutopilotControl(storage, input)
+  (input) => trichatAutopilotControl(storage, invokeRegisteredTool, input)
 );
 
 registerTool(

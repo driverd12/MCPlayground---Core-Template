@@ -220,6 +220,40 @@ export type AgentSessionRecord = {
   source_agent: string | null;
 };
 
+export type AgentLearningEntryStatus = "active" | "suppressed";
+export type AgentLearningEntryKind =
+  | "execution_pattern"
+  | "delegation_pattern"
+  | "verification_pattern"
+  | "failure_pattern"
+  | "guardrail";
+export type AgentLearningEntryPolarity = "prefer" | "avoid";
+
+export type AgentLearningEntryRecord = {
+  entry_id: string;
+  agent_id: string;
+  created_at: string;
+  updated_at: string;
+  status: AgentLearningEntryStatus;
+  lesson_kind: AgentLearningEntryKind;
+  polarity: AgentLearningEntryPolarity;
+  scope: string | null;
+  summary: string;
+  lesson: string;
+  evidence: string | null;
+  source_run_id: string | null;
+  source_task_id: string | null;
+  thread_id: string | null;
+  turn_id: string | null;
+  confidence: number | null;
+  weight: number;
+  fingerprint: string;
+  metadata: Record<string, unknown>;
+  source_client: string | null;
+  source_model: string | null;
+  source_agent: string | null;
+};
+
 export type ArtifactStatus = "active" | "superseded" | "invalid" | "archived";
 
 export type ArtifactTrustTier = "raw" | "derived" | "verified" | "policy-backed" | "deprecated";
@@ -553,6 +587,10 @@ export type TaskSummaryRecord = {
     max_attempts: number;
     updated_at: string;
   } | null;
+  last_completed: {
+    task_id: string;
+    updated_at: string;
+  } | null;
 };
 
 export type TriChatSummaryRecord = {
@@ -711,6 +749,8 @@ export type TriChatAutopilotStateRecord = {
   thread_title: string;
   thread_status: "active" | "archived";
   objective: string;
+  lead_agent_id: string | null;
+  specialist_agent_ids: string[];
   max_rounds: number;
   min_success_agents: number;
   bridge_timeout_seconds: number;
@@ -934,6 +974,11 @@ export class Storage {
         version: 13,
         name: "add-runtime-event-bus-schema",
         run: () => this.applyRuntimeEventBusMigration(),
+      },
+      {
+        version: 14,
+        name: "add-agent-learning-ledger-schema",
+        run: () => this.applyAgentLearningSchemaMigration(),
       },
     ]);
     this.ensureRuntimeSchemaCompleteness();
@@ -1959,6 +2004,12 @@ export class Storage {
             "Autopilot heartbeat: propose one high-leverage improvement for MCP server reliability and TriChat interop."
         ).trim() ||
         "Autopilot heartbeat: propose one high-leverage improvement for MCP server reliability and TriChat interop.",
+      lead_agent_id: asNullableString(config.lead_agent_id),
+      specialist_agent_ids: dedupeNonEmpty(
+        Array.isArray(config.specialist_agent_ids)
+          ? (config.specialist_agent_ids as unknown[]).map((entry) => String(entry ?? ""))
+          : []
+      ),
       max_rounds: parseBoundedInt(config.max_rounds, 2, 1, 6),
       min_success_agents: parseBoundedInt(config.min_success_agents, 2, 1, 3),
       bridge_timeout_seconds: parseBoundedInt(config.bridge_timeout_seconds, 180, 5, 7200),
@@ -1990,6 +2041,8 @@ export class Storage {
     thread_title: string;
     thread_status: "active" | "archived";
     objective: string;
+    lead_agent_id?: string | null;
+    specialist_agent_ids?: string[];
     max_rounds: number;
     min_success_agents: number;
     bridge_timeout_seconds: number;
@@ -2033,6 +2086,8 @@ export class Storage {
       objective:
         String(params.objective ?? "").trim() ||
         "Autopilot heartbeat: propose one high-leverage improvement for MCP server reliability and TriChat interop.",
+      lead_agent_id: asNullableString(params.lead_agent_id),
+      specialist_agent_ids: dedupeNonEmpty(params.specialist_agent_ids ?? []),
       max_rounds: parseBoundedInt(params.max_rounds, 2, 1, 6),
       min_success_agents: parseBoundedInt(params.min_success_agents, 2, 1, 3),
       bridge_timeout_seconds: parseBoundedInt(params.bridge_timeout_seconds, 180, 5, 7200),
@@ -2059,6 +2114,8 @@ export class Storage {
       thread_title: normalized.thread_title,
       thread_status: normalized.thread_status,
       objective: normalized.objective,
+      lead_agent_id: normalized.lead_agent_id,
+      specialist_agent_ids: normalized.specialist_agent_ids,
       max_rounds: normalized.max_rounds,
       min_success_agents: normalized.min_success_agents,
       bridge_timeout_seconds: normalized.bridge_timeout_seconds,
@@ -3778,6 +3835,195 @@ export class Storage {
       reason: session ? "closed" : "not-found",
       session: session ?? undefined,
     };
+  }
+
+  recordAgentLearningEntry(params: {
+    entry_id?: string;
+    agent_id: string;
+    status?: AgentLearningEntryStatus;
+    lesson_kind: AgentLearningEntryKind;
+    polarity: AgentLearningEntryPolarity;
+    scope?: string;
+    summary: string;
+    lesson: string;
+    evidence?: string;
+    source_run_id?: string;
+    source_task_id?: string;
+    thread_id?: string;
+    turn_id?: string;
+    confidence?: number;
+    weight?: number;
+    fingerprint: string;
+    metadata?: Record<string, unknown>;
+    source_client?: string;
+    source_model?: string;
+    source_agent?: string;
+  }): { created: boolean; entry: AgentLearningEntryRecord } {
+    const agentId = params.agent_id.trim();
+    if (!agentId) {
+      throw new Error("agent_id is required");
+    }
+    const summary = params.summary.trim();
+    if (!summary) {
+      throw new Error("summary is required");
+    }
+    const lesson = params.lesson.trim();
+    if (!lesson) {
+      throw new Error("lesson is required");
+    }
+    const fingerprint = params.fingerprint.trim();
+    if (!fingerprint) {
+      throw new Error("fingerprint is required");
+    }
+    const now = new Date().toISOString();
+    const status = normalizeAgentLearningEntryStatus(params.status ?? "active");
+    const lessonKind = normalizeAgentLearningEntryKind(params.lesson_kind);
+    const polarity = normalizeAgentLearningEntryPolarity(params.polarity);
+    const scope = params.scope?.trim() || null;
+    const evidence = params.evidence?.trim() || null;
+    const parsedConfidence = params.confidence === undefined || params.confidence === null ? null : Number(params.confidence);
+    const confidence =
+      parsedConfidence === null || !Number.isFinite(parsedConfidence)
+        ? null
+        : Math.max(0, Math.min(1, parsedConfidence));
+    const parsedWeight = params.weight === undefined || params.weight === null ? null : Number(params.weight);
+    const weight =
+      parsedWeight === null || !Number.isFinite(parsedWeight)
+        ? 0.5
+        : Math.max(0.05, Math.min(1, parsedWeight));
+    const metadata = parseLooseObject(params.metadata ?? {});
+    const existing = this.db
+      .prepare(
+        `SELECT entry_id
+         FROM agent_learning_entries
+         WHERE agent_id = ? AND fingerprint = ?`
+      )
+      .get(agentId, fingerprint) as Record<string, unknown> | undefined;
+    const entryId = (params.entry_id?.trim() || asNullableString(existing?.entry_id) || crypto.randomUUID()) as string;
+
+    this.db
+      .prepare(
+        `INSERT INTO agent_learning_entries (
+           entry_id, agent_id, created_at, updated_at, status, lesson_kind, polarity, scope,
+           summary, lesson, evidence, source_run_id, source_task_id, thread_id, turn_id,
+           confidence, weight, fingerprint, metadata_json, source_client, source_model, source_agent
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(entry_id) DO UPDATE SET
+           updated_at = excluded.updated_at,
+           status = excluded.status,
+           lesson_kind = excluded.lesson_kind,
+           polarity = excluded.polarity,
+           scope = excluded.scope,
+           summary = excluded.summary,
+           lesson = excluded.lesson,
+           evidence = excluded.evidence,
+           source_run_id = excluded.source_run_id,
+           source_task_id = excluded.source_task_id,
+           thread_id = excluded.thread_id,
+           turn_id = excluded.turn_id,
+           confidence = excluded.confidence,
+           weight = excluded.weight,
+           fingerprint = excluded.fingerprint,
+           metadata_json = excluded.metadata_json,
+           source_client = excluded.source_client,
+           source_model = excluded.source_model,
+           source_agent = excluded.source_agent`
+      )
+      .run(
+        entryId,
+        agentId,
+        existing ? now : now,
+        now,
+        status,
+        lessonKind,
+        polarity,
+        scope,
+        summary,
+        lesson,
+        evidence,
+        params.source_run_id?.trim() || null,
+        params.source_task_id?.trim() || null,
+        params.thread_id?.trim() || null,
+        params.turn_id?.trim() || null,
+        confidence,
+        weight,
+        fingerprint,
+        stableStringify(metadata),
+        params.source_client ?? null,
+        params.source_model ?? null,
+        params.source_agent ?? null
+      );
+
+    const entry = this.getAgentLearningEntryById(entryId);
+    if (!entry) {
+      throw new Error(`Failed to read agent learning entry after upsert: ${entryId}`);
+    }
+    return {
+      created: !existing,
+      entry,
+    };
+  }
+
+  getAgentLearningEntryById(entryId: string): AgentLearningEntryRecord | null {
+    const normalized = entryId.trim();
+    if (!normalized) {
+      return null;
+    }
+    const row = this.db
+      .prepare(
+        `SELECT entry_id, agent_id, created_at, updated_at, status, lesson_kind, polarity, scope,
+                summary, lesson, evidence, source_run_id, source_task_id, thread_id, turn_id,
+                confidence, weight, fingerprint, metadata_json, source_client, source_model, source_agent
+         FROM agent_learning_entries
+         WHERE entry_id = ?`
+      )
+      .get(normalized) as Record<string, unknown> | undefined;
+    if (!row) {
+      return null;
+    }
+    return mapAgentLearningEntryRow(row);
+  }
+
+  listAgentLearningEntries(params: {
+    agent_id?: string;
+    status?: AgentLearningEntryStatus;
+    lesson_kind?: AgentLearningEntryKind;
+    polarity?: AgentLearningEntryPolarity;
+    limit: number;
+  }): AgentLearningEntryRecord[] {
+    const limit = Math.max(1, Math.min(500, params.limit));
+    const whereClauses: string[] = [];
+    const values: unknown[] = [];
+    const agentId = params.agent_id?.trim();
+    if (agentId) {
+      whereClauses.push("agent_id = ?");
+      values.push(agentId);
+    }
+    if (params.status) {
+      whereClauses.push("status = ?");
+      values.push(normalizeAgentLearningEntryStatus(params.status));
+    }
+    if (params.lesson_kind) {
+      whereClauses.push("lesson_kind = ?");
+      values.push(normalizeAgentLearningEntryKind(params.lesson_kind));
+    }
+    if (params.polarity) {
+      whereClauses.push("polarity = ?");
+      values.push(normalizeAgentLearningEntryPolarity(params.polarity));
+    }
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(
+        `SELECT entry_id, agent_id, created_at, updated_at, status, lesson_kind, polarity, scope,
+                summary, lesson, evidence, source_run_id, source_task_id, thread_id, turn_id,
+                confidence, weight, fingerprint, metadata_json, source_client, source_model, source_agent
+         FROM agent_learning_entries
+         ${whereSql}
+         ORDER BY weight DESC, updated_at DESC
+         LIMIT ?`
+      )
+      .all(...values, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => mapAgentLearningEntryRow(row));
   }
 
   recordArtifact(params: {
@@ -5552,6 +5798,15 @@ export class Storage {
          LIMIT 1`
       )
       .get() as Record<string, unknown> | undefined;
+    const completedRow = this.db
+      .prepare(
+        `SELECT task_id, updated_at
+         FROM tasks
+         WHERE status = 'completed'
+         ORDER BY updated_at DESC
+         LIMIT 1`
+      )
+      .get() as Record<string, unknown> | undefined;
 
     return {
       counts,
@@ -5571,6 +5826,12 @@ export class Storage {
             attempt_count: Number(failedRow.attempt_count ?? 0),
             max_attempts: Number(failedRow.max_attempts ?? 0),
             updated_at: String(failedRow.updated_at ?? ""),
+          }
+        : null,
+      last_completed: completedRow
+        ? {
+            task_id: String(completedRow.task_id ?? ""),
+            updated_at: String(completedRow.updated_at ?? ""),
           }
         : null,
     };
@@ -7920,6 +8181,7 @@ export class Storage {
       "experiments",
       "experiment_runs",
       "agent_sessions",
+      "agent_learning_entries",
       "trichat_threads",
       "trichat_messages",
       "trichat_turns",
@@ -8009,6 +8271,7 @@ export class Storage {
     this.applyTriChatReliabilitySchemaMigration();
     this.applyAgenticSchemaMigration();
     this.applyAgentSessionsSchemaMigration();
+    this.applyAgentLearningSchemaMigration();
     this.applyExperimentSchemaMigration();
     this.applyRuntimeEventBusMigration();
   }
@@ -8493,6 +8756,52 @@ export class Storage {
     this.ensureIndex("idx_agent_sessions_agent", "agent_sessions", "agent_id, updated_at DESC");
     this.ensureIndex("idx_agent_sessions_status", "agent_sessions", "status, updated_at DESC");
     this.ensureIndex("idx_agent_sessions_lease", "agent_sessions", "lease_expires_at ASC");
+  }
+
+  private applyAgentLearningSchemaMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_learning_entries (
+        entry_id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        status TEXT NOT NULL,
+        lesson_kind TEXT NOT NULL,
+        polarity TEXT NOT NULL,
+        scope TEXT,
+        summary TEXT NOT NULL,
+        lesson TEXT NOT NULL,
+        evidence TEXT,
+        source_run_id TEXT,
+        source_task_id TEXT,
+        thread_id TEXT,
+        turn_id TEXT,
+        confidence REAL,
+        weight REAL NOT NULL DEFAULT 0.5,
+        fingerprint TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        source_client TEXT,
+        source_model TEXT,
+        source_agent TEXT
+      );
+    `);
+
+    this.ensureIndex("idx_agent_learning_agent", "agent_learning_entries", "agent_id, updated_at DESC");
+    this.ensureIndex(
+      "idx_agent_learning_agent_polarity",
+      "agent_learning_entries",
+      "agent_id, polarity, updated_at DESC"
+    );
+    this.ensureIndex(
+      "idx_agent_learning_agent_status",
+      "agent_learning_entries",
+      "agent_id, status, updated_at DESC"
+    );
+    this.ensureIndex(
+      "idx_agent_learning_agent_fingerprint",
+      "agent_learning_entries",
+      "agent_id, fingerprint"
+    );
   }
 
   private applyExperimentSchemaMigration(): void {
@@ -9049,6 +9358,38 @@ function mapAgentSessionRow(row: Record<string, unknown>): AgentSessionRecord {
     heartbeat_at: asNullableString(row.heartbeat_at),
     capabilities: parseJsonObject(row.capabilities_json),
     tags: safeParseJsonArray(row.tags_json),
+    metadata: parseJsonObject(row.metadata_json),
+    source_client: asNullableString(row.source_client),
+    source_model: asNullableString(row.source_model),
+    source_agent: asNullableString(row.source_agent),
+  };
+}
+
+function mapAgentLearningEntryRow(row: Record<string, unknown>): AgentLearningEntryRecord {
+  return {
+    entry_id: String(row.entry_id ?? ""),
+    agent_id: String(row.agent_id ?? ""),
+    created_at: String(row.created_at ?? ""),
+    updated_at: String(row.updated_at ?? ""),
+    status: normalizeAgentLearningEntryStatus(row.status),
+    lesson_kind: normalizeAgentLearningEntryKind(row.lesson_kind),
+    polarity: normalizeAgentLearningEntryPolarity(row.polarity),
+    scope: asNullableString(row.scope),
+    summary: String(row.summary ?? ""),
+    lesson: String(row.lesson ?? ""),
+    evidence: asNullableString(row.evidence),
+    source_run_id: asNullableString(row.source_run_id),
+    source_task_id: asNullableString(row.source_task_id),
+    thread_id: asNullableString(row.thread_id),
+    turn_id: asNullableString(row.turn_id),
+    confidence:
+      row.confidence === null || row.confidence === undefined
+        ? null
+        : Number.isFinite(Number(row.confidence))
+          ? Number(row.confidence)
+          : null,
+    weight: Number.isFinite(Number(row.weight)) ? Number(row.weight) : 0.5,
+    fingerprint: String(row.fingerprint ?? ""),
     metadata: parseJsonObject(row.metadata_json),
     source_client: asNullableString(row.source_client),
     source_model: asNullableString(row.source_model),
@@ -9637,6 +9978,35 @@ function normalizeAgentSessionStatus(value: unknown): AgentSessionStatus {
     return normalized;
   }
   return "active";
+}
+
+function normalizeAgentLearningEntryStatus(value: unknown): AgentLearningEntryStatus {
+  const normalized = String(value ?? "active");
+  if (normalized === "suppressed") {
+    return "suppressed";
+  }
+  return "active";
+}
+
+function normalizeAgentLearningEntryKind(value: unknown): AgentLearningEntryKind {
+  const normalized = String(value ?? "execution_pattern");
+  if (
+    normalized === "delegation_pattern" ||
+    normalized === "verification_pattern" ||
+    normalized === "failure_pattern" ||
+    normalized === "guardrail"
+  ) {
+    return normalized;
+  }
+  return "execution_pattern";
+}
+
+function normalizeAgentLearningEntryPolarity(value: unknown): AgentLearningEntryPolarity {
+  const normalized = String(value ?? "prefer");
+  if (normalized === "avoid") {
+    return "avoid";
+  }
+  return "prefer";
 }
 
 function normalizeArtifactStatus(value: unknown): ArtifactStatus {

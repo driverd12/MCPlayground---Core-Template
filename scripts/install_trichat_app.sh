@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="TriChat"
-INSTALL_DIR="${HOME}/Applications"
+APP_NAME="Agent Office"
+INSTALL_DIR="/Applications"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRANSPORT="stdio"
-TERMINAL_MODE="alacritty"
+TERMINAL_MODE="terminal"
 ICON_PATH=""
 
 usage() {
@@ -16,14 +16,15 @@ Usage:
 Options:
   --icon <path>          Optional icon image file to apply to the app (.png recommended)
   --transport <mode>     stdio (default) or http
-  --terminal <mode>      alacritty (default) or terminal
-  --name <app-name>      App name (default: TriChat)
-  --install-dir <path>   Install directory (default: ~/Applications)
+  --terminal <mode>      terminal (default) or alacritty
+  --name <app-name>      App name (default: Agent Office)
+  --install-dir <path>   Install directory (default: /Applications)
   --repo-root <path>     Repository root (default: current repo)
   -h, --help             Show this help
 
 Examples:
-  ./scripts/install_trichat_app.sh --icon /absolute/path/to/3cats.png
+  ./scripts/install_trichat_app.sh
+  ./scripts/install_trichat_app.sh --icon /absolute/path/to/office-mascot.png
   ./scripts/install_trichat_app.sh --transport http --terminal alacritty
 USAGE
 }
@@ -115,6 +116,9 @@ INSTALL_DIR="$(mkdir -p "${INSTALL_DIR}" && cd "${INSTALL_DIR}" && pwd)"
 APP_PATH="${INSTALL_DIR}/${APP_NAME}.app"
 
 require_command osacompile
+require_command python3
+require_command sips
+require_command iconutil
 
 if [[ "${TERMINAL_MODE}" == "alacritty" ]]; then
   require_command open
@@ -123,28 +127,36 @@ fi
 if [[ -n "${ICON_PATH}" ]]; then
   ICON_PATH="$(cd "$(dirname "${ICON_PATH}")" && pwd)/$(basename "${ICON_PATH}")"
   [[ -f "${ICON_PATH}" ]] || fail "icon file does not exist: ${ICON_PATH}"
-  require_command sips
-  require_command iconutil
 fi
 
-LAUNCH_SCRIPT="npm run trichat:tui"
+LAUNCH_SCRIPT="npm run trichat:office:tmux"
 if [[ "${TRANSPORT}" == "http" ]]; then
-  LAUNCH_SCRIPT="npm run trichat:tui:http"
+  LAUNCH_SCRIPT="TRICHAT_MCP_TRANSPORT=http npm run trichat:office:tmux"
 fi
 
 TMP_APPLESCRIPT="$(mktemp -t trichat-installer-XXXXXX.applescript)"
 TMP_ICONSET_DIR=""
 TMP_ICON_FILE=""
+TMP_ICON_SOURCE=""
 cleanup() {
   rm -f "${TMP_APPLESCRIPT}"
   if [[ -n "${TMP_ICON_FILE}" ]]; then
     rm -f "${TMP_ICON_FILE}"
+  fi
+  if [[ -n "${TMP_ICON_SOURCE}" ]]; then
+    rm -f "${TMP_ICON_SOURCE}"
   fi
   if [[ -n "${TMP_ICONSET_DIR}" ]]; then
     rm -rf "${TMP_ICONSET_DIR}"
   fi
 }
 trap cleanup EXIT
+
+if [[ -z "${ICON_PATH}" ]]; then
+  TMP_ICON_SOURCE="$(mktemp -t agent-office-icon-XXXXXX).png"
+  python3 "${REPO_ROOT}/scripts/generate_agent_office_icon.py" --out "${TMP_ICON_SOURCE}"
+  ICON_PATH="${TMP_ICON_SOURCE}"
+fi
 
 if [[ "${TERMINAL_MODE}" == "terminal" ]]; then
   cat > "${TMP_APPLESCRIPT}" <<EOF
@@ -175,19 +187,16 @@ fi
 
 osacompile -o "${APP_PATH}" "${TMP_APPLESCRIPT}" >/dev/null
 
-if [[ -n "${ICON_PATH}" ]]; then
-  TMP_ICONSET_DIR="$(mktemp -d -t trichat-iconset-XXXXXX)"
-  TMP_ICONSET_DIR="${TMP_ICONSET_DIR}/TriChat.iconset"
-  TMP_ICON_FILE="$(mktemp -t trichat-icon-XXXXXX).icns"
-  build_icns "${ICON_PATH}" "${TMP_ICON_FILE}" "${TMP_ICONSET_DIR}"
-  cp -f "${TMP_ICON_FILE}" "${APP_PATH}/Contents/Resources/applet.icns"
-  if command -v codesign >/dev/null 2>&1; then
-    codesign --force --deep --sign - "${APP_PATH}" >/dev/null 2>&1 || true
-  fi
+TMP_ICONSET_DIR="$(mktemp -d -t trichat-iconset-XXXXXX)"
+TMP_ICONSET_DIR="${TMP_ICONSET_DIR}/AgentOffice.iconset"
+TMP_ICON_FILE="$(mktemp -t trichat-icon-XXXXXX).icns"
+build_icns "${ICON_PATH}" "${TMP_ICON_FILE}" "${TMP_ICONSET_DIR}"
+cp -f "${TMP_ICON_FILE}" "${APP_PATH}/Contents/Resources/applet.icns"
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --deep --sign - "${APP_PATH}" >/dev/null 2>&1 || true
 fi
+touch "${APP_PATH}"
 
 echo "installed ${APP_PATH}" >&2
 echo "launch target: ${LAUNCH_SCRIPT}" >&2
-if [[ -n "${ICON_PATH}" ]]; then
-  echo "icon applied from: ${ICON_PATH}" >&2
-fi
+echo "icon applied from: ${ICON_PATH}" >&2

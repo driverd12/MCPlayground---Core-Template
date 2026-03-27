@@ -1,6 +1,7 @@
 import { z } from "zod";
-import { type AgentSessionRecord, type GoalRecord, type PlanRecord, type PlanStepRecord, Storage } from "../storage.js";
+import { type AgentSessionRecord, type GoalRecord, type PlanRecord, type PlanStepRecord, type TaskSummaryRecord, Storage } from "../storage.js";
 import { getAdaptiveWorkerProfile, summarizeAdaptiveSessionHealth, summarizeAdaptiveWorkerProfile } from "./agent_session.js";
+import { buildAgentLearningOverview } from "./agent_learning.js";
 import { evaluatePlanStepReadiness, getPlanStepApprovalGateKind } from "./plan.js";
 
 const goalStatusSchema = z.enum([
@@ -421,6 +422,38 @@ function deriveKernelState(params: {
   return "idle";
 }
 
+function taskFailuresAreStale(taskSummary: TaskSummaryRecord): boolean {
+  if ((taskSummary.counts.failed ?? 0) === 0 || !taskSummary.last_failed || !taskSummary.last_completed) {
+    return false;
+  }
+  return taskSummary.last_completed.updated_at > taskSummary.last_failed.updated_at;
+}
+
+function taskFailuresRecoveredByActiveSessions(
+  taskSummary: TaskSummaryRecord,
+  activeSessions: AgentSessionRecord[]
+): boolean {
+  if ((taskSummary.counts.failed ?? 0) === 0 || !taskSummary.last_failed) {
+    return false;
+  }
+  const failedAtMs = Date.parse(taskSummary.last_failed.updated_at);
+  if (Number.isNaN(failedAtMs)) {
+    return false;
+  }
+  return activeSessions.some((session) => {
+    const adaptive = summarizeAdaptiveSessionHealth(session);
+    if (adaptive.adaptive_state !== "healthy") {
+      return false;
+    }
+    const profile = getAdaptiveWorkerProfile(session);
+    const recoveredAtMs = profile.last_completed_at ? Date.parse(profile.last_completed_at) : Number.NaN;
+    if (Number.isNaN(recoveredAtMs) || recoveredAtMs <= failedAtMs) {
+      return false;
+    }
+    return adaptive.performance.low.recovery_streak >= Math.max(4, Math.min(8, profile.total_failed * 2));
+  });
+}
+
 export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSummarySchema>) {
   const goalLimit = input.goal_limit ?? 10;
   const sessionLimit = input.session_limit ?? 20;
@@ -449,14 +482,6 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   const recentArtifacts = storage.listArtifacts({
     limit: artifactLimit,
   });
-  const recentEvents = storage.listRuntimeEvents({
-    limit: eventLimit,
-    since: input.event_since,
-  });
-  const eventSummary = storage.summarizeRuntimeEvents({
-    since: input.event_since,
-  });
-
   const goalSummaries = openGoals.map((goal) => {
     const plan = resolveGoalPlan(storage, goal);
     const steps = plan ? storage.listPlanSteps(plan.plan_id) : [];
@@ -538,10 +563,12 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       adaptive_none_count: 0,
     }
   );
+  const staleTaskFailures =
+    taskFailuresAreStale(taskSummary) || taskFailuresRecoveredByActiveSessions(taskSummary, activeSessions);
 
   const state = deriveKernelState({
     failed_goal_count: goalCounts.failed ?? 0,
-    failed_task_count: taskSummary.counts.failed ?? 0,
+    failed_task_count: staleTaskFailures ? 0 : taskSummary.counts.failed ?? 0,
     failed_experiment_count: experimentCounts.failed ?? 0,
     blocked_approval_count: totals.blocked_approval_count,
     blocked_human_count: totals.blocked_human_count,
@@ -565,8 +592,34 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       suppressed: 0,
     }
   );
+  const learningOverview = buildAgentLearningOverview(storage, {
+    limit: 250,
+    top_agents_limit: 6,
+    recent_limit: 6,
+  });
+  const activeLearningEntries = storage.listAgentLearningEntries({
+    status: "active",
+    limit: 250,
+  });
+  const recentEvents = storage.listRuntimeEvents({
+    limit: eventLimit,
+    since: input.event_since,
+  });
+  const eventSummary = storage.summarizeRuntimeEvents({
+    since: input.event_since,
+  });
+  const activeLearningAgents = new Set(activeLearningEntries.map((entry) => entry.agent_id));
+  const activeSessionAgentIds = [...new Set(activeSessions.map((session) => session.agent_id))];
+  const uncoveredActiveSessionAgents = activeSessionAgentIds
+    .filter((agentId) => !activeLearningAgents.has(agentId))
+    .sort((left, right) => left.localeCompare(right));
+  const activeSessionLearningCoverageCount = activeSessionAgentIds.length - uncoveredActiveSessionAgents.length;
   if ((taskSummary.counts.failed ?? 0) > 0 && taskSummary.last_failed) {
-    attention.push(`Failed task detected: ${taskSummary.last_failed.task_id}`);
+    attention.push(
+      staleTaskFailures
+        ? `Stale failed task remains in history: ${taskSummary.last_failed.task_id}`
+        : `Failed task detected: ${taskSummary.last_failed.task_id}`
+    );
   }
   if (totals.blocked_approval_count > 0) {
     attention.push(
@@ -611,6 +664,15 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   }
   if (adaptiveSessionCounts.degraded > 0) {
     attention.push(`Adaptive routing marks ${adaptiveSessionCounts.degraded} active session(s) as degraded.`);
+  }
+  if (activeSessions.length > 0 && learningOverview.active_entry_count === 0) {
+    attention.push("Active agent sessions have not yet accumulated any bounded learning entries.");
+  } else if (uncoveredActiveSessionAgents.length > 0) {
+    attention.push(
+      `Active learning coverage is still missing for ${uncoveredActiveSessionAgents.length} live agent session(s): ${uncoveredActiveSessionAgents
+        .slice(0, 4)
+        .join(", ")}${uncoveredActiveSessionAgents.length > 4 ? ", ..." : ""}.`
+    );
   }
   if (
     adaptiveSessionCounts.healthy === 0 &&
@@ -662,10 +724,23 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       methodology_entry_hold_count: totals.methodology_entry_hold_count,
       methodology_entry_recovery_ready_count: totals.methodology_entry_recovery_ready_count,
       failed_step_count: totals.failed_step_count,
+      learning_entry_count: learningOverview.total_entries,
+      active_learning_entry_count: learningOverview.active_entry_count,
+      learning_agent_count: learningOverview.agent_count,
+      active_session_learning_coverage_count: activeSessionLearningCoverageCount,
     },
     open_goals: goalSummaries,
     active_sessions: activeSessions,
     adaptive_sessions: adaptiveSessions,
+    learning: {
+      ...learningOverview,
+      active_session_coverage: {
+        active_session_agent_count: activeSessionAgentIds.length,
+        covered_agent_count: activeSessionLearningCoverageCount,
+        uncovered_agent_count: uncoveredActiveSessionAgents.length,
+        uncovered_agent_ids: uncoveredActiveSessionAgents,
+      },
+    },
     tasks: taskSummary,
     experiments,
     recent_artifacts: recentArtifacts,

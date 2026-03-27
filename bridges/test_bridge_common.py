@@ -14,7 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bridge_common import post_json_request, run_cli_command  # noqa: E402
+from bridge_common import normalize_proposal, post_json_request, run_cli_command  # noqa: E402
 
 warnings.simplefilter("ignore", ResourceWarning)
 
@@ -191,6 +191,99 @@ class PostJsonRequestTests(unittest.TestCase):
         self.assertIn("HTTP 401", str(raised.exception))
 
 
+class ProposalNormalizationTests(unittest.TestCase):
+    def test_preserves_delegation_metadata_when_present(self) -> None:
+        proposal = normalize_proposal(
+            json.dumps(
+                {
+                    "strategy": "Delegate the bounded implementation slice to code-smith.",
+                    "commands": ["git status"],
+                    "confidence": 0.83,
+                    "mentorship_note": "Keep the handoff bounded and replay-friendly.",
+                    "delegate_agent_id": "code-smith",
+                    "task_objective": "Implement the smallest safe diff and report verification steps.",
+                    "success_criteria": [
+                        "Keep the diff minimal and aligned to the bounded objective.",
+                        "Report the verification command that was run.",
+                    ],
+                    "evidence_requirements": [
+                        "List changed files.",
+                        "Include verification output.",
+                    ],
+                    "rollback_notes": [
+                        "Stop and report if the change expands beyond the bounded slice.",
+                    ],
+                }
+            ),
+            agent_id="implementation-director",
+            objective="Ship the next bounded implementation slice.",
+            fallback_confidence=0.5,
+            fallback_mentorship="fallback mentorship",
+            fallback_strategy="fallback strategy",
+        )
+        self.assertEqual(proposal.delegate_agent_id, "code-smith")
+        self.assertEqual(
+            proposal.task_objective,
+            "Implement the smallest safe diff and report verification steps.",
+        )
+        self.assertEqual(proposal.commands, ["git status"])
+        self.assertEqual(
+            proposal.success_criteria,
+            [
+                "Keep the diff minimal and aligned to the bounded objective.",
+                "Report the verification command that was run.",
+            ],
+        )
+        self.assertEqual(
+            proposal.evidence_requirements,
+            ["List changed files.", "Include verification output."],
+        )
+        self.assertEqual(
+            proposal.rollback_notes,
+            ["Stop and report if the change expands beyond the bounded slice."],
+        )
+        self.assertEqual(len(proposal.delegations or []), 1)
+
+    def test_preserves_delegation_batches_and_uses_first_item_for_legacy_fields(self) -> None:
+        proposal = normalize_proposal(
+            json.dumps(
+                {
+                    "strategy": "Ship the next bounded implementation and verification slices in parallel.",
+                    "commands": ["git status"],
+                    "confidence": 0.86,
+                    "mentorship_note": "Keep each handoff narrow and evidence-rich.",
+                    "delegations": [
+                        {
+                            "delegate_agent_id": "code-smith",
+                            "task_objective": "Implement the bounded code slice.",
+                            "success_criteria": ["Keep the diff minimal."],
+                            "evidence_requirements": ["List changed files."],
+                            "rollback_notes": ["Stop if the change expands beyond the slice."],
+                        },
+                        {
+                            "delegate_agent_id": "quality-guard",
+                            "task_objective": "Run the bounded verification pass.",
+                            "success_criteria": ["Check the highest-risk path."],
+                            "evidence_requirements": ["Include the verification command."],
+                            "rollback_notes": ["Do not fix code while verifying."],
+                        },
+                    ],
+                }
+            ),
+            agent_id="ring-leader",
+            objective="Ship the next bounded slices safely.",
+            fallback_confidence=0.5,
+            fallback_mentorship="fallback mentorship",
+            fallback_strategy="fallback strategy",
+        )
+        self.assertEqual(proposal.delegate_agent_id, "code-smith")
+        self.assertEqual(proposal.task_objective, "Implement the bounded code slice.")
+        self.assertEqual(
+            [item.delegate_agent_id for item in (proposal.delegations or [])],
+            ["code-smith", "quality-guard"],
+        )
+
+
 class WrapperDryRunTests(unittest.TestCase):
     def test_wrappers_emit_valid_dry_run_envelopes(self) -> None:
         wrapper_dir = Path(__file__).resolve().parent
@@ -232,6 +325,11 @@ class WrapperDryRunTests(unittest.TestCase):
                 self.assertIn("commands", content)
                 self.assertIn("confidence", content)
                 self.assertIn("mentorship_note", content)
+                self.assertIn("delegate_agent_id", content)
+                self.assertIn("task_objective", content)
+                self.assertIn("success_criteria", content)
+                self.assertIn("evidence_requirements", content)
+                self.assertIn("rollback_notes", content)
 
     def test_wrappers_emit_plain_dry_run_when_requested(self) -> None:
         wrapper_dir = Path(__file__).resolve().parent

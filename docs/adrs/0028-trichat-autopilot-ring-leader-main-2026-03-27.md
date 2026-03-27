@@ -1,0 +1,17 @@
+# 0028-trichat-autopilot-ring-leader-main-2026-03-27: TriChat Autopilot ring-leader-main 2026-03-27
+
+- Status: accepted
+- Date: 2026-03-27T05:10:40.148Z
+
+## Content
+Objective source: heartbeat
+Objective: Inspect kernel state, choose one high-leverage bounded next action, and delegate specialist work with explicit success criteria and rollback awareness
+Thread: ring-leader-main
+Turn: 1dd10cef-e5e4-4238-b00b-c5cf1e56e858
+Away mode: normal
+Selected agent: local-imprint
+Selected strategy: Inspect kernel state, choose one high-leverage bounded next action, and delegate specialist work with explicit success criteria and rollback awareness
+Execution mode: tmux_dispatch
+Execution commands: git status || npm run trichat:doctor || npm run ring-leader:status
+Verification: skipped (execution deferred to task queue)
+Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/MCPlayground---Core-Template

@@ -2,7 +2,7 @@
 """TriChat orchestrator for Anamnesis.
 
 Single-terminal UX:
-- one prompt fanout to codex, cursor, and local-imprint adapters
+- one prompt fanout to the active roster adapters
 - durable shared timeline via trichat.* MCP tools
 - slash-command routing into durable task.* workflows
 """
@@ -27,6 +27,57 @@ from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 
+def parse_cli_flag_value(argv: List[str], flag: str) -> Optional[str]:
+    try:
+        index = argv.index(flag)
+    except ValueError:
+        return None
+    if index + 1 >= len(argv):
+        return None
+    return argv[index + 1]
+
+
+def load_dotenv_file(dotenv_path: Path) -> None:
+    if not dotenv_path.exists():
+        return
+    try:
+        lines = dotenv_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and (
+            (value.startswith('"') and value.endswith('"'))
+            or (value.startswith("'") and value.endswith("'"))
+        ):
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+def prime_process_env(argv: List[str]) -> None:
+    default_repo_root = Path(__file__).resolve().parents[1]
+    dotenv_override = os.environ.get("DOTENV_CONFIG_PATH", "").strip()
+    if dotenv_override:
+        load_dotenv_file(Path(dotenv_override).expanduser())
+        return
+    repo_root_arg = parse_cli_flag_value(argv, "--repo-root")
+    repo_root = Path(repo_root_arg).expanduser() if repo_root_arg else default_repo_root
+    load_dotenv_file(repo_root.resolve() / ".env")
+
+
+prime_process_env(sys.argv[1:])
+
 OLLAMA_API_BASE = os.environ.get("TRICHAT_OLLAMA_API_BASE", "http://127.0.0.1:11434")
 
 DEFAULT_CODEX_PROMPT = (
@@ -44,6 +95,7 @@ DEFAULT_IMPRINT_PROMPT = (
     "idempotent operations. Reply concisely (max 6 lines) and avoid memory/transcript dumps unless requested. "
     "For arithmetic expressions, compute deterministically with strict order-of-operations."
 )
+DEFAULT_ACTIVE_AGENT_IDS = ["codex", "cursor", "local-imprint"]
 
 EXECUTE_GATE_MODES = {"open", "allowlist", "approval"}
 
@@ -108,6 +160,127 @@ def parse_csv_set(raw: str) -> set[str]:
     return values
 
 
+def parse_agent_id_list(raw: str) -> List[str]:
+    ordered: List[str] = []
+    for item in str(raw).split(","):
+        normalized = item.strip().lower()
+        if not normalized or normalized in ordered:
+            continue
+        ordered.append(normalized)
+    return ordered
+
+
+def fallback_roster_config() -> Dict[str, Any]:
+    return {
+        "default_agent_ids": list(DEFAULT_ACTIVE_AGENT_IDS),
+        "agents": [
+            {
+                "agent_id": "codex",
+                "display_name": "Codex",
+                "bridge_env_var": "TRICHAT_CODEX_CMD",
+                "bridge_script_names": ["codex_bridge.py"],
+                "system_prompt": DEFAULT_CODEX_PROMPT,
+                "enabled": True,
+            },
+            {
+                "agent_id": "cursor",
+                "display_name": "Cursor",
+                "bridge_env_var": "TRICHAT_CURSOR_CMD",
+                "bridge_script_names": ["cursor_bridge.py"],
+                "system_prompt": DEFAULT_CURSOR_PROMPT,
+                "enabled": True,
+            },
+            {
+                "agent_id": "local-imprint",
+                "display_name": "Local Imprint",
+                "bridge_env_var": "TRICHAT_IMPRINT_CMD",
+                "bridge_script_names": ["local-imprint_bridge.py", "local_imprint_bridge.py"],
+                "system_prompt": DEFAULT_IMPRINT_PROMPT,
+                "enabled": True,
+            },
+        ],
+    }
+
+
+def load_roster_config(repo_root: Path) -> Dict[str, Any]:
+    fallback = fallback_roster_config()
+    config_path = repo_root / "config" / "trichat_agents.json"
+    if not config_path.exists():
+        return fallback
+
+    try:
+        parsed = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return fallback
+
+    raw_agents = parsed.get("agents", []) if isinstance(parsed, dict) else []
+    agents: List[Dict[str, Any]] = []
+    if isinstance(raw_agents, list):
+        for entry in raw_agents:
+            if not isinstance(entry, dict):
+                continue
+            agent_id = str(entry.get("agent_id") or "").strip().lower()
+            system_prompt = str(entry.get("system_prompt") or "").strip()
+            if not agent_id or not system_prompt or entry.get("enabled") is False:
+                continue
+            bridge_script_names = entry.get("bridge_script_names")
+            agents.append(
+                {
+                    "agent_id": agent_id,
+                    "display_name": str(entry.get("display_name") or agent_id).strip() or agent_id,
+                    "bridge_env_var": str(entry.get("bridge_env_var") or "").strip(),
+                    "bridge_script_names": [
+                        str(name).strip()
+                        for name in (bridge_script_names if isinstance(bridge_script_names, list) else [])
+                        if str(name).strip()
+                    ],
+                    "system_prompt": system_prompt,
+                    "enabled": True,
+                }
+            )
+
+    if not agents:
+        return fallback
+
+    defaults = parsed.get("default_agent_ids", []) if isinstance(parsed, dict) else []
+    default_agent_ids = [
+        str(agent_id).strip().lower()
+        for agent_id in defaults
+        if str(agent_id).strip()
+    ]
+    if not default_agent_ids:
+        default_agent_ids = list(DEFAULT_ACTIVE_AGENT_IDS)
+
+    return {
+        "default_agent_ids": default_agent_ids,
+        "agents": agents,
+    }
+
+
+def get_active_roster_agents(repo_root: Path, requested_ids: str) -> List[Dict[str, Any]]:
+    roster = load_roster_config(repo_root)
+    agent_map = {
+        str(agent.get("agent_id") or "").strip().lower(): agent
+        for agent in roster.get("agents", [])
+        if isinstance(agent, dict)
+    }
+    requested = parse_agent_id_list(requested_ids)
+    active_ids = requested or [
+        agent_id
+        for agent_id in roster.get("default_agent_ids", [])
+        if agent_id in agent_map
+    ]
+    if not active_ids:
+        active_ids = list(DEFAULT_ACTIVE_AGENT_IDS)
+
+    active_agents: List[Dict[str, Any]] = []
+    for agent_id in active_ids:
+        agent = agent_map.get(agent_id)
+        if agent:
+            active_agents.append(agent)
+    return active_agents
+
+
 def is_smoke_thread(candidate: Dict[str, Any]) -> bool:
     thread_id = str(candidate.get("thread_id") or "").strip().lower()
     title = str(candidate.get("title") or "").strip().lower()
@@ -120,8 +293,8 @@ def is_smoke_thread(candidate: Dict[str, Any]) -> bool:
     )
 
 
-def auto_bridge_command(repo_root: Path, agent_id: str) -> str:
-    candidate_names = [
+def auto_bridge_command(repo_root: Path, agent_id: str, bridge_script_names: Optional[List[str]] = None) -> str:
+    candidate_names = bridge_script_names or [
         f"{agent_id}_bridge.py",
         f"{agent_id.replace('-', '_')}_bridge.py",
     ]
@@ -143,14 +316,16 @@ def resolve_bridge_command(
     agent_id: str,
     explicit_value: Optional[str],
     env_var_name: str,
+    bridge_script_names: Optional[List[str]] = None,
 ) -> str:
     explicit = (explicit_value or "").strip()
     if explicit:
         return explicit
-    from_env = os.environ.get(env_var_name, "").strip()
-    if from_env:
-        return from_env
-    return auto_bridge_command(repo_root, agent_id)
+    if env_var_name:
+        from_env = os.environ.get(env_var_name, "").strip()
+        if from_env:
+            return from_env
+    return auto_bridge_command(repo_root, agent_id, bridge_script_names=bridge_script_names)
 
 
 class McpToolCaller:
@@ -714,6 +889,8 @@ class TriChatApp:
         if self.args.adapter_failover_timeout < min_failover_budget:
             self.args.adapter_failover_timeout = min_failover_budget
         self.repo_root = Path(args.repo_root).resolve()
+        self.agent_specs = get_active_roster_agents(self.repo_root, args.agents)
+        self.active_agent_ids = [str(spec["agent_id"]) for spec in self.agent_specs]
         self.mcp = McpToolCaller(
             repo_root=self.repo_root,
             transport=args.transport,
@@ -734,7 +911,7 @@ class TriChatApp:
         self.execute_gate_mode = requested_mode if requested_mode in EXECUTE_GATE_MODES else "open"
         self.execute_allow_agents = parse_csv_set(args.execute_allow_agents)
         if not self.execute_allow_agents:
-            self.execute_allow_agents = {"codex", "cursor", "local-imprint"}
+            self.execute_allow_agents = set(self.active_agent_ids)
         self.execute_approval_phrase = str(args.execute_approval_phrase or "approve").strip() or "approve"
         self.adapter_telemetry_enabled = True
 
@@ -761,48 +938,39 @@ class TriChatApp:
         return ""
 
     def _build_agents(self) -> Dict[str, AgentAdapter]:
-        codex_command = resolve_bridge_command(
-            self.repo_root,
-            agent_id="codex",
-            explicit_value=self.args.codex_command,
-            env_var_name="TRICHAT_CODEX_CMD",
-        )
-        cursor_command = resolve_bridge_command(
-            self.repo_root,
-            agent_id="cursor",
-            explicit_value=self.args.cursor_command,
-            env_var_name="TRICHAT_CURSOR_CMD",
-        )
-        imprint_command = resolve_bridge_command(
-            self.repo_root,
-            agent_id="local-imprint",
-            explicit_value=self.args.imprint_command,
-            env_var_name="TRICHAT_IMPRINT_CMD",
-        )
-
-        configs = [
-            AgentConfig(
-                agent_id="codex",
-                system_prompt=DEFAULT_CODEX_PROMPT,
-                model=self.args.model,
-                command=codex_command,
-                workspace=str(self.repo_root),
-            ),
-            AgentConfig(
-                agent_id="cursor",
-                system_prompt=DEFAULT_CURSOR_PROMPT,
-                model=self.args.model,
-                command=cursor_command,
-                workspace=str(self.repo_root),
-            ),
-            AgentConfig(
-                agent_id="local-imprint",
-                system_prompt=DEFAULT_IMPRINT_PROMPT,
-                model=self.args.model,
-                command=imprint_command,
-                workspace=str(self.repo_root),
-            ),
-        ]
+        configs: List[AgentConfig] = []
+        for spec in self.agent_specs:
+            agent_id = str(spec.get("agent_id") or "").strip().lower()
+            if not agent_id:
+                continue
+            explicit_command = ""
+            if agent_id == "codex":
+                explicit_command = self.args.codex_command
+            elif agent_id == "cursor":
+                explicit_command = self.args.cursor_command
+            elif agent_id == "local-imprint":
+                explicit_command = self.args.imprint_command
+            bridge_script_names = spec.get("bridge_script_names")
+            command = resolve_bridge_command(
+                self.repo_root,
+                agent_id=agent_id,
+                explicit_value=explicit_command,
+                env_var_name=str(spec.get("bridge_env_var") or "").strip(),
+                bridge_script_names=[
+                    str(name).strip()
+                    for name in (bridge_script_names if isinstance(bridge_script_names, list) else [])
+                    if str(name).strip()
+                ],
+            )
+            configs.append(
+                AgentConfig(
+                    agent_id=agent_id,
+                    system_prompt=str(spec.get("system_prompt") or "").strip(),
+                    model=self.args.model,
+                    command=command or None,
+                    workspace=str(self.repo_root),
+                )
+            )
         return {
             config.agent_id: AgentAdapter(
                 config=config,
@@ -991,7 +1159,7 @@ class TriChatApp:
             return True
         if command == "/agent":
             if len(tail) < 2:
-                print("Usage: /agent <codex|cursor|local-imprint> <message>")
+                print(f"Usage: /agent <{'|'.join(self.active_agent_ids)}> <message>")
                 return True
             agent_id = tail[0]
             prompt = " ".join(tail[1:]).strip()
@@ -1057,7 +1225,7 @@ class TriChatApp:
             metadata={"kind": "user-turn"},
         )
         history = self.get_timeline(limit=60)
-        response_order = ["codex", "cursor", "local-imprint"]
+        response_order = list(self.active_agent_ids)
         futures: Dict[concurrent.futures.Future[Tuple[str, Dict[str, Any]]], str] = {}
         results: Dict[str, Dict[str, Any]] = {}
         telemetry_events: List[Dict[str, Any]] = []
@@ -1367,7 +1535,7 @@ class TriChatApp:
             print(f"Reset adapter circuit breakers: {target}")
             return
 
-        print("Usage: /adapters [status|reset [all|codex|cursor|local-imprint]]")
+        print(f"Usage: /adapters [status|reset [all|{'|'.join(self.active_agent_ids)}]]")
 
     def _print_adapter_status(self) -> None:
         statuses = self._adapter_status_rows()
@@ -2095,7 +2263,7 @@ class TriChatApp:
         print(f"Thread: {self.thread_id}")
         print(f"Repo:   {self.repo_root}")
         route_parts = []
-        for agent_id in ["codex", "cursor", "local-imprint"]:
+        for agent_id in self.active_agent_ids:
             adapter = self.agents.get(agent_id)
             route_parts.append(f"{agent_id}={'bridge' if adapter and adapter.config.command else 'ollama'}")
         print("Agents: " + ", ".join(route_parts))
@@ -2150,6 +2318,11 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     parser.add_argument("--thread-id", default="", help="Existing thread id to continue.")
     parser.add_argument("--thread-title", default="", help="Thread title when creating a new thread.")
     parser.add_argument("--resume-latest", action="store_true", help="Resume most recent active thread.")
+    parser.add_argument(
+        "--agents",
+        default=os.environ.get("TRICHAT_AGENT_IDS", ""),
+        help="Comma-separated active roster override. Defaults to config/trichat_agents.json.",
+    )
     parser.add_argument(
         "--model",
         default=os.environ.get("TRICHAT_OLLAMA_MODEL", "llama3.2:3b"),
@@ -2261,7 +2434,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--execute-allow-agents",
-        default=os.environ.get("TRICHAT_EXECUTE_ALLOW_AGENTS", "codex,cursor,local-imprint"),
+        default=os.environ.get("TRICHAT_EXECUTE_ALLOW_AGENTS", ""),
         help="Comma-separated allowlist for /execute when gate mode is allowlist.",
     )
     parser.add_argument(

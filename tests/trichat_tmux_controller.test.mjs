@@ -202,6 +202,10 @@ test("trichat.tmux_controller supports durable start/dispatch/stop flow with ide
         mutation: nextMutation(testId, "trichat.tmux_controller-stop", () => mutationCounter++),
       });
       assert.equal(stopResult.status.enabled, false);
+      assert.equal(stopResult.status.counts.queued, 0);
+      assert.equal(stopResult.status.counts.dispatched, 0);
+      assert.equal(stopResult.status.counts.running, 0);
+      assert.ok(stopResult.status.counts.cancelled >= 4);
     } finally {
       await first.client.close().catch(() => {});
     }
@@ -213,6 +217,10 @@ test("trichat.tmux_controller supports durable start/dispatch/stop flow with ide
         include_completed: true,
       });
       assert.equal(restored.state.enabled, false);
+      assert.equal(restored.state.counts.queued, 0);
+      assert.equal(restored.state.counts.dispatched, 0);
+      assert.equal(restored.state.counts.running, 0);
+      assert.ok(restored.state.counts.cancelled >= 4);
       assert.ok(restored.state.counts.total >= 4);
     } finally {
       await second.client.close().catch(() => {});

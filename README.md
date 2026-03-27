@@ -13,6 +13,60 @@ This repository ships with one workflow pack by default:
 
 The runtime also includes first-class TriChat orchestration tools (`trichat.*`) for multi-agent turns, autonomous loops, and tmux-backed nested execution control.
 
+## MCP Capability Wireframe
+
+This is the operator-facing map of the current server surface.
+
+```mermaid
+flowchart TD
+  Clients["Codex / Cursor / IDE / HTTP Clients"] --> Transport["MCP Transports<br/>stdio / HTTP / launchd"]
+  Transport --> Kernel["MCPlayground Core Template Server"]
+
+  Kernel --> Memory["Continuity + Knowledge<br/>memory.* / transcript.* / who_knows / knowledge.query / retrieval.hybrid / imprint.*"]
+  Kernel --> Control["Execution Control Plane<br/>goal.* / plan.* / dispatch.autorun / goal.autorun* / playbook.*"]
+  Kernel --> Worker["Durable Worker Ops<br/>agent.session.* / agent.claim_next / agent.report_result / task.* / run.* / lock.* / event.*"]
+  Kernel --> Evidence["Evidence + Governance<br/>artifact.* / experiment.* / policy.evaluate / preflight.check / postflight.verify / adr.create / decision.link / incident.*"]
+  Kernel --> Office["TriChat + Office Ops<br/>trichat.thread* / trichat.turn* / trichat.autopilot / trichat.tmux_controller / trichat.bus / trichat.adapter_telemetry / trichat.slo / trichat.chaos"]
+  Kernel --> Health["Runtime + Recovery<br/>kernel.summary / health.* / migration.status / backups / corruption quarantine"]
+  Kernel --> Learning["Bounded Agent Learning<br/>agent.learning_* / mentorship notes / MCP memory / ADR trail"]
+
+  Office --> Dashboard["Agent Office Dashboard<br/>curses TUI + tmux war room + macOS app"]
+  Worker --> Packs["Domain Packs + Hooks<br/>agentic pack / pack.plan.generate / pack.verify.run"]
+  Evidence --> Packs
+  Learning --> Office
+  Learning --> Worker
+```
+
+## Agent Spawn Wireframe
+
+This is the current ring-leader spawning and delegation shape.
+
+```mermaid
+flowchart TD
+  User["User / Operator"] --> Ring["Ring Leader<br/>lead agent / council selector / confidence gate / GSD planner"]
+
+  Ring --> DirImpl["implementation-director<br/>implementation planner"]
+  Ring --> DirResearch["research-director<br/>research planner"]
+  Ring --> DirVerify["verification-director<br/>verification planner"]
+  Ring --> LocalImprint["local-imprint<br/>local memory + continuity lane"]
+  Ring --> Codex["codex<br/>frontier review / hard problems / integration lane"]
+
+  DirImpl --> CodeSmith["code-smith<br/>leaf SME for implementation slices"]
+  DirResearch --> ResearchScout["research-scout<br/>leaf SME for bounded research"]
+  DirVerify --> QualityGuard["quality-guard<br/>leaf SME for verification and release checks"]
+
+  Ring --> Claim["agent.claim_next<br/>claim bounded work"]
+  Claim --> Council["TriChat council turn<br/>confidence + plan substance + policy gates"]
+  Council --> Execute["Execution router<br/>direct command / tmux dispatch / fallback task batch"]
+  Execute --> Leafs["Leaf / SME agents<br/>single-owner bounded tasks"]
+  Leafs --> Report["agent.report_result<br/>artifacts / evidence / outcomes / learning signal"]
+  Report --> Learn["Bounded learning ledger<br/>prefer / avoid / proof bars / rollback discipline"]
+  Learn --> Ring
+
+  Execute --> Tmux["trichat.tmux_controller<br/>worker lanes / queue discipline / office telemetry"]
+  Tmux --> Dashboard["Agent Office Dashboard<br/>desk work / chat / break / sleep sprites"]
+```
+
 ## Why This Template Exists
 
 Most MCP projects repeat the same infrastructure work:
@@ -161,6 +215,41 @@ node ./scripts/trichat_roster.mjs
 node ./scripts/mcp_tool_call.mjs --tool trichat.roster --args '{}' --transport stdio --stdio-command node --stdio-args dist/server.js --cwd .
 ```
 
+## Agent Office Dashboard
+
+Launch the animated office monitor directly:
+
+```bash
+npm run trichat:office
+```
+
+Start the tmux war room with dedicated windows for the office scene, briefing board, lane monitor, and worker queue:
+
+```bash
+npm run trichat:office:tmux
+```
+
+This dashboard is MCP-backed and reads live state from:
+
+- `trichat.roster`
+- `trichat.workboard`
+- `trichat.tmux_controller`
+- `trichat.bus`
+- `trichat.adapter_telemetry`
+- `task.summary`
+- `trichat.summary`
+- `kernel.summary`
+
+The office scene keeps working agents at their desks, moves active chatter to the coffee and water cooler strip, shows resets in the lounge, and parks long-idle agents on the sofa in sleep mode. Action badges reflect real MCP/tmux signals such as desk work, briefing, chatting, break/reset, blocked, offline, and sleep.
+
+Install the single-click macOS app launcher in `/Applications`:
+
+```bash
+npm run trichat:app:install
+```
+
+By default the app opens the tmux-backed Agent Office dashboard and generates its own built-in office mascot icon if you do not pass `--icon`.
+
 ## Configuration
 
 Copy the template:
@@ -227,6 +316,7 @@ Connection examples and client setup:
 - [Coworker Quickstart (Cursor + Codex)](./docs/COWORKER_QUICKSTART_CURSOR_CODEX.md)
 - [TriChat Multi-Agent Setup](./docs/TRICHAT_MULTI_AGENT_SETUP.md)
 - [Agent Adoption Guide](./docs/AGENT_ADOPTION.md)
+- [Ring Leader MCP Ops](./docs/RING_LEADER_MCP_OPS.md)
 
 Fast STDIO connection example:
 

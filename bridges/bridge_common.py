@@ -83,11 +83,35 @@ class BridgeContext:
 
 
 @dataclass(frozen=True)
+class DelegationBrief:
+    delegate_agent_id: str | None = None
+    task_objective: str | None = None
+    success_criteria: list[str] | None = None
+    evidence_requirements: list[str] | None = None
+    rollback_notes: list[str] | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "delegate_agent_id": self.delegate_agent_id,
+            "task_objective": self.task_objective,
+            "success_criteria": list(self.success_criteria or []),
+            "evidence_requirements": list(self.evidence_requirements or []),
+            "rollback_notes": list(self.rollback_notes or []),
+        }
+
+
+@dataclass(frozen=True)
 class Proposal:
     strategy: str
     commands: list[str]
     confidence: float
     mentorship_note: str
+    delegate_agent_id: str | None = None
+    task_objective: str | None = None
+    success_criteria: list[str] | None = None
+    evidence_requirements: list[str] | None = None
+    rollback_notes: list[str] | None = None
+    delegations: list[DelegationBrief] | None = None
 
     def to_json(self) -> str:
         return json.dumps(
@@ -96,6 +120,12 @@ class Proposal:
                 "commands": self.commands,
                 "confidence": self.confidence,
                 "mentorship_note": self.mentorship_note,
+                "delegate_agent_id": self.delegate_agent_id,
+                "task_objective": self.task_objective,
+                "success_criteria": list(self.success_criteria or []),
+                "evidence_requirements": list(self.evidence_requirements or []),
+                "rollback_notes": list(self.rollback_notes or []),
+                "delegations": [item.as_dict() for item in list(self.delegations or [])],
             },
             ensure_ascii=True,
         )
@@ -267,6 +297,12 @@ def build_dry_run_proposal(agent_id: str, objective: str, workspace: Path) -> Pr
         commands=list(DEFAULT_COMMANDS),
         confidence=0.51,
         mentorship_note=f"{agent_id} dry-run protocol response for objective: {objective}",
+        delegate_agent_id=None,
+        task_objective=None,
+        success_criteria=[],
+        evidence_requirements=[],
+        rollback_notes=[],
+        delegations=[],
     )
 
 
@@ -287,6 +323,33 @@ def normalize_proposal(
 ) -> Proposal:
     parsed = try_parse_json_object(raw)
     if isinstance(parsed, dict):
+        nested_brief = parsed.get("delegation_brief")
+        delegation = nested_brief if isinstance(nested_brief, dict) else {}
+        parsed_delegations = normalize_delegation_briefs(
+            parsed.get("delegations")
+            or parsed.get("delegation_batch")
+            or parsed.get("delegation_briefs")
+            or parsed.get("task_batch")
+            or parsed.get("work_items")
+        )
+        primary_delegation = normalize_delegation_brief(
+            {
+                "delegate_agent_id": normalize_text(parsed.get("delegate_agent_id"))
+                or normalize_text(delegation.get("delegate_agent_id")),
+                "task_objective": normalize_text(parsed.get("task_objective"))
+                or normalize_text(delegation.get("task_objective")),
+                "success_criteria": normalize_text_list(parsed.get("success_criteria"))
+                or normalize_text_list(delegation.get("success_criteria")),
+                "evidence_requirements": normalize_text_list(parsed.get("evidence_requirements"))
+                or normalize_text_list(delegation.get("evidence_requirements")),
+                "rollback_notes": normalize_text_list(parsed.get("rollback_notes"))
+                or normalize_text_list(delegation.get("rollback_notes")),
+            }
+        )
+        delegations = dedupe_delegation_briefs(
+            ([primary_delegation] if primary_delegation else []) + parsed_delegations
+        )
+        selected_delegation = delegations[0] if delegations else primary_delegation
         strategy = normalize_text(parsed.get("strategy")) or normalize_text(parsed.get("summary"))
         strategy = strategy or fallback_strategy or f"{agent_id} recommends a staged reliability pass for: {objective}"
         commands = normalize_commands(parsed.get("commands"))
@@ -297,6 +360,12 @@ def normalize_proposal(
             commands=commands,
             confidence=confidence,
             mentorship_note=mentorship_note,
+            delegate_agent_id=selected_delegation.delegate_agent_id if selected_delegation else None,
+            task_objective=selected_delegation.task_objective if selected_delegation else None,
+            success_criteria=selected_delegation.success_criteria if selected_delegation else [],
+            evidence_requirements=selected_delegation.evidence_requirements if selected_delegation else [],
+            rollback_notes=selected_delegation.rollback_notes if selected_delegation else [],
+            delegations=delegations,
         )
 
     strategy = normalize_text(raw) or fallback_strategy or f"{agent_id} recommends a staged reliability pass for: {objective}"
@@ -305,7 +374,65 @@ def normalize_proposal(
         commands=list(DEFAULT_COMMANDS),
         confidence=round(max(0.05, min(0.99, fallback_confidence)), 3),
         mentorship_note=fallback_mentorship,
+        delegate_agent_id=None,
+        task_objective=None,
+        success_criteria=[],
+        evidence_requirements=[],
+        rollback_notes=[],
+        delegations=[],
     )
+
+
+def normalize_delegation_brief(value: Any) -> DelegationBrief | None:
+    if not isinstance(value, dict):
+        return None
+    delegate_agent_id = normalize_text(value.get("delegate_agent_id")) or None
+    task_objective = normalize_text(value.get("task_objective")) or None
+    success_criteria = normalize_text_list(value.get("success_criteria"))
+    evidence_requirements = normalize_text_list(value.get("evidence_requirements"))
+    rollback_notes = normalize_text_list(value.get("rollback_notes"))
+    if (
+        delegate_agent_id is None
+        and task_objective is None
+        and not success_criteria
+        and not evidence_requirements
+        and not rollback_notes
+    ):
+        return None
+    return DelegationBrief(
+        delegate_agent_id=delegate_agent_id,
+        task_objective=task_objective,
+        success_criteria=success_criteria,
+        evidence_requirements=evidence_requirements,
+        rollback_notes=rollback_notes,
+    )
+
+
+def normalize_delegation_briefs(value: Any) -> list[DelegationBrief]:
+    raw_items = value if isinstance(value, list) else [value] if isinstance(value, dict) else []
+    return dedupe_delegation_briefs(
+        [brief for brief in (normalize_delegation_brief(item) for item in raw_items) if brief is not None]
+    )
+
+
+def dedupe_delegation_briefs(items: list[DelegationBrief]) -> list[DelegationBrief]:
+    seen: set[str] = set()
+    output: list[DelegationBrief] = []
+    for item in items:
+        key = "::".join(
+            [
+                item.delegate_agent_id or "",
+                item.task_objective or "",
+                "|".join(item.success_criteria or []),
+                "|".join(item.evidence_requirements or []),
+                "|".join(item.rollback_notes or []),
+            ]
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(item)
+    return output
 
 
 def normalize_plain_response(
@@ -357,6 +484,28 @@ def normalize_commands(value: Any) -> list[str]:
         seen.add(key)
         deduped.append(command)
     return deduped or list(DEFAULT_COMMANDS)
+
+
+def normalize_text_list(value: Any) -> list[str]:
+    items: list[str] = []
+    if isinstance(value, list):
+        for item in value:
+            text = normalize_text(item)
+            if text:
+                items.append(text)
+    elif isinstance(value, str):
+        text = normalize_text(value)
+        if text:
+            items.append(text)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 def normalize_confidence(value: Any, *, fallback: float) -> float:

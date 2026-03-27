@@ -8,6 +8,9 @@ export type TriChatAgentDefinition = {
   provider?: string;
   auth_mode?: string;
   role_lane?: string;
+  coordination_tier?: string;
+  parent_agent_id?: string;
+  managed_agent_ids?: string[];
   accent_color?: string;
   bridge_env_var?: string;
   bridge_script_names?: string[];
@@ -36,6 +39,7 @@ const fallbackConfig: TriChatRosterConfig = {
       provider: "openai",
       auth_mode: "cli-login",
       role_lane: "planner",
+      coordination_tier: "support",
       accent_color: "#ff4fd8",
       bridge_env_var: "TRICHAT_CODEX_CMD",
       bridge_script_names: ["codex_bridge.py"],
@@ -92,6 +96,8 @@ const fallbackConfig: TriChatRosterConfig = {
       provider: "local",
       auth_mode: "local-model",
       role_lane: "reliability-critic",
+      coordination_tier: "support",
+      parent_agent_id: "ring-leader",
       accent_color: "#ffd166",
       bridge_env_var: "TRICHAT_IMPRINT_CMD",
       bridge_script_names: ["local-imprint_bridge.py", "local_imprint_bridge.py"],
@@ -99,6 +105,127 @@ const fallbackConfig: TriChatRosterConfig = {
       supports_local_model_fallback: true,
       system_prompt:
         "You are the local Imprint agent for Anamnesis. Favor deterministic local-first execution and idempotent operations. Reply in max 6 lines by default and do not dump memory or transcript blocks unless explicitly requested.",
+    },
+    {
+      agent_id: "ring-leader",
+      display_name: "Ring Leader",
+      provider: "local",
+      auth_mode: "local-model",
+      role_lane: "orchestrator",
+      coordination_tier: "lead",
+      managed_agent_ids: [
+        "implementation-director",
+        "research-director",
+        "verification-director",
+        "local-imprint",
+        "codex",
+      ],
+      accent_color: "#f25f5c",
+      bridge_env_var: "TRICHAT_RING_LEADER_CMD",
+      bridge_script_names: ["local-imprint_bridge.py", "local_imprint_bridge.py"],
+      description: "Mission operator that decomposes goals, chooses lanes, and keeps specialist work moving.",
+      supports_local_model_fallback: true,
+      system_prompt:
+        "You are Ring Leader, the local mission operator for Dan Driver's agent system. Break large goals into bounded slices, choose the best specialist lane for each slice, demand clear evidence, surface blockers early, and keep the system moving toward completion. Prefer delegation, sequencing, rollback awareness, and explicit success criteria. Keep replies concise by default.",
+    },
+    {
+      agent_id: "implementation-director",
+      display_name: "Implementation Director",
+      provider: "local",
+      auth_mode: "local-model",
+      role_lane: "implementer",
+      coordination_tier: "director",
+      parent_agent_id: "ring-leader",
+      managed_agent_ids: ["code-smith"],
+      accent_color: "#577590",
+      bridge_env_var: "TRICHAT_IMPLEMENTATION_DIRECTOR_CMD",
+      bridge_script_names: ["local-imprint_bridge.py", "local_imprint_bridge.py"],
+      description: "Mid-layer implementation director that supervises code-focused leaf agents and reports back to the ring leader.",
+      supports_local_model_fallback: true,
+      system_prompt:
+        "You are Implementation Director, a local sub-director under Ring Leader. Break implementation goals into bounded code tasks, decide when Code Smith should own execution, demand minimal diffs, and report back concise progress with evidence. Prefer delegation, sequencing, and explicit success criteria over doing everything yourself.",
+    },
+    {
+      agent_id: "research-director",
+      display_name: "Research Director",
+      provider: "local",
+      auth_mode: "local-model",
+      role_lane: "analyst",
+      coordination_tier: "director",
+      parent_agent_id: "ring-leader",
+      managed_agent_ids: ["research-scout"],
+      accent_color: "#43aa8b",
+      bridge_env_var: "TRICHAT_RESEARCH_DIRECTOR_CMD",
+      bridge_script_names: ["local-imprint_bridge.py", "local_imprint_bridge.py"],
+      description: "Mid-layer research director that supervises analysis leaf agents and reports option framing back to the ring leader.",
+      supports_local_model_fallback: true,
+      system_prompt:
+        "You are Research Director, a local sub-director under Ring Leader. Turn broad uncertainty into bounded research tasks, direct Research Scout toward the highest-leverage unknowns, and return decision-ready comparisons with clear assumptions and evidence gaps.",
+    },
+    {
+      agent_id: "verification-director",
+      display_name: "Verification Director",
+      provider: "local",
+      auth_mode: "local-model",
+      role_lane: "verifier",
+      coordination_tier: "director",
+      parent_agent_id: "ring-leader",
+      managed_agent_ids: ["quality-guard"],
+      accent_color: "#f9844a",
+      bridge_env_var: "TRICHAT_VERIFICATION_DIRECTOR_CMD",
+      bridge_script_names: ["local-imprint_bridge.py", "local_imprint_bridge.py"],
+      description: "Mid-layer verification director that supervises review leaf agents and reports release confidence back to the ring leader.",
+      supports_local_model_fallback: true,
+      system_prompt:
+        "You are Verification Director, a local sub-director under Ring Leader. Convert vague confidence into bounded validation work, direct Quality Guard toward the highest-risk regressions, and report concrete release blockers or evidence of safety back to the ring leader.",
+    },
+    {
+      agent_id: "code-smith",
+      display_name: "Code Smith",
+      provider: "local",
+      auth_mode: "local-model",
+      role_lane: "implementer",
+      coordination_tier: "leaf",
+      parent_agent_id: "implementation-director",
+      accent_color: "#4d908e",
+      bridge_env_var: "TRICHAT_CODE_SMITH_CMD",
+      bridge_script_names: ["local-imprint_bridge.py", "local_imprint_bridge.py"],
+      description: "Focused implementation specialist for code changes, scripts, and integration work.",
+      supports_local_model_fallback: true,
+      system_prompt:
+        "You are Code Smith, a local implementation specialist. Focus on code changes, command sequences, integration details, and minimal diffs that move the objective forward. Favor concrete steps, deterministic edits, and pragmatic tradeoffs. Keep replies concise and implementation-heavy.",
+    },
+    {
+      agent_id: "research-scout",
+      display_name: "Research Scout",
+      provider: "local",
+      auth_mode: "local-model",
+      role_lane: "analyst",
+      coordination_tier: "leaf",
+      parent_agent_id: "research-director",
+      accent_color: "#277da1",
+      bridge_env_var: "TRICHAT_RESEARCH_SCOUT_CMD",
+      bridge_script_names: ["local-imprint_bridge.py", "local_imprint_bridge.py"],
+      description: "Narrow research and synthesis lane for options, comparisons, and external framing.",
+      supports_local_model_fallback: true,
+      system_prompt:
+        "You are Research Scout, a local analysis specialist. Compare options, identify unknowns, gather missing context, and compress findings into decision-ready guidance. Favor alternatives, assumptions, and evidence gaps over implementation detail. Keep replies concise and synthesis-first.",
+    },
+    {
+      agent_id: "quality-guard",
+      display_name: "Quality Guard",
+      provider: "local",
+      auth_mode: "local-model",
+      role_lane: "verifier",
+      coordination_tier: "leaf",
+      parent_agent_id: "verification-director",
+      accent_color: "#f9c74f",
+      bridge_env_var: "TRICHAT_QUALITY_GUARD_CMD",
+      bridge_script_names: ["local-imprint_bridge.py", "local_imprint_bridge.py"],
+      description: "Verification and critique lane for regressions, edge cases, and release readiness.",
+      supports_local_model_fallback: true,
+      system_prompt:
+        "You are Quality Guard, a local verification specialist. Look for behavioral regressions, risky assumptions, missing tests, weak evidence, and release blockers. Favor concrete failure modes, validation steps, and confidence judgments. Keep replies concise and review-oriented.",
     },
   ],
 };
@@ -165,6 +292,13 @@ function sanitizeAgent(value: unknown): TriChatAgentDefinition | null {
     provider: String(candidate.provider ?? "").trim() || undefined,
     auth_mode: String(candidate.auth_mode ?? "").trim() || undefined,
     role_lane: String(candidate.role_lane ?? "").trim() || undefined,
+    coordination_tier: String(candidate.coordination_tier ?? "").trim() || undefined,
+    parent_agent_id: normalizeAgentId(String(candidate.parent_agent_id ?? "")) || undefined,
+    managed_agent_ids: Array.isArray(candidate.managed_agent_ids)
+      ? candidate.managed_agent_ids
+          .map((entry) => normalizeAgentId(String(entry ?? "")))
+          .filter((entry) => entry.length > 0)
+      : undefined,
     accent_color: String(candidate.accent_color ?? "").trim() || undefined,
     bridge_env_var: String(candidate.bridge_env_var ?? "").trim() || undefined,
     bridge_script_names: Array.isArray(candidate.bridge_script_names)
