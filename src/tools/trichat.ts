@@ -6051,6 +6051,9 @@ async function runAutopilotExecutionViaTmux(
     intake: AutopilotGoalIntakeResult;
     command_plan: AutopilotCommandPlan;
     selected_strategy: string;
+    selected_agent: string | null;
+    selected_delegate_agent_id: string | null;
+    selected_delegation_brief: AutopilotDelegationBrief | null;
   }
 ): Promise<AutopilotExecutionResult> {
   const taskQueue = buildAutopilotTmuxTaskQueue({
@@ -6058,6 +6061,11 @@ async function runAutopilotExecutionViaTmux(
     thread_id: input.intake.thread_id,
     turn_id: input.intake.turn_id,
     strategy: input.selected_strategy,
+    lead_agent_id: input.config.lead_agent_id,
+    selected_agent: input.selected_agent,
+    selected_delegate_agent_id: input.selected_delegate_agent_id,
+    selected_delegation_brief: input.selected_delegation_brief,
+    source_task_routing: input.intake.task_routing,
   });
   const configuredWorkers = clampInt(input.config.tmux_worker_count, 1, 24);
   const workerCount = input.config.tmux_auto_scale_workers
@@ -7953,7 +7961,28 @@ function buildAutopilotTmuxTaskQueue(input: {
   thread_id: string;
   turn_id: string;
   strategy: string;
+  lead_agent_id: string | null;
+  selected_agent: string | null;
+  selected_delegate_agent_id: string | null;
+  selected_delegation_brief: AutopilotDelegationBrief | null;
+  source_task_routing: {
+    preferred_agent_ids: string[];
+    allowed_agent_ids: string[];
+  };
 }): TriChatTmuxTaskInput[] {
+  const delegateAgentId = normalizeConsensusAgentId(input.selected_delegate_agent_id);
+  const selectedAgentId = normalizeConsensusAgentId(input.selected_agent);
+  const preferredAgentIds = dedupeNonEmptyCommands(
+    [
+      normalizeConsensusAgentId(input.lead_agent_id),
+      delegateAgentId,
+      selectedAgentId,
+      ...input.source_task_routing.preferred_agent_ids,
+    ].filter((value): value is string => Boolean(value))
+  );
+  const delegationBrief = input.selected_delegation_brief
+    ? finalizeAutopilotDelegationBrief(input.selected_delegation_brief)
+    : null;
   return input.commands.map((command, index) => {
     const complexity = estimateAutopilotCommandComplexity(command);
     const basePriority = Math.max(20, 95 - index * 6);
@@ -7969,6 +7998,18 @@ function buildAutopilotTmuxTaskQueue(input: {
         source: "trichat.autopilot",
         strategy: compactConsensusText(input.strategy, 320),
         command_index: index + 1,
+        lead_agent_id: normalizeConsensusAgentId(input.lead_agent_id),
+        selected_agent: selectedAgentId,
+        delegate_agent_id: delegateAgentId,
+        delegation_brief: delegationBrief,
+        task_objective: delegationBrief?.task_objective ?? null,
+        success_criteria: delegationBrief?.success_criteria ?? [],
+        evidence_requirements: delegationBrief?.evidence_requirements ?? [],
+        rollback_notes: delegationBrief?.rollback_notes ?? [],
+        task_routing: {
+          preferred_agent_ids: preferredAgentIds,
+          allowed_agent_ids: [AUTOPILOT_WORKER_ID],
+        },
       },
     };
   });

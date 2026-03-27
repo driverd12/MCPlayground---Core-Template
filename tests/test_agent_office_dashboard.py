@@ -144,25 +144,48 @@ class AgentOfficeDashboardTests(unittest.TestCase):
                 },
             ],
         }
-        workboard = {
-            "latest_turn": {
-                "selected_agent": "implementation-director",
-                "selected_strategy": "Delegate bounded tasks to code-smith with explicit success criteria.",
-                "expected_agents": ["ring-leader", "implementation-director"],
-                "updated_at": "2026-03-27T03:52:31.612Z",
-            }
-        }
-        tmux = {
-            "state": {
-                "counts": {"running": 1},
-                "tasks": [{"title": "Step 2: npm test", "status": "running"}],
-            }
+        workboard = {"latest_turn": {}}
+        tmux = {"state": {"counts": {"running": 0}, "tasks": []}}
+        task_running = {
+            "tasks": [
+                {
+                    "task_id": "task-1",
+                    "status": "running",
+                    "objective": "Implement the bounded patch slice",
+                    "payload": {
+                        "delegate_agent_id": "code-smith",
+                        "task_objective": "Implement the bounded patch slice",
+                    },
+                    "metadata": {
+                        "lead_agent_id": "ring-leader",
+                        "selected_agent": "implementation-director",
+                        "delegate_agent_id": "code-smith",
+                        "delegation_brief": {
+                            "delegate_agent_id": "code-smith",
+                            "task_objective": "Implement the bounded patch slice",
+                        },
+                    },
+                }
+            ]
         }
         agents = MODULE.select_display_agents(roster, workboard)
-        presences = MODULE.derive_presence_map(agents, workboard, tmux, {"states": []}, {"events": []}, now_epoch=MODULE.iso_to_epoch("2026-03-27T03:53:00Z"))
+        presences = MODULE.derive_presence_map(
+            agents,
+            workboard,
+            tmux,
+            task_running,
+            {"tasks": []},
+            {"sessions": []},
+            {"states": []},
+            {"events": []},
+            now_epoch=MODULE.iso_to_epoch("2026-03-27T03:53:00Z"),
+        )
         states = {presence.agent.agent_id: presence.state for presence in presences}
+        evidence = {presence.agent.agent_id: presence.evidence_source for presence in presences}
+        self.assertEqual(states["ring-leader"], "supervising")
         self.assertEqual(states["implementation-director"], "supervising")
         self.assertEqual(states["code-smith"], "working")
+        self.assertEqual(evidence["code-smith"], "task:delegate")
 
     def test_blocked_adapter_state_overrides_other_presence(self) -> None:
         roster = {
@@ -191,8 +214,19 @@ class AgentOfficeDashboardTests(unittest.TestCase):
             ]
         }
         agents = MODULE.select_display_agents(roster, workboard)
-        presences = MODULE.derive_presence_map(agents, workboard, tmux, adapter, {"events": []}, now_epoch=MODULE.iso_to_epoch("2026-03-27T03:53:00Z"))
+        presences = MODULE.derive_presence_map(
+            agents,
+            workboard,
+            tmux,
+            {"tasks": []},
+            {"tasks": []},
+            {"sessions": []},
+            adapter,
+            {"events": []},
+            now_epoch=MODULE.iso_to_epoch("2026-03-27T03:53:00Z"),
+        )
         self.assertEqual(presences[0].state, "offline")
+        self.assertEqual(presences[0].evidence_source, "adapter")
 
     def test_recent_chat_without_active_turn_becomes_break_state(self) -> None:
         roster = {
@@ -223,6 +257,9 @@ class AgentOfficeDashboardTests(unittest.TestCase):
             agents,
             workboard,
             tmux,
+            {"tasks": []},
+            {"tasks": []},
+            {"sessions": []},
             {"states": []},
             bus,
             now_epoch=MODULE.iso_to_epoch("2026-03-27T03:53:00Z"),
@@ -230,6 +267,7 @@ class AgentOfficeDashboardTests(unittest.TestCase):
         self.assertEqual(presences[0].state, "break")
         self.assertEqual(presences[0].location, "lounge")
         self.assertIn("break", presences[0].actions)
+        self.assertEqual(presences[0].evidence_source, "bus")
 
     def test_active_agent_with_no_recent_signals_falls_asleep(self) -> None:
         roster = {
@@ -250,6 +288,9 @@ class AgentOfficeDashboardTests(unittest.TestCase):
             agents,
             workboard,
             tmux,
+            {"tasks": []},
+            {"tasks": []},
+            {"sessions": []},
             {"states": []},
             {"events": []},
             now_epoch=MODULE.iso_to_epoch("2026-03-27T03:53:00Z"),
@@ -257,6 +298,92 @@ class AgentOfficeDashboardTests(unittest.TestCase):
         self.assertEqual(presences[0].state, "sleeping")
         self.assertEqual(presences[0].location, "sofa")
         self.assertIn("sleep", presences[0].actions)
+        self.assertEqual(presences[0].evidence_source, "none")
+
+    def test_tmux_title_does_not_fake_agent_ownership(self) -> None:
+        roster = {
+            "active_agent_ids": ["code-smith"],
+            "agents": [
+                {
+                    "agent_id": "code-smith",
+                    "display_name": "Code Smith",
+                    "coordination_tier": "leaf",
+                    "role_lane": "implementer",
+                }
+            ],
+        }
+        workboard = {"latest_turn": {}}
+        tmux = {
+            "state": {
+                "counts": {"running": 1},
+                "tasks": [
+                    {
+                        "task_id": "tmux-1",
+                        "title": "code-smith hotfix lane",
+                        "status": "running",
+                        "metadata": {
+                            "strategy": "Code smith should maybe own this",
+                        },
+                    }
+                ],
+            }
+        }
+        agents = MODULE.select_display_agents(roster, workboard)
+        presences = MODULE.derive_presence_map(
+            agents,
+            workboard,
+            tmux,
+            {"tasks": []},
+            {"tasks": []},
+            {"sessions": []},
+            {"states": []},
+            {"events": []},
+            now_epoch=MODULE.iso_to_epoch("2026-03-27T03:53:00Z"),
+        )
+        self.assertEqual(presences[0].state, "sleeping")
+        self.assertEqual(presences[0].evidence_source, "none")
+
+    def test_busy_session_can_drive_real_supervising_state(self) -> None:
+        roster = {
+            "active_agent_ids": ["ring-leader"],
+            "agents": [
+                {
+                    "agent_id": "ring-leader",
+                    "display_name": "Ring Leader",
+                    "coordination_tier": "lead",
+                    "role_lane": "orchestrator",
+                }
+            ],
+        }
+        workboard = {"latest_turn": {}}
+        tmux = {"state": {"counts": {"running": 0}, "tasks": []}}
+        sessions = {
+            "sessions": [
+                {
+                    "session_id": "trichat-autopilot:ring-leader-main",
+                    "agent_id": "ring-leader",
+                    "status": "busy",
+                    "updated_at": "2026-03-27T03:52:40Z",
+                    "metadata": {
+                        "objective": "Inspect kernel state and choose one next action",
+                    },
+                }
+            ]
+        }
+        agents = MODULE.select_display_agents(roster, workboard)
+        presences = MODULE.derive_presence_map(
+            agents,
+            workboard,
+            tmux,
+            {"tasks": []},
+            {"tasks": []},
+            sessions,
+            {"states": []},
+            {"events": []},
+            now_epoch=MODULE.iso_to_epoch("2026-03-27T03:53:00Z"),
+        )
+        self.assertEqual(presences[0].state, "supervising")
+        self.assertEqual(presences[0].evidence_source, "session")
 
     def test_office_view_renders_amenities(self) -> None:
         snapshot = MODULE.DashboardSnapshot(

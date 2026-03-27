@@ -103,6 +103,113 @@ test("trichat.autopilot can execute council commands via tmux backend", async ()
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
+test("trichat.autopilot stamps explicit agent ownership metadata onto tmux-dispatched tasks", async () => {
+  const testId = `${Date.now()}-tmux-metadata`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-trichat-autopilot-tmux-metadata-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const bridgePath = path.join(tempDir, "mock_tmux_metadata_bridge.js");
+  let mutationCounter = 0;
+
+  fs.writeFileSync(
+    bridgePath,
+    [
+      "#!/usr/bin/env node",
+      "const agent = process.argv[2] || 'agent';",
+      "let input = '';",
+      "process.stdin.setEncoding('utf8');",
+      "process.stdin.on('data', (chunk) => { input += chunk; });",
+      "process.stdin.on('end', () => {",
+      "  let payload = {};",
+      "  try { payload = JSON.parse(String(input || '{}').trim() || '{}'); } catch { payload = {}; }",
+      "  const protocolVersion = payload.protocol_version || 'trichat-bridge-v1';",
+      "  const requestId = payload.request_id || `req-${Date.now()}`;",
+      "  const threadId = payload.thread_id || 'thread';",
+      "  if (payload.op === 'ping') {",
+      "    process.stdout.write(`${JSON.stringify({ kind: 'trichat.adapter.pong', protocol_version: protocolVersion, request_id: requestId, agent_id: agent, thread_id: threadId, content: 'pong' })}\\n`);",
+      "    return;",
+      "  }",
+      "  const response = {",
+      "    strategy: 'Delegate cursor to inspect the repo state and return bounded evidence.',",
+      "    commands: ['git status', 'npm run trichat:roster'],",
+      "    confidence: 0.91,",
+      "    delegate_agent_id: 'cursor',",
+      "    task_objective: 'Inspect the repo state and report bounded evidence',",
+      "    success_criteria: ['Stay read-only', 'Return repo status evidence'],",
+      "    evidence_requirements: ['git status output', 'roster output'],",
+      "    rollback_notes: ['No rollback needed for read-only checks'],",
+      "    mentorship_note: 'Carry explicit delegate ownership into tmux tasks.'",
+      "  };",
+      "  process.stdout.write(`${JSON.stringify({ kind: 'trichat.adapter.response', protocol_version: protocolVersion, request_id: requestId, agent_id: agent, thread_id: threadId, content: JSON.stringify(response) })}\\n`);",
+      "});",
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(bridgePath, 0o755);
+
+  const bridgeCmd = (agent) => `node ${JSON.stringify(bridgePath)} ${agent}`;
+  const session = await openClient(dbPath, {
+    TRICHAT_TMUX_DRY_RUN: "1",
+    TRICHAT_CODEX_CMD: bridgeCmd("codex"),
+    TRICHAT_CURSOR_CMD: bridgeCmd("cursor"),
+    TRICHAT_AGENT_IDS: "codex,cursor",
+  });
+
+  try {
+    const sessionName = `trichat-autopilot-metadata-${testId}`;
+    const result = await callTool(session.client, "trichat.autopilot", {
+      action: "run_once",
+      mutation: nextMutation(testId, "trichat.autopilot-run_once-tmux-metadata", () => mutationCounter++),
+      interval_seconds: 86400,
+      thread_id: `trichat-autopilot-metadata-${testId}`,
+      thread_title: `TriChat Autopilot Metadata ${testId}`,
+      thread_status: "archived",
+      away_mode: "normal",
+      lead_agent_id: "codex",
+      specialist_agent_ids: ["cursor"],
+      max_rounds: 1,
+      min_success_agents: 1,
+      bridge_timeout_seconds: 8,
+      bridge_dry_run: false,
+      execute_enabled: true,
+      command_allowlist: ["git status", "npm run trichat:roster"],
+      execute_backend: "tmux",
+      tmux_session_name: sessionName,
+      tmux_worker_count: 2,
+      tmux_max_queue_per_worker: 4,
+      tmux_auto_scale_workers: true,
+      tmux_sync_after_dispatch: true,
+      confidence_threshold: 0.1,
+      adr_policy: "manual",
+    });
+
+    assert.equal(result.tick.ok, true);
+    assert.equal(result.tick.execution.mode, "tmux_dispatch");
+
+    const tmuxStatus = await callTool(session.client, "trichat.tmux_controller", {
+      action: "status",
+      session_name: sessionName,
+    });
+    const stamped = tmuxStatus.state.tasks.find((task) => {
+      const metadata = task.metadata ?? {};
+      return (
+        metadata.delegate_agent_id === "cursor" &&
+        metadata.task_objective === "Inspect the repo state and report bounded evidence" &&
+        Array.isArray(metadata.task_routing?.preferred_agent_ids) &&
+        metadata.task_routing.preferred_agent_ids.includes("cursor")
+      );
+    });
+    assert.ok(stamped);
+    assert.equal(stamped.metadata.lead_agent_id, "codex");
+    assert.ok(["codex", "cursor"].includes(String(stamped.metadata.selected_agent ?? "")));
+    assert.equal(stamped.metadata.task_objective, "Inspect the repo state and report bounded evidence");
+    assert.ok(stamped.metadata.evidence_requirements.includes("git status output"));
+    assert.ok(stamped.metadata.evidence_requirements.includes("roster output"));
+  } finally {
+    await session.client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("trichat.autopilot high-impact governance skips repo ADRs for routine read-only tmux ticks", async () => {
   const testId = `${Date.now()}-readonly-adr-skip`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-trichat-autopilot-readonly-adr-"));

@@ -373,6 +373,8 @@ class OfficePresence:
     activity: str
     location: str
     actions: List[str]
+    evidence_source: str
+    evidence_detail: str
 
 
 @dataclass
@@ -401,6 +403,8 @@ class AgentTaskSignal:
     activity: str
     count: int
     updated_at: str
+    source: str
+    reference: str
 
 
 def build_agent_catalog(roster_payload: Dict[str, Any]) -> Dict[str, DashboardAgent]:
@@ -515,28 +519,283 @@ def infer_managed_delegate(
 ) -> Optional[str]:
     if not selected.managed_agent_ids:
         return None
-    haystacks = [
-        str(current_turn.get("selected_strategy") or ""),
-        str(current_turn.get("decision_summary") or ""),
-    ]
     metadata = as_dict(current_turn.get("metadata"))
-    for candidate in selected.managed_agent_ids:
-        managed = catalog.get(candidate)
-        if not managed:
-            continue
-        display_name = managed.display_name.lower()
-        for haystack in haystacks:
-            normalized = haystack.lower()
-            if candidate in normalized or display_name in normalized:
-                return candidate
-    specialist_ids = dedupe(as_list(metadata.get("specialist_agent_ids")))
-    for candidate in specialist_ids:
+    explicit_candidates = dedupe(
+        [
+            current_turn.get("selected_delegate_agent_id"),
+            as_dict(current_turn.get("selected_delegation_brief")).get("delegate_agent_id"),
+            as_dict(metadata.get("delegation_brief")).get("delegate_agent_id"),
+        ]
+        + [
+            as_dict(entry).get("delegate_agent_id")
+            for entry in as_list(current_turn.get("selected_delegation_briefs")) + as_list(metadata.get("delegation_briefs"))
+        ]
+        + as_list(as_dict(metadata.get("source_task_routing")).get("preferred_agent_ids"))
+    )
+    for candidate in explicit_candidates:
         if candidate in selected.managed_agent_ids and candidate in catalog:
+            return candidate
+    for candidate in selected.managed_agent_ids:
+        if candidate in catalog and candidate in dedupe(as_list(current_turn.get("expected_agents"))):
             return candidate
     for candidate in selected.managed_agent_ids:
         if candidate in catalog:
             return candidate
     return None
+
+
+def iter_task_routing_candidates(*records: Dict[str, Any]) -> Iterable[str]:
+    for record in records:
+        routing = as_dict(record.get("task_routing"))
+        for key in ("preferred_agent_ids", "allowed_agent_ids"):
+            for candidate in as_list(routing.get(key)):
+                agent_id = normalize_agent_id(candidate)
+                if agent_id:
+                    yield agent_id
+
+
+def extract_explicit_task_agents(
+    catalog: Dict[str, DashboardAgent],
+    task: Dict[str, Any],
+) -> Tuple[List[str], List[str], str]:
+    metadata = as_dict(task.get("metadata"))
+    payload = as_dict(task.get("payload"))
+    task_brief = as_dict(metadata.get("delegation_brief"))
+    payload_brief = as_dict(payload.get("delegation_brief"))
+    delegates = dedupe(
+        [
+            metadata.get("delegate_agent_id"),
+            payload.get("delegate_agent_id"),
+            task_brief.get("delegate_agent_id"),
+            payload_brief.get("delegate_agent_id"),
+        ]
+        + [
+            as_dict(entry).get("delegate_agent_id")
+            for entry in as_list(metadata.get("delegation_briefs"))
+            + as_list(payload.get("delegation_briefs"))
+            + as_list(metadata.get("selected_delegation_briefs"))
+            + as_list(payload.get("selected_delegation_briefs"))
+        ]
+    )
+    selected_agent = normalize_agent_id(metadata.get("selected_agent") or payload.get("selected_agent"))
+    lead_agent = normalize_agent_id(metadata.get("lead_agent_id") or payload.get("lead_agent_id"))
+    routing_candidates = dedupe(
+        list(
+            iter_task_routing_candidates(
+                metadata,
+                payload,
+                as_dict(metadata.get("routing")),
+                as_dict(payload.get("routing")),
+            )
+        )
+    )
+    owners = [agent_id for agent_id in delegates if agent_id in catalog]
+    source = "delegate"
+    if not owners and selected_agent in catalog:
+        owners = [selected_agent]
+        source = "selected_agent"
+    if not owners:
+        fallback_targets = [
+            agent_id
+            for agent_id in routing_candidates
+            if agent_id in catalog and agent_id not in {lead_agent}
+        ]
+        if len(fallback_targets) == 1:
+            owners = fallback_targets
+            source = "task_routing"
+    supervisors: List[str] = []
+    for candidate in [selected_agent, lead_agent]:
+        if candidate and candidate in catalog and candidate not in owners and candidate not in supervisors:
+            supervisors.append(candidate)
+    for owner in owners:
+        add_parent_chain(owner, catalog, supervisors)
+    supervisors = [agent_id for agent_id in supervisors if agent_id in catalog and agent_id not in owners]
+    return owners, supervisors, source
+
+
+def merge_agent_signal(
+    signals: Dict[str, AgentTaskSignal],
+    agent_id: str,
+    state: str,
+    activity: str,
+    updated_at: str,
+    source: str,
+    reference: str,
+) -> None:
+    status_rank = {"running": 3, "dispatched": 2, "queued": 1}
+    existing = signals.get(agent_id)
+    if existing and status_rank.get(existing.state, 0) > status_rank.get(state, 0):
+        signals[agent_id] = AgentTaskSignal(
+            state=existing.state,
+            activity=existing.activity,
+            count=existing.count + 1,
+            updated_at=existing.updated_at,
+            source=existing.source,
+            reference=existing.reference,
+        )
+        return
+    signals[agent_id] = AgentTaskSignal(
+        state=state,
+        activity=activity,
+        count=(existing.count if existing else 0) + 1,
+        updated_at=updated_at,
+        source=source,
+        reference=reference,
+    )
+
+
+def normalize_task_signal_state(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized in {"running", "dispatched", "queued"}:
+        return normalized
+    if normalized == "pending":
+        return "queued"
+    return ""
+
+
+def task_activity_text(task: Dict[str, Any]) -> str:
+    payload = as_dict(task.get("payload"))
+    return compact_single_line(
+        str(
+            task.get("objective")
+            or payload.get("task_objective")
+            or task.get("title")
+            or task.get("command")
+            or "bounded task"
+        ),
+        56,
+    )
+
+
+def build_agent_task_signal_maps(
+    catalog: Dict[str, DashboardAgent],
+    tmux_payload: Dict[str, Any],
+    task_running_payload: Dict[str, Any],
+    task_pending_payload: Dict[str, Any],
+) -> Tuple[Dict[str, AgentTaskSignal], Dict[str, AgentTaskSignal]]:
+    owner_signals: Dict[str, AgentTaskSignal] = {}
+    supervisor_signals: Dict[str, AgentTaskSignal] = {}
+    task_batches = [
+        ("tmux", as_list(as_dict(tmux_payload.get("state")).get("tasks"))),
+        ("task", as_list(task_running_payload.get("tasks")) + as_list(task_pending_payload.get("tasks"))),
+    ]
+    for source_label, entries in task_batches:
+        for task_raw in entries:
+            task = as_dict(task_raw)
+            status = normalize_task_signal_state(task.get("status"))
+            if not status:
+                continue
+            owners, supervisors, target_source = extract_explicit_task_agents(catalog, task)
+            if not owners and not supervisors:
+                continue
+            updated_at = str(
+                task.get("started_at")
+                or task.get("dispatched_at")
+                or task.get("updated_at")
+                or task.get("created_at")
+                or ""
+            ).strip()
+            activity = task_activity_text(task)
+            task_id = str(task.get("task_id") or task.get("title") or task.get("command") or "task").strip()
+            signal_source = f"{source_label}:{target_source}" if target_source else source_label
+            for agent_id in owners:
+                merge_agent_signal(owner_signals, agent_id, status, activity, updated_at, signal_source, task_id)
+            if owners:
+                owner_label = compact_single_line(
+                    ", ".join(catalog[agent_id].display_name for agent_id in owners if agent_id in catalog),
+                    36,
+                )
+            else:
+                owner_label = "delegate"
+            for agent_id in supervisors:
+                merge_agent_signal(
+                    supervisor_signals,
+                    agent_id,
+                    status,
+                    compact_single_line(f"directing {owner_label}: {activity}", 56),
+                    updated_at,
+                    signal_source,
+                    task_id,
+                )
+    return owner_signals, supervisor_signals
+
+
+def build_agent_session_signal_map(
+    catalog: Dict[str, DashboardAgent],
+    agent_sessions_payload: Dict[str, Any],
+    task_index: Dict[str, Dict[str, Any]],
+    now_epoch: float,
+) -> Dict[str, AgentTaskSignal]:
+    signals: Dict[str, AgentTaskSignal] = {}
+    for session_raw in as_list(agent_sessions_payload.get("sessions")):
+        session = as_dict(session_raw)
+        agent_id = normalize_agent_id(session.get("agent_id"))
+        if agent_id not in catalog:
+            continue
+        if str(session.get("status") or "").strip().lower() != "busy":
+            continue
+        updated_at = str(session.get("updated_at") or session.get("heartbeat_at") or "").strip()
+        if age_seconds(updated_at, now_epoch) > 900:
+            continue
+        metadata = as_dict(session.get("metadata"))
+        current_task_id = str(
+            metadata.get("current_task_id")
+            or metadata.get("last_source_task_id")
+            or metadata.get("last_claimed_task_id")
+            or ""
+        ).strip()
+        task = task_index.get(current_task_id, {})
+        activity = compact_single_line(
+            str(
+                task.get("objective")
+                or as_dict(task.get("payload")).get("task_objective")
+                or metadata.get("last_selected_strategy")
+                or metadata.get("objective")
+                or "active session"
+            ),
+            56,
+        )
+        state = "running"
+        if catalog[agent_id].tier in {"lead", "director"} or catalog[agent_id].role == "orchestrator":
+            activity = compact_single_line(f"orchestrating: {activity}", 56)
+        merge_agent_signal(
+            signals,
+            agent_id,
+            state,
+            activity,
+            updated_at,
+            "session",
+            str(session.get("session_id") or agent_id),
+        )
+    return signals
+
+
+def build_recent_chat_notes(
+    catalog: Dict[str, DashboardAgent],
+    bus_payload: Dict[str, Any],
+    now_epoch: float,
+) -> Dict[str, Tuple[str, float, str]]:
+    notes: Dict[str, Tuple[str, float, str]] = {}
+    for event_raw in reversed(as_list(bus_payload.get("events"))):
+        event = as_dict(event_raw)
+        agent_id = normalize_agent_id(event.get("source_agent"))
+        if not agent_id or agent_id in notes or agent_id not in catalog:
+            continue
+        if str(event.get("role") or "").strip().lower() == "system":
+            continue
+        event_age = age_seconds(event.get("created_at"), now_epoch)
+        if event_age > 900:
+            continue
+        event_type = str(event.get("event_type") or "").strip().lower()
+        content = compact_single_line(str(event.get("content") or ""), 56)
+        if not content and event_type:
+            content = compact_single_line(event_type.replace("trichat.", "").replace("_", " "), 56)
+        notes[agent_id] = (
+            content or "recent chatter",
+            event_age,
+            str(event.get("event_id") or event.get("event_seq") or agent_id).strip(),
+        )
+    return notes
 
 
 def select_display_agents(
@@ -627,25 +886,6 @@ def build_blocked_notes(adapter_payload: Dict[str, Any], now_epoch: float) -> Di
         blocked[agent_id] = (severity, last_error)
     return blocked
 
-
-def build_recent_chat_notes(bus_payload: Dict[str, Any], now_epoch: float) -> Dict[str, Tuple[str, float]]:
-    notes: Dict[str, Tuple[str, float]] = {}
-    for event_raw in reversed(as_list(bus_payload.get("events"))):
-        event = as_dict(event_raw)
-        agent_id = normalize_agent_id(event.get("source_agent"))
-        if not agent_id or agent_id in notes:
-            continue
-        event_age = age_seconds(event.get("created_at"), now_epoch)
-        if event_age > 900:
-            continue
-        event_type = str(event.get("event_type") or "").strip().lower()
-        content = compact_single_line(str(event.get("content") or ""), 56)
-        if not content:
-            content = compact_single_line(event_type.replace("trichat.", "").replace("_", " "), 56)
-        notes[agent_id] = (content or "recent chatter", event_age)
-    return notes
-
-
 def build_adapter_age_map(adapter_payload: Dict[str, Any], now_epoch: float) -> Dict[str, float]:
     ages: Dict[str, float] = {}
     for state_raw in as_list(adapter_payload.get("states")):
@@ -657,80 +897,6 @@ def build_adapter_age_map(adapter_payload: Dict[str, Any], now_epoch: float) -> 
         if agent_id not in ages or age < ages[agent_id]:
             ages[agent_id] = age
     return ages
-
-
-def infer_task_candidate_agents(
-    catalog: Dict[str, DashboardAgent],
-    task: Dict[str, Any],
-) -> List[str]:
-    metadata = as_dict(task.get("metadata"))
-    haystacks = " ".join(
-        [
-            str(task.get("title") or ""),
-            str(task.get("command") or ""),
-            str(metadata.get("strategy") or ""),
-            str(metadata.get("ownership_scope") or ""),
-            str(metadata.get("delegate_agent_id") or ""),
-            str(as_dict(metadata.get("delegation_brief")).get("delegate_agent_id") or ""),
-        ]
-    ).lower()
-    matches: List[str] = []
-    for agent_id, agent in catalog.items():
-        if agent_id in haystacks or agent.display_name.lower() in haystacks:
-            matches.append(agent_id)
-    return dedupe(matches)
-
-
-def build_agent_task_signal_map(
-    catalog: Dict[str, DashboardAgent],
-    tmux_payload: Dict[str, Any],
-    now_epoch: float,
-) -> Dict[str, AgentTaskSignal]:
-    status_rank = {"running": 3, "dispatched": 2, "queued": 1}
-    signals: Dict[str, AgentTaskSignal] = {}
-    for task_raw in as_list(as_dict(tmux_payload.get("state")).get("tasks")):
-        task = as_dict(task_raw)
-        status = str(task.get("status") or "").strip().lower()
-        if status not in status_rank:
-            continue
-        candidates = infer_task_candidate_agents(catalog, task)
-        if not candidates:
-            continue
-        updated_at = (
-            str(task.get("started_at") or task.get("dispatched_at") or task.get("created_at") or "").strip()
-        )
-        activity = compact_single_line(str(task.get("title") or task.get("command") or "tmux work"), 56)
-        for agent_id in candidates:
-            existing = signals.get(agent_id)
-            if existing and status_rank.get(existing.state, 0) > status_rank.get(status, 0):
-                signals[agent_id] = AgentTaskSignal(
-                    state=existing.state,
-                    activity=existing.activity,
-                    count=existing.count + 1,
-                    updated_at=existing.updated_at,
-                )
-                continue
-            signals[agent_id] = AgentTaskSignal(
-                state=status,
-                activity=activity,
-                count=(existing.count if existing else 0) + 1,
-                updated_at=updated_at,
-            )
-    return signals
-
-
-def current_focus_task(tmux_payload: Dict[str, Any]) -> str:
-    state = as_dict(tmux_payload.get("state"))
-    for task_raw in as_list(state.get("tasks")):
-        task = as_dict(task_raw)
-        status = str(task.get("status") or "").strip().lower()
-        if status not in {"running", "dispatched", "queued"}:
-            continue
-        title = compact_single_line(str(task.get("title") or ""), 38)
-        command = compact_single_line(str(task.get("command") or ""), 38)
-        return title or command or "active tmux lane"
-    return "waiting for next bounded task"
-
 
 def infer_role_action(agent: DashboardAgent, activity: str) -> str:
     haystack = f"{agent.role} {activity}".lower()
@@ -784,57 +950,37 @@ def build_action_tags(
     return dedupe(tags)[:3]
 
 
-def infer_focus_assignment(
-    selected_agent_id: str,
-    current_turn: Dict[str, Any],
-    catalog: Dict[str, DashboardAgent],
-) -> Tuple[str, List[str]]:
-    selected_id = normalize_agent_id(selected_agent_id)
-    if not selected_id or selected_id not in catalog:
-        return "", []
-    selected = catalog[selected_id]
-    supervisors: List[str] = []
-    if selected.tier == "director" and selected.managed_agent_ids:
-        delegate = infer_managed_delegate(selected, current_turn, catalog)
-        if delegate:
-            supervisors.append(selected_id)
-            return delegate, supervisors
-    if selected.tier == "lead" and selected.managed_agent_ids:
-        delegate = infer_managed_delegate(selected, current_turn, catalog)
-        if delegate and delegate in catalog:
-            delegate_agent = catalog[delegate]
-            supervisors.append(selected_id)
-            if delegate_agent.tier == "director" and delegate_agent.managed_agent_ids:
-                nested = infer_managed_delegate(delegate_agent, current_turn, catalog)
-                if nested:
-                    supervisors.append(delegate)
-                    return nested, supervisors
-            return delegate, supervisors
-    return selected_id, supervisors
-
-
 def derive_presence_map(
     agents: List[DashboardAgent],
     workboard_payload: Dict[str, Any],
     tmux_payload: Dict[str, Any],
+    task_running_payload: Dict[str, Any],
+    task_pending_payload: Dict[str, Any],
+    agent_sessions_payload: Dict[str, Any],
     adapter_payload: Dict[str, Any],
     bus_payload: Dict[str, Any],
     now_epoch: Optional[float] = None,
 ) -> List[OfficePresence]:
     now_epoch = now_epoch if now_epoch is not None else time.time()
     catalog = {agent.agent_id: agent for agent in agents}
-    current_turn = maybe_turn(workboard_payload)
-    turn_recent = age_seconds(current_turn.get("updated_at"), now_epoch) <= 300
+    current_turn = as_dict(workboard_payload.get("active_turn"))
+    turn_recent = bool(current_turn) and age_seconds(current_turn.get("updated_at"), now_epoch) <= 300
     expected_agents = set(dedupe(as_list(current_turn.get("expected_agents"))))
     selected_agent = normalize_agent_id(current_turn.get("selected_agent"))
     blocked_notes = build_blocked_notes(adapter_payload, now_epoch)
-    recent_chat = build_recent_chat_notes(bus_payload, now_epoch)
+    recent_chat = build_recent_chat_notes(catalog, bus_payload, now_epoch)
     adapter_ages = build_adapter_age_map(adapter_payload, now_epoch)
-    task_signals = build_agent_task_signal_map(catalog, tmux_payload, now_epoch)
-    focus_agent, supervisors = infer_focus_assignment(selected_agent, current_turn, catalog)
-    focus_task = current_focus_task(tmux_payload)
-    disagreement = bool(current_turn.get("disagreement"))
-    active_tmux = parse_any_int(as_dict(tmux_payload.get("state")).get("counts", {}).get("running")) > 0
+    task_index = build_task_index(task_running_payload, task_pending_payload)
+    owner_signals, supervisor_signals = build_agent_task_signal_maps(
+        catalog,
+        tmux_payload,
+        task_running_payload,
+        task_pending_payload,
+    )
+    session_signals = build_agent_session_signal_map(catalog, agent_sessions_payload, task_index, now_epoch)
+    selected_delegate = ""
+    if selected_agent in catalog and turn_recent:
+        selected_delegate = infer_managed_delegate(catalog[selected_agent], current_turn, catalog) or ""
     presences: List[OfficePresence] = []
 
     for agent in agents:
@@ -842,16 +988,25 @@ def derive_presence_map(
         location = "desk"
         activity = "standing by"
         queue_count = 0
+        evidence_source = "none"
+        evidence_detail = "no current evidence"
         blocked = blocked_notes.get(agent.agent_id)
-        task_signal = task_signals.get(agent.agent_id)
+        owner_signal = owner_signals.get(agent.agent_id)
+        supervisor_signal = supervisor_signals.get(agent.agent_id)
+        session_signal = session_signals.get(agent.agent_id)
         chat_signal = recent_chat.get(agent.agent_id)
         signal_ages = [adapter_ages.get(agent.agent_id, 1e12)]
-        if task_signal:
-            signal_ages.append(age_seconds(task_signal.updated_at, now_epoch))
-            queue_count = task_signal.count
+        if owner_signal:
+            signal_ages.append(age_seconds(owner_signal.updated_at, now_epoch))
+            queue_count = max(queue_count, owner_signal.count)
+        if supervisor_signal:
+            signal_ages.append(age_seconds(supervisor_signal.updated_at, now_epoch))
+            queue_count = max(queue_count, supervisor_signal.count)
+        if session_signal:
+            signal_ages.append(age_seconds(session_signal.updated_at, now_epoch))
         if chat_signal:
             signal_ages.append(chat_signal[1])
-        if turn_recent and (agent.agent_id == focus_agent or agent.agent_id in expected_agents or agent.agent_id in supervisors):
+        if turn_recent and (agent.agent_id == selected_agent or agent.agent_id in expected_agents):
             signal_ages.append(age_seconds(current_turn.get("updated_at"), now_epoch))
         freshest_signal_age = min(signal_ages) if signal_ages else 1e12
         if blocked:
@@ -859,39 +1014,65 @@ def derive_presence_map(
             state = "offline" if severity == "offline" else "blocked"
             activity = detail
             location = "desk"
-        elif task_signal and task_signal.state == "running":
+            evidence_source = "adapter"
+            evidence_detail = detail
+        elif owner_signal and owner_signal.state == "running":
             state = "working"
             location = "desk"
-            activity = task_signal.activity
-        elif turn_recent and agent.agent_id == focus_agent:
-            state = "working" if active_tmux else "supervising"
-            activity = focus_task if active_tmux else compact_single_line(str(current_turn.get("selected_strategy") or ""), 56)
-        elif turn_recent and agent.agent_id in supervisors:
+            activity = owner_signal.activity
+            evidence_source = owner_signal.source
+            evidence_detail = owner_signal.reference
+        elif supervisor_signal and supervisor_signal.state == "running":
             state = "supervising"
-            focus_label = catalog.get(focus_agent).display_name if focus_agent in catalog else "delegate"
-            activity = compact_single_line(f"directing {focus_label}", 56)
-        elif turn_recent and agent.agent_id in expected_agents and (disagreement or agent.agent_id in recent_chat):
-            state = "talking"
-            location = "cooler"
-            activity = chat_signal[0] if chat_signal else "council chatter"
+            activity = supervisor_signal.activity
+            evidence_source = supervisor_signal.source
+            evidence_detail = supervisor_signal.reference
+        elif session_signal and session_signal.state == "running":
+            state = "supervising" if agent.tier in {"lead", "director"} or agent.role == "orchestrator" else "working"
+            activity = session_signal.activity
+            evidence_source = session_signal.source
+            evidence_detail = session_signal.reference
+        elif turn_recent and agent.agent_id == selected_agent:
+            state = "supervising" if selected_delegate else "working"
+            activity = compact_single_line(
+                str(current_turn.get("selected_strategy") or current_turn.get("user_prompt") or "active turn"),
+                56,
+            )
+            evidence_source = "turn"
+            evidence_detail = str(current_turn.get("turn_id") or "active-turn").strip() or "active-turn"
         elif chat_signal and chat_signal[1] <= 240:
             state = "talking"
             location = "cooler"
             activity = chat_signal[0]
+            evidence_source = "bus"
+            evidence_detail = chat_signal[2]
         elif chat_signal:
             state = "break"
             location = "lounge"
             activity = chat_signal[0]
-        elif task_signal and task_signal.state in {"queued", "dispatched"}:
+            evidence_source = "bus"
+            evidence_detail = chat_signal[2]
+        elif owner_signal and owner_signal.state in {"queued", "dispatched"}:
             state = "idle"
-            activity = compact_single_line(f"queued: {task_signal.activity}", 56)
+            activity = compact_single_line(f"queued: {owner_signal.activity}", 56)
+            evidence_source = owner_signal.source
+            evidence_detail = owner_signal.reference
+        elif supervisor_signal and supervisor_signal.state in {"queued", "dispatched"}:
+            state = "idle"
+            activity = compact_single_line(f"oversight queued: {supervisor_signal.activity}", 56)
+            evidence_source = supervisor_signal.source
+            evidence_detail = supervisor_signal.reference
         elif turn_recent and agent.agent_id in expected_agents:
             state = "idle"
             activity = "waiting on the next turn"
+            evidence_source = "turn"
+            evidence_detail = str(current_turn.get("turn_id") or "active-turn").strip() or "active-turn"
         elif agent.active and freshest_signal_age > 1800:
             state = "sleeping"
             location = "sofa"
             activity = "saving energy until the next bounded task"
+            evidence_source = "none"
+            evidence_detail = f"idle_for={human_duration(freshest_signal_age)}"
         actions = build_action_tags(agent, state, location, activity, queue_count=queue_count)
         presences.append(
             OfficePresence(
@@ -900,6 +1081,8 @@ def derive_presence_map(
                 activity=compact_single_line(activity or "standing by", 56),
                 location=location,
                 actions=actions,
+                evidence_source=evidence_source,
+                evidence_detail=compact_single_line(evidence_detail or "n/a", 56),
             )
         )
     return presences
@@ -1007,6 +1190,7 @@ def render_agent_card(presence: OfficePresence, width: int, frame: int) -> List[
         "|" + fit_text(sprite[2], inner) + "|",
         "|" + fit_text(sprite[3], inner) + "|",
         "|" + fit_text(badges, inner) + "|",
+        "|" + fit_text(compact_single_line(f"src={presence.evidence_source} ref={presence.evidence_detail}", inner), inner) + "|",
         "|" + fit_text(compact_single_line(f"{mood} :: {presence.activity}", inner), inner) + "|",
         bottom,
     ]
@@ -1052,6 +1236,9 @@ def render_office_view(snapshot: DashboardSnapshot, width: int, height: int, fra
         agents,
         snapshot.workboard,
         snapshot.tmux,
+        snapshot.task_running,
+        snapshot.task_pending,
+        snapshot.agent_sessions,
         snapshot.adapter,
         snapshot.bus_tail,
         snapshot.fetched_at,
@@ -1072,6 +1259,7 @@ def render_office_view(snapshot: DashboardSnapshot, width: int, height: int, fra
     lines = build_scene_banner(theme, available_width, frame)
     lines.append(fit_text(banner, available_width))
     lines.append(fit_text("Desk row :: ring leader, directors, leaf SMEs, and support mentors on one live floor", available_width))
+    lines.append(fit_text("Truth mode :: active states require durable task/session/bus/adapter evidence; no title-guessing", available_width))
     lines.append("")
     lines.extend(render_card_grid(cards, columns=columns, gap=gap))
     lines.append("")
@@ -1363,6 +1551,7 @@ def render_workers_view(snapshot: DashboardSnapshot, width: int, height: int) ->
     for task_raw in tasks[: max(4, height - 6)]:
         task = as_dict(task_raw)
         metadata = as_dict(task.get("metadata"))
+        owners, supervisors, target_source = extract_explicit_task_agents(catalog, task)
         header = (
             f"{task.get('task_id') or 'task'} "
             f"[{task.get('status') or 'n/a'}] "
@@ -1377,8 +1566,16 @@ def render_workers_view(snapshot: DashboardSnapshot, width: int, height: int) ->
         ownership_scope = compact_single_line(str(metadata.get("ownership_scope") or ""), width - 2)
         if ownership_scope:
             lines.append(fit_text(f"  scope: {ownership_scope}", width))
-        matched_agents = infer_task_candidate_agents(catalog, task)
-        for agent_id in matched_agents[:2]:
+        if owners or supervisors:
+            owner_summary = ", ".join(owners) or "n/a"
+            supervisor_summary = ", ".join(supervisors) or "n/a"
+            lines.append(
+                fit_text(
+                    f"  agents: owners={owner_summary} supervise={supervisor_summary} src={target_source or 'explicit'}",
+                    width,
+                )
+            )
+        for agent_id in owners[:2]:
             learning = learning_by_agent.get(agent_id, {})
             top_summaries = as_list(learning.get("top_summaries"))
             if not learning:
@@ -1435,6 +1632,12 @@ def render_help_view(width: int, height: int, theme: str = "night") -> List[str]
         fit_text("- agent.session_list", width),
         fit_text("- task.list (running/pending)", width),
         fit_text("- trichat.autopilot(status)", width),
+        "",
+        fit_text("Truth mode:", width),
+        fit_text("- WORK / LEAD require explicit task, session, or active-turn evidence", width),
+        fit_text("- CHAT / BREAK require real agent bus events", width),
+        fit_text("- BLOCK / DOWN require adapter telemetry", width),
+        fit_text("- Unowned tmux titles never create fake ownership", width),
         "",
         fit_text("Agents can stack action badges: desk/code, brief/multi, chat/coffee, break/reset, or sleep/nap.", width),
         fit_text(f"Current theme: {theme_label(theme)}", width),
