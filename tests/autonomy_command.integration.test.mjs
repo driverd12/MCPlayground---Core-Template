@@ -79,6 +79,66 @@ test("autonomy.command turns a cold control plane into a durable autonomous goal
   }
 });
 
+test("autonomy.command auto-spawns matched SMEs and folds their bounded workstreams into the plan", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-command-specialist-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+  const ollama = await startFakeOllamaServer({
+    models: [{ name: "llama3.2:3b" }],
+  });
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+    TRICHAT_OLLAMA_URL: ollama.url,
+    TRICHAT_RING_LEADER_AUTOSTART: "1",
+    TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+    TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+    TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+  });
+
+  try {
+    const intake = await callTool(session.client, "autonomy.command", {
+      mutation: nextMutation("autonomy-command-specialist", "autonomy.command", () => mutationCounter++),
+      objective:
+        "Set up a Docker Compose reverse proxy stack, verify container health, and keep the change bounded and reversible.",
+      title: "Docker specialist autonomy intake",
+      trichat_bridge_dry_run: true,
+      dispatch_limit: 12,
+      max_passes: 3,
+    });
+
+    assert.equal(intake.ok, true);
+    assert.ok(intake.specialists);
+    assert.ok(intake.specialists.matched_domains.some((entry) => entry.domain_key === "docker"));
+    assert.ok(intake.goal.metadata.matched_specialist_domains.includes("docker"));
+    assert.ok(intake.goal.metadata.specialist_agent_ids.includes("docker-sme"));
+
+    const roster = await callTool(session.client, "trichat.roster", {});
+    assert.ok(
+      roster.agents.some(
+        (agent) =>
+          agent.agent_id === "docker-sme" &&
+          agent.parent_agent_id === "implementation-director" &&
+          agent.coordination_tier === "leaf"
+      )
+    );
+
+    const plan = await callTool(session.client, "plan.get", { plan_id: intake.plan.plan_id });
+    assert.ok(
+      plan.steps.some(
+        (step) =>
+          step.metadata?.owner_role_id === "docker-sme" &&
+          step.metadata?.task_execution?.domain_key === "docker"
+      )
+    );
+  } finally {
+    await session.client.close().catch(() => {});
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function openClient(extraEnv) {
   const transport = new StdioClientTransport({
     command: "node",

@@ -197,10 +197,11 @@ import { modelRouter, modelRouterSchema } from "./tools/model_router.js";
 import { orgProgram, orgProgramSchema } from "./tools/org_program.js";
 import { taskCompile, taskCompileSchema } from "./tools/task_compiler.js";
 import { autonomyBootstrap, autonomyBootstrapSchema } from "./tools/autonomy_bootstrap.js";
-import { autonomyMaintain, autonomyMaintainSchema } from "./tools/autonomy_maintain.js";
+import { autonomyMaintain, autonomyMaintainSchema, initializeAutonomyMaintainDaemon } from "./tools/autonomy_maintain.js";
 import { autonomyCommand, autonomyCommandSchema } from "./tools/autonomy_command.js";
 import { autonomyIdeIngress, autonomyIdeIngressSchema } from "./tools/autonomy_ide_ingress.js";
 import { providerBridge, providerBridgeSchema } from "./tools/provider_bridge.js";
+import { matchDomainSpecialists, specialistCatalog, specialistCatalogSchema } from "./tools/specialist_catalog.js";
 import {
   trichatChaos,
   trichatChaosSchema,
@@ -413,6 +414,26 @@ function readStringArray(value: unknown): string[] | undefined {
     .map((entry) => readString(entry))
     .filter((entry): entry is string => Boolean(entry));
   return normalized.length > 0 ? Array.from(new Set(normalized)) : undefined;
+}
+
+function resolveEffectiveTriChatAgentIds(
+  storage: Storage,
+  objective: string | undefined,
+  explicitAgentIds: readonly string[] | undefined
+) {
+  const objectiveText = readString(objective) ?? "";
+  const matchedAgentIds =
+    objectiveText.length > 0
+      ? matchDomainSpecialists(storage, objectiveText, 6, 0.3).flatMap((entry) => entry.recommended_trichat_agent_ids)
+      : [];
+  const merged = [
+    ...new Set(
+      [...(explicitAgentIds ?? []), ...matchedAgentIds]
+        .map((entry) => readString(entry))
+        .filter((entry): entry is string => Boolean(entry))
+    ),
+  ];
+  return merged.length > 0 ? merged : undefined;
 }
 
 function readInteger(value: unknown): number | undefined {
@@ -1050,7 +1071,11 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               step.title;
             const threadId = readString(rawInput.thread_id) ?? buildPlanDispatchThreadId(plan.plan_id, step.step_id);
             const threadTitle = readString(rawInput.thread_title) ?? `${plan.title}: ${step.title}`;
-            const expectedAgents = readStringArray(rawInput.expected_agents);
+            const expectedAgents = resolveEffectiveTriChatAgentIds(
+              storage,
+              [goal?.objective, userPrompt].filter(Boolean).join("\n\n"),
+              readStringArray(rawInput.expected_agents)
+            );
             const minAgents = readInteger(rawInput.min_agents);
 
             const threadResult = await invokeRegisteredTool("trichat.thread_open", {
@@ -1427,6 +1452,7 @@ async function dispatchAutorun(input: z.infer<typeof dispatchAutorunSchema>) {
 
         if (!(input.dry_run ?? false)) {
           const snapshot = getPlanExecutionSnapshot(input.plan_id);
+          const goal = snapshot.plan.goal_id ? storage.getGoalById(snapshot.plan.goal_id) : null;
           const trichatSteps = snapshot.steps.filter((step) => {
             if (step.executor_kind !== "trichat" || step.status !== "running") {
               return false;
@@ -1445,19 +1471,25 @@ async function dispatchAutorun(input: z.infer<typeof dispatchAutorunSchema>) {
             }
             processedTriChatTurns.add(turnId);
             try {
+              const stepPrompt =
+                readString(step.input.user_prompt) ??
+                readString(step.input.prompt) ??
+                readString(step.input.content) ??
+                step.title;
+              const effectiveExpectedAgents = resolveEffectiveTriChatAgentIds(
+                storage,
+                [goal?.objective, stepPrompt].filter(Boolean).join("\n\n"),
+                [...(readStringArray(step.input.expected_agents) ?? []), ...(input.trichat_agent_ids ?? [])]
+              );
               const autorunResult = await trichatTurnAutorun(storage, {
                 turn_id: turnId,
                 session_key: `dispatch-autorun:${input.plan_id}:${step.step_id}:${pass}`,
-                expected_agents: input.trichat_agent_ids,
+                expected_agents: effectiveExpectedAgents,
                 max_rounds: input.trichat_max_rounds,
                 min_success_agents: input.trichat_min_success_agents,
                 bridge_timeout_seconds: input.trichat_bridge_timeout_seconds,
                 bridge_dry_run: input.trichat_bridge_dry_run,
-                objective:
-                  readString(step.input.user_prompt) ??
-                  readString(step.input.prompt) ??
-                  readString(step.input.content) ??
-                  step.title,
+                objective: stepPrompt,
                 project_dir:
                   readString(step.input.project_dir) ??
                   readString(step.metadata.project_dir) ??
@@ -2168,6 +2200,13 @@ registerTool(
   (input) => providerBridge(storage, input)
 );
 
+registerTool(
+  "specialist.catalog",
+  "Match, ensure, and persist narrow domain SMEs that can be routed automatically from real operator objectives.",
+  specialistCatalogSchema,
+  (input) => specialistCatalog(storage, invokeRegisteredTool, input)
+);
+
 registerTool("org.program", "Version and promote role programs for ring leader, directors, SMEs, and leaf agents.", orgProgramSchema, (input) =>
   orgProgram(storage, input)
 );
@@ -2718,6 +2757,7 @@ initializeImprintAutoSnapshotDaemon(storage, {
   get_tool_names: () => Array.from(toolRegistry.keys()),
 });
 initializeGoalAutorunDaemon(storage, invokeRegisteredTool);
+initializeAutonomyMaintainDaemon(storage, invokeRegisteredTool);
 
 function createServerInstance() {
   const server = new Server(
@@ -2760,16 +2800,16 @@ async function main() {
   const httpEnabled = args.includes("--http") || process.env.MCP_HTTP === "1";
   const bootstrapOnStart = parseBooleanEnv(process.env.MCP_AUTONOMY_BOOTSTRAP_ON_START, true);
   const maintainOnStart = parseBooleanEnv(process.env.MCP_AUTONOMY_MAINTAIN_ON_START, true);
+  const startupNonce = `${Date.now()}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
 
   if (httpEnabled && bootstrapOnStart) {
-    const nonce = `${Date.now()}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
     try {
       await autonomyBootstrap(storage, invokeRegisteredTool, {
         action: "ensure",
         local_host_id: "local",
         mutation: {
-          idempotency_key: `server-startup-autonomy-${nonce}`,
-          side_effect_fingerprint: `server-startup-autonomy-${nonce}`,
+          idempotency_key: `server-startup-autonomy-${startupNonce}`,
+          side_effect_fingerprint: `server-startup-autonomy-${startupNonce}`,
         },
         probe_ollama_url: process.env.TRICHAT_OLLAMA_URL,
         autostart_ring_leader: parseBooleanEnv(process.env.TRICHAT_RING_LEADER_AUTOSTART, true),
@@ -2784,37 +2824,38 @@ async function main() {
         `[autonomy.bootstrap] startup ensure failed: ${error instanceof Error ? error.message : String(error)}`
       );
     }
+  }
 
-    if (maintainOnStart) {
-      try {
-        await autonomyMaintain(storage, invokeRegisteredTool, {
-          action: "run",
-          local_host_id: "local",
-          mutation: {
-            idempotency_key: `server-startup-autonomy-maintain-${nonce}`,
-            side_effect_fingerprint: `server-startup-autonomy-maintain-${nonce}`,
-          },
-          probe_ollama_url: process.env.TRICHAT_OLLAMA_URL,
-          ensure_bootstrap: true,
-          autostart_ring_leader: parseBooleanEnv(process.env.TRICHAT_RING_LEADER_AUTOSTART, true),
-          bootstrap_run_immediately: false,
-          start_goal_autorun_daemon: true,
-          maintain_tmux_controller: true,
-          run_eval_if_due: true,
-          eval_interval_seconds: 21600,
-          eval_suite_id: "autonomy.control-plane",
-          minimum_eval_score: 75,
-          refresh_learning_summary: true,
-          learning_review_interval_seconds: 300,
-          interval_seconds: 120,
-          publish_runtime_event: true,
-          source_client: "server.startup",
-        });
-      } catch (error) {
-        console.warn(
-          `[autonomy.maintain] startup run failed: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
+  if (httpEnabled && maintainOnStart) {
+    try {
+      await autonomyMaintain(storage, invokeRegisteredTool, {
+        action: "start",
+        local_host_id: "local",
+        mutation: {
+          idempotency_key: `server-startup-autonomy-maintain-${startupNonce}`,
+          side_effect_fingerprint: `server-startup-autonomy-maintain-${startupNonce}`,
+        },
+        probe_ollama_url: process.env.TRICHAT_OLLAMA_URL,
+        ensure_bootstrap: true,
+        autostart_ring_leader: parseBooleanEnv(process.env.TRICHAT_RING_LEADER_AUTOSTART, true),
+        bootstrap_run_immediately: false,
+        start_goal_autorun_daemon: true,
+        maintain_tmux_controller: true,
+        run_eval_if_due: true,
+        eval_interval_seconds: 21600,
+        eval_suite_id: "autonomy.control-plane",
+        minimum_eval_score: 75,
+        refresh_learning_summary: true,
+        learning_review_interval_seconds: 300,
+        interval_seconds: 120,
+        publish_runtime_event: true,
+        run_immediately: true,
+        source_client: "server.startup",
+      });
+    } catch (error) {
+      console.warn(
+        `[autonomy.maintain] startup run failed: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 

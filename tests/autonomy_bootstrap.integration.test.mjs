@@ -246,6 +246,7 @@ test("autonomy.maintain keeps the control plane ready and refreshes bounded eval
     assert.equal(maintained.status.bootstrap.self_start_ready, true);
     assert.equal(maintained.status.goal_autorun_daemon.running, true);
     assert.equal(maintained.status.state.enabled, true);
+    assert.equal(maintained.status.runtime.running, true);
     assert.equal(typeof maintained.status.state.last_run_at, "string");
     assert.equal(typeof maintained.status.state.last_learning_review_at, "string");
     assert.equal(maintained.eval.executed, true);
@@ -261,6 +262,30 @@ test("autonomy.maintain keeps the control plane ready and refreshes bounded eval
     assert.equal(kernel.autonomy_maintain.stale, false);
     assert.equal(kernel.autonomy_maintain.eval_due, false);
     assert.equal(typeof kernel.autonomy_maintain.last_run_at, "string");
+    assert.equal(kernel.autonomy_maintain.runtime.running, true);
+    assert.equal(kernel.overview.autonomy_maintain.runtime_running, true);
+
+    await session.client.close().catch(() => {});
+    const restoredSession = await openClient({
+      ANAMNESIS_HUB_DB_PATH: dbPath,
+      TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+      TRICHAT_OLLAMA_URL: ollama.url,
+      TRICHAT_RING_LEADER_AUTOSTART: "1",
+      TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+      TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+      TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+    });
+    try {
+      const restored = await callTool(restoredSession.client, "autonomy.maintain", {
+        action: "status",
+        local_host_id: "local",
+        probe_ollama_url: ollama.url,
+      });
+      assert.equal(restored.runtime.running, true);
+      assert.equal(restored.state.enabled, true);
+    } finally {
+      await restoredSession.client.close().catch(() => {});
+    }
   } finally {
     await session.client.close().catch(() => {});
     await ollama.close();

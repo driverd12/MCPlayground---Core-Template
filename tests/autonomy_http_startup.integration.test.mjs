@@ -58,6 +58,14 @@ test("http daemon self-converges the autonomy bootstrap on startup", async () =>
     assert.equal(status.ring_leader.running, true);
     assert.equal(status.worker_fabric.host_present, true);
     assert.equal(status.model_router.backend_present, true);
+
+    const maintain = await waitForAutonomyMaintainStatus({
+      url: `http://127.0.0.1:${httpPort}/`,
+      origin: "http://127.0.0.1",
+      bearerToken,
+    });
+    assert.equal(maintain.runtime.running, true);
+    assert.equal(maintain.runtime.last_error ?? null, null);
   } finally {
     child.kill("SIGTERM");
     await new Promise((resolve) => child.once("exit", () => resolve()));
@@ -66,6 +74,52 @@ test("http daemon self-converges the autonomy bootstrap on startup", async () =>
   }
 
   assert.equal(stderr.includes("[autonomy.bootstrap] startup ensure failed"), false);
+});
+
+test("http daemon starts autonomy maintain even when bootstrap-on-start is disabled", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-http-maintain-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const busPath = path.join(tempDir, "trichat.bus.sock");
+  const bearerToken = "test-autonomy-http-maintain-token";
+  const ollama = await startFakeOllamaServer({
+    models: [{ name: "llama3.2:3b" }],
+  });
+  const httpPort = await reservePort();
+  const child = spawn("node", ["dist/server.js", "--http", "--http-port", String(httpPort)], {
+    cwd: REPO_ROOT,
+    env: inheritedEnv({
+      MCP_HTTP: "1",
+      MCP_HTTP_PORT: String(httpPort),
+      MCP_HTTP_HOST: "127.0.0.1",
+      MCP_HTTP_BEARER_TOKEN: bearerToken,
+      ANAMNESIS_HUB_DB_PATH: dbPath,
+      TRICHAT_BUS_SOCKET_PATH: busPath,
+      TRICHAT_OLLAMA_URL: ollama.url,
+      TRICHAT_RING_LEADER_AUTOSTART: "1",
+      TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+      TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+      TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+      MCP_AUTONOMY_BOOTSTRAP_ON_START: "0",
+      MCP_AUTONOMY_MAINTAIN_ON_START: "1",
+    }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  try {
+    const maintain = await waitForAutonomyMaintainStatus({
+      url: `http://127.0.0.1:${httpPort}/`,
+      origin: "http://127.0.0.1",
+      bearerToken,
+    });
+    assert.equal(maintain.runtime.running, true);
+    assert.equal(maintain.state.enabled, true);
+    assert.equal(typeof maintain.state.last_run_at, "string");
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 async function waitForAutonomyStatus({ url, origin, bearerToken }) {
@@ -109,6 +163,49 @@ async function waitForAutonomyStatus({ url, origin, bearerToken }) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw lastError ?? new Error("Timed out waiting for autonomy bootstrap readiness");
+}
+
+async function waitForAutonomyMaintainStatus({ url, origin, bearerToken }) {
+  const deadline = Date.now() + 15000;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const result = await execFileAsync(
+        "node",
+        [
+          "./scripts/mcp_tool_call.mjs",
+          "--tool",
+          "autonomy.maintain",
+          "--args",
+          '{"action":"status"}',
+          "--transport",
+          "http",
+          "--url",
+          url,
+          "--origin",
+          origin,
+          "--cwd",
+          REPO_ROOT,
+        ],
+        {
+          cwd: REPO_ROOT,
+          env: inheritedEnv({
+            MCP_HTTP_BEARER_TOKEN: bearerToken,
+          }),
+          maxBuffer: 8 * 1024 * 1024,
+        }
+      );
+      const parsed = JSON.parse(result.stdout);
+      if (parsed?.runtime?.running) {
+        return parsed;
+      }
+      lastError = new Error(`autonomy.maintain runtime not running: ${JSON.stringify(parsed?.runtime ?? {})}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw lastError ?? new Error("Timed out waiting for autonomy maintain runtime");
 }
 
 async function startFakeOllamaServer({ models }) {

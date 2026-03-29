@@ -900,6 +900,49 @@ export type OrgProgramsStateRecord = {
   updated_at: string;
 };
 
+export type DomainSpecialistStatus = "candidate" | "active" | "archived";
+
+export type DomainSpecialistMatchRulesRecord = {
+  keywords: string[];
+  tags: string[];
+  paths: string[];
+};
+
+export type DomainSpecialistRoutingHintsRecord = {
+  preferred_host_tags: string[];
+  required_host_tags: string[];
+  preferred_agent_ids: string[];
+  support_agent_ids: string[];
+  preferred_model_tags: string[];
+  quality_preference: string | null;
+  local_learning_entry_target: number;
+};
+
+export type DomainSpecialistRecord = {
+  domain_key: string;
+  agent_id: string;
+  role_id: string;
+  title: string;
+  description: string | null;
+  lane: string | null;
+  coordination_tier: string | null;
+  parent_agent_id: string | null;
+  managed_agent_ids: string[];
+  match_rules: DomainSpecialistMatchRulesRecord;
+  routing_hints: DomainSpecialistRoutingHintsRecord;
+  system_prompt: string;
+  status: DomainSpecialistStatus;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DomainSpecialistRegistryStateRecord = {
+  enabled: boolean;
+  specialists: DomainSpecialistRecord[];
+  updated_at: string;
+};
+
 export type GoalAutorunStateRecord = {
   enabled: boolean;
   interval_seconds: number;
@@ -3518,6 +3561,178 @@ export class Storage {
            updated_at = excluded.updated_at`
       )
       .run("org.programs", normalized.enabled ? 1 : 0, stableStringify({ roles: normalized.roles }), now);
+
+    return normalized;
+  }
+
+  getDomainSpecialistRegistryState(): DomainSpecialistRegistryStateRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT enabled, config_json, updated_at
+         FROM daemon_configs
+         WHERE daemon_key = ?`
+      )
+      .get("domain.specialists") as Record<string, unknown> | undefined;
+    if (!row) {
+      return null;
+    }
+
+    const config = parseJsonObject(row.config_json);
+    const specialists = (Array.isArray(config.specialists) ? config.specialists : [])
+      .map((entry) => {
+        if (!entry || typeof entry !== "object") {
+          return null;
+        }
+        const item = entry as Record<string, unknown>;
+        const domainKey = String(item.domain_key ?? "").trim().toLowerCase();
+        const agentId = String(item.agent_id ?? "").trim().toLowerCase();
+        const roleId = String(item.role_id ?? "").trim().toLowerCase();
+        const title = String(item.title ?? "").trim();
+        const systemPrompt = String(item.system_prompt ?? "").trim();
+        if (!domainKey || !agentId || !roleId || !title || !systemPrompt) {
+          return null;
+        }
+        const statusRaw = String(item.status ?? "active").trim().toLowerCase();
+        const status: DomainSpecialistStatus =
+          statusRaw === "candidate" || statusRaw === "archived" ? statusRaw : "active";
+        const matchRules = parseLooseObject(item.match_rules);
+        const routingHints = parseLooseObject(item.routing_hints);
+        return {
+          domain_key: domainKey,
+          agent_id: agentId,
+          role_id: roleId,
+          title,
+          description: asNullableString(item.description),
+          lane: asNullableString(item.lane),
+          coordination_tier: asNullableString(item.coordination_tier),
+          parent_agent_id: asNullableString(item.parent_agent_id),
+          managed_agent_ids: dedupeNonEmpty(
+            Array.isArray(item.managed_agent_ids) ? item.managed_agent_ids.map((value) => String(value ?? "")) : []
+          ),
+          match_rules: {
+            keywords: dedupeNonEmpty(
+              Array.isArray(matchRules.keywords) ? matchRules.keywords.map((value) => String(value ?? "")) : []
+            ),
+            tags: dedupeNonEmpty(Array.isArray(matchRules.tags) ? matchRules.tags.map((value) => String(value ?? "")) : []),
+            paths: dedupeNonEmpty(Array.isArray(matchRules.paths) ? matchRules.paths.map((value) => String(value ?? "")) : []),
+          },
+          routing_hints: {
+            preferred_host_tags: dedupeNonEmpty(
+              Array.isArray(routingHints.preferred_host_tags)
+                ? routingHints.preferred_host_tags.map((value) => String(value ?? ""))
+                : []
+            ),
+            required_host_tags: dedupeNonEmpty(
+              Array.isArray(routingHints.required_host_tags)
+                ? routingHints.required_host_tags.map((value) => String(value ?? ""))
+                : []
+            ),
+            preferred_agent_ids: dedupeNonEmpty(
+              Array.isArray(routingHints.preferred_agent_ids)
+                ? routingHints.preferred_agent_ids.map((value) => String(value ?? ""))
+                : []
+            ),
+            support_agent_ids: dedupeNonEmpty(
+              Array.isArray(routingHints.support_agent_ids)
+                ? routingHints.support_agent_ids.map((value) => String(value ?? ""))
+                : []
+            ),
+            preferred_model_tags: dedupeNonEmpty(
+              Array.isArray(routingHints.preferred_model_tags)
+                ? routingHints.preferred_model_tags.map((value) => String(value ?? ""))
+                : []
+            ),
+            quality_preference: asNullableString(routingHints.quality_preference),
+            local_learning_entry_target: parseBoundedInt(routingHints.local_learning_entry_target, 3, 0, 1000),
+          },
+          system_prompt: systemPrompt,
+          status,
+          metadata: parseLooseObject(item.metadata),
+          created_at: normalizeIsoTimestamp(asNullableString(item.created_at) ?? undefined, String(row.updated_at ?? "")),
+          updated_at: normalizeIsoTimestamp(asNullableString(item.updated_at) ?? undefined, String(row.updated_at ?? "")),
+        } satisfies DomainSpecialistRecord;
+      })
+      .filter((entry): entry is DomainSpecialistRecord => Boolean(entry))
+      .sort((left, right) => left.domain_key.localeCompare(right.domain_key));
+
+    return {
+      enabled: Number(row.enabled ?? 0) === 1,
+      specialists,
+      updated_at: String(row.updated_at ?? ""),
+    };
+  }
+
+  setDomainSpecialistRegistryState(params: {
+    enabled: boolean;
+    specialists: DomainSpecialistRecord[];
+  }): DomainSpecialistRegistryStateRecord {
+    const now = new Date().toISOString();
+    const specialists = (params.specialists ?? [])
+      .map((specialist) => {
+        const domainKey = String(specialist.domain_key ?? "").trim().toLowerCase();
+        const agentId = String(specialist.agent_id ?? "").trim().toLowerCase();
+        const roleId = String(specialist.role_id ?? "").trim().toLowerCase();
+        const title = String(specialist.title ?? "").trim();
+        const systemPrompt = String(specialist.system_prompt ?? "").trim();
+        if (!domainKey || !agentId || !roleId || !title || !systemPrompt) {
+          return null;
+        }
+        return {
+          domain_key: domainKey,
+          agent_id: agentId,
+          role_id: roleId,
+          title,
+          description: asNullableString(specialist.description),
+          lane: asNullableString(specialist.lane),
+          coordination_tier: asNullableString(specialist.coordination_tier),
+          parent_agent_id: asNullableString(specialist.parent_agent_id),
+          managed_agent_ids: dedupeNonEmpty(specialist.managed_agent_ids ?? []),
+          match_rules: {
+            keywords: dedupeNonEmpty(specialist.match_rules?.keywords ?? []),
+            tags: dedupeNonEmpty(specialist.match_rules?.tags ?? []),
+            paths: dedupeNonEmpty(specialist.match_rules?.paths ?? []),
+          },
+          routing_hints: {
+            preferred_host_tags: dedupeNonEmpty(specialist.routing_hints?.preferred_host_tags ?? []),
+            required_host_tags: dedupeNonEmpty(specialist.routing_hints?.required_host_tags ?? []),
+            preferred_agent_ids: dedupeNonEmpty(specialist.routing_hints?.preferred_agent_ids ?? []),
+            support_agent_ids: dedupeNonEmpty(specialist.routing_hints?.support_agent_ids ?? []),
+            preferred_model_tags: dedupeNonEmpty(specialist.routing_hints?.preferred_model_tags ?? []),
+            quality_preference: asNullableString(specialist.routing_hints?.quality_preference),
+            local_learning_entry_target: parseBoundedInt(
+              specialist.routing_hints?.local_learning_entry_target,
+              3,
+              0,
+              1000
+            ),
+          },
+          system_prompt: systemPrompt,
+          status:
+            specialist.status === "candidate" || specialist.status === "archived" ? specialist.status : "active",
+          metadata: parseLooseObject(specialist.metadata),
+          created_at: normalizeIsoTimestamp(asNullableString(specialist.created_at) ?? undefined, now),
+          updated_at: now,
+        } satisfies DomainSpecialistRecord;
+      })
+      .filter((entry): entry is DomainSpecialistRecord => Boolean(entry))
+      .sort((left, right) => left.domain_key.localeCompare(right.domain_key));
+
+    const normalized: DomainSpecialistRegistryStateRecord = {
+      enabled: Boolean(params.enabled),
+      specialists,
+      updated_at: now,
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO daemon_configs (daemon_key, enabled, config_json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(daemon_key) DO UPDATE SET
+           enabled = excluded.enabled,
+           config_json = excluded.config_json,
+           updated_at = excluded.updated_at`
+      )
+      .run("domain.specialists", normalized.enabled ? 1 : 0, stableStringify({ specialists: normalized.specialists }), now);
 
     return normalized;
   }

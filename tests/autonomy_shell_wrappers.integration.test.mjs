@@ -44,6 +44,8 @@ test("autonomy shell wrapper ensure converges the control plane through the real
     const status = await runShellJson(["./scripts/autonomy_ctl.sh", "status"], baseEnv);
     assert.equal(status.self_start_ready, true);
     assert.deepEqual(status.repairs_needed, []);
+    assert.equal(status.maintain?.runtime?.running, true);
+    assert.equal(status.maintain?.runtime?.last_error ?? null, null);
   } finally {
     await ollama.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -83,6 +85,7 @@ test("ring leader start proactively uses autonomy bootstrap on a cold control pl
     assert.equal(status.ring_leader.running, true);
     assert.equal(status.worker_fabric.host_present, true);
     assert.equal(status.model_router.backend_present, true);
+    assert.equal(status.maintain?.runtime?.running, true);
   } finally {
     await ollama.close();
     fs.rmSync(tempDir, { recursive: true, force: true });

@@ -76,6 +76,7 @@ test("server starts with default agentic workflow hooks and exposes core + TriCh
     assert.equal(names.has("transcript.log"), true);
     assert.equal(names.has("autonomy.maintain"), true);
     assert.equal(names.has("autonomy.command"), true);
+    assert.equal(names.has("specialist.catalog"), true);
 
     assert.equal(names.has("trichat.thread_open"), true);
     assert.equal(names.has("trichat.tmux_controller"), true);
@@ -508,6 +509,40 @@ test("goal.execute generates a default agentic plan and dispatches the first run
       goal_id: createdGoal.goal.goal_id,
     });
     assert.equal(goalState.goal.active_plan_id, executedGoal.plan.plan_id);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("goal.execute enriches direct autorun councils with matched specialist SMEs from the goal objective", async () => {
+  const testId = `${Date.now()}-goal-execute-specialist-enrichment`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-execute-specialist-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Docker direct goal execution",
+      objective: "Set up a Docker Compose reverse proxy stack and keep the rollout bounded and reversible.",
+      status: "active",
+      autonomy_mode: "execute_bounded",
+      acceptance_criteria: ["A Docker SME joins the delivery hierarchy for the task."],
+      tags: ["docker", "agentic"],
+    });
+
+    const executedGoal = await callTool(client, "goal.execute", {
+      mutation: nextMutation(testId, "goal.execute", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      max_passes: 4,
+    });
+
+    assert.equal(executedGoal.ok, true);
+    assert.ok(Array.isArray(executedGoal.trichat_agent_ids));
+    assert.ok(executedGoal.trichat_agent_ids.includes("docker-sme"));
+    assert.ok(executedGoal.trichat_agent_ids.includes("implementation-director"));
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

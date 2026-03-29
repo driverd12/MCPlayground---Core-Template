@@ -38,12 +38,19 @@ import {
 import {
   getTriChatActiveAgentIds,
   getTriChatAgent,
+  getTriChatAgentMap,
   getTriChatBridgeCandidates,
   getTriChatBridgeEnvVar,
   getTriChatRoleLaneMap,
   getTriChatRosterSummary,
+  type TriChatAgentDefinition,
   normalizeTriChatAgentId,
 } from "../trichat_roster.js";
+import {
+  getDomainSpecialistAgentDefinition,
+  listDomainSpecialistAgentDefinitions,
+  matchDomainSpecialists,
+} from "./specialist_catalog.js";
 
 const threadStatusSchema = z.enum(["active", "archived"]);
 const adapterChannelSchema = z.enum(["command", "model"]);
@@ -64,6 +71,27 @@ const TURN_PHASE_ORDER: ReadonlyArray<string> = [
   "verify",
   "summarize",
 ];
+
+function resolveTriChatAgentDefinition(storage: Storage | undefined, agentId: string | null | undefined): TriChatAgentDefinition | null {
+  const staticAgent = getTriChatAgent(agentId);
+  const dynamicAgent = storage ? getDomainSpecialistAgentDefinition(storage, agentId) : null;
+  const base = dynamicAgent ?? staticAgent;
+  if (!base) {
+    return null;
+  }
+  const dynamicChildren =
+    storage
+      ? listDomainSpecialistAgentDefinitions(storage)
+          .filter((agent) => normalizeTriChatAgentId(agent.parent_agent_id) === normalizeTriChatAgentId(base.agent_id))
+          .map((agent) => agent.agent_id)
+      : [];
+  return {
+    ...base,
+    managed_agent_ids: [
+      ...new Set([...(base.managed_agent_ids ?? []), ...dynamicChildren].map((value) => normalizeTriChatAgentId(value)).filter(Boolean)),
+    ],
+  };
+}
 
 export const trichatThreadOpenSchema = z.object({
   mutation: mutationSchema,
@@ -1133,15 +1161,45 @@ export function trichatSummary(storage: Storage, input: z.infer<typeof trichatSu
   };
 }
 
-export function trichatRoster(_storage: Storage, input: z.infer<typeof trichatRosterSchema>) {
+export function trichatRoster(storage: Storage, input: z.infer<typeof trichatRosterSchema>) {
   const summary = getTriChatRosterSummary(input.agent_ids);
-  const agents = input.active_only ? summary.agents.filter((agent) => agent.active) : summary.agents;
+  const dynamicAgents = listDomainSpecialistAgentDefinitions(storage).map((agent) => ({
+    ...agent,
+    active: summary.active_agent_ids.includes(agent.agent_id),
+    dynamic: true,
+  }));
+  const agentsById = new Map(
+    [...summary.agents, ...dynamicAgents].map((agent) => [
+      agent.agent_id,
+      {
+        ...agent,
+        managed_agent_ids: [...(agent.managed_agent_ids ?? [])],
+      },
+    ])
+  );
+  for (const dynamicAgent of dynamicAgents) {
+    const parentAgentId = normalizeConsensusAgentId(dynamicAgent.parent_agent_id);
+    if (!parentAgentId) {
+      continue;
+    }
+    const parentAgent = agentsById.get(parentAgentId);
+    if (!parentAgent) {
+      continue;
+    }
+    parentAgent.managed_agent_ids = dedupeNonEmptyCommands([
+      ...parentAgent.managed_agent_ids,
+      dynamicAgent.agent_id,
+    ]);
+  }
+  const mergedAgents = [...agentsById.values()].sort((left, right) => left.agent_id.localeCompare(right.agent_id));
+  const agents = input.active_only ? mergedAgents.filter((agent) => agent.active) : mergedAgents;
   return {
     generated_at: new Date().toISOString(),
     config_path: summary.config_path,
     default_agent_ids: summary.default_agent_ids,
     active_agent_ids: summary.active_agent_ids,
     overridden_by_env: summary.overridden_by_env,
+    dynamic_agent_count: dynamicAgents.length,
     agents,
   };
 }
@@ -1407,7 +1465,7 @@ export async function trichatTurnAutorun(
     turn_id: turn.turn_id,
     project_dir: projectDir,
     delegation_brief: null,
-    target_agent_ids: resolveAutopilotAgentPool(config).council_agent_ids,
+    target_agent_ids: resolveAutopilotAgentPool(storage, config, objective).council_agent_ids,
     task_routing: {
       preferred_agent_ids: [],
       allowed_agent_ids: [],
@@ -3660,7 +3718,7 @@ async function runAutopilotGoalIntake(
     sanitizeAutopilotObjectiveSeed(sourceTask?.objective?.trim() || input.config.objective.trim(), 600) ||
     compactConsensusText(sourceTask?.objective?.trim() || input.config.objective.trim(), 600);
   const projectDir = sourceTask?.project_dir?.trim() || process.cwd();
-  const intakeTargets = resolveAutopilotIntakeTargetAgents(input.config, sourceTask);
+  const intakeTargets = resolveAutopilotIntakeTargetAgents(storage, input.config, sourceTask, objective);
   await runAutopilotIdempotent(storage, {
     tool_name: "memory.append",
     session_key: input.session_key,
@@ -3951,6 +4009,7 @@ async function runAutopilotCouncil(
     allowlist: input.config.command_allowlist,
   });
   const delegationSelection = resolveAutopilotDelegationSelection({
+    storage,
     selected_agent: selectedAgent,
     selected_strategy: selectedStrategy,
     selected_delegate_agent_id: selectedProposal?.delegate_agent_id ?? null,
@@ -4016,6 +4075,7 @@ async function runAutopilotCouncil(
 }
 
 function resolveAutopilotDelegationSelection(input: {
+  storage: Storage;
   selected_agent: string | null;
   selected_strategy: string;
   selected_delegate_agent_id: string | null;
@@ -4038,6 +4098,7 @@ function resolveAutopilotDelegationSelection(input: {
     explicitDelegations
       .map((delegation) =>
         resolveSingleAutopilotDelegationSelection({
+          storage: input.storage,
           selected_agent: input.selected_agent,
           selected_strategy: input.selected_strategy,
           selected_delegate_agent_id: delegation.delegate_agent_id,
@@ -4046,6 +4107,7 @@ function resolveAutopilotDelegationSelection(input: {
           selected_evidence_requirements: delegation.evidence_requirements,
           selected_rollback_notes: delegation.rollback_notes,
           source_delegation_brief: shouldApplyAutopilotSourceDelegationFallback({
+            storage: input.storage,
             source_delegation_brief: sourceDelegationBrief,
             selected_delegate_agent_id: delegation.delegate_agent_id,
             batch_size: explicitDelegations.length,
@@ -4058,6 +4120,7 @@ function resolveAutopilotDelegationSelection(input: {
       .filter((brief): brief is AutopilotDelegationBrief => Boolean(brief))
   );
   const primarySelection = resolveSingleAutopilotDelegationSelection({
+    storage: input.storage,
     selected_agent: input.selected_agent,
     selected_strategy: input.selected_strategy,
     selected_delegate_agent_id: input.selected_delegate_agent_id,
@@ -4084,6 +4147,7 @@ function resolveAutopilotDelegationSelection(input: {
 }
 
 function resolveSingleAutopilotDelegationSelection(input: {
+  storage: Storage;
   selected_agent: string | null;
   selected_strategy: string;
   selected_delegate_agent_id: string | null;
@@ -4109,14 +4173,14 @@ function resolveSingleAutopilotDelegationSelection(input: {
   if (!selectedAgentId) {
     const fallbackBrief = finalizeAutopilotDelegationBrief({
       delegate_agent_id:
-        preserveAutopilotLeafDelegate(sourceDelegateAgentId, explicitDelegateAgentId) ||
+        preserveAutopilotLeafDelegate(input.storage, sourceDelegateAgentId, explicitDelegateAgentId) ||
         explicitDelegateAgentId ||
         sourceDelegateAgentId ||
         null,
       task_objective:
         shouldPreferSourceDelegationTaskObjective({
           resolved_delegate_agent_id:
-            preserveAutopilotLeafDelegate(sourceDelegateAgentId, explicitDelegateAgentId) ||
+            preserveAutopilotLeafDelegate(input.storage, sourceDelegateAgentId, explicitDelegateAgentId) ||
             explicitDelegateAgentId ||
             sourceDelegateAgentId,
           explicit_task_objective: explicitTaskObjective,
@@ -4144,12 +4208,16 @@ function resolveSingleAutopilotDelegationSelection(input: {
     };
   }
 
-  const preservedSourceDelegateAgentId = preserveAutopilotLeafDelegate(sourceDelegateAgentId, explicitDelegateAgentId);
+  const preservedSourceDelegateAgentId = preserveAutopilotLeafDelegate(
+    input.storage,
+    sourceDelegateAgentId,
+    explicitDelegateAgentId
+  );
   const inferredDelegateAgentId =
     preservedSourceDelegateAgentId ||
     explicitDelegateAgentId ||
     sourceDelegateAgentId ||
-    inferAutopilotDelegateAgentIdFromStrategy(selectedAgentId, input.selected_strategy);
+    inferAutopilotDelegateAgentIdFromStrategy(input.storage, selectedAgentId, input.selected_strategy);
   const preferredSourceObjective = shouldPreferSourceDelegationTaskObjective({
     resolved_delegate_agent_id: inferredDelegateAgentId,
     explicit_task_objective: explicitTaskObjective,
@@ -4186,6 +4254,7 @@ function resolveSingleAutopilotDelegationSelection(input: {
 }
 
 function shouldApplyAutopilotSourceDelegationFallback(input: {
+  storage: Storage;
   source_delegation_brief: AutopilotDelegationBrief | null;
   selected_delegate_agent_id: string | null;
   batch_size: number;
@@ -4203,18 +4272,19 @@ function shouldApplyAutopilotSourceDelegationFallback(input: {
   }
   return (
     selectedDelegateAgentId === sourceDelegateAgentId ||
-    preserveAutopilotLeafDelegate(sourceDelegateAgentId, selectedDelegateAgentId) === sourceDelegateAgentId
+    preserveAutopilotLeafDelegate(input.storage, sourceDelegateAgentId, selectedDelegateAgentId) === sourceDelegateAgentId
   );
 }
 
 function preserveAutopilotLeafDelegate(
+  storage: Storage,
   sourceDelegateAgentId: string | null,
   explicitDelegateAgentId: string | null
 ): string | null {
   if (!sourceDelegateAgentId || !explicitDelegateAgentId || sourceDelegateAgentId === explicitDelegateAgentId) {
     return null;
   }
-  return doesAutopilotAgentManage(explicitDelegateAgentId, sourceDelegateAgentId) ? sourceDelegateAgentId : null;
+  return doesAutopilotAgentManage(storage, explicitDelegateAgentId, sourceDelegateAgentId) ? sourceDelegateAgentId : null;
 }
 
 function shouldPreferSourceDelegationTaskObjective(input: {
@@ -4699,8 +4769,12 @@ function buildAutopilotFallbackObjective(input: {
   return baseObjective || strategy || "Inspect kernel state and choose one high-leverage bounded next action.";
 }
 
-function inferAutopilotDelegateAgentIdFromStrategy(selectedAgentId: string, strategy: string): string | null {
-  const selectedAgent = getTriChatAgent(selectedAgentId);
+function inferAutopilotDelegateAgentIdFromStrategy(
+  storage: Storage,
+  selectedAgentId: string,
+  strategy: string
+): string | null {
+  const selectedAgent = resolveTriChatAgentDefinition(storage, selectedAgentId);
   const managedAgentIds =
     selectedAgent?.managed_agent_ids
       ?.map((agentId) => normalizeConsensusAgentId(agentId))
@@ -4711,7 +4785,7 @@ function inferAutopilotDelegateAgentIdFromStrategy(selectedAgentId: string, stra
 
   const normalizedStrategy = normalizeAutopilotDelegationHint(strategy);
   for (const managedAgentId of managedAgentIds) {
-    const managedAgent = getTriChatAgent(managedAgentId);
+    const managedAgent = resolveTriChatAgentDefinition(storage, managedAgentId);
     const aliases = dedupeNonEmptyCommands(
       [
         managedAgentId,
@@ -4749,14 +4823,18 @@ function buildAutopilotInferredTaskObjective(input: {
   );
 }
 
-function doesAutopilotAgentManage(managerAgentId: string | null, candidateAgentId: string | null): boolean {
+function doesAutopilotAgentManage(
+  storage: Storage,
+  managerAgentId: string | null,
+  candidateAgentId: string | null
+): boolean {
   const managerId = normalizeConsensusAgentId(managerAgentId);
   const candidateId = normalizeConsensusAgentId(candidateAgentId);
   if (!managerId || !candidateId || managerId === candidateId) {
     return false;
   }
 
-  const directManager = getTriChatAgent(managerId);
+  const directManager = resolveTriChatAgentDefinition(storage, managerId);
   const managedAgentIds =
     directManager?.managed_agent_ids
       ?.map((agentId) => normalizeConsensusAgentId(agentId))
@@ -4769,7 +4847,7 @@ function doesAutopilotAgentManage(managerAgentId: string | null, candidateAgentI
   let currentAgentId: string | null = candidateId;
   while (currentAgentId && !seen.has(currentAgentId)) {
     seen.add(currentAgentId);
-    const currentAgent = getTriChatAgent(currentAgentId);
+    const currentAgent = resolveTriChatAgentDefinition(storage, currentAgentId);
     const parentAgentId = normalizeConsensusAgentId(currentAgent?.parent_agent_id);
     if (!parentAgentId) {
       return false;
@@ -5707,16 +5785,7 @@ async function runAutopilotCouncilRoundParallel(
 
   const abortedAgents: string[] = [];
   if (pending.size > 0) {
-    const leftovers = await Promise.all([...pending.values()]);
-    for (const completed of leftovers) {
-      settled.push(completed);
-      if (
-        completed.result.error &&
-        completed.result.error.toLowerCase().includes("aborted by quorum-finalize")
-      ) {
-        abortedAgents.push(completed.agent_id);
-      }
-    }
+    abortedAgents.push(...pending.keys());
   }
 
   return {
@@ -5981,7 +6050,7 @@ async function runAutopilotExecution(
     input.command_plan.allowed_commands.length > 0 &&
     input.command_plan.blocked_commands.length === 0;
   if (!canDirectExecute) {
-    const agentPool = resolveAutopilotAgentPool(input.config);
+    const agentPool = resolveAutopilotAgentPool(storage, input.config, input.intake.objective);
     const fallbackAllowedAgentIds = dedupeNonEmptyCommands(
       [agentPool.lead_agent_id, AUTOPILOT_WORKER_ID].filter((value): value is string => Boolean(value))
     );
@@ -6751,6 +6820,7 @@ async function runAutopilotBridgeAsk(
     exclude_run_id: input.run_id,
   });
   const prompt = buildAutopilotCouncilPrompt({
+    storage,
     objective: input.objective,
     objective_source: input.objective_source,
     lane: input.lane,
@@ -7222,7 +7292,7 @@ async function pauseAutopilotDaemon(storage: Storage, config: TriChatAutopilotCo
 }
 
 function getAutopilotStatus(storage?: Storage) {
-  const effectiveAgentPool = resolveAutopilotAgentPool(autopilotRuntime.config);
+  const effectiveAgentPool = resolveAutopilotAgentPool(storage, autopilotRuntime.config, autopilotRuntime.config.objective);
   const sessionId = buildAutopilotAgentSessionId(autopilotRuntime.config);
   const session = storage ? storage.getAgentSessionById(sessionId) : null;
   const persisted = storage ? storage.getTriChatAutopilotState() : null;
@@ -7263,16 +7333,45 @@ function getAutopilotStatus(storage?: Storage) {
   };
 }
 
-function resolveAutopilotAgentPool(config: Pick<TriChatAutopilotConfig, "lead_agent_id" | "specialist_agent_ids">) {
+function resolveAutopilotAgentPool(
+  storage: Storage | undefined,
+  config: Pick<TriChatAutopilotConfig, "lead_agent_id" | "specialist_agent_ids">,
+  objective?: string | null
+) {
+  const bridgeReadySupportAgentIds = dedupeNonEmptyCommands(
+    [...getTriChatAgentMap().values()].flatMap((agent) => {
+      const envVar = getTriChatBridgeEnvVar(agent.agent_id);
+      if (!envVar || !String(process.env[envVar] ?? "").trim()) {
+        return [];
+      }
+      if (agent.agent_id === config.lead_agent_id) {
+        return [agent.agent_id];
+      }
+      const tier = String(agent.coordination_tier ?? "").trim().toLowerCase();
+      const provider = String(agent.provider ?? "").trim().toLowerCase();
+      return tier === "support" || (provider && provider !== "local") ? [agent.agent_id] : [];
+    })
+  );
+  const normalizedObjective = String(objective ?? "").trim();
+  const matchedSpecialistAgentIds =
+    storage && normalizedObjective
+      ? dedupeNonEmptyCommands(
+          matchDomainSpecialists(storage, normalizedObjective, 6, 0.3).flatMap((entry) =>
+            entry.recommended_trichat_agent_ids
+          )
+        )
+      : [];
   const configuredAgentIds = dedupeNonEmptyCommands(
     [
       normalizeConsensusAgentId(config.lead_agent_id),
       ...normalizeConsensusAgentIds(config.specialist_agent_ids ?? []),
+      ...bridgeReadySupportAgentIds,
+      ...matchedSpecialistAgentIds,
     ].filter((value): value is string => Boolean(value))
   );
   const activeAgentIds = dedupeNonEmptyCommands([
     ...configuredAgentIds,
-    ...normalizeConsensusAgentIds(getTriChatActiveAgentIds()),
+    ...normalizeConsensusAgentIds(getTriChatActiveAgentIds(configuredAgentIds)),
   ]);
   const activeSet = new Set(activeAgentIds);
   const preferredLead = normalizeConsensusAgentId(config.lead_agent_id);
@@ -7284,10 +7383,11 @@ function resolveAutopilotAgentPool(config: Pick<TriChatAutopilotConfig, "lead_ag
   const configuredSpecialists = (config.specialist_agent_ids ?? [])
     .map((agentId) => normalizeConsensusAgentId(agentId))
     .filter((agentId) => agentId && activeSet.has(agentId) && agentId !== leadAgentId);
-  const specialistAgentIds =
+  const specialistAgentIds = dedupeNonEmptyCommands(
     configuredSpecialists.length > 0
-      ? dedupeNonEmptyCommands(configuredSpecialists)
-      : activeAgentIds.filter((agentId) => agentId !== leadAgentId);
+      ? [...configuredSpecialists, ...activeAgentIds.filter((agentId) => agentId !== leadAgentId)]
+      : activeAgentIds.filter((agentId) => agentId !== leadAgentId)
+  );
   const councilAgentIds = dedupeNonEmptyCommands(
     [leadAgentId, ...specialistAgentIds].filter((value): value is string => Boolean(value))
   );
@@ -7309,7 +7409,7 @@ function buildAutopilotAgentSessionId(config: Pick<TriChatAutopilotConfig, "thre
 }
 
 function buildAutopilotAgentSessionSpec(config: TriChatAutopilotConfig) {
-  const agentPool = resolveAutopilotAgentPool(config);
+  const agentPool = resolveAutopilotAgentPool(undefined, config, config.objective);
   const leadAgentId = agentPool.lead_agent_id ?? AUTOPILOT_WORKER_ID;
   const sessionId = buildAutopilotAgentSessionId(config);
   return {
@@ -7461,10 +7561,12 @@ function resolveAutopilotTaskRouting(task: TaskRecord | null) {
 }
 
 function resolveAutopilotIntakeTargetAgents(
+  storage: Storage,
   config: Pick<TriChatAutopilotConfig, "lead_agent_id" | "specialist_agent_ids">,
-  sourceTask: TaskRecord | null
+  sourceTask: TaskRecord | null,
+  objective: string
 ) {
-  const agentPool = resolveAutopilotAgentPool(config);
+  const agentPool = resolveAutopilotAgentPool(storage, config, objective);
   const taskRouting = resolveAutopilotTaskRouting(sourceTask);
   const taskDelegationBrief = resolveAutopilotTaskDelegationBrief(sourceTask);
   const taskTargetAgents = taskRouting.preferred_agent_ids.length > 0
@@ -7473,7 +7575,7 @@ function resolveAutopilotIntakeTargetAgents(
   const targetAgentIds = dedupeNonEmptyCommands(
     [
       agentPool.lead_agent_id,
-      ...expandAutopilotDelegationTargets([
+      ...expandAutopilotDelegationTargets(storage, [
         ...(taskTargetAgents.length > 0 ? taskTargetAgents : agentPool.specialist_agent_ids),
         taskDelegationBrief?.delegate_agent_id ?? "",
       ]),
@@ -7486,11 +7588,11 @@ function resolveAutopilotIntakeTargetAgents(
   };
 }
 
-function expandAutopilotDelegationTargets(agentIds: string[]): string[] {
+function expandAutopilotDelegationTargets(storage: Storage | undefined, agentIds: string[]): string[] {
   const expanded = new Set<string>();
   for (const candidate of normalizeConsensusAgentIds(agentIds)) {
     expanded.add(candidate);
-    const agent = getTriChatAgent(candidate);
+    const agent = resolveTriChatAgentDefinition(storage, candidate);
     const parentAgentId = normalizeConsensusAgentId(agent?.parent_agent_id);
     if (parentAgentId) {
       expanded.add(parentAgentId);
@@ -7826,6 +7928,7 @@ function buildAutopilotBridgeRequestId(sessionKey: string, round: number, agentI
 }
 
 function buildAutopilotCouncilPrompt(input: {
+  storage: Storage;
   objective: string;
   objective_source: string;
   lane: string;
@@ -7839,7 +7942,7 @@ function buildAutopilotCouncilPrompt(input: {
 }): string {
   const isLeadAgent =
     Boolean(input.lead_agent_id) && normalizeConsensusAgentId(input.agent_id) === normalizeConsensusAgentId(input.lead_agent_id);
-  const agent = getTriChatAgent(input.agent_id);
+  const agent = resolveTriChatAgentDefinition(input.storage, input.agent_id);
   const coordinationTier = String(agent?.coordination_tier ?? (isLeadAgent ? "lead" : "specialist")).trim() || "specialist";
   const parentAgentId = normalizeConsensusAgentId(agent?.parent_agent_id);
   const managedAgentIds =
@@ -7881,6 +7984,8 @@ function buildAutopilotCouncilPrompt(input: {
     `Reports to: ${parentAgentId ?? input.lead_agent_id ?? "none"}`,
     `Managed agents: ${managedAgentIds.join(", ") || "none"}`,
     `Objective source: ${input.objective_source}`,
+    `Agent description: ${agent?.description ?? "none"}`,
+    `Agent doctrine: ${compactConsensusText(agent?.system_prompt ?? "Stay bounded, evidence-based, and narrow to the assigned lane.", 520)}`,
     `Lead agent: ${input.lead_agent_id ?? "none"}`,
     `Specialists: ${input.specialist_agent_ids.join(", ") || "none"}`,
     `Target council: ${input.target_agent_ids.join(", ") || "default"}`,
@@ -9756,20 +9861,37 @@ async function runAdapterProtocolCommandAsync(input: {
         ...process.env,
         ...(input.env_overrides ?? {}),
       },
+      detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"],
     });
 
+    const killChild = (signal: NodeJS.Signals) => {
+      try {
+        if (process.platform !== "win32" && typeof child.pid === "number") {
+          process.kill(-child.pid, signal);
+          return;
+        }
+      } catch {
+        // Fall back to direct child signaling below.
+      }
+      try {
+        child.kill(signal);
+      } catch {
+        // Ignore kill races when the child already exited.
+      }
+    };
+
     const timeoutHandle = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      killChild("SIGKILL");
     }, timeoutMs);
 
     const onAbort = () => {
       abortedBySignal = true;
-      child.kill("SIGTERM");
+      killChild("SIGTERM");
       setTimeout(() => {
         if (!settled) {
-          child.kill("SIGKILL");
+          killChild("SIGKILL");
         }
       }, 200);
     };

@@ -27,7 +27,8 @@ type TriChatRosterConfig = {
 };
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const rosterConfigPath = path.join(repoRoot, "config", "trichat_agents.json");
+const rosterConfigPath =
+  process.env.TRICHAT_ROSTER_CONFIG_PATH?.trim() || path.join(repoRoot, "config", "trichat_agents.json");
 
 const fallbackConfig: TriChatRosterConfig = {
   version: 1,
@@ -232,6 +233,10 @@ const fallbackConfig: TriChatRosterConfig = {
 
 let cachedRoster: TriChatRosterConfig | null = null;
 
+function looksLikeDynamicSpecialistAgentId(agentId: string) {
+  return /(?:-sme|-specialist|-expert)$/i.test(agentId.trim());
+}
+
 function normalizeAgentId(value: string | null | undefined): string {
   return String(value ?? "")
     .trim()
@@ -341,7 +346,7 @@ export function getTriChatActiveAgentIds(agentIds?: readonly string[]): string[]
   const catalog = getTriChatAgentMap();
   const deduped = new Set<string>();
   for (const agentId of activeSource) {
-    if (catalog.has(agentId)) {
+    if (catalog.has(agentId) || (requested.length > 0 && looksLikeDynamicSpecialistAgentId(agentId))) {
       deduped.add(agentId);
     }
   }
@@ -370,14 +375,20 @@ export function getTriChatRoleLaneMap(agentIds?: readonly string[]): Record<stri
 }
 
 export function getTriChatBridgeEnvVar(agentId: string | null | undefined): string | null {
-  return getTriChatAgent(agentId)?.bridge_env_var ?? null;
+  const resolved = getTriChatAgent(agentId)?.bridge_env_var ?? null;
+  if (resolved) {
+    return resolved;
+  }
+  return looksLikeDynamicSpecialistAgentId(normalizeAgentId(agentId)) ? "TRICHAT_SPECIALIST_CMD" : null;
 }
 
 export function getTriChatBridgeCandidates(workspace: string, agentId: string): string[] {
   const agent = getTriChatAgent(agentId);
   const names = agent?.bridge_script_names?.length
     ? agent.bridge_script_names
-    : [`${normalizeAgentId(agentId)}_bridge.py`, `${normalizeAgentId(agentId).replace(/-/g, "_")}_bridge.py`];
+    : looksLikeDynamicSpecialistAgentId(normalizeAgentId(agentId))
+      ? ["local-imprint_bridge.py", "local_imprint_bridge.py"]
+      : [`${normalizeAgentId(agentId)}_bridge.py`, `${normalizeAgentId(agentId).replace(/-/g, "_")}_bridge.py`];
   const seen = new Set<string>();
   const candidates: string[] = [];
   for (const name of names) {
@@ -407,4 +418,8 @@ export function getTriChatRosterSummary(agentIds?: readonly string[]) {
 
 export function normalizeTriChatAgentId(agentId: string | null | undefined): string {
   return normalizeAgentId(agentId);
+}
+
+export function invalidateTriChatRosterCache() {
+  cachedRoster = null;
 }

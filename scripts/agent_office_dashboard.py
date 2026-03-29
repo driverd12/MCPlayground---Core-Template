@@ -1303,6 +1303,7 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
     learning = snapshot.learning
     autonomy_maintain = snapshot.autonomy_maintain
     autonomy_maintain_state = as_dict(autonomy_maintain.get("state"))
+    autonomy_maintain_runtime = as_dict(autonomy_maintain.get("runtime"))
     autonomy_maintain_due = as_dict(autonomy_maintain.get("due"))
     learning_top_agents = as_list(learning.get("top_agents"))
     kernel_learning = as_dict(kernel.get("learning"))
@@ -1413,6 +1414,7 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
         fit_text(
             "Maintain :: "
             f"enabled={'yes' if autonomy_maintain_state.get('enabled') else 'no'} "
+            f"running={'yes' if autonomy_maintain_runtime.get('running') else 'no'} "
             f"stale={'yes' if autonomy_maintain_due.get('stale') else 'no'} "
             f"eval_due={'yes' if autonomy_maintain_due.get('eval') else 'no'} "
             f"last_eval={kernel_autonomy_maintain.get('last_eval_score') if kernel_autonomy_maintain.get('last_eval_score') is not None else 'n/a'}",

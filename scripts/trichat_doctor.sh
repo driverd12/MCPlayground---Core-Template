@@ -104,6 +104,21 @@ if not data.get("self_start_ready"):
     )
 PY
 
+echo "[doctor] autonomy maintain status:"
+AUTONOMY_MAINTAIN_STATUS="$(call_mcp autonomy.maintain '{"action":"status"}')"
+printf '%s\n' "${AUTONOMY_MAINTAIN_STATUS}"
+python3 - "${AUTONOMY_MAINTAIN_STATUS}" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+runtime = data.get("runtime") or {}
+if not runtime.get("running"):
+    raise SystemExit("autonomy maintain runtime is not running")
+if runtime.get("last_error"):
+    raise SystemExit(f"autonomy maintain runtime last_error: {runtime.get('last_error')}")
+PY
+
 echo "[doctor] ring leader status:"
 ./scripts/ring_leader_ctl.sh status
 

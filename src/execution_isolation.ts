@@ -63,7 +63,10 @@ export function buildIsolatedExecutionPlan(input: {
     'mkdir -p "$(dirname "$WORKSPACE")"',
     'rm -rf "$WORKSPACE"',
     'if [ "$MODE" = "git_worktree" ] && git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then git -C "$ROOT" worktree add --detach "$WORKSPACE" HEAD >/dev/null 2>&1 || cp -R "$ROOT" "$WORKSPACE"; else cp -R "$ROOT" "$WORKSPACE"; fi',
+    'if [ -d "$ROOT/node_modules" ] && [ ! -e "$WORKSPACE/node_modules" ]; then ln -s "$ROOT/node_modules" "$WORKSPACE/node_modules"; fi',
+    'if [ -d "$ROOT/.venv" ] && [ ! -e "$WORKSPACE/.venv" ]; then ln -s "$ROOT/.venv" "$WORKSPACE/.venv"; fi',
     'cd "$WORKSPACE"',
+    'export PATH="$WORKSPACE/node_modules/.bin:$WORKSPACE/.venv/bin:$PATH"',
     '/bin/sh -lc "$USER_CMD"',
   ].join("; ");
 

@@ -68,11 +68,13 @@ import sys
 
 data = json.loads(pathlib.Path(sys.argv[1]).read_text())
 state = data.get("state") or {}
+runtime = data.get("runtime") or {}
 due = data.get("due") or {}
 goal_autorun = data.get("goal_autorun_daemon") or {}
 print(
     "[production] autonomy maintain: "
     f"enabled={state.get('enabled')} "
+    f"running={runtime.get('running')} "
     f"last_run_at={state.get('last_run_at') or 'n/a'} "
     f"stale={due.get('stale')} "
     f"eval_due={due.get('eval')} "
@@ -80,6 +82,10 @@ print(
 )
 if not state.get("enabled"):
     raise SystemExit("autonomy.maintain has not persisted an enabled background state yet")
+if not runtime.get("running"):
+    raise SystemExit("autonomy.maintain runtime is not currently running")
+if runtime.get("last_error"):
+    raise SystemExit(f"autonomy.maintain runtime last_error={runtime.get('last_error')}")
 if not state.get("last_run_at"):
     raise SystemExit("autonomy.maintain has not recorded a keepalive run yet")
 if due.get("stale"):

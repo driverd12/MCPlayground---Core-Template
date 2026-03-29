@@ -3,6 +3,7 @@ import { z } from "zod";
 import { Storage } from "../storage.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { getEffectiveOrgProgram } from "./org_program.js";
+import { matchDomainSpecialists } from "./specialist_catalog.js";
 
 const recordSchema = z.record(z.unknown());
 
@@ -108,7 +109,35 @@ function deriveDefaultStreams(objective: string): CompiledStream[] {
   return streams;
 }
 
-function materializeStreams(input: z.infer<typeof taskCompileSchema>): CompiledStream[] {
+function deriveSpecialistStreams(storage: Storage, objective: string): CompiledStream[] {
+  return matchDomainSpecialists(storage, objective, 6, 0.3)
+    .map((match) => compiledWorkstreamSchema.safeParse(match.recommended_workstream))
+    .filter((result): result is { success: true; data: z.infer<typeof compiledWorkstreamSchema> } => result.success)
+    .map((result, index) => ({
+      stream_id: result.data.stream_id?.trim() || `specialist-${index + 1}`,
+      title: result.data.title.trim(),
+      owner_role_id: result.data.owner_role_id?.trim() || "implementation-director",
+      executor_ref: result.data.executor_ref?.trim() || result.data.owner_role_id?.trim() || "implementation-director",
+      step_kind: result.data.step_kind ?? "mutation",
+      depends_on: [...new Set((result.data.depends_on ?? []).map((entry) => entry.trim()).filter(Boolean))],
+      evidence_requirements: [
+        ...new Set((result.data.evidence_requirements ?? []).map((entry) => entry.trim()).filter(Boolean)),
+      ],
+      rollback_notes: [...new Set((result.data.rollback_notes ?? []).map((entry) => entry.trim()).filter(Boolean))],
+      task_metadata: result.data.task_metadata ?? {},
+    }));
+}
+
+function mergeStreams(primary: CompiledStream[], secondary: CompiledStream[]) {
+  const merged = new Map<string, CompiledStream>();
+  for (const stream of [...primary, ...secondary]) {
+    const key = stream.stream_id.trim() || stream.title.trim().toLowerCase();
+    merged.set(key, stream);
+  }
+  return [...merged.values()];
+}
+
+function materializeStreams(storage: Storage, input: z.infer<typeof taskCompileSchema>): CompiledStream[] {
   const provided = (input.workstreams ?? []).map((stream, index) => ({
     stream_id: stream.stream_id?.trim() || `stream-${index + 1}`,
     title: stream.title.trim(),
@@ -120,7 +149,10 @@ function materializeStreams(input: z.infer<typeof taskCompileSchema>): CompiledS
     rollback_notes: [...new Set((stream.rollback_notes ?? []).map((entry) => entry.trim()).filter(Boolean))],
     task_metadata: stream.task_metadata ?? {},
   }));
-  return provided.length > 0 ? provided : deriveDefaultStreams(input.objective);
+  const specialistStreams = deriveSpecialistStreams(storage, input.objective);
+  return provided.length > 0
+    ? mergeStreams(provided, specialistStreams)
+    : mergeStreams(deriveDefaultStreams(input.objective), specialistStreams);
 }
 
 export async function taskCompile(storage: Storage, input: z.infer<typeof taskCompileSchema>) {
@@ -136,7 +168,7 @@ export async function taskCompile(storage: Storage, input: z.infer<typeof taskCo
       }
 
       const now = new Date().toISOString();
-      const streams = materializeStreams(input);
+      const streams = materializeStreams(storage, input);
       const analysisStepId = `compile-analysis-${crypto.randomUUID()}`;
       const streamStepIds = new Map(streams.map((stream) => [stream.stream_id, `${stream.stream_id}-${crypto.randomUUID()}`]));
       const compiledSteps = [

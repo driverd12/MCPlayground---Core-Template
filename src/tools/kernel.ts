@@ -18,6 +18,7 @@ import {
 } from "../storage.js";
 import { getAdaptiveWorkerProfile, summarizeAdaptiveSessionHealth, summarizeAdaptiveWorkerProfile } from "./agent_session.js";
 import { buildAgentLearningOverview } from "./agent_learning.js";
+import { getAutonomyMaintainRuntimeStatus } from "./autonomy_maintain.js";
 import { evaluatePlanStepReadiness, getPlanStepApprovalGateKind } from "./plan.js";
 
 const goalStatusSchema = z.enum([
@@ -199,6 +200,14 @@ type AutonomyMaintainSummary = {
   last_actions: string[];
   last_attention: string[];
   last_error: string | null;
+  runtime: {
+    running: boolean;
+    in_tick: boolean;
+    started_at: string | null;
+    last_tick_at: string | null;
+    last_error: string | null;
+    tick_count: number;
+  };
 };
 
 function countByStatus<T extends { status: string }>(records: T[]) {
@@ -757,6 +766,7 @@ function summarizeOrgPrograms(storage: Storage): OrgProgramSummary {
 }
 
 function summarizeAutonomyMaintain(state: AutonomyMaintainStateRecord | null): AutonomyMaintainSummary {
+  const runtime = getAutonomyMaintainRuntimeStatus();
   if (!state) {
     return {
       enabled: false,
@@ -778,6 +788,7 @@ function summarizeAutonomyMaintain(state: AutonomyMaintainStateRecord | null): A
       last_actions: [],
       last_attention: [],
       last_error: null,
+      runtime,
     };
   }
   const lastRunAgeSeconds = ageSeconds(state.last_run_at);
@@ -803,6 +814,7 @@ function summarizeAutonomyMaintain(state: AutonomyMaintainStateRecord | null): A
     last_actions: state.last_actions,
     last_attention: state.last_attention,
     last_error: state.last_error,
+    runtime,
   };
 }
 
@@ -817,8 +829,17 @@ function deriveKernelState(params: {
   running_step_count: number;
   pending_task_count: number;
   active_session_count: number;
+  autonomy_maintain_enabled: boolean;
+  autonomy_maintain_running: boolean;
 }) {
   if (params.failed_goal_count > 0 || params.failed_task_count > 0 || params.failed_experiment_count > 0) {
+    return "degraded";
+  }
+  if (
+    params.autonomy_maintain_enabled &&
+    !params.autonomy_maintain_running &&
+    (params.ready_step_count > 0 || params.pending_task_count > 0)
+  ) {
     return "degraded";
   }
   if (params.blocked_approval_count > 0 || params.methodology_entry_hold_count > 0) {
@@ -993,6 +1014,8 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     running_step_count: totals.running_step_count,
     pending_task_count: taskSummary.counts.pending ?? 0,
     active_session_count: activeSessions.length,
+    autonomy_maintain_enabled: autonomyMaintainSummary.enabled,
+    autonomy_maintain_running: autonomyMaintainSummary.runtime.running,
   });
 
   const attention: string[] = [];
@@ -1131,6 +1154,8 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   }
   if (!autonomyMaintainSummary.enabled) {
     attention.push("Background autonomy maintenance has not persisted an enabled state yet.");
+  } else if (!autonomyMaintainSummary.runtime.running) {
+    attention.push("Background autonomy maintenance is enabled in storage, but the live daemon loop is not running.");
   } else if (autonomyMaintainSummary.stale) {
     attention.push("Background autonomy maintenance is stale and may no longer be refreshing readiness automatically.");
   } else if (autonomyMaintainSummary.eval_due) {
@@ -1195,6 +1220,8 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
         last_run_age_seconds: autonomyMaintainSummary.last_run_age_seconds,
         eval_due: autonomyMaintainSummary.eval_due,
         last_eval_score: autonomyMaintainSummary.last_eval_score,
+        runtime_running: autonomyMaintainSummary.runtime.running,
+        runtime_last_error: autonomyMaintainSummary.runtime.last_error,
       },
       ready_step_count: totals.ready_step_count,
       running_step_count: totals.running_step_count,

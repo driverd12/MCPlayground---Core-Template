@@ -3,6 +3,7 @@ import { type GoalRecord, type PlanRecord, type PlanStepRecord, Storage } from "
 import { summarizeAdaptiveSessionHealth } from "./agent_session.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { evaluatePlanStepReadiness, getPlanStepApprovalGateKind } from "./plan.js";
+import { matchDomainSpecialists } from "./specialist_catalog.js";
 
 const goalStatusSchema = z.enum([
   "draft",
@@ -302,6 +303,15 @@ function readFiniteNumber(value: unknown): number | null {
 
 function readBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
+}
+
+function mergeGoalExecuteTriChatAgentIds(storage: Storage, objective: string, providedAgentIds: string[] | undefined) {
+  const objectiveText = readString(objective) ?? "";
+  const matchedAgentIds =
+    objectiveText.length > 0
+      ? matchDomainSpecialists(storage, objectiveText, 6, 0.3).flatMap((entry) => entry.recommended_trichat_agent_ids)
+      : [];
+  return [...new Set([...(providedAgentIds ?? []), ...matchedAgentIds].map((entry) => String(entry ?? "").trim()).filter(Boolean))];
 }
 
 function buildGoalExecuteDerivedMutation(
@@ -1704,6 +1714,9 @@ export async function goalExecute(
       const initialSteps = storage.listPlanSteps(plan.plan_id);
       const initialSummary = summarizeGoalExecution(plan, initialSteps);
       const initialAdaptiveRouting = summarizePlanAdaptiveRouting(initialSteps);
+      const effectiveTriChatAgentIds = input.autorun
+        ? mergeGoalExecuteTriChatAgentIds(storage, snapshotGoal.objective, input.trichat_agent_ids)
+        : undefined;
 
       if (isTerminalPlanStatus(plan.status)) {
         storage.appendRuntimeEvent({
@@ -1755,7 +1768,7 @@ export async function goalExecute(
         allow_non_ready: input.autorun ? undefined : input.allow_non_ready,
         dry_run: input.dry_run,
         max_passes: input.autorun ? input.max_passes : undefined,
-        trichat_agent_ids: input.autorun ? input.trichat_agent_ids : undefined,
+        trichat_agent_ids: effectiveTriChatAgentIds,
         trichat_max_rounds: input.autorun ? input.trichat_max_rounds : undefined,
         trichat_min_success_agents: input.autorun ? input.trichat_min_success_agents : undefined,
         trichat_bridge_timeout_seconds: input.autorun ? input.trichat_bridge_timeout_seconds : undefined,
@@ -1793,6 +1806,7 @@ export async function goalExecute(
           planner_selection: plannerSelection,
           dispatch_mode: input.autorun ? "autorun" : "dispatch",
           dry_run: input.dry_run ?? false,
+          trichat_agent_ids: effectiveTriChatAgentIds,
           execution_summary: executionSummary,
           adaptive_routing_summary: adaptiveRoutingSummary,
           plan_risk_assessment: finalPlanAssessment,
@@ -1813,6 +1827,7 @@ export async function goalExecute(
         selected_existing_plan: selectedExistingPlan,
         planner_selection: plannerSelection,
         dispatch_mode: input.autorun ? "autorun" : "dispatch",
+        trichat_agent_ids: effectiveTriChatAgentIds,
         execution: executionResult,
         execution_summary: executionSummary,
         adaptive_routing_summary: adaptiveRoutingSummary,

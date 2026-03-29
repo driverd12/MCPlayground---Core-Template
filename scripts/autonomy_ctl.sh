@@ -91,6 +91,7 @@ call_tool_json() {
 ensure_autonomy_entry() {
   local quiet="${1:-1}"
   local args_json
+  local bootstrap_result=""
   args_json="$(node --input-type=module - \
     "${AUTONOMY_BOOTSTRAP_RUN_IMMEDIATELY:-0}" \
     "${TRICHAT_RING_LEADER_AUTOSTART:-1}" \
@@ -125,7 +126,11 @@ NODE
   if [[ "${quiet}" == "1" ]]; then
     call_tool_json autonomy.bootstrap "${args_json}" >/dev/null
   else
-    call_tool_json autonomy.bootstrap "${args_json}"
+    bootstrap_result="$(call_tool_json autonomy.bootstrap "${args_json}")"
+  fi
+  run_maintain_entry 1
+  if [[ "${quiet}" != "1" ]]; then
+    printf '%s\n' "${bootstrap_result}"
   fi
 }
 
@@ -190,7 +195,17 @@ NODE
 TRANSPORT="$(resolve_transport)"
 
 if [[ "${ACTION}" == "status" ]]; then
-  call_tool_json autonomy.bootstrap '{"action":"status"}'
+  BOOTSTRAP_STATUS="$(call_tool_json autonomy.bootstrap '{"action":"status"}')"
+  MAINTAIN_STATUS="$(call_tool_json autonomy.maintain '{"action":"status"}')"
+  python3 - "${BOOTSTRAP_STATUS}" "${MAINTAIN_STATUS}" <<'PY'
+import json
+import sys
+
+bootstrap = json.loads(sys.argv[1])
+maintain = json.loads(sys.argv[2])
+bootstrap["maintain"] = maintain
+print(json.dumps(bootstrap))
+PY
   exit 0
 fi
 

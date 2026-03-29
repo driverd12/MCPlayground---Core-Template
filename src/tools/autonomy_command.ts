@@ -108,6 +108,51 @@ function dedupeStrings(value: unknown): string[] {
   return [...new Set(value.map((entry) => String(entry ?? "").trim()).filter(Boolean))];
 }
 
+function readObjectArray(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is Record<string, unknown> => isRecord(entry));
+}
+
+function dedupeWorkstreams(
+  ...sources: Array<Array<z.infer<typeof workstreamSchema>> | Record<string, unknown>[] | undefined>
+): z.infer<typeof workstreamSchema>[] {
+  const byKey = new Map<string, z.infer<typeof workstreamSchema>>();
+  for (const source of sources) {
+    for (const candidate of source ?? []) {
+      if (!isRecord(candidate)) {
+        continue;
+      }
+      const parsed = workstreamSchema.safeParse(candidate);
+      if (!parsed.success) {
+        continue;
+      }
+      const stream = parsed.data;
+      const key = stream.stream_id?.trim() || stream.title.trim().toLowerCase();
+      byKey.set(key, stream);
+    }
+  }
+  return [...byKey.values()];
+}
+
+function mergeAgentIds(...sources: Array<unknown>) {
+  return dedupeStrings(sources.flatMap((value) => (Array.isArray(value) ? value : value == null ? [] : [value])));
+}
+
+function filterBridgeReadySupportAgents(
+  providerBridgeStatus: Record<string, unknown> | null,
+  supportAgentIds: string[]
+) {
+  const readyAgents = new Set(
+    readObjectArray(providerBridgeStatus?.outbound_council_agents).flatMap((entry) => {
+      const agentId = readString(entry.agent_id);
+      return readBoolean(entry.bridge_ready) === true && agentId ? [agentId] : [];
+    })
+  );
+  return supportAgentIds.filter((agentId) => readyAgents.has(agentId));
+}
+
 function deriveMutation(base: { idempotency_key: string; side_effect_fingerprint: string }, phase: string) {
   const safePhase = phase.replace(/[^a-zA-Z0-9._-]+/g, "-");
   const digest = crypto
@@ -208,6 +253,38 @@ export async function autonomyCommand(
         );
       }
 
+      const specialistResolution = (await invokeTool("specialist.catalog", {
+        action: "ensure",
+        mutation: deriveMutation(input.mutation, "specialist-catalog.ensure"),
+        objective: input.objective,
+        auto_spawn: true,
+        max_matches: 6,
+        minimum_score: 0.3,
+        ...source,
+      })) as Record<string, unknown>;
+      let providerBridgeStatus: Record<string, unknown> | null = null;
+      try {
+        providerBridgeStatus = (await invokeTool("provider.bridge", {
+          action: "status",
+          ...source,
+        })) as Record<string, unknown>;
+      } catch {
+        providerBridgeStatus = null;
+      }
+      const specialistWorkstreams = readObjectArray(specialistResolution.recommended_workstreams);
+      const specialistAgentIds = dedupeStrings(specialistResolution.recommended_trichat_agent_ids);
+      const supportAgentIds = dedupeStrings(specialistResolution.support_agent_ids);
+      const bridgeReadySupportAgentIds = filterBridgeReadySupportAgents(providerBridgeStatus, supportAgentIds);
+      const effectiveWorkstreams = dedupeWorkstreams(input.workstreams, specialistWorkstreams);
+      const effectiveTriChatAgentIds = mergeAgentIds(
+        input.trichat_agent_ids,
+        specialistAgentIds,
+        bridgeReadySupportAgentIds
+      );
+      const matchedDomains = readObjectArray(specialistResolution.matched_domains)
+        .map((entry) => readString(entry.domain_key))
+        .filter((entry): entry is string => Boolean(entry));
+
       const createdGoal = (await invokeTool("goal.create", {
         mutation: deriveMutation(input.mutation, "goal-create"),
         goal_id: input.goal_id,
@@ -228,6 +305,9 @@ export async function autonomyCommand(
         metadata: {
           intake_tool: "autonomy.command",
           intake_objective: input.objective,
+          matched_specialist_domains: matchedDomains,
+          specialist_agent_ids: specialistAgentIds,
+          support_agent_ids: bridgeReadySupportAgentIds,
           ...(input.metadata ?? {}),
         },
         ...source,
@@ -245,11 +325,14 @@ export async function autonomyCommand(
           title,
           create_plan: true,
           selected: input.selected_plan,
-          workstreams: input.workstreams,
+          workstreams: effectiveWorkstreams.length > 0 ? effectiveWorkstreams : undefined,
           success_criteria: acceptanceCriteria,
           rollback: defaultRollbackNotes(),
           metadata: {
             intake_tool: "autonomy.command",
+            matched_specialist_domains: matchedDomains,
+            specialist_agent_ids: specialistAgentIds,
+            support_agent_ids: bridgeReadySupportAgentIds,
             ...(input.metadata ?? {}),
           },
           ...source,
@@ -272,7 +355,7 @@ export async function autonomyCommand(
         dry_run: input.dry_run,
         autorun: true,
         max_passes: input.max_passes,
-        trichat_agent_ids: input.trichat_agent_ids,
+        trichat_agent_ids: effectiveTriChatAgentIds.length > 0 ? effectiveTriChatAgentIds : undefined,
         trichat_max_rounds: input.trichat_max_rounds,
         trichat_min_success_agents: input.trichat_min_success_agents,
         trichat_bridge_timeout_seconds: input.trichat_bridge_timeout_seconds,
@@ -306,7 +389,7 @@ export async function autonomyCommand(
             options: input.options,
             title,
             selected: input.selected_plan,
-            trichat_agent_ids: input.trichat_agent_ids,
+            trichat_agent_ids: effectiveTriChatAgentIds.length > 0 ? effectiveTriChatAgentIds : undefined,
             trichat_max_rounds: input.trichat_max_rounds,
             trichat_min_success_agents: input.trichat_min_success_agents,
             trichat_bridge_timeout_seconds: input.trichat_bridge_timeout_seconds,
@@ -333,6 +416,9 @@ export async function autonomyCommand(
           compile_objective: input.compile_objective,
           execution_ok: readBoolean(execution.ok),
           goal_autorun_daemon_action: daemonAction,
+          matched_specialist_domains: matchedDomains,
+          specialist_agent_ids: specialistAgentIds,
+          support_agent_ids: bridgeReadySupportAgentIds,
           dry_run: input.dry_run ?? false,
         },
         ...source,
@@ -345,6 +431,8 @@ export async function autonomyCommand(
         goal: goalAfter,
         plan: planAfter,
         bootstrap: bootstrapResult,
+        specialists: specialistResolution,
+        provider_bridge: providerBridgeStatus,
         compile: compileResult,
         execution,
         goal_autorun_daemon: {

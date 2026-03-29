@@ -222,6 +222,57 @@ test("benchmark.run executes a real isolated suite and records durable run evide
   }
 });
 
+test("benchmark.run isolated workspaces inherit repo toolchains needed for real evals", async () => {
+  const testId = `${Date.now()}-benchmark-toolchain`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-benchmark-toolchain-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+  });
+
+  try {
+    const suite = await callTool(session.client, "benchmark.suite_upsert", {
+      mutation: nextMutation(testId, "benchmark.suite_upsert", () => mutationCounter++),
+      title: "Repo toolchain bench",
+      objective: "Verify isolated repo workspaces can use the checked-out Node toolchain",
+      project_dir: REPO_ROOT,
+      isolation_mode: "git_worktree",
+      aggregate_metric_name: "suite_success_rate",
+      aggregate_metric_direction: "maximize",
+      cases: [
+        {
+          case_id: "tsc-version",
+          title: "TypeScript binary is on PATH inside isolation",
+          command: "tsc --version",
+        },
+        {
+          case_id: "sdk-resolve",
+          title: "Repo dependencies resolve inside isolation",
+          command: "node -e \"console.log(require.resolve('@modelcontextprotocol/sdk/client/index.js'))\"",
+        },
+      ],
+      tags: ["benchmark", "toolchain", "isolation"],
+    });
+
+    const runResult = await callTool(session.client, "benchmark.run", {
+      mutation: nextMutation(testId, "benchmark.run", () => mutationCounter++),
+      suite_id: suite.suite.suite_id,
+      candidate_label: "repo-toolchain",
+    });
+
+    assert.equal(runResult.ok, true);
+    assert.equal(runResult.experiment_run.status, "completed");
+    assert.equal(runResult.case_results.every((entry) => entry.ok === true), true);
+    assert.ok(runResult.case_results.every((entry) => String(entry.workspace).includes(".mcp-isolation")));
+  } finally {
+    await session.client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function openClient(extraEnv) {
   const transport = new StdioClientTransport({
     command: "node",
@@ -278,4 +329,3 @@ function run(command, cwd) {
     throw new Error(`command failed: ${command}\n${result.stderr}`);
   }
 }
-
