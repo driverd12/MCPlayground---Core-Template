@@ -1,0 +1,415 @@
+import crypto from "node:crypto";
+import { z } from "zod";
+import { type AutonomyMaintainStateRecord, Storage } from "../storage.js";
+import { buildAgentLearningOverview } from "./agent_learning.js";
+import { mutationSchema, runIdempotentMutation } from "./mutation.js";
+
+const sourceSchema = z.object({
+  source_client: z.string().optional(),
+  source_model: z.string().optional(),
+  source_agent: z.string().optional(),
+});
+
+export const autonomyMaintainSchema = z
+  .object({
+    action: z.enum(["status", "run"]).default("status"),
+    mutation: mutationSchema.optional(),
+    local_host_id: z.string().min(1).default("local"),
+    probe_ollama_url: z.string().optional(),
+    ensure_bootstrap: z.boolean().default(true),
+    autostart_ring_leader: z.boolean().optional(),
+    bootstrap_run_immediately: z.boolean().optional(),
+    start_goal_autorun_daemon: z.boolean().default(true),
+    autorun_interval_seconds: z.number().int().min(5).max(3600).optional(),
+    maintain_tmux_controller: z.boolean().default(true),
+    tmux_capture_lines: z.number().int().min(50).max(4000).optional(),
+    run_eval_if_due: z.boolean().default(true),
+    eval_interval_seconds: z.number().int().min(300).max(604800).default(21600),
+    eval_suite_id: z.string().min(1).default("autonomy.control-plane"),
+    eval_host_id: z.string().min(1).optional(),
+    minimum_eval_score: z.number().min(0).max(100).default(75),
+    refresh_learning_summary: z.boolean().default(true),
+    learning_review_interval_seconds: z.number().int().min(60).max(604800).default(300),
+    interval_seconds: z.number().int().min(5).max(3600).default(120),
+    publish_runtime_event: z.boolean().default(true),
+    ...sourceSchema.shape,
+  })
+  .superRefine((value, ctx) => {
+    if (value.action === "run" && !value.mutation) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "mutation is required for run",
+        path: ["mutation"],
+      });
+    }
+  });
+
+type InvokeTool = (toolName: string, input: Record<string, unknown>) => Promise<unknown>;
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function readBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function readString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? Number(value) : null;
+}
+
+function isoAgeSeconds(value: string | null | undefined) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const timestamp = Date.parse(text);
+  if (!Number.isFinite(timestamp)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.max(0, (Date.now() - timestamp) / 1000);
+}
+
+function deriveMutation(base: { idempotency_key: string; side_effect_fingerprint: string }, phase: string) {
+  const safePhase = phase.replace(/[^a-zA-Z0-9._-]+/g, "-");
+  const digest = crypto
+    .createHash("sha256")
+    .update(`${base.idempotency_key}|${base.side_effect_fingerprint}|${safePhase}`)
+    .digest("hex");
+  return {
+    idempotency_key: `autonomy-maintain-${safePhase}-${digest.slice(0, 24)}`,
+    side_effect_fingerprint: `autonomy-maintain-${safePhase}-${digest.slice(24, 56)}`,
+  };
+}
+
+function buildGuardrails() {
+  return [
+    "Do not open new self-improvement goals from maintain ticks.",
+    "Do not auto-promote org-program versions from maintain ticks.",
+    "Do not mutate repo code from maintain ticks; use readiness, eval, and visibility only.",
+  ];
+}
+
+function buildDefaultState(input: z.infer<typeof autonomyMaintainSchema>): AutonomyMaintainStateRecord {
+  return {
+    enabled: false,
+    interval_seconds: input.interval_seconds,
+    learning_review_interval_seconds: input.learning_review_interval_seconds,
+    eval_interval_seconds: input.eval_interval_seconds,
+    last_run_at: null,
+    last_bootstrap_ready_at: null,
+    last_goal_autorun_daemon_at: null,
+    last_tmux_maintained_at: null,
+    last_learning_review_at: null,
+    last_learning_entry_count: 0,
+    last_learning_active_agent_count: 0,
+    last_eval_run_at: null,
+    last_eval_run_id: null,
+    last_eval_score: null,
+    last_actions: [],
+    last_attention: [],
+    last_error: null,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+async function buildStatus(
+  storage: Storage,
+  invokeTool: InvokeTool,
+  input: z.infer<typeof autonomyMaintainSchema>,
+  stateOverride?: AutonomyMaintainStateRecord | null
+) {
+  const state = stateOverride ?? storage.getAutonomyMaintainState() ?? buildDefaultState(input);
+  const bootstrap = asRecord(
+    await invokeTool("autonomy.bootstrap", {
+      action: "status",
+      local_host_id: input.local_host_id,
+      probe_ollama_url: input.probe_ollama_url,
+      autostart_ring_leader: input.autostart_ring_leader,
+      source_client: input.source_client ?? "autonomy.maintain",
+      source_model: input.source_model,
+      source_agent: input.source_agent ?? "ring-leader",
+    })
+  );
+  const goalAutorun = asRecord(await invokeTool("goal.autorun_daemon", { action: "status" }));
+  const tmux = asRecord(await invokeTool("trichat.tmux_controller", { action: "status" }));
+  const learning = buildAgentLearningOverview(storage, {
+    limit: 250,
+    top_agents_limit: 8,
+    recent_limit: 8,
+  });
+  const tmuxDashboard = asRecord(tmux.dashboard);
+  const lastRunAgeSeconds = isoAgeSeconds(state.last_run_at);
+  const learningReviewAgeSeconds = isoAgeSeconds(state.last_learning_review_at);
+  const evalAgeSeconds = isoAgeSeconds(state.last_eval_run_at);
+  const due = {
+    stale: lastRunAgeSeconds > Math.max(state.interval_seconds * 3, 300),
+    learning_review: learningReviewAgeSeconds > state.learning_review_interval_seconds,
+    eval: input.run_eval_if_due !== false && evalAgeSeconds > state.eval_interval_seconds,
+  };
+  const attention = [...new Set([...(state.last_attention ?? []), ...((bootstrap.repairs_needed as string[] | undefined) ?? [])])]
+    .map((entry) => String(entry ?? "").trim())
+    .filter(Boolean);
+  if (readBoolean(goalAutorun.running) !== true) {
+    attention.push("goal.autorun_daemon.not_running");
+  }
+  if (readBoolean(asRecord(tmux.state).enabled) === true && readNumber(tmuxDashboard.queue_depth) === null) {
+    attention.push("trichat.tmux_controller.dashboard_missing");
+  }
+  if (learning.active_entry_count === 0) {
+    attention.push("agent.learning.no_active_entries");
+  }
+  return {
+    state,
+    bootstrap,
+    goal_autorun_daemon: goalAutorun,
+    tmux_controller: {
+      enabled: readBoolean(asRecord(tmux.state).enabled) === true,
+      queue_depth: readNumber(tmuxDashboard.queue_depth) ?? 0,
+      queue_age_seconds: readNumber(tmuxDashboard.queue_age_seconds),
+      worker_count: readNumber(asRecord(tmux.state).worker_count) ?? 0,
+    },
+    learning,
+    due,
+    guardrails: buildGuardrails(),
+    attention: [...new Set(attention)],
+  };
+}
+
+export async function autonomyMaintain(
+  storage: Storage,
+  invokeTool: InvokeTool,
+  input: z.infer<typeof autonomyMaintainSchema>
+) {
+  if (input.action === "status") {
+    return buildStatus(storage, invokeTool, input);
+  }
+
+  return runIdempotentMutation({
+    storage,
+    tool_name: "autonomy.maintain",
+    mutation: input.mutation!,
+    payload: input,
+    execute: async () => {
+      const sourceClient = input.source_client ?? "autonomy.maintain";
+      const sourceAgent = input.source_agent ?? "ring-leader";
+      const previousState = storage.getAutonomyMaintainState();
+      const now = new Date().toISOString();
+      const actions: string[] = [];
+      const attention: string[] = [];
+      let lastError: string | null = null;
+
+      const bootstrap = asRecord(
+        await invokeTool("autonomy.bootstrap", {
+          action: input.ensure_bootstrap ? "ensure" : "status",
+          mutation: input.ensure_bootstrap ? deriveMutation(input.mutation!, "bootstrap") : undefined,
+          local_host_id: input.local_host_id,
+          probe_ollama_url: input.probe_ollama_url,
+          autostart_ring_leader: input.autostart_ring_leader ?? true,
+          run_immediately: input.bootstrap_run_immediately ?? false,
+          seed_org_programs: input.ensure_bootstrap ? true : undefined,
+          seed_benchmark_suite: input.ensure_bootstrap ? true : undefined,
+          seed_eval_suite: input.ensure_bootstrap ? true : undefined,
+          source_client: sourceClient,
+          source_model: input.source_model,
+          source_agent: sourceAgent,
+        })
+      );
+      const bootstrapStatus = asRecord(bootstrap.status).self_start_ready === undefined ? bootstrap : asRecord(bootstrap.status);
+      actions.push(input.ensure_bootstrap ? "autonomy.bootstrap.ensure" : "autonomy.bootstrap.status");
+      const repairsNeeded = Array.isArray(bootstrapStatus.repairs_needed)
+        ? bootstrapStatus.repairs_needed.map((entry) => String(entry ?? "").trim()).filter(Boolean)
+        : [];
+      attention.push(...repairsNeeded);
+
+      let goalAutorunStatus = asRecord(await invokeTool("goal.autorun_daemon", { action: "status" }));
+      let goalAutorunStarted = false;
+      if (input.start_goal_autorun_daemon !== false && readBoolean(goalAutorunStatus.running) !== true) {
+        goalAutorunStatus = asRecord(
+          await invokeTool("goal.autorun_daemon", {
+            action: "start",
+            mutation: deriveMutation(input.mutation!, "goal-autorun-daemon"),
+            interval_seconds: input.autorun_interval_seconds,
+            run_immediately: true,
+            source_client: sourceClient,
+            source_model: input.source_model,
+            source_agent: sourceAgent,
+          })
+        );
+        goalAutorunStarted = true;
+        actions.push("goal.autorun_daemon.start");
+      }
+      if (readBoolean(goalAutorunStatus.running) !== true) {
+        attention.push("goal.autorun_daemon.not_running");
+      }
+
+      let tmuxMaintainResult: Record<string, unknown> | null = null;
+      const tmuxStatus = asRecord(await invokeTool("trichat.tmux_controller", { action: "status" }));
+      const tmuxQueueDepth = readNumber(asRecord(tmuxStatus.dashboard).queue_depth) ?? 0;
+      if (input.maintain_tmux_controller !== false && readBoolean(asRecord(tmuxStatus.state).enabled) === true) {
+        try {
+          tmuxMaintainResult = asRecord(
+            await invokeTool("trichat.tmux_controller", {
+              action: "maintain",
+              mutation: deriveMutation(input.mutation!, "tmux-maintain"),
+              auto_scale_workers: true,
+              nudge_blocked_lanes: true,
+              capture_lines: input.tmux_capture_lines,
+              source_client: sourceClient,
+              source_model: input.source_model,
+              source_agent: sourceAgent,
+            })
+          );
+          actions.push("trichat.tmux_controller.maintain");
+          if (tmuxMaintainResult.ok === false) {
+            const reason = readString(asRecord(tmuxMaintainResult.maintenance).reason) ?? readString(tmuxMaintainResult.error);
+            if (reason) {
+              attention.push(`trichat.tmux_controller.${reason}`);
+            } else {
+              attention.push("trichat.tmux_controller.maintain_failed");
+            }
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (/maintain lock not acquired/i.test(message)) {
+            actions.push("trichat.tmux_controller.maintain_skipped_locked");
+          } else {
+            attention.push(`trichat.tmux_controller.${message}`);
+          }
+        }
+      }
+
+      const workerFabricStatus = asRecord(bootstrapStatus.worker_fabric);
+      const workerTelemetry = asRecord(workerFabricStatus.telemetry);
+      const fabricQueueDepth = readNumber(workerTelemetry.queue_depth) ?? 0;
+      const fabricActiveTasks = readNumber(workerTelemetry.active_tasks) ?? 0;
+      const idleForEval = fabricQueueDepth <= 0 && fabricActiveTasks <= 0 && tmuxQueueDepth <= 0;
+
+      const learning = input.refresh_learning_summary === false
+        ? buildAgentLearningOverview(storage, {
+            limit: 250,
+            top_agents_limit: 8,
+            recent_limit: 8,
+          })
+        : buildAgentLearningOverview(storage, {
+            limit: 250,
+            top_agents_limit: 8,
+            recent_limit: 8,
+          });
+      actions.push("agent.learning_summary");
+      if (learning.active_entry_count === 0) {
+        attention.push("agent.learning.no_active_entries");
+      }
+
+      let evalResult: Record<string, unknown> | null = null;
+      const previousEvalAgeSeconds = isoAgeSeconds(previousState?.last_eval_run_at);
+      const shouldRunEval =
+        input.run_eval_if_due !== false &&
+        readBoolean(bootstrapStatus.self_start_ready) === true &&
+        previousEvalAgeSeconds > input.eval_interval_seconds &&
+        idleForEval;
+      if (shouldRunEval) {
+        evalResult = asRecord(
+          await invokeTool("eval.run", {
+            mutation: deriveMutation(input.mutation!, "eval-run"),
+            suite_id: input.eval_suite_id,
+            candidate_label: `autonomy-maintain:${new Date().toISOString().slice(0, 19)}`,
+            host_id: input.eval_host_id ?? input.local_host_id,
+            source_client: sourceClient,
+            source_model: input.source_model,
+            source_agent: sourceAgent,
+          })
+        );
+        actions.push(`eval.run:${input.eval_suite_id}`);
+        const evalScore = readNumber(evalResult.aggregate_metric_value);
+        if (evalResult.ok !== true) {
+          attention.push(`eval.${input.eval_suite_id}.failed`);
+        } else if (evalScore !== null && evalScore < input.minimum_eval_score) {
+          attention.push(`eval.${input.eval_suite_id}.below_threshold`);
+        }
+      } else if (input.run_eval_if_due !== false && !idleForEval) {
+        actions.push("eval.deferred_busy");
+      }
+
+      const nextState = storage.setAutonomyMaintainState({
+        enabled: true,
+        interval_seconds: input.interval_seconds,
+        learning_review_interval_seconds: input.learning_review_interval_seconds,
+        eval_interval_seconds: input.eval_interval_seconds,
+        last_run_at: now,
+        last_bootstrap_ready_at: readBoolean(bootstrapStatus.self_start_ready) === true ? now : previousState?.last_bootstrap_ready_at ?? null,
+        last_goal_autorun_daemon_at: readBoolean(goalAutorunStatus.running) === true ? now : previousState?.last_goal_autorun_daemon_at ?? null,
+        last_tmux_maintained_at: tmuxMaintainResult ? now : previousState?.last_tmux_maintained_at ?? null,
+        last_learning_review_at: now,
+        last_learning_entry_count: learning.total_entries,
+        last_learning_active_agent_count: learning.agents_with_active_entries,
+        last_eval_run_at: evalResult ? now : previousState?.last_eval_run_at ?? null,
+        last_eval_run_id: readString(evalResult?.run_id) ?? previousState?.last_eval_run_id ?? null,
+        last_eval_score: readNumber(evalResult?.aggregate_metric_value) ?? previousState?.last_eval_score ?? null,
+        last_actions: actions,
+        last_attention: attention,
+        last_error: lastError,
+      });
+
+      const shouldPublishEvent =
+        input.publish_runtime_event !== false &&
+        (goalAutorunStarted ||
+          Boolean(tmuxMaintainResult) ||
+          Boolean(evalResult) ||
+          repairsNeeded.length > 0 ||
+          attention.length > 0);
+      if (shouldPublishEvent) {
+        storage.appendRuntimeEvent({
+          event_type: "autonomy.maintain",
+          entity_type: "daemon",
+          entity_id: "autonomy.maintain",
+          status: attention.length > 0 ? "attention" : "healthy",
+          summary:
+            attention.length > 0
+              ? `autonomy.maintain completed with attention: ${attention.slice(0, 3).join(", ")}`
+              : "autonomy.maintain refreshed readiness, autorun, learning, and eval surfaces.",
+          details: {
+            actions,
+            attention,
+            eval_run_id: nextState.last_eval_run_id,
+            eval_score: nextState.last_eval_score,
+            learning_entry_count: nextState.last_learning_entry_count,
+            learning_active_agent_count: nextState.last_learning_active_agent_count,
+            goal_autorun_running: readBoolean(goalAutorunStatus.running) === true,
+            tmux_maintained: Boolean(tmuxMaintainResult),
+          },
+          source_client: sourceClient,
+          source_model: input.source_model,
+          source_agent: sourceAgent,
+        });
+      }
+
+      const status = await buildStatus(storage, invokeTool, input, nextState);
+      return {
+        ok: readBoolean(asRecord(status.bootstrap).self_start_ready) === true,
+        actions,
+        eval: {
+          executed: Boolean(evalResult),
+          suite_id: input.eval_suite_id,
+          run_id: readString(evalResult?.run_id),
+          ok: readBoolean(evalResult?.ok),
+          aggregate_metric_value: readNumber(evalResult?.aggregate_metric_value),
+        },
+        learning: {
+          total_entries: learning.total_entries,
+          active_entry_count: learning.active_entry_count,
+          agents_with_active_entries: learning.agents_with_active_entries,
+        },
+        status,
+      };
+    },
+  });
+}

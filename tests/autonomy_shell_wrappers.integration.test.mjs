@@ -89,6 +89,45 @@ test("ring leader start proactively uses autonomy bootstrap on a cold control pl
   }
 });
 
+test("autonomy keepalive defaults to bounded maintenance instead of a bare readiness ping", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-keepalive-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const ollama = await startFakeOllamaServer({
+    models: [
+      {
+        name: "llama3.2:3b",
+      },
+    ],
+  });
+
+  try {
+    const baseEnv = inheritedEnv({
+      ANAMNESIS_HUB_DB_PATH: dbPath,
+      TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+      TRICHAT_OLLAMA_URL: ollama.url,
+      TRICHAT_RING_LEADER_AUTOSTART: "1",
+      TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+      TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+      TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+      TRICHAT_RING_LEADER_TRANSPORT: "stdio",
+      MCP_HTTP_BEARER_TOKEN: "",
+      AUTONOMY_LEARNING_REVIEW_INTERVAL_SECONDS: "60",
+      AUTONOMY_EVAL_INTERVAL_SECONDS: "300",
+    });
+
+    const maintained = await runShellJson(["./scripts/autonomy_keepalive.sh"], baseEnv);
+    assert.equal(maintained.ok, true);
+    assert.equal(maintained.status.state.enabled, true);
+    assert.equal(maintained.status.bootstrap.self_start_ready, true);
+    assert.equal(maintained.status.goal_autorun_daemon.running, true);
+    assert.equal(typeof maintained.status.state.last_run_at, "string");
+    assert.equal(maintained.eval.executed, true);
+  } finally {
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("autonomy ingress shell wrapper records continuity and launches real background intake", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-ingress-shell-"));
   const dbPath = path.join(tempDir, "hub.sqlite");

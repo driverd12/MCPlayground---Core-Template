@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ACTION="${1:-ensure}"
+ACTION="${1:-maintain}"
 case "${ACTION}" in
-  status|ensure|repair)
+  status|ensure|maintain|repair)
     ;;
   *)
-    echo "usage: $0 [status|ensure]" >&2
+    echo "usage: $0 [status|ensure|maintain]" >&2
     exit 2
     ;;
 esac
 
 if [[ "${ACTION}" == "repair" ]]; then
-  ACTION="ensure"
+  ACTION="maintain"
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

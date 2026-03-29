@@ -50,6 +50,7 @@
     "ring-leader:run": "./scripts/ring_leader_ctl.sh run_once",
     "autonomy:status": "./scripts/autonomy_ctl.sh status",
     "autonomy:ensure": "./scripts/autonomy_ctl.sh ensure",
+    "autonomy:maintain": "./scripts/autonomy_ctl.sh maintain",
     "autonomy:intake": "./scripts/autonomy_command.sh",
     "autonomy:command": "./scripts/autonomy_command.sh",
     "autonomy:ide": "./scripts/autonomy_ide_ingress.sh",

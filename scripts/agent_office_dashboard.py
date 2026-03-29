@@ -407,7 +407,8 @@ class DashboardSnapshot:
     kernel: Dict[str, Any]
     learning: Dict[str, Any]
     autopilot: Dict[str, Any]
-    errors: List[str]
+    autonomy_maintain: Dict[str, Any] = field(default_factory=dict)
+    errors: List[str] = field(default_factory=list)
     agent_sessions: Dict[str, Any] = field(default_factory=dict)
     task_running: Dict[str, Any] = field(default_factory=dict)
     task_pending: Dict[str, Any] = field(default_factory=dict)
@@ -1298,7 +1299,11 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
     kernel_model_router = as_dict(kernel.get("model_router"))
     kernel_evals = as_dict(kernel.get("evals"))
     kernel_org_programs = as_dict(kernel.get("org_programs"))
+    kernel_autonomy_maintain = as_dict(kernel.get("autonomy_maintain"))
     learning = snapshot.learning
+    autonomy_maintain = snapshot.autonomy_maintain
+    autonomy_maintain_state = as_dict(autonomy_maintain.get("state"))
+    autonomy_maintain_due = as_dict(autonomy_maintain.get("due"))
     learning_top_agents = as_list(learning.get("top_agents"))
     kernel_learning = as_dict(kernel.get("learning"))
     learning_coverage = as_dict(kernel_learning.get("active_session_coverage"))
@@ -1403,6 +1408,14 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
             "Org :: "
             f"roles={parse_any_int(kernel_org_programs.get('role_count'))} "
             f"active_versions={parse_any_int(kernel_org_programs.get('active_version_count'))}",
+            width,
+        ),
+        fit_text(
+            "Maintain :: "
+            f"enabled={'yes' if autonomy_maintain_state.get('enabled') else 'no'} "
+            f"stale={'yes' if autonomy_maintain_due.get('stale') else 'no'} "
+            f"eval_due={'yes' if autonomy_maintain_due.get('eval') else 'no'} "
+            f"last_eval={kernel_autonomy_maintain.get('last_eval_score') if kernel_autonomy_maintain.get('last_eval_score') is not None else 'n/a'}",
             width,
         ),
         "",
@@ -1805,6 +1818,7 @@ def fetch_snapshot(caller: McpToolCaller, thread_id: str) -> DashboardSnapshot:
         "kernel": ("kernel.summary", {"session_limit": 6, "event_limit": 6, "task_running_limit": 8}),
         "learning": ("agent.learning_summary", {"limit": 200, "top_agents_limit": 8, "recent_limit": 8}),
         "autopilot": ("trichat.autopilot", {"action": "status"}),
+        "autonomy_maintain": ("autonomy.maintain", {"action": "status"}),
     }
     results: Dict[str, Dict[str, Any]] = {}
     errors: List[str] = []
@@ -1836,6 +1850,7 @@ def fetch_snapshot(caller: McpToolCaller, thread_id: str) -> DashboardSnapshot:
         kernel=results.get("kernel", {}),
         learning=results.get("learning", {}),
         autopilot=results.get("autopilot", {}),
+        autonomy_maintain=results.get("autonomy_maintain", {}),
         errors=errors,
     )
 
@@ -1888,6 +1903,7 @@ class OfficeDashboardApp:
             kernel={},
             learning={},
             autopilot={},
+            autonomy_maintain={},
             errors=[self.last_error] if self.last_error else [],
         )
         lines = render_view(snapshot, self.view, self.args.width, self.args.height, frame=0, theme=self.theme)
@@ -1955,6 +1971,7 @@ class OfficeDashboardApp:
             kernel={},
             learning={},
             autopilot={},
+            autonomy_maintain={},
             errors=[self.last_error] if self.last_error else [],
         )
         header = (

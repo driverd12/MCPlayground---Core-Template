@@ -912,6 +912,27 @@ export type GoalAutorunStateRecord = {
   updated_at: string;
 };
 
+export type AutonomyMaintainStateRecord = {
+  enabled: boolean;
+  interval_seconds: number;
+  learning_review_interval_seconds: number;
+  eval_interval_seconds: number;
+  last_run_at: string | null;
+  last_bootstrap_ready_at: string | null;
+  last_goal_autorun_daemon_at: string | null;
+  last_tmux_maintained_at: string | null;
+  last_learning_review_at: string | null;
+  last_learning_entry_count: number;
+  last_learning_active_agent_count: number;
+  last_eval_run_at: string | null;
+  last_eval_run_id: string | null;
+  last_eval_score: number | null;
+  last_actions: string[];
+  last_attention: string[];
+  last_error: string | null;
+  updated_at: string;
+};
+
 export type TriChatAutoRetentionStateRecord = {
   enabled: boolean;
   interval_seconds: number;
@@ -2022,6 +2043,123 @@ export class Storage {
            updated_at = excluded.updated_at`
       )
       .run("goal.autorun", normalized.enabled ? 1 : 0, configJson, now);
+
+    return {
+      ...normalized,
+      updated_at: now,
+    };
+  }
+
+  getAutonomyMaintainState(): AutonomyMaintainStateRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT enabled, config_json, updated_at
+         FROM daemon_configs
+         WHERE daemon_key = ?`
+      )
+      .get("autonomy.maintain") as Record<string, unknown> | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    const config = parseJsonObject(row.config_json);
+    return {
+      enabled: Number(row.enabled ?? 0) === 1,
+      interval_seconds: parseBoundedInt(config.interval_seconds, 120, 5, 3600),
+      learning_review_interval_seconds: parseBoundedInt(config.learning_review_interval_seconds, 300, 60, 604800),
+      eval_interval_seconds: parseBoundedInt(config.eval_interval_seconds, 21600, 300, 604800),
+      last_run_at: asNullableString(config.last_run_at)?.trim() || null,
+      last_bootstrap_ready_at: asNullableString(config.last_bootstrap_ready_at)?.trim() || null,
+      last_goal_autorun_daemon_at: asNullableString(config.last_goal_autorun_daemon_at)?.trim() || null,
+      last_tmux_maintained_at: asNullableString(config.last_tmux_maintained_at)?.trim() || null,
+      last_learning_review_at: asNullableString(config.last_learning_review_at)?.trim() || null,
+      last_learning_entry_count: parseBoundedInt(config.last_learning_entry_count, 0, 0, 1_000_000),
+      last_learning_active_agent_count: parseBoundedInt(config.last_learning_active_agent_count, 0, 0, 1_000_000),
+      last_eval_run_at: asNullableString(config.last_eval_run_at)?.trim() || null,
+      last_eval_run_id: asNullableString(config.last_eval_run_id)?.trim() || null,
+      last_eval_score:
+        typeof config.last_eval_score === "number" && Number.isFinite(config.last_eval_score)
+          ? Number(config.last_eval_score.toFixed(4))
+          : null,
+      last_actions: dedupeNonEmpty(Array.isArray(config.last_actions) ? config.last_actions.map((entry) => String(entry ?? "")) : []),
+      last_attention: dedupeNonEmpty(Array.isArray(config.last_attention) ? config.last_attention.map((entry) => String(entry ?? "")) : []),
+      last_error: asNullableString(config.last_error)?.trim() || null,
+      updated_at: String(row.updated_at ?? ""),
+    };
+  }
+
+  setAutonomyMaintainState(params: {
+    enabled: boolean;
+    interval_seconds: number;
+    learning_review_interval_seconds: number;
+    eval_interval_seconds: number;
+    last_run_at?: string | null;
+    last_bootstrap_ready_at?: string | null;
+    last_goal_autorun_daemon_at?: string | null;
+    last_tmux_maintained_at?: string | null;
+    last_learning_review_at?: string | null;
+    last_learning_entry_count?: number;
+    last_learning_active_agent_count?: number;
+    last_eval_run_at?: string | null;
+    last_eval_run_id?: string | null;
+    last_eval_score?: number | null;
+    last_actions?: string[];
+    last_attention?: string[];
+    last_error?: string | null;
+  }): AutonomyMaintainStateRecord {
+    const now = new Date().toISOString();
+    const normalized = {
+      enabled: Boolean(params.enabled),
+      interval_seconds: parseBoundedInt(params.interval_seconds, 120, 5, 3600),
+      learning_review_interval_seconds: parseBoundedInt(params.learning_review_interval_seconds, 300, 60, 604800),
+      eval_interval_seconds: parseBoundedInt(params.eval_interval_seconds, 21600, 300, 604800),
+      last_run_at: params.last_run_at?.trim() || null,
+      last_bootstrap_ready_at: params.last_bootstrap_ready_at?.trim() || null,
+      last_goal_autorun_daemon_at: params.last_goal_autorun_daemon_at?.trim() || null,
+      last_tmux_maintained_at: params.last_tmux_maintained_at?.trim() || null,
+      last_learning_review_at: params.last_learning_review_at?.trim() || null,
+      last_learning_entry_count: parseBoundedInt(params.last_learning_entry_count, 0, 0, 1_000_000),
+      last_learning_active_agent_count: parseBoundedInt(params.last_learning_active_agent_count, 0, 0, 1_000_000),
+      last_eval_run_at: params.last_eval_run_at?.trim() || null,
+      last_eval_run_id: params.last_eval_run_id?.trim() || null,
+      last_eval_score:
+        typeof params.last_eval_score === "number" && Number.isFinite(params.last_eval_score)
+          ? Number(params.last_eval_score.toFixed(4))
+          : null,
+      last_actions: [...new Set((params.last_actions ?? []).map((entry) => String(entry ?? "").trim()).filter(Boolean))],
+      last_attention: [...new Set((params.last_attention ?? []).map((entry) => String(entry ?? "").trim()).filter(Boolean))],
+      last_error: params.last_error?.trim() || null,
+    };
+    const configJson = stableStringify({
+      interval_seconds: normalized.interval_seconds,
+      learning_review_interval_seconds: normalized.learning_review_interval_seconds,
+      eval_interval_seconds: normalized.eval_interval_seconds,
+      last_run_at: normalized.last_run_at,
+      last_bootstrap_ready_at: normalized.last_bootstrap_ready_at,
+      last_goal_autorun_daemon_at: normalized.last_goal_autorun_daemon_at,
+      last_tmux_maintained_at: normalized.last_tmux_maintained_at,
+      last_learning_review_at: normalized.last_learning_review_at,
+      last_learning_entry_count: normalized.last_learning_entry_count,
+      last_learning_active_agent_count: normalized.last_learning_active_agent_count,
+      last_eval_run_at: normalized.last_eval_run_at,
+      last_eval_run_id: normalized.last_eval_run_id,
+      last_eval_score: normalized.last_eval_score,
+      last_actions: normalized.last_actions,
+      last_attention: normalized.last_attention,
+      last_error: normalized.last_error,
+    });
+
+    this.db
+      .prepare(
+        `INSERT INTO daemon_configs (daemon_key, enabled, config_json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(daemon_key) DO UPDATE SET
+           enabled = excluded.enabled,
+           config_json = excluded.config_json,
+           updated_at = excluded.updated_at`
+      )
+      .run("autonomy.maintain", normalized.enabled ? 1 : 0, configJson, now);
 
     return {
       ...normalized,

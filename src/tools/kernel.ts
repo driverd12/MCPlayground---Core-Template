@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  type AutonomyMaintainStateRecord,
   type AgentSessionRecord,
   type EvalSuiteRecord,
   type EvalSuitesStateRecord,
@@ -178,11 +179,44 @@ type OrgProgramSummary = {
   }>;
 };
 
+type AutonomyMaintainSummary = {
+  enabled: boolean;
+  interval_seconds: number;
+  learning_review_interval_seconds: number;
+  eval_interval_seconds: number;
+  last_run_at: string | null;
+  last_run_age_seconds: number | null;
+  stale: boolean;
+  last_bootstrap_ready_at: string | null;
+  last_goal_autorun_daemon_at: string | null;
+  last_tmux_maintained_at: string | null;
+  last_learning_review_at: string | null;
+  last_learning_entry_count: number;
+  last_learning_active_agent_count: number;
+  last_eval_run_at: string | null;
+  last_eval_score: number | null;
+  eval_due: boolean;
+  last_actions: string[];
+  last_attention: string[];
+  last_error: string | null;
+};
+
 function countByStatus<T extends { status: string }>(records: T[]) {
   return records.reduce<Record<string, number>>((acc, record) => {
     acc[record.status] = (acc[record.status] ?? 0) + 1;
     return acc;
   }, {});
+}
+
+function ageSeconds(value: string | null) {
+  if (!value) {
+    return null;
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+  return Math.max(0, Number((((Date.now() - timestamp) / 1000)).toFixed(4)));
 }
 
 function isTerminalPlanStatus(status: PlanRecord["status"]) {
@@ -722,6 +756,56 @@ function summarizeOrgPrograms(storage: Storage): OrgProgramSummary {
   };
 }
 
+function summarizeAutonomyMaintain(state: AutonomyMaintainStateRecord | null): AutonomyMaintainSummary {
+  if (!state) {
+    return {
+      enabled: false,
+      interval_seconds: 120,
+      learning_review_interval_seconds: 300,
+      eval_interval_seconds: 21600,
+      last_run_at: null,
+      last_run_age_seconds: null,
+      stale: true,
+      last_bootstrap_ready_at: null,
+      last_goal_autorun_daemon_at: null,
+      last_tmux_maintained_at: null,
+      last_learning_review_at: null,
+      last_learning_entry_count: 0,
+      last_learning_active_agent_count: 0,
+      last_eval_run_at: null,
+      last_eval_score: null,
+      eval_due: true,
+      last_actions: [],
+      last_attention: [],
+      last_error: null,
+    };
+  }
+  const lastRunAgeSeconds = ageSeconds(state.last_run_at);
+  const lastEvalAgeSeconds = ageSeconds(state.last_eval_run_at);
+  const stale = lastRunAgeSeconds === null ? true : lastRunAgeSeconds > Math.max(state.interval_seconds * 3, 300);
+  return {
+    enabled: state.enabled,
+    interval_seconds: state.interval_seconds,
+    learning_review_interval_seconds: state.learning_review_interval_seconds,
+    eval_interval_seconds: state.eval_interval_seconds,
+    last_run_at: state.last_run_at,
+    last_run_age_seconds: lastRunAgeSeconds,
+    stale,
+    last_bootstrap_ready_at: state.last_bootstrap_ready_at,
+    last_goal_autorun_daemon_at: state.last_goal_autorun_daemon_at,
+    last_tmux_maintained_at: state.last_tmux_maintained_at,
+    last_learning_review_at: state.last_learning_review_at,
+    last_learning_entry_count: state.last_learning_entry_count,
+    last_learning_active_agent_count: state.last_learning_active_agent_count,
+    last_eval_run_at: state.last_eval_run_at,
+    last_eval_score: state.last_eval_score,
+    eval_due: lastEvalAgeSeconds === null ? true : lastEvalAgeSeconds > state.eval_interval_seconds,
+    last_actions: state.last_actions,
+    last_attention: state.last_attention,
+    last_error: state.last_error,
+  };
+}
+
 function deriveKernelState(params: {
   failed_goal_count: number;
   failed_task_count: number;
@@ -813,6 +897,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   const modelRouterSummary = summarizeModelRouter(storage);
   const evalSummary = summarizeEvalSuites(storage);
   const orgProgramSummary = summarizeOrgPrograms(storage);
+  const autonomyMaintainSummary = summarizeAutonomyMaintain(storage.getAutonomyMaintainState());
   const goalSummaries = openGoals.map((goal) => {
     const plan = resolveGoalPlan(storage, goal);
     const steps = plan ? storage.listPlanSteps(plan.plan_id) : [];
@@ -1044,6 +1129,18 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   } else if (orgProgramSummary.active_version_count === 0) {
     attention.push("Org-program roles exist, but none have an active version yet.");
   }
+  if (!autonomyMaintainSummary.enabled) {
+    attention.push("Background autonomy maintenance has not persisted an enabled state yet.");
+  } else if (autonomyMaintainSummary.stale) {
+    attention.push("Background autonomy maintenance is stale and may no longer be refreshing readiness automatically.");
+  } else if (autonomyMaintainSummary.eval_due) {
+    attention.push("Background autonomy maintenance is ready for its next eval health refresh.");
+  }
+  if (autonomyMaintainSummary.last_attention.length > 0) {
+    attention.push(
+      `Background autonomy maintenance last reported attention: ${autonomyMaintainSummary.last_attention.slice(0, 3).join(", ")}.`
+    );
+  }
   if (attention.length === 0 && state === "active") {
     attention.push("Kernel is progressing normally.");
   }
@@ -1092,6 +1189,13 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
         version_count: orgProgramSummary.version_count,
         active_version_count: orgProgramSummary.active_version_count,
       },
+      autonomy_maintain: {
+        enabled: autonomyMaintainSummary.enabled,
+        stale: autonomyMaintainSummary.stale,
+        last_run_age_seconds: autonomyMaintainSummary.last_run_age_seconds,
+        eval_due: autonomyMaintainSummary.eval_due,
+        last_eval_score: autonomyMaintainSummary.last_eval_score,
+      },
       ready_step_count: totals.ready_step_count,
       running_step_count: totals.running_step_count,
       blocked_approval_count: totals.blocked_approval_count,
@@ -1115,6 +1219,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     model_router: modelRouterSummary,
     evals: evalSummary,
     org_programs: orgProgramSummary,
+    autonomy_maintain: autonomyMaintainSummary,
     learning: {
       ...learningOverview,
       active_session_coverage: {

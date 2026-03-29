@@ -7,10 +7,10 @@ if [[ $# -gt 0 ]]; then
 fi
 
 case "${ACTION}" in
-  status|ensure|intake|ingress|ide)
+  status|ensure|maintain|intake|ingress|ide)
     ;;
   *)
-    echo "usage: $0 [status|ensure|intake|ingress|ide]" >&2
+    echo "usage: $0 [status|ensure|maintain|intake|ingress|ide]" >&2
     echo "  intake|ingress|ide delegate to ./scripts/autonomy_ide_ingress.sh" >&2
     echo "  run ./scripts/autonomy_ide_ingress.sh --help for ingress options" >&2
     exit 2
@@ -129,6 +129,64 @@ NODE
   fi
 }
 
+run_maintain_entry() {
+  local quiet="${1:-1}"
+  local args_json
+  args_json="$(node --input-type=module - \
+    "${AUTONOMY_KEEPALIVE_INTERVAL_SECONDS:-120}" \
+    "${AUTONOMY_LEARNING_REVIEW_INTERVAL_SECONDS:-300}" \
+    "${AUTONOMY_EVAL_INTERVAL_SECONDS:-21600}" \
+    "${AUTONOMY_BOOTSTRAP_RUN_IMMEDIATELY:-0}" \
+    "${TRICHAT_RING_LEADER_AUTOSTART:-1}" \
+    <<'NODE'
+function parseBoolean(value, fallback) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function parseIntValue(value, fallback, min, max) {
+  const parsed = Number.parseInt(String(value || "").trim(), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+const [intervalSeconds, learningIntervalSeconds, evalIntervalSeconds, runImmediately, autostartRingLeader] = process.argv.slice(2);
+const stamp = Date.now();
+
+process.stdout.write(
+  JSON.stringify({
+    action: "run",
+    mutation: {
+      idempotency_key: `autonomy-maintain-run-${stamp}-${process.pid}`,
+      side_effect_fingerprint: `autonomy-maintain-run-${stamp}-${process.pid}`,
+    },
+    interval_seconds: parseIntValue(intervalSeconds, 120, 5, 3600),
+    learning_review_interval_seconds: parseIntValue(learningIntervalSeconds, 300, 60, 604800),
+    eval_interval_seconds: parseIntValue(evalIntervalSeconds, 21600, 300, 604800),
+    bootstrap_run_immediately: parseBoolean(runImmediately, false),
+    autostart_ring_leader: parseBoolean(autostartRingLeader, true),
+    ensure_bootstrap: true,
+    start_goal_autorun_daemon: true,
+    maintain_tmux_controller: true,
+    run_eval_if_due: true,
+    eval_suite_id: "autonomy.control-plane",
+    minimum_eval_score: 75,
+    refresh_learning_summary: true,
+    publish_runtime_event: true,
+    source_client: "autonomy_ctl.sh",
+  })
+);
+NODE
+)"
+  if [[ "${quiet}" == "1" ]]; then
+    call_tool_json autonomy.maintain "${args_json}" >/dev/null
+  else
+    call_tool_json autonomy.maintain "${args_json}"
+  fi
+}
+
 TRANSPORT="$(resolve_transport)"
 
 if [[ "${ACTION}" == "status" ]]; then
@@ -138,6 +196,11 @@ fi
 
 if [[ "${ACTION}" == "ensure" ]]; then
   ensure_autonomy_entry 0
+  exit 0
+fi
+
+if [[ "${ACTION}" == "maintain" ]]; then
+  run_maintain_entry 0
   exit 0
 fi
 

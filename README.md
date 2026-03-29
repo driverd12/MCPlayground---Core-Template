@@ -502,10 +502,14 @@ TriChat reliability checks:
 npm run trichat:bridges:test
 npm run trichat:doctor
 npm run production:doctor
+npm run autonomy:status
+npm run autonomy:maintain
 npm run trichat:smoke
 npm run trichat:dogfood
 npm run trichat:soak:gate -- --hours 1 --interval-seconds 60
 ```
+
+Background upkeep is real, not advisory: launchd keepalive now drives `autonomy.maintain`, which keeps the control plane ready, keeps `goal.autorun_daemon` alive, refreshes bounded learning visibility, maintains tmux worker lanes, and runs the default eval suite only when it is due.
 
 Alternate roster validation example:
 

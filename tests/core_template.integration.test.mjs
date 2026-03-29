@@ -74,6 +74,7 @@ test("server starts with default agentic workflow hooks and exposes core + TriCh
     assert.equal(names.has("agent.report_result"), true);
     assert.equal(names.has("task.create"), true);
     assert.equal(names.has("transcript.log"), true);
+    assert.equal(names.has("autonomy.maintain"), true);
     assert.equal(names.has("autonomy.command"), true);
 
     assert.equal(names.has("trichat.thread_open"), true);

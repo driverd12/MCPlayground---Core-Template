@@ -197,6 +197,7 @@ import { modelRouter, modelRouterSchema } from "./tools/model_router.js";
 import { orgProgram, orgProgramSchema } from "./tools/org_program.js";
 import { taskCompile, taskCompileSchema } from "./tools/task_compiler.js";
 import { autonomyBootstrap, autonomyBootstrapSchema } from "./tools/autonomy_bootstrap.js";
+import { autonomyMaintain, autonomyMaintainSchema } from "./tools/autonomy_maintain.js";
 import { autonomyCommand, autonomyCommandSchema } from "./tools/autonomy_command.js";
 import { autonomyIdeIngress, autonomyIdeIngressSchema } from "./tools/autonomy_ide_ingress.js";
 import { providerBridge, providerBridgeSchema } from "./tools/provider_bridge.js";
@@ -2140,6 +2141,13 @@ registerTool(
 );
 
 registerTool(
+  "autonomy.maintain",
+  "Run bounded background upkeep so the control plane stays ready, autorun keeps scanning, learning stays visible, and eval health stays fresh without recursive self-improvement.",
+  autonomyMaintainSchema,
+  (input) => autonomyMaintain(storage, invokeRegisteredTool, input)
+);
+
+registerTool(
   "autonomy.command",
   "Accept a single operator command, ensure the control plane is ready, compile bounded work, and kick off unattended execution.",
   autonomyCommandSchema,
@@ -2751,6 +2759,7 @@ async function main() {
   const args = process.argv.slice(2);
   const httpEnabled = args.includes("--http") || process.env.MCP_HTTP === "1";
   const bootstrapOnStart = parseBooleanEnv(process.env.MCP_AUTONOMY_BOOTSTRAP_ON_START, true);
+  const maintainOnStart = parseBooleanEnv(process.env.MCP_AUTONOMY_MAINTAIN_ON_START, true);
 
   if (httpEnabled && bootstrapOnStart) {
     const nonce = `${Date.now()}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
@@ -2774,6 +2783,38 @@ async function main() {
       console.warn(
         `[autonomy.bootstrap] startup ensure failed: ${error instanceof Error ? error.message : String(error)}`
       );
+    }
+
+    if (maintainOnStart) {
+      try {
+        await autonomyMaintain(storage, invokeRegisteredTool, {
+          action: "run",
+          local_host_id: "local",
+          mutation: {
+            idempotency_key: `server-startup-autonomy-maintain-${nonce}`,
+            side_effect_fingerprint: `server-startup-autonomy-maintain-${nonce}`,
+          },
+          probe_ollama_url: process.env.TRICHAT_OLLAMA_URL,
+          ensure_bootstrap: true,
+          autostart_ring_leader: parseBooleanEnv(process.env.TRICHAT_RING_LEADER_AUTOSTART, true),
+          bootstrap_run_immediately: false,
+          start_goal_autorun_daemon: true,
+          maintain_tmux_controller: true,
+          run_eval_if_due: true,
+          eval_interval_seconds: 21600,
+          eval_suite_id: "autonomy.control-plane",
+          minimum_eval_score: 75,
+          refresh_learning_summary: true,
+          learning_review_interval_seconds: 300,
+          interval_seconds: 120,
+          publish_runtime_event: true,
+          source_client: "server.startup",
+        });
+      } catch (error) {
+        console.warn(
+          `[autonomy.maintain] startup run failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
     }
   }
 

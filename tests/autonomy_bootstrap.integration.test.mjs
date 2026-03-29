@@ -204,6 +204,70 @@ test("a cold control plane can take a single command from intake to durable auto
   }
 });
 
+test("autonomy.maintain keeps the control plane ready and refreshes bounded eval health in the background", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-maintain-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const ollama = await startFakeOllamaServer({
+    models: [
+      {
+        name: "llama3.2:3b",
+      },
+    ],
+  });
+  let mutationCounter = 0;
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+    TRICHAT_OLLAMA_URL: ollama.url,
+    TRICHAT_RING_LEADER_AUTOSTART: "1",
+    TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+    TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+    TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+  });
+
+  try {
+    const maintained = await callTool(session.client, "autonomy.maintain", {
+      action: "run",
+      mutation: nextMutation("autonomy-maintain", "autonomy.maintain.run", () => mutationCounter++),
+      local_host_id: "local",
+      probe_ollama_url: ollama.url,
+      autostart_ring_leader: true,
+      interval_seconds: 120,
+      learning_review_interval_seconds: 60,
+      eval_interval_seconds: 300,
+      minimum_eval_score: 0,
+    });
+
+    assert.equal(maintained.ok, true);
+    assert.ok(Array.isArray(maintained.actions));
+    assert.ok(maintained.actions.includes("autonomy.bootstrap.ensure"));
+    assert.ok(maintained.actions.includes("agent.learning_summary"));
+    assert.equal(maintained.status.bootstrap.self_start_ready, true);
+    assert.equal(maintained.status.goal_autorun_daemon.running, true);
+    assert.equal(maintained.status.state.enabled, true);
+    assert.equal(typeof maintained.status.state.last_run_at, "string");
+    assert.equal(typeof maintained.status.state.last_learning_review_at, "string");
+    assert.equal(maintained.eval.executed, true);
+    assert.equal(typeof maintained.eval.run_id, "string");
+    assert.equal(typeof maintained.eval.aggregate_metric_value, "number");
+
+    const kernel = await callTool(session.client, "kernel.summary", {
+      session_limit: 6,
+      event_limit: 6,
+      task_running_limit: 8,
+    });
+    assert.equal(kernel.autonomy_maintain.enabled, true);
+    assert.equal(kernel.autonomy_maintain.stale, false);
+    assert.equal(kernel.autonomy_maintain.eval_due, false);
+    assert.equal(typeof kernel.autonomy_maintain.last_run_at, "string");
+  } finally {
+    await session.client.close().catch(() => {});
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function startFakeOllamaServer({ models }) {
   const server = http.createServer((req, res) => {
     if (req.url === "/api/tags") {

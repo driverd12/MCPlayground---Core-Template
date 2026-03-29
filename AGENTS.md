@@ -18,6 +18,7 @@ Build and harden a robust MCP server with real agentic tooling so a local ring l
 - Keep the office TUI cute, informative, and operationally honest: sprite states should reflect real MCP/tmux/telemetry signals, not fake activity.
 - Treat `autonomy.ide_ingress` as the one canonical operator and IDE intake lane. Do not invent a second ingress path for shell, office, or external clients.
 - For IDE-originated work, let the local-first council try first: `implementation-director`, `research-director`, `verification-director`, `local-imprint`, unless an explicit agent override is provided.
+- Make the control plane self-maintaining in the background: launchd keepalive should drive real `autonomy.maintain` upkeep so readiness, autorun, learning visibility, and eval freshness continue without slash-command babysitting.
 - Separate inbound client federation from outbound council capability. Cursor, Codex, and Gemini can be real council participants here; GitHub Copilot is an inbound MCP client today, not a fake outbound council bridge.
 - Keep ChatGPT/OpenAI custom MCP claims truthful: remote-only until a real remote MCP surface exists. Never present it as a pure local install.
 
@@ -33,6 +34,7 @@ Build and harden a robust MCP server with real agentic tooling so a local ring l
 
 - Favor substantive tool paths like `kernel.summary`, `trichat.workboard`, `trichat.tmux_controller`, `trichat.adapter_telemetry`, `task.summary`, and durable agent-session/task reporting.
 - Treat `agent.learning_summary` and `kernel.summary.learning` as the canonical operator surfaces for bounded agent learning; learned behavior should be inspectable, attributable, and never hidden behind prompt magic.
+- Keep `autonomy.maintain` bounded and anti-recursive: it may refresh readiness, autorun, tmux health, learning visibility, and eval state, but it must not open self-improvement goals, auto-promote org programs, or mutate repo code on its own.
 - Keep the ring leader replay-safe across restarts and repeated manual nudges: stale claim replays must refresh cleanly, and fresh operator/source intake should outrank the ring leader's own leftover specialist fallback backlog.
 - Persist the ring leader's current work contract into durable session metadata so the dashboard can recover the last source objective, selected strategy, delegate target, evidence bar, rollback notes, and execution backlog even after daemon restarts.
 - Harden the ring leader against stale failures by tracking confidence, plan substance, recovery evidence, and bounded fallback chains.
