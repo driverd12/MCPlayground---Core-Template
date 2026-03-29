@@ -237,10 +237,17 @@ Send one top-level objective into the autonomous stack so it bootstraps readines
 npm run autonomy:command -- "Map the repo, implement the requested change, verify it, and keep going until the goal is truly complete."
 ```
 
+Mirror an IDE/operator objective into transcript continuity, the office thread, and the same durable autonomous execution lane:
+
+```bash
+npm run autonomy:ide -- "Take what I say in the IDE, record it into MCP continuity, show it in the office, and run with it in the background."
+```
+
 Optional shell flags are available through the wrapper, for example:
 
 ```bash
 ./scripts/autonomy_command.sh --title "Morning autonomy smoke" --tag demo --accept "Verification evidence is attached." -- "Take this objective from intake to durable execution."
+./scripts/autonomy_ide_ingress.sh --session codex-ide --thread trichat-autopilot-internal --tag ide -- "Mirror this IDE objective into the office and keep the background workflow moving."
 ```
 
 ## Agent Office Dashboard
@@ -262,6 +269,8 @@ Open the intake desk directly when you want to hand the office a plain-language 
 ```bash
 npm run autonomy:intake:shell
 ```
+
+The intake desk now uses the same `autonomy.ide_ingress` path as the IDE wrapper, so office intake, Codex/IDE intake, transcript continuity, thread mirroring, memory capture, and durable background execution all stay on one real lane.
 
 This dashboard is MCP-backed and reads live state from:
 

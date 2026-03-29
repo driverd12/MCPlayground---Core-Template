@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -89,6 +89,84 @@ test("ring leader start proactively uses autonomy bootstrap on a cold control pl
   }
 });
 
+test("autonomy ingress shell wrapper records continuity and launches real background intake", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-ingress-shell-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const busPath = path.join(tempDir, "trichat.bus.sock");
+  const bearerToken = "test-autonomy-ingress-shell-token";
+  const ollama = await startFakeOllamaServer({
+    models: [
+      {
+        name: "llama3.2:3b",
+      },
+    ],
+  });
+  const httpPort = await reservePort();
+  const child = spawn("node", ["dist/server.js", "--http", "--http-port", String(httpPort)], {
+    cwd: REPO_ROOT,
+    env: inheritedEnv({
+      MCP_HTTP: "1",
+      MCP_HTTP_PORT: String(httpPort),
+      MCP_HTTP_HOST: "127.0.0.1",
+      MCP_HTTP_BEARER_TOKEN: bearerToken,
+      MCP_AUTONOMY_BOOTSTRAP_ON_START: "1",
+      ANAMNESIS_HUB_DB_PATH: dbPath,
+      TRICHAT_BUS_SOCKET_PATH: busPath,
+      TRICHAT_OLLAMA_URL: ollama.url,
+      TRICHAT_RING_LEADER_AUTOSTART: "1",
+      TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+      TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+      TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+    }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  try {
+    await waitForAutonomyStatus({
+      url: `http://127.0.0.1:${httpPort}/`,
+      origin: "http://127.0.0.1",
+      bearerToken,
+    });
+    const baseEnv = inheritedEnv({
+      TRICHAT_RING_LEADER_TRANSPORT: "http",
+      TRICHAT_MCP_TRANSPORT: "http",
+      TRICHAT_MCP_URL: `http://127.0.0.1:${httpPort}/`,
+      TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
+      MCP_HTTP_BEARER_TOKEN: bearerToken,
+    });
+
+    const ingress = await runShellJson(
+      [
+        "./scripts/autonomy_ctl.sh",
+        "ingress",
+        "--session",
+        "codex-shell-ingress",
+        "--thread",
+        "codex-shell-thread",
+        "--title",
+        "Shell ingress objective",
+        "--dry-run",
+        "--no-daemon",
+        "--",
+        "Take one IDE-style objective, mirror it into the office, and continue through autonomous execution.",
+      ],
+      baseEnv
+    );
+
+    assert.equal(ingress.ok, true);
+    assert.equal(ingress.session_id, "codex-shell-ingress");
+    assert.equal(ingress.thread_id, "codex-shell-thread");
+    assert.equal(ingress.autonomy.execution.ok, true);
+    assert.equal(ingress.autonomy.execution.dry_run ?? true, true);
+    assert.equal(ingress.autonomy.goal.title, "Shell ingress objective");
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function startFakeOllamaServer({ models }) {
   const server = http.createServer((req, res) => {
     if (req.url === "/api/tags") {
@@ -116,6 +194,61 @@ async function startFakeOllamaServer({ models }) {
         server.close((error) => (error ? reject(error) : resolve()));
       }),
   };
+}
+
+async function reservePort() {
+  const server = http.createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to reserve port");
+  }
+  const { port } = address;
+  await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  return port;
+}
+
+async function waitForAutonomyStatus({ url, origin, bearerToken }) {
+  const deadline = Date.now() + 15000;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const result = await execFileAsync(
+        "node",
+        [
+          "./scripts/mcp_tool_call.mjs",
+          "--tool",
+          "autonomy.bootstrap",
+          "--args",
+          '{"action":"status"}',
+          "--transport",
+          "http",
+          "--url",
+          url,
+          "--origin",
+          origin,
+          "--cwd",
+          REPO_ROOT,
+        ],
+        {
+          cwd: REPO_ROOT,
+          env: inheritedEnv({
+            MCP_HTTP_BEARER_TOKEN: bearerToken,
+          }),
+          maxBuffer: 8 * 1024 * 1024,
+        }
+      );
+      const parsed = JSON.parse(result.stdout);
+      if (parsed?.self_start_ready) {
+        return parsed;
+      }
+      lastError = new Error(`self_start_ready=false repairs=${JSON.stringify(parsed?.repairs_needed ?? [])}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw lastError ?? new Error("Timed out waiting for autonomy bootstrap readiness");
 }
 
 function inheritedEnv(extra) {

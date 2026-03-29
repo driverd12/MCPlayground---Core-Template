@@ -7,12 +7,12 @@ if [[ $# -gt 0 ]]; then
 fi
 
 case "${ACTION}" in
-  status|ensure|intake)
+  status|ensure|intake|ingress|ide)
     ;;
   *)
-    echo "usage: $0 [status|ensure|intake]" >&2
-    echo "  intake delegates to ./scripts/autonomy_command.sh" >&2
-    echo "  run ./scripts/autonomy_command.sh --help for intake options" >&2
+    echo "usage: $0 [status|ensure|intake|ingress|ide]" >&2
+    echo "  intake|ingress|ide delegate to ./scripts/autonomy_ide_ingress.sh" >&2
+    echo "  run ./scripts/autonomy_ide_ingress.sh --help for ingress options" >&2
     exit 2
     ;;
 esac
@@ -143,4 +143,4 @@ fi
 
 ensure_autonomy_entry 1
 
-exec "${REPO_ROOT}/scripts/autonomy_command.sh" "$@"
+exec "${REPO_ROOT}/scripts/autonomy_ide_ingress.sh" --no-ensure "$@"

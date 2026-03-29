@@ -41,7 +41,7 @@ run_objective() {
   echo "[intake] submitting objective:"
   echo "  ${objective}"
   echo
-  ./scripts/autonomy_command.sh "$@" -- "${objective}"
+  ./scripts/autonomy_ide_ingress.sh "$@" -- "${objective}"
 }
 
 if [[ -t 1 && -n "${TERM:-}" ]]; then
