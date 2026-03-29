@@ -197,6 +197,7 @@ import { modelRouter, modelRouterSchema } from "./tools/model_router.js";
 import { orgProgram, orgProgramSchema } from "./tools/org_program.js";
 import { taskCompile, taskCompileSchema } from "./tools/task_compiler.js";
 import { autonomyBootstrap, autonomyBootstrapSchema } from "./tools/autonomy_bootstrap.js";
+import { autonomyCommand, autonomyCommandSchema } from "./tools/autonomy_command.js";
 import {
   trichatChaos,
   trichatChaosSchema,
@@ -2134,6 +2135,13 @@ registerTool(
   "Seed and repair the local autonomy substrate so the ring leader can self-start with real worker, model, org, and eval state.",
   autonomyBootstrapSchema,
   (input) => autonomyBootstrap(storage, invokeRegisteredTool, input)
+);
+
+registerTool(
+  "autonomy.command",
+  "Accept a single operator command, ensure the control plane is ready, compile bounded work, and kick off unattended execution.",
+  autonomyCommandSchema,
+  (input) => autonomyCommand(storage, invokeRegisteredTool, input)
 );
 
 registerTool("org.program", "Version and promote role programs for ring leader, directors, SMEs, and leaf agents.", orgProgramSchema, (input) =>

@@ -231,6 +231,18 @@ Clean stale probe threads, requeue eligible old autopilot failures, and prune un
 npm run ring-leader:cleanup
 ```
 
+Send one top-level objective into the autonomous stack so it bootstraps readiness, opens a durable goal, compiles bounded work, dispatches execution, and keeps background continuation alive:
+
+```bash
+npm run autonomy:command -- "Map the repo, implement the requested change, verify it, and keep going until the goal is truly complete."
+```
+
+Optional shell flags are available through the wrapper, for example:
+
+```bash
+./scripts/autonomy_command.sh --title "Morning autonomy smoke" --tag demo --accept "Verification evidence is attached." -- "Take this objective from intake to durable execution."
+```
+
 ## Agent Office Dashboard
 
 Launch the animated office monitor directly:

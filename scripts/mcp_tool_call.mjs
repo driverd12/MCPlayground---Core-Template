@@ -103,7 +103,10 @@ async function main() {
     const parsed = asJson(text);
     process.stdout.write(`${JSON.stringify(parsed, null, 2)}\n`);
   } finally {
-    await client.close().catch(() => {});
+    await Promise.race([
+      client.close().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 750)),
+    ]);
   }
 }
 

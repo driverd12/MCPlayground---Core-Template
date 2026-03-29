@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && npm run test:python && node --test ./tests/auto_squish.persistence.test.mjs ./tests/core_template.integration.test.mjs ./tests/storage_guard.persistence.test.mjs ./tests/agentic_pack.integration.test.mjs ./tests/trichat_auto_retention.persistence.test.mjs ./tests/trichat_autopilot.persistence.test.mjs ./tests/trichat_autopilot.snappiness.test.mjs ./tests/trichat_autopilot.tmux_backend.test.mjs ./tests/trichat_bus.unixsocket.test.mjs ./tests/trichat_tmux_controller.test.mjs ./tests/worker_fabric_and_benchmark.test.mjs ./tests/next_wave_runtime.integration.test.mjs ./tests/autonomy_bootstrap.integration.test.mjs ./tests/autonomy_shell_wrappers.integration.test.mjs ./tests/autonomy_http_startup.integration.test.mjs",
+    "test": "npm run build && npm run test:python && node --test ./tests/auto_squish.persistence.test.mjs ./tests/core_template.integration.test.mjs ./tests/storage_guard.persistence.test.mjs ./tests/agentic_pack.integration.test.mjs ./tests/trichat_auto_retention.persistence.test.mjs ./tests/trichat_autopilot.persistence.test.mjs ./tests/trichat_autopilot.snappiness.test.mjs ./tests/trichat_autopilot.tmux_backend.test.mjs ./tests/trichat_bus.unixsocket.test.mjs ./tests/trichat_tmux_controller.test.mjs ./tests/worker_fabric_and_benchmark.test.mjs ./tests/next_wave_runtime.integration.test.mjs ./tests/autonomy_bootstrap.integration.test.mjs ./tests/autonomy_command.integration.test.mjs ./tests/autonomy_shell_wrappers.integration.test.mjs ./tests/autonomy_http_startup.integration.test.mjs",
     "test:python": "PYTHONWARNINGS=ignore::ResourceWarning python3 -m unittest discover -s bridges -p 'test_*.py' && python3 -m unittest discover -s tests -p 'test_*.py'",
     "test:bridges": "npm run test:python",
     "start": "node dist/server.js",
@@ -50,6 +50,8 @@
     "ring-leader:run": "./scripts/ring_leader_ctl.sh run_once",
     "autonomy:status": "./scripts/autonomy_ctl.sh status",
     "autonomy:ensure": "./scripts/autonomy_ctl.sh ensure",
+    "autonomy:intake": "./scripts/autonomy_command.sh",
+    "autonomy:command": "./scripts/autonomy_command.sh",
     "production:doctor": "./scripts/production_readiness.sh",
     "codex:mcp:register": "./scripts/codex_mcp_register.sh"
   },

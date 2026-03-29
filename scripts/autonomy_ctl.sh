@@ -2,11 +2,17 @@
 set -euo pipefail
 
 ACTION="${1:-status}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+
 case "${ACTION}" in
-  status|ensure)
+  status|ensure|intake)
     ;;
   *)
-    echo "usage: $0 [status|ensure]" >&2
+    echo "usage: $0 [status|ensure|intake]" >&2
+    echo "  intake delegates to ./scripts/autonomy_command.sh" >&2
+    echo "  run ./scripts/autonomy_command.sh --help for intake options" >&2
     exit 2
     ;;
 esac
@@ -46,31 +52,49 @@ resolve_transport() {
   printf 'stdio\n'
 }
 
-TRANSPORT="$(resolve_transport)"
+parse_csv_arg() {
+  local raw="${1:-}"
+  node --input-type=module - "${raw}" <<'NODE'
+const raw = process.argv[2] || "";
+const values = raw
+  .split(",")
+  .map((entry) => entry.trim())
+  .filter(Boolean);
+process.stdout.write(JSON.stringify(values));
+NODE
+}
 
-if [[ "${ACTION}" == "status" ]]; then
+derive_title() {
+  local objective="${1:-}"
+  node --input-type=module - "${objective}" <<'NODE'
+const objective = String(process.argv[2] || "").trim();
+const compact = objective.replace(/\s+/g, " ");
+const title = compact.length > 72 ? `${compact.slice(0, 69).trim()}...` : compact;
+process.stdout.write(title || "Autonomy intake");
+NODE
+}
+
+call_tool_json() {
+  local tool_name="${1}"
+  local args_json="${2}"
   node ./scripts/mcp_tool_call.mjs \
-    --tool autonomy.bootstrap \
-    --args '{"action":"status"}' \
+    --tool "${tool_name}" \
+    --args "${args_json}" \
     --transport "${TRANSPORT}" \
     --url "${HTTP_URL}" \
     --origin "${HTTP_ORIGIN}" \
     --stdio-command "${STDIO_COMMAND}" \
     --stdio-args "${STDIO_ARGS}" \
     --cwd "${REPO_ROOT}"
-  exit 0
-fi
+}
 
-NOW_TS="$(date +%s)"
-RAND_SUFFIX="$(node --input-type=module -e 'process.stdout.write(Math.random().toString(36).slice(2, 8));')"
-IDEMPOTENCY_KEY="autonomy-bootstrap-${ACTION}-${NOW_TS}-${RAND_SUFFIX}"
-FINGERPRINT="autonomy-bootstrap-${ACTION}-fingerprint-${NOW_TS}-${RAND_SUFFIX}"
-
-ARGS_JSON="$(node --input-type=module - <<'NODE' \
-"${IDEMPOTENCY_KEY}" \
-"${FINGERPRINT}" \
-"${AUTONOMY_BOOTSTRAP_RUN_IMMEDIATELY:-0}" \
-"${TRICHAT_RING_LEADER_AUTOSTART:-1}"
+ensure_autonomy_entry() {
+  local quiet="${1:-1}"
+  local args_json
+  args_json="$(node --input-type=module - \
+    "${AUTONOMY_BOOTSTRAP_RUN_IMMEDIATELY:-0}" \
+    "${TRICHAT_RING_LEADER_AUTOSTART:-1}" \
+    <<'NODE'
 function parseBoolean(value, fallback) {
   const normalized = String(value || "").trim().toLowerCase();
   if (["1", "true", "yes", "on"].includes(normalized)) return true;
@@ -78,19 +102,15 @@ function parseBoolean(value, fallback) {
   return fallback;
 }
 
-const [
-  idempotencyKey,
-  sideEffectFingerprint,
-  runImmediately,
-  autostartRingLeader,
-] = process.argv.slice(2);
+const [runImmediately, autostartRingLeader] = process.argv.slice(2);
+const stamp = Date.now();
 
 process.stdout.write(
   JSON.stringify({
     action: "ensure",
     mutation: {
-      idempotency_key: idempotencyKey,
-      side_effect_fingerprint: sideEffectFingerprint,
+      idempotency_key: `autonomy-bootstrap-ensure-${stamp}-${process.pid}`,
+      side_effect_fingerprint: `autonomy-bootstrap-ensure-${stamp}-${process.pid}`,
     },
     run_immediately: parseBoolean(runImmediately, false),
     autostart_ring_leader: parseBoolean(autostartRingLeader, true),
@@ -102,13 +122,25 @@ process.stdout.write(
 );
 NODE
 )"
+  if [[ "${quiet}" == "1" ]]; then
+    call_tool_json autonomy.bootstrap "${args_json}" >/dev/null
+  else
+    call_tool_json autonomy.bootstrap "${args_json}"
+  fi
+}
 
-node ./scripts/mcp_tool_call.mjs \
-  --tool autonomy.bootstrap \
-  --args "${ARGS_JSON}" \
-  --transport "${TRANSPORT}" \
-  --url "${HTTP_URL}" \
-  --origin "${HTTP_ORIGIN}" \
-  --stdio-command "${STDIO_COMMAND}" \
-  --stdio-args "${STDIO_ARGS}" \
-  --cwd "${REPO_ROOT}"
+TRANSPORT="$(resolve_transport)"
+
+if [[ "${ACTION}" == "status" ]]; then
+  call_tool_json autonomy.bootstrap '{"action":"status"}'
+  exit 0
+fi
+
+if [[ "${ACTION}" == "ensure" ]]; then
+  ensure_autonomy_entry 0
+  exit 0
+fi
+
+ensure_autonomy_entry 1
+
+exec "${REPO_ROOT}/scripts/autonomy_command.sh" "$@"
