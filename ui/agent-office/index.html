@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Office</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-sprite" aria-hidden="true"></div>
+          <div>
+            <div class="eyebrow">retro unix mission control</div>
+            <h1>Agent Office</h1>
+          </div>
+        </div>
+        <div class="status-strip" id="status-strip"></div>
+      </header>
+
+      <main class="workspace">
+        <section class="mission-panel panel">
+          <div class="panel-header">
+            <h2>Mission Console</h2>
+            <div class="toolbar">
+              <button data-action="ensure">Ensure</button>
+              <button data-action="maintain">Maintain</button>
+              <button data-action="ring_leader_tick">Tick</button>
+              <button data-action="open_tmux">Open tmux</button>
+            </div>
+          </div>
+          <div class="mission-grid">
+            <article class="console-block">
+              <h3>Current Objective</h3>
+              <p id="current-objective">Loading...</p>
+            </article>
+            <article class="console-block">
+              <h3>Decision Path</h3>
+              <p id="current-strategy">Loading...</p>
+            </article>
+            <article class="console-block">
+              <h3>Delegation Brief</h3>
+              <pre id="delegation-brief">Loading...</pre>
+            </article>
+            <article class="console-block">
+              <h3>Confidence Method</h3>
+              <pre id="confidence-method">Loading...</pre>
+            </article>
+          </div>
+        </section>
+
+        <section class="office-panel panel">
+          <div class="panel-header">
+            <h2>Pixel Office</h2>
+            <div class="toolbar">
+              <button id="refresh-now">Refresh</button>
+            </div>
+          </div>
+          <div class="office-layout">
+            <section class="room command" data-room="command_deck">
+              <div class="room-title">Command Deck</div>
+              <div class="room-floor" id="room-command_deck"></div>
+            </section>
+            <section class="room lounge" data-room="lounge">
+              <div class="room-title">Lounge + Water</div>
+              <div class="room-floor" id="room-lounge"></div>
+            </section>
+            <section class="room build" data-room="build_bay">
+              <div class="room-title">Build Bay</div>
+              <div class="room-floor" id="room-build_bay"></div>
+            </section>
+            <section class="room ops" data-room="ops_rack">
+              <div class="room-title">Ops Rack</div>
+              <div class="room-floor" id="room-ops_rack"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="sidebar">
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Inspector</h2>
+            </div>
+            <div id="inspector" class="inspector">Select an agent.</div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Runtime + Fabric</h2>
+            </div>
+            <div id="runtime-summary" class="metric-list">Loading...</div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Events</h2>
+            </div>
+            <div id="event-feed" class="event-feed">Loading...</div>
+          </section>
+        </section>
+
+        <section class="intake-panel panel">
+          <div class="panel-header">
+            <h2>Local Agent Intake</h2>
+          </div>
+          <form id="intake-form">
+            <label for="objective-input">Objective</label>
+            <textarea id="objective-input" rows="5" placeholder="Describe the outcome, definition of done, and hard constraints."></textarea>
+            <div class="intake-actions">
+              <label class="checkbox">
+                <input id="dry-run-toggle" type="checkbox" />
+                Dry run
+              </label>
+              <button type="submit">Dispatch</button>
+            </div>
+          </form>
+          <div id="intake-result" class="intake-result">Ready.</div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="./app.js"></script>
+  </body>
+  </html>

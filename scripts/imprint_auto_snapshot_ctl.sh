@@ -13,6 +13,34 @@ esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
+eval "$("${REPO_ROOT}/scripts/export_dotenv_env.sh" "${REPO_ROOT}")"
+
+TOKEN_FILE="${REPO_ROOT}/data/imprint/http_bearer_token"
+if [[ -z "${MCP_HTTP_BEARER_TOKEN:-}" && -f "${TOKEN_FILE}" ]]; then
+  export MCP_HTTP_BEARER_TOKEN="$(cat "${TOKEN_FILE}")"
+fi
+
+HTTP_URL="${TRICHAT_MCP_URL:-http://127.0.0.1:8787/}"
+HTTP_ORIGIN="${TRICHAT_MCP_ORIGIN:-http://127.0.0.1}"
+STDIO_COMMAND="${TRICHAT_MCP_STDIO_COMMAND:-node}"
+STDIO_ARGS="${TRICHAT_MCP_STDIO_ARGS:-dist/server.js}"
+
+resolve_transport() {
+  if [[ "${ACTION}" == "status" ]]; then
+    printf 'stdio\n'
+    return 0
+  fi
+  if [[ -n "${MCP_HTTP_BEARER_TOKEN:-}" ]]; then
+    if curl -fsS \
+      -H "Authorization: Bearer ${MCP_HTTP_BEARER_TOKEN}" \
+      -H "Origin: ${HTTP_ORIGIN}" \
+      "${HTTP_URL%/}/health" >/dev/null 2>&1; then
+      printf 'http\n'
+      return 0
+    fi
+  fi
+  printf 'stdio\n'
+}
 
 PROFILE_ID="${ANAMNESIS_IMPRINT_PROFILE_ID:-default}"
 INTERVAL_SECONDS="${ANAMNESIS_IMPRINT_AUTO_SNAPSHOT_INTERVAL_SECONDS:-900}"
@@ -88,7 +116,20 @@ NODE
 )"
 fi
 
-node "${REPO_ROOT}/scripts/mcp_tool_call.mjs" \
+TRANSPORT="$(resolve_transport)"
+TIMEOUT_MS="${MCP_TOOL_CALL_TIMEOUT_MS:-180000}"
+MAX_ATTEMPTS="${MCP_TOOL_CALL_HTTP_MAX_ATTEMPTS:-10}"
+if [[ "${ACTION}" == "status" ]]; then
+  TIMEOUT_MS="${IMPRINT_STATUS_TIMEOUT_MS:-6000}"
+  MAX_ATTEMPTS="${IMPRINT_STATUS_HTTP_MAX_ATTEMPTS:-1}"
+fi
+
+MCP_TOOL_CALL_TIMEOUT_MS="${TIMEOUT_MS}" MCP_TOOL_CALL_HTTP_MAX_ATTEMPTS="${MAX_ATTEMPTS}" node "${REPO_ROOT}/scripts/mcp_tool_call.mjs" \
   --tool imprint.auto_snapshot \
   --args "${ARGS_JSON}" \
+  --transport "${TRANSPORT}" \
+  --url "${HTTP_URL}" \
+  --origin "${HTTP_ORIGIN}" \
+  --stdio-command "${STDIO_COMMAND}" \
+  --stdio-args "${STDIO_ARGS}" \
   --cwd "${REPO_ROOT}"

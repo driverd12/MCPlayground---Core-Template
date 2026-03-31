@@ -88,13 +88,14 @@ test("task.compile folds matched specialist workstreams into direct compile call
     });
 
     assert.equal(compiled.created_plan, true);
-    assert.ok(
-      compiled.steps.some(
-        (step) =>
-          step.executor_ref === "implementation-director" &&
-          step.metadata?.task_execution?.domain_key === "docker"
-      )
+    const dockerStep = compiled.steps.find(
+      (step) =>
+        step.executor_ref === "implementation-director" &&
+        step.metadata?.task_execution?.domain_key === "docker"
     );
+    assert.ok(dockerStep);
+    assert.ok(dockerStep.metadata?.task_execution?.task_execution?.preferred_host_tags.includes("container"));
+    assert.ok(dockerStep.metadata?.task_execution?.task_execution?.preferred_host_tags.includes("server"));
   } finally {
     await session.client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

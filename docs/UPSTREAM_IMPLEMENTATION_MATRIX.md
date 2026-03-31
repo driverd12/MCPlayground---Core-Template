@@ -90,3 +90,101 @@ Only stylistic inspiration is allowed here:
 - operator-facing energy
 
 Unsafe guardrail bypass, jailbreak behavior, or instruction-override patterns are explicitly out of scope.
+
+## builderz-labs / mission-control
+
+Source:
+- [mission-control README](https://github.com/builderz-labs/mission-control)
+
+Upstream wins we implemented:
+
+| Upstream idea | Local status | Local implementation |
+| --- | --- | --- |
+| Single mission-control surface for operators | `adapted` | Built-in `/office/` GUI plus tmux office substrate share one live MCP backend |
+| Room-based orchestration view | `implemented` | Command deck, lounge, build bay, and ops rack are rendered from real MCP presence signals |
+| Modern control-room feel over a local agent stack | `implemented` | Clickable Agent Office GUI served directly by the HTTP transport |
+
+Intentionally out of scope:
+
+- mission-control's hosted SaaS surface
+- its cloud-specific deployment assumptions
+
+## ComposioHQ / agent-orchestrator
+
+Source:
+- [agent-orchestrator README](https://github.com/ComposioHQ/agent-orchestrator)
+
+Upstream wins we implemented:
+
+| Upstream idea | Local status | Local implementation |
+| --- | --- | --- |
+| Event-driven reaction loop | `implemented` | `reaction.engine` plus notifier channels |
+| Provider-aware orchestration | `implemented` | `provider.bridge` and canonical `autonomy.ide_ingress` |
+| Human-attention escalation | `implemented` | deduped desktop/webhook notifications and office-visible reaction state |
+
+## ruvnet / ruflo
+
+Source:
+- [ruflo README](https://github.com/ruvnet/ruflo)
+
+Upstream wins we implemented:
+
+| Upstream idea | Local status | Local implementation |
+| --- | --- | --- |
+| Swarm topology selection by objective | `implemented` | `swarm.profile` |
+| Memory-aware preflight before coordination | `implemented` | retrieval hybrid query and checkpoint metadata on `autonomy.command` |
+| Checkpointed swarm reasoning | `adapted` | durable swarm checkpoint artifacts and operator-visible swarm summary |
+
+## hpn-bristol / agentic-ai-future-factory
+
+Source:
+- [agentic-ai-future-factory README](https://github.com/hpn-bristol/agentic-ai-future-factory)
+
+Upstream wins we implemented:
+
+| Upstream idea | Local status | Local implementation |
+| --- | --- | --- |
+| Reproducible workflow export | `implemented` | `workflow.export` bundle + metrics ledger |
+| Data-driven orchestration metrics | `implemented` | append-only `run-metrics.jsonl` from durable run/task history |
+| Argo-oriented DAG contract | `adapted` | truthful YAML contract export without claiming live cluster execution |
+
+Intentionally out of scope:
+
+- live Kubernetes execution
+- Argo step runner
+
+## EvoAgentX
+
+Source:
+- [EvoAgentX README](https://github.com/EvoAgentX/EvoAgentX)
+
+Upstream wins we implemented:
+
+| Upstream idea | Local status | Local implementation |
+| --- | --- | --- |
+| Agent-program mutation and evaluation | `implemented` | `optimizer.*` |
+| Promotion only on measured improvement | `implemented` | candidate vs baseline scoring and gated promotion |
+| Runtime behavior changed by promoted programs | `implemented` | `task.compile` and `trichat` consume effective org-program signals live |
+
+Intentionally out of scope:
+
+- arbitrary workflow-graph mutation
+- free-form recursive self-improvement
+
+## jayminwest / overstory
+
+Source:
+- [overstory README](https://github.com/jayminwest/overstory)
+
+Upstream wins we implemented:
+
+| Upstream idea | Local status | Local implementation |
+| --- | --- | --- |
+| Worktree-native coding workers | `implemented` | `runtime.worker` launches tmux-backed isolated worktree runtimes |
+| Persistent runtime session tracking | `implemented` | durable `runtime_worker_sessions` schema |
+| Runtime follow-through instead of fire-and-forget | `implemented` | completion-envelope reconciliation and maintain auto-spawn |
+
+Intentionally out of scope:
+
+- Overstory-specific cost console and replay UX
+- provider-specific runtime adapters beyond current `codex` and `shell` runtime modes

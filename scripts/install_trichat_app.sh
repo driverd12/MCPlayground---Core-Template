@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRANSPORT="stdio"
 TERMINAL_MODE="terminal"
 ICON_PATH=""
+SURFACE="web"
 
 usage() {
   cat <<'USAGE'
@@ -17,6 +18,7 @@ Options:
   --icon <path>          Optional icon image file to apply to the app (.png recommended)
   --transport <mode>     stdio (default) or http
   --terminal <mode>      terminal (default) or alacritty
+  --surface <mode>       web (default) or tmux
   --name <app-name>      App name (default: Agent Office)
   --install-dir <path>   Install directory (default: /Applications)
   --repo-root <path>     Repository root (default: current repo)
@@ -76,6 +78,11 @@ while [[ $# -gt 0 ]]; do
       TERMINAL_MODE="$2"
       shift 2
       ;;
+    --surface)
+      [[ $# -ge 2 ]] || fail "--surface requires web|tmux"
+      SURFACE="$2"
+      shift 2
+      ;;
     --name)
       [[ $# -ge 2 ]] || fail "--name requires a value"
       APP_NAME="$2"
@@ -111,6 +118,11 @@ case "${TERMINAL_MODE}" in
   *) fail "--terminal must be terminal or alacritty (got: ${TERMINAL_MODE})" ;;
 esac
 
+case "${SURFACE}" in
+  web|tmux) ;;
+  *) fail "--surface must be web or tmux (got: ${SURFACE})" ;;
+esac
+
 REPO_ROOT="$(cd "${REPO_ROOT}" && pwd)"
 eval "$("${REPO_ROOT}/scripts/export_dotenv_env.sh" "${REPO_ROOT}")"
 if [[ "${TRANSPORT}" == "stdio" && -n "${MCP_HTTP_BEARER_TOKEN:-}" ]]; then
@@ -133,9 +145,13 @@ if [[ -n "${ICON_PATH}" ]]; then
   [[ -f "${ICON_PATH}" ]] || fail "icon file does not exist: ${ICON_PATH}"
 fi
 
-LAUNCH_SCRIPT="TRICHAT_AUTONOMY_ENSURE_ON_ENTRY=\${TRICHAT_AUTONOMY_ENSURE_ON_ENTRY:-1} TRICHAT_OFFICE_THEME=\${TRICHAT_OFFICE_THEME:-night} npm run trichat:office:tmux"
-if [[ "${TRANSPORT}" == "http" ]]; then
-  LAUNCH_SCRIPT="TRICHAT_AUTONOMY_ENSURE_ON_ENTRY=\${TRICHAT_AUTONOMY_ENSURE_ON_ENTRY:-1} TRICHAT_OFFICE_THEME=\${TRICHAT_OFFICE_THEME:-night} TRICHAT_MCP_TRANSPORT=http npm run trichat:office:tmux"
+if [[ "${SURFACE}" == "web" ]]; then
+  LAUNCH_SCRIPT="TRICHAT_AUTONOMY_ENSURE_ON_ENTRY=\${TRICHAT_AUTONOMY_ENSURE_ON_ENTRY:-1} TRICHAT_OFFICE_THEME=\${TRICHAT_OFFICE_THEME:-night} ./scripts/agent_office_gui.sh open"
+else
+  LAUNCH_SCRIPT="TRICHAT_AUTONOMY_ENSURE_ON_ENTRY=\${TRICHAT_AUTONOMY_ENSURE_ON_ENTRY:-1} TRICHAT_OFFICE_THEME=\${TRICHAT_OFFICE_THEME:-night} npm run trichat:office:tmux"
+  if [[ "${TRANSPORT}" == "http" ]]; then
+    LAUNCH_SCRIPT="TRICHAT_AUTONOMY_ENSURE_ON_ENTRY=\${TRICHAT_AUTONOMY_ENSURE_ON_ENTRY:-1} TRICHAT_OFFICE_THEME=\${TRICHAT_OFFICE_THEME:-night} TRICHAT_MCP_TRANSPORT=http npm run trichat:office:tmux"
+  fi
 fi
 
 TMP_APPLESCRIPT="$(mktemp -t trichat-installer-XXXXXX.applescript)"

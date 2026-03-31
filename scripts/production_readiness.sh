@@ -26,91 +26,324 @@ trap cleanup EXIT
 
 TRICHAT_HTTP_URL="${TRICHAT_MCP_URL:-http://127.0.0.1:8787/}"
 TRICHAT_HTTP_ORIGIN="${TRICHAT_MCP_ORIGIN:-http://127.0.0.1}"
+MCP_TOOL_CALL_TIMEOUT_MS="${MCP_TOOL_CALL_TIMEOUT_MS:-15000}"
+TOKEN_FILE="${REPO_ROOT}/data/imprint/http_bearer_token"
+if [[ -z "${MCP_HTTP_BEARER_TOKEN:-}" && -f "${TOKEN_FILE}" ]]; then
+  export MCP_HTTP_BEARER_TOKEN="$(cat "${TOKEN_FILE}")"
+fi
+
+curl_json() {
+  local path="$1"
+  local allow_http_error="${2:-0}"
+  local attempt stderr_file response body http_code rc
+  stderr_file="${TMP_DIR}/curl-json-${path//[^A-Za-z0-9_.-]/_}.err"
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if response="$(
+      curl -sS \
+        -w $'\n%{http_code}' \
+        -H "Authorization: Bearer ${MCP_HTTP_BEARER_TOKEN}" \
+        -H "Origin: ${TRICHAT_HTTP_ORIGIN}" \
+        "${TRICHAT_HTTP_URL%/}${path}" \
+        2>"${stderr_file}"
+    )"; then
+      http_code="${response##*$'\n'}"
+      body="${response%$'\n'*}"
+      if [[ "${allow_http_error}" == "1" || "${http_code}" -lt 400 ]]; then
+        printf '%s\n' "${body}"
+        return 0
+      fi
+      printf 'HTTP %s\n' "${http_code}" >&2
+      printf '%s\n' "${body}" >&2
+      return 22
+    fi
+    rc=$?
+    if ! grep -qiE 'recv failure|connection reset|econnrefused|failed to connect|timed out|socket hang up|empty reply from server' "${stderr_file}"; then
+      cat "${stderr_file}" >&2
+      return "${rc}"
+    fi
+    sleep 0.5
+  done
+  cat "${stderr_file}" >&2
+  return "${rc:-1}"
+}
 
 call_http() {
   local tool="$1"
   local args="${2:-\{\}}"
-  node ./scripts/mcp_tool_call.mjs \
-    --tool "${tool}" \
-    --args "${args}" \
-    --transport http \
-    --url "${TRICHAT_HTTP_URL}" \
-    --origin "${TRICHAT_HTTP_ORIGIN}" \
-    --cwd "${REPO_ROOT}"
+  local attempt stderr_file output rc
+  stderr_file="${TMP_DIR}/call-http-${tool//[^A-Za-z0-9_.-]/_}.err"
+  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if output="$(
+      MCP_TOOL_CALL_TIMEOUT_MS="${MCP_TOOL_CALL_TIMEOUT_MS}" node ./scripts/mcp_tool_call.mjs \
+        --tool "${tool}" \
+        --args "${args}" \
+        --transport http \
+        --url "${TRICHAT_HTTP_URL}" \
+        --origin "${TRICHAT_HTTP_ORIGIN}" \
+        --cwd "${REPO_ROOT}" \
+        2>"${stderr_file}"
+    )"; then
+      printf '%s\n' "${output}"
+      return 0
+    fi
+    rc=$?
+    if ! grep -qiE 'fetch failed|econnrefused|socket hang up|timed out|connection reset' "${stderr_file}"; then
+      cat "${stderr_file}" >&2
+      return "${rc}"
+    fi
+    sleep 0.5
+  done
+  cat "${stderr_file}" >&2
+  return "${rc:-1}"
 }
 
 echo "[production] repo: ${REPO_ROOT}"
 echo "[production] node: $(node -v)"
 echo "[production] python: $(python3 --version 2>&1)"
 echo "[production] mcp url: ${TRICHAT_HTTP_URL}"
+echo "[production] health: $(curl_json '/health' | python3 -c "import json,sys; print(json.load(sys.stdin).get('status','n/a'))")"
 
-call_http autonomy.bootstrap '{"action":"status"}' > "${TMP_DIR}/autonomy.json"
-python3 - "${TMP_DIR}/autonomy.json" <<'PY'
+curl_json '/ready' 1 > "${TMP_DIR}/ready.json"
+python3 - "${TMP_DIR}/ready.json" <<'PY'
 import json
 import pathlib
 import sys
 
 data = json.loads(pathlib.Path(sys.argv[1]).read_text())
 print(
-    "[production] autonomy bootstrap: "
-    f"ready={data.get('self_start_ready')} "
-    f"attention={','.join(data.get('repairs_needed', [])) or 'none'}"
+    "[production] control plane: "
+    f"ready={data.get('ready')} "
+    f"state={data.get('state') or 'n/a'} "
+    f"attention={','.join(data.get('attention', [])) or 'none'}"
 )
-if not data.get("self_start_ready"):
-    raise SystemExit("autonomy bootstrap is not self-start ready")
+if not data.get("ready"):
+    raise SystemExit("control plane /ready is not healthy")
 PY
 
-call_http autonomy.maintain '{"action":"status"}' > "${TMP_DIR}/autonomy-maintain.json"
-python3 - "${TMP_DIR}/autonomy-maintain.json" <<'PY'
+call_http health.storage '{}' > "${TMP_DIR}/health-storage.json"
+python3 - "${TMP_DIR}/health-storage.json" <<'PY'
 import json
 import pathlib
 import sys
 
 data = json.loads(pathlib.Path(sys.argv[1]).read_text())
-state = data.get("state") or {}
-runtime = data.get("runtime") or {}
-due = data.get("due") or {}
-goal_autorun = data.get("goal_autorun_daemon") or {}
+backups = data.get("backups") or {}
+total_bytes = int(backups.get("total_bytes") or 0)
+reclaimable_bytes = int(backups.get("reclaimable_bytes") or 0)
+print(
+    "[production] storage backups: "
+    f"artifacts={backups.get('artifact_count')} "
+    f"keep={backups.get('backup_keep')} "
+    f"total_bytes={total_bytes} "
+    f"reclaimable_bytes={reclaimable_bytes}"
+)
+if total_bytes > 128 * 1024 * 1024 * 1024:
+    raise SystemExit("storage backups exceed the 128GB production ceiling")
+if reclaimable_bytes > 5 * 1024 * 1024 * 1024:
+    raise SystemExit("storage backups have more than 5GB of reclaimable churn")
+PY
+
+python3 - "${TMP_DIR}/ready.json" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+worker = data.get("worker_fabric") or {}
+print(
+    "[production] worker fabric: "
+    f"healthy_hosts={worker.get('healthy_host_count')} "
+    f"degraded_hosts={worker.get('degraded_host_count')} "
+    f"offline_hosts={worker.get('offline_host_count')}"
+)
+if int(worker.get("healthy_host_count") or 0) < 1:
+    raise SystemExit("worker fabric has no healthy hosts")
+PY
+
+python3 - "${TMP_DIR}/ready.json" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+autonomy = data.get("autonomy_maintain") or {}
+eval_health = autonomy.get("eval_health") or {}
 print(
     "[production] autonomy maintain: "
-    f"enabled={state.get('enabled')} "
-    f"running={runtime.get('running')} "
-    f"last_run_at={state.get('last_run_at') or 'n/a'} "
-    f"stale={due.get('stale')} "
-    f"eval_due={due.get('eval')} "
-    f"goal_autorun_running={goal_autorun.get('running')}"
+    f"enabled={autonomy.get('enabled')} "
+    f"running={autonomy.get('runtime_running')} "
+    f"last_run_at={autonomy.get('last_run_at') or 'n/a'} "
+    f"stale={autonomy.get('stale')} "
+    f"eval_due={autonomy.get('eval_due')} "
+    f"eval_score={eval_health.get('last_eval_score') if eval_health.get('last_eval_score') is not None else 'n/a'} "
+    f"minimum_eval_score={eval_health.get('minimum_eval_score') if eval_health.get('minimum_eval_score') is not None else 'n/a'}"
 )
-if not state.get("enabled"):
-    raise SystemExit("autonomy.maintain has not persisted an enabled background state yet")
-if not runtime.get("running"):
+if not autonomy.get("enabled"):
+    raise SystemExit("autonomy.maintain is not enabled")
+if not autonomy.get("runtime_running"):
     raise SystemExit("autonomy.maintain runtime is not currently running")
-if runtime.get("last_error"):
-    raise SystemExit(f"autonomy.maintain runtime last_error={runtime.get('last_error')}")
-if not state.get("last_run_at"):
+if not autonomy.get("last_run_at"):
     raise SystemExit("autonomy.maintain has not recorded a keepalive run yet")
-if due.get("stale"):
+if autonomy.get("stale"):
     raise SystemExit("autonomy.maintain state is stale")
-if not goal_autorun.get("running"):
-    raise SystemExit("goal.autorun_daemon is not running under autonomy maintenance")
+if not eval_health.get("healthy"):
+    raise SystemExit("autonomy.maintain eval health is not ready")
 PY
 
-call_http model.router '{}' > "${TMP_DIR}/model-router.json"
-python3 - "${TMP_DIR}/model-router.json" <<'PY'
+python3 - "${TMP_DIR}/ready.json" <<'PY'
 import json
 import pathlib
 import sys
 
 data = json.loads(pathlib.Path(sys.argv[1]).read_text())
-state = data.get("state") or {}
-backends = state.get("backends") or []
+reaction = data.get("reaction_engine") or {}
+print(
+    "[production] reaction engine: "
+    f"enabled={reaction.get('enabled')} "
+    f"running={reaction.get('runtime_running')} "
+    f"stale={reaction.get('stale')}"
+)
+if not reaction.get("enabled"):
+    raise SystemExit("reaction.engine is not enabled")
+if not reaction.get("runtime_running"):
+    raise SystemExit("reaction.engine runtime is not currently running")
+if reaction.get("stale"):
+    raise SystemExit("reaction.engine state is stale")
+PY
+
+node --input-type=module - <<'NODE'
+import { captureLocalHostProfile } from "./dist/local_host_profile.js";
+const profile = captureLocalHostProfile({ workspace_root: process.cwd() });
+console.log(
+  "[production] local accelerator: " +
+    `kind=${profile.accelerator_kind} ` +
+    `model=${profile.gpu_model ?? "n/a"} ` +
+    `api=${profile.gpu_api ?? "n/a"} ` +
+    `cores=${profile.gpu_core_count ?? "n/a"} ` +
+    `gpu_mem_total=${profile.gpu_memory_total_gb ?? "n/a"} ` +
+    `gpu_mem_avail=${profile.gpu_memory_available_gb ?? "n/a"} ` +
+    `mlx=${profile.mlx_available} ` +
+    `mlx_lm=${profile.mlx_lm_available} ` +
+    `mlx_python=${profile.mlx_python ?? "n/a"}`
+);
+if (profile.accelerator_kind !== "none" && !profile.full_gpu_access) {
+  throw new Error("local accelerator detected but full_gpu_access is false");
+}
+NODE
+
+if [[ "${TRICHAT_MLX_SERVER_ENABLED:-0}" == "1" && -n "${TRICHAT_MLX_ENDPOINT:-}" ]]; then
+  MLX_HEALTH="$(
+    curl -fsS \
+      "${TRICHAT_MLX_ENDPOINT%/}/health"
+  )"
+  MLX_MODELS="$(
+    curl -fsS \
+      "${TRICHAT_MLX_ENDPOINT%/}/v1/models"
+  )"
+  python3 - "${TRICHAT_MLX_ENDPOINT%/}" "${MLX_HEALTH}" "${MLX_MODELS}" <<'PY'
+import json
+import sys
+
+endpoint = sys.argv[1]
+health = json.loads(sys.argv[2])
+models = json.loads(sys.argv[3])
+model_count = len((models.get("data") or [])) if isinstance(models, dict) else 0
+print(
+    "[production] mlx server: "
+    f"healthy={health.get('status') == 'ok'} "
+    f"models={model_count} "
+    f"endpoint={endpoint}"
+)
+if health.get("status") != "ok":
+    raise SystemExit("mlx server health probe failed")
+PY
+fi
+
+OBS_IDEMPOTENCY_KEY="production-observability-ship-$(date +%s%N)"
+call_http observability.ship "{\"mutation\":{\"idempotency_key\":\"${OBS_IDEMPOTENCY_KEY}\",\"side_effect_fingerprint\":\"${OBS_IDEMPOTENCY_KEY}\"},\"source\":\"local_host\"}" > "${TMP_DIR}/observability-ship.json"
+python3 - "${TMP_DIR}/observability-ship.json" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+document_count = int(data.get("document_count") or 0)
+source_kind = data.get("source_kind") or "n/a"
+index_name = data.get("index_name") or "n/a"
+print(
+    "[production] observability ship: "
+    f"index={index_name} "
+    f"source={source_kind} "
+    f"document_count={document_count}"
+)
+if document_count < 1:
+    raise SystemExit("observability.ship did not ingest a local host telemetry document")
+PY
+
+call_http observability.dashboard '{"critical_window_minutes":15,"recent_limit":5}' > "${TMP_DIR}/observability-dashboard.json"
+python3 - "${TMP_DIR}/observability-dashboard.json" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+overview = data.get("overview") or {}
+doc_count = int(overview.get("count") or 0)
+recent_error_count = int(data.get("recent_error_count") or 0)
+recent_critical_count = int(data.get("recent_critical_count") or 0)
+top_sources = data.get("top_sources") or []
+top_services = data.get("top_services") or []
+top_source = (top_sources[0] or {}).get("source_kind") if top_sources else "n/a"
+top_service = (top_services[0] or {}).get("service") if top_services else "n/a"
+print(
+    "[production] observability dashboard: "
+    f"documents={doc_count} "
+    f"errors15m={recent_error_count} "
+    f"critical15m={recent_critical_count} "
+    f"top_source={top_source} "
+    f"top_service={top_service}"
+)
+if doc_count < 1:
+    raise SystemExit("observability.dashboard returned no indexed telemetry documents")
+if recent_critical_count > 0:
+    raise SystemExit("observability.dashboard reported recent critical telemetry")
+PY
+
+python3 - "${TMP_DIR}/ready.json" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+state = data.get("model_router") or {}
 print(
     "[production] model router: "
     f"enabled={state.get('enabled')} "
-    f"backends={len(backends)} "
+    f"backends={state.get('backend_count')} "
     f"default={state.get('default_backend_id')}"
 )
-if not state.get("enabled") or not backends:
+if not state.get("enabled") or int(state.get("backend_count") or 0) < 1:
     raise SystemExit("model.router is not enabled with at least one backend")
+PY
+
+call_http runtime.worker '{"action":"status","limit":20}' > "${TMP_DIR}/runtime-worker.json"
+python3 - "${TMP_DIR}/runtime-worker.json" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+summary = data.get("summary") or {}
+runtimes = data.get("runtimes") or []
+available = sorted(entry.get("runtime_id") for entry in runtimes if isinstance(entry, dict) and entry.get("available") is True)
+print(
+    "[production] runtime workers: "
+    f"sessions={summary.get('session_count')} "
+    f"active={summary.get('active_count')} "
+    f"available={','.join(available) or 'none'}"
+)
+if "shell" not in available:
+    raise SystemExit("runtime.worker did not report the shell runtime as available")
 PY
 
 call_http org.program '{}' > "${TMP_DIR}/org-program.json"
@@ -187,6 +420,27 @@ print(
 )
 PY
 
+call_http operator.brief '{"thread_id":"ring-leader-main","include_kernel":true,"include_runtime_brief":true,"include_compile_brief":true}' > "${TMP_DIR}/operator-brief.json"
+python3 - "${TMP_DIR}/operator-brief.json" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+brief_markdown = str(data.get("brief_markdown") or "").strip()
+current_objective = data.get("current_objective") or "n/a"
+source = data.get("source") or "n/a"
+if source != "operator.brief":
+    raise SystemExit(f"operator.brief returned unexpected source {source!r}")
+if not brief_markdown:
+    raise SystemExit("operator.brief returned an empty brief_markdown")
+print(
+    "[production] operator brief: "
+    f"source={source} "
+    f"current_objective={current_objective}"
+)
+PY
+
 kernel_ok=0
 for attempt in 1 2 3 4 5; do
   call_http kernel.summary '{"session_limit":6,"event_limit":6,"task_running_limit":8}' > "${TMP_DIR}/kernel.json"
@@ -258,6 +512,46 @@ grep -q "Truth mode:" "${TMP_DIR}/office-help.txt"
 grep -q "SuperClaude-inspired confidence checks" "${TMP_DIR}/office-help.txt"
 echo "[production] office dashboard: help view renders with truth mode + methodology surface"
 
+python3 - <<'PY' "${TRICHAT_HTTP_URL}" "${TRICHAT_HTTP_ORIGIN}" "${TMP_DIR}/office-bootstrap.json" "${TMP_DIR}/office-snapshot.json" "${TMP_DIR}/office-session-name.txt"
+import json
+import sys
+import urllib.request
+import pathlib
+
+base = sys.argv[1].rstrip("/")
+origin = sys.argv[2]
+bootstrap_path = pathlib.Path(sys.argv[3])
+snapshot_path = pathlib.Path(sys.argv[4])
+session_name_path = pathlib.Path(sys.argv[5])
+
+bootstrap_request = urllib.request.Request(f"{base}/office/api/bootstrap", headers={"Origin": origin})
+with urllib.request.urlopen(bootstrap_request, timeout=20) as response:
+    bootstrap = json.loads(response.read().decode("utf-8"))
+if not bootstrap.get("ok"):
+    raise SystemExit("office bootstrap route did not report ok")
+bootstrap_path.write_text(json.dumps(bootstrap))
+session_name_path.write_text(str(bootstrap.get("tmux_session_name") or "agent-office"))
+
+snapshot_request = urllib.request.Request(f"{base}/office/api/snapshot?live=1", headers={"Origin": origin})
+with urllib.request.urlopen(snapshot_request, timeout=60) as response:
+    snapshot_source = response.headers.get("x-office-snapshot-source") or "n/a"
+    snapshot = json.loads(response.read().decode("utf-8"))
+if snapshot_source not in {"direct", "direct-node"}:
+    raise SystemExit(f"office snapshot source was {snapshot_source!r}, expected 'direct' or 'direct-node'")
+snapshot_path.write_text(json.dumps(snapshot))
+agents = snapshot.get("agents") or []
+summary = snapshot.get("summary") or {}
+if not agents:
+    raise SystemExit("office snapshot returned no agents")
+print(
+    "[production] office gui: "
+    f"agents={len(agents)} "
+    f"source={snapshot_source} "
+    f"kernel={((summary.get('kernel') or {}).get('state') or 'n/a')} "
+    f"router={((summary.get('router') or {}).get('default_backend_id') or 'n/a')}"
+)
+PY
+
 test -d "/Applications/Agent Office.app"
 echo "[production] app launcher: /Applications/Agent Office.app present"
 
@@ -273,13 +567,14 @@ if not loaded:
     raise SystemExit("launchd autonomy keepalive agent is not loaded")
 PY
 
-tmux has-session -t agent-office
-WINDOWS="$(tmux list-windows -t agent-office -F '#{window_name}')"
+OFFICE_SESSION_NAME="$(cat "${TMP_DIR}/office-session-name.txt")"
+tmux has-session -t "${OFFICE_SESSION_NAME}"
+WINDOWS="$(tmux list-windows -t "${OFFICE_SESSION_NAME}" -F '#{window_name}')"
 echo "${WINDOWS}" | grep -qx 'office'
 echo "${WINDOWS}" | grep -qx 'briefing'
 echo "${WINDOWS}" | grep -qx 'lanes'
 echo "${WINDOWS}" | grep -qx 'workers'
-printf "[production] tmux windows:\n%s\n" "${WINDOWS}"
+printf "[production] tmux windows (%s):\n%s\n" "${OFFICE_SESSION_NAME}" "${WINDOWS}"
 
 call_http trichat.tmux_controller '{"action":"status"}' > "${TMP_DIR}/tmux.json"
 python3 - "${TMP_DIR}/tmux.json" <<'PY'

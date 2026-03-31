@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <title>Agent Office</title>
+    <link rel="stylesheet" href="/office/styles.css?v=20260331c" />
+  </head>
+  <body data-office-boot="booting">
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand__icon">
+            <span></span>
+          </div>
+          <div>
+            <h1>Agent Office</h1>
+            <p id="subtitle">Live MCP operator surface</p>
+          </div>
+        </div>
+        <div class="topbar__controls">
+          <button data-action="ensure">Ensure</button>
+          <button data-action="maintain">Maintain</button>
+          <button data-action="tmux_detach">tmux</button>
+          <button id="refresh-button">Refresh</button>
+        </div>
+      </header>
+
+      <section class="status-strip" id="status-strip">
+        <div class="chip"><strong>Loading</strong><span>Connecting to the live MCP office snapshot.</span></div>
+      </section>
+
+      <nav class="tabs">
+        <button class="tabs__button is-active" data-tab="office">Office</button>
+        <button class="tabs__button" data-tab="briefing">Briefing</button>
+        <button class="tabs__button" data-tab="workers">Workers</button>
+        <button class="tabs__button" data-tab="events">Events</button>
+      </nav>
+
+      <main class="workspace">
+        <section class="panel panel--main">
+          <div id="office-view" class="tab-panel is-active">
+            <section class="office-empty">
+              <div class="section-title">Connecting</div>
+              <p>Loading the office floor from the live MCP control plane.</p>
+            </section>
+          </div>
+          <div id="briefing-view" class="tab-panel"></div>
+          <div id="workers-view" class="tab-panel"></div>
+          <div id="events-view" class="tab-panel"></div>
+        </section>
+
+        <aside class="panel panel--side">
+          <section class="side-block">
+            <div class="side-block__title">Intake Desk</div>
+            <form id="intake-form" class="intake-form">
+              <input id="intake-title" name="title" type="text" placeholder="Goal title (optional)" />
+              <textarea
+                id="intake-objective"
+                name="objective"
+                rows="7"
+                placeholder="Describe the objective, definition of done, and hard constraints."
+              ></textarea>
+              <div class="intake-form__row">
+                <select id="intake-risk" name="risk">
+                  <option value="low">low</option>
+                  <option value="medium" selected>medium</option>
+                  <option value="high">high</option>
+                  <option value="critical">critical</option>
+                </select>
+                <select id="intake-mode" name="mode">
+                  <option value="observe">observe</option>
+                  <option value="recommend">recommend</option>
+                  <option value="stage">stage</option>
+                  <option value="execute_bounded" selected>execute_bounded</option>
+                  <option value="execute_destructive_with_approval">execute_destructive_with_approval</option>
+                </select>
+              </div>
+              <label class="checkbox">
+                <input id="intake-dry-run" name="dry_run" type="checkbox" />
+                <span>Dry run</span>
+              </label>
+              <button type="submit" class="button button--primary">Dispatch objective</button>
+            </form>
+            <pre id="intake-result" class="terminal terminal--small">Ready.</pre>
+          </section>
+
+          <section class="side-block">
+            <div class="side-block__title">Selected Agent</div>
+            <div id="agent-detail" class="agent-detail">
+              <div class="metric-list">
+                <div class="metric"><span>Status</span><strong>Loading</strong></div>
+              </div>
+            </div>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <script>
+      window.setTimeout(() => {
+        if (document.body.dataset.officeBoot === "ready") return;
+        const intake = document.querySelector("#intake-result");
+        const office = document.querySelector("#office-view");
+        const status = document.querySelector("#status-strip");
+        if (status) {
+          status.innerHTML = '<div class="chip"><strong>Warning</strong><span>The office UI did not finish booting. Refresh this tab once to reload the latest assets.</span></div>';
+        }
+        if (office) {
+          office.innerHTML = '<section class="office-alert"><div class="section-title">UI Boot Fallback</div><ul><li>The office page loaded but the live client did not finish booting.</li><li>Use Refresh in the top bar or reload the tab once.</li></ul></section>';
+        }
+        if (intake) {
+          intake.textContent = "UI boot fallback triggered. Refresh the tab once to load the latest office client.";
+        }
+      }, 2500);
+    </script>
+    <script type="module" src="/office/app.js?v=20260331c"></script>
+  </body>
+</html>

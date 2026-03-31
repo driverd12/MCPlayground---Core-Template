@@ -31,8 +31,9 @@ fi
 
 SESSION_NAME="${TRICHAT_OFFICE_TMUX_SESSION_NAME:-agent-office}"
 THREAD_ID="${TRICHAT_OFFICE_THREAD_ID:-ring-leader-main}"
-REFRESH_SECONDS="${TRICHAT_OFFICE_REFRESH_SECONDS:-2.0}"
+REFRESH_SECONDS="${TRICHAT_OFFICE_REFRESH_SECONDS:-4.0}"
 THEME="${TRICHAT_OFFICE_THEME:-night}"
+TOOL_TIMEOUT_SECONDS="${TRICHAT_OFFICE_TOOL_TIMEOUT_SECONDS:-8.0}"
 TRANSPORT="${TRICHAT_MCP_TRANSPORT:-}"
 if [[ -z "${TRANSPORT}" ]]; then
   if [[ -n "${MCP_HTTP_BEARER_TOKEN:-}" ]]; then
@@ -76,6 +77,7 @@ DASHBOARD_BASE=(
   "--origin" "${ORIGIN}"
   "--stdio-command" "${STDIO_COMMAND}"
   "--stdio-args" "${STDIO_ARGS}"
+  "--mcp-timeout-seconds" "${TOOL_TIMEOUT_SECONDS}"
 )
 
 join_dashboard_command() {

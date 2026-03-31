@@ -12,12 +12,24 @@ MCP_LABEL="com.mcplayground.mcp.server"
 AUTO_LABEL="com.mcplayground.imprint.autosnapshot"
 WORKER_LABEL="com.mcplayground.imprint.inboxworker"
 KEEPALIVE_LABEL="com.mcplayground.autonomy.keepalive"
+MLX_LABEL="com.mcplayground.mlx.server"
 
 MCP_PLIST="${LAUNCH_DIR}/${MCP_LABEL}.plist"
 AUTO_PLIST="${LAUNCH_DIR}/${AUTO_LABEL}.plist"
 WORKER_PLIST="${LAUNCH_DIR}/${WORKER_LABEL}.plist"
 KEEPALIVE_PLIST="${LAUNCH_DIR}/${KEEPALIVE_LABEL}.plist"
-BUS_SOCKET_PATH="${TRICHAT_BUS_SOCKET_PATH:-${REPO_ROOT}/data/trichat.bus.sock}"
+MLX_PLIST="${LAUNCH_DIR}/${MLX_LABEL}.plist"
+LEGACY_BUS_SOCKET_PATH="${REPO_ROOT}/data/trichat.bus.sock"
+BUS_SOCKET_DIGEST="$(printf '%s' "${REPO_ROOT}" | shasum -a 256 | cut -c1-12)"
+if [[ "${OSTYPE:-}" == darwin* ]]; then
+  BUS_SOCKET_DEFAULT="${HOME}/Library/Caches/mcplayground/trichat-${BUS_SOCKET_DIGEST}.sock"
+else
+  BUS_SOCKET_DEFAULT="${HOME}/.cache/mcplayground/trichat-${BUS_SOCKET_DIGEST}.sock"
+fi
+if [[ ${#LEGACY_BUS_SOCKET_PATH} -lt 100 ]]; then
+  BUS_SOCKET_DEFAULT="${LEGACY_BUS_SOCKET_PATH}"
+fi
+BUS_SOCKET_PATH="${TRICHAT_BUS_SOCKET_PATH:-${BUS_SOCKET_DEFAULT}}"
 
 MCP_PORT="${MCP_HTTP_PORT:-${ANAMNESIS_MCP_HTTP_PORT:-8787}}"
 MCP_HOST="${MCP_HTTP_HOST:-127.0.0.1}"
@@ -27,6 +39,14 @@ INBOX_BATCH_SIZE="${ANAMNESIS_INBOX_BATCH_SIZE:-3}"
 INBOX_LEASE_SECONDS="${ANAMNESIS_INBOX_LEASE_SECONDS:-300}"
 INBOX_HEARTBEAT_INTERVAL="${ANAMNESIS_INBOX_HEARTBEAT_INTERVAL:-30}"
 AUTONOMY_KEEPALIVE_INTERVAL="${AUTONOMY_KEEPALIVE_INTERVAL_SECONDS:-120}"
+MLX_SERVER_ENABLED="${TRICHAT_MLX_SERVER_ENABLED:-0}"
+MLX_ENDPOINT="${TRICHAT_MLX_ENDPOINT:-http://127.0.0.1:8788}"
+MLX_PORT="${MLX_ENDPOINT##*:}"
+MLX_HOST="${MLX_ENDPOINT%:${MLX_PORT}}"
+MLX_HOST="${MLX_HOST#http://}"
+MLX_HOST="${MLX_HOST#https://}"
+MLX_PYTHON="${TRICHAT_MLX_PYTHON:-}"
+MLX_MODEL="${TRICHAT_MLX_MODEL:-}"
 NODE_BIN="$(command -v node || true)"
 if [[ -z "${NODE_BIN}" ]]; then
   echo "error: node not found in PATH" >&2
@@ -35,6 +55,10 @@ fi
 PYTHON_BIN="$(command -v python3 || true)"
 if [[ -z "${PYTHON_BIN}" ]]; then
   echo "error: python3 not found in PATH" >&2
+  exit 2
+fi
+if ! command -v curl >/dev/null 2>&1; then
+  echo "error: curl not found in PATH" >&2
   exit 2
 fi
 
@@ -54,7 +78,40 @@ mkdir -p "$(dirname "${TOKEN_FILE}")"
 printf '%s' "${HTTP_BEARER_TOKEN}" > "${TOKEN_FILE}"
 chmod 600 "${TOKEN_FILE}" >/dev/null 2>&1 || true
 
-mkdir -p "${LAUNCH_DIR}" "${LOG_DIR}"
+mkdir -p "${LAUNCH_DIR}" "${LOG_DIR}" "$(dirname "${BUS_SOCKET_PATH}")"
+
+wait_for_mcp_ready() {
+  local url="http://${MCP_HOST}:${MCP_PORT}/ready"
+  local deadline=$((SECONDS + 30))
+  local ready_json=""
+
+  while (( SECONDS < deadline )); do
+    ready_json="$(curl -fsS --connect-timeout 1 --max-time 2 \
+      -H "Authorization: Bearer ${HTTP_BEARER_TOKEN}" \
+      -H "Origin: http://127.0.0.1" \
+      "${url}" 2>/dev/null || true)"
+    if [[ -n "${ready_json}" ]] && READY_JSON="${ready_json}" "${PYTHON_BIN}" - <<'PY'
+import json, os, sys
+payload = json.loads(os.environ["READY_JSON"])
+sys.exit(0 if payload.get("ok") and payload.get("ready") else 1)
+PY
+    then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "error: MCP HTTP daemon did not become ready after launchd restart" >&2
+  if [[ -f "${LOG_DIR}/mcp-http.err.log" ]]; then
+    echo "--- mcp-http.err.log (tail) ---" >&2
+    tail -n 50 "${LOG_DIR}/mcp-http.err.log" >&2 || true
+  fi
+  if [[ -f "${LOG_DIR}/mcp-http.out.log" ]]; then
+    echo "--- mcp-http.out.log (tail) ---" >&2
+    tail -n 50 "${LOG_DIR}/mcp-http.out.log" >&2 || true
+  fi
+  return 1
+}
 
 terminate_repo_listener() {
   local pid="$1"
@@ -86,10 +143,6 @@ if command -v lsof >/dev/null 2>&1; then
   fi
 fi
 
-if [[ -S "${BUS_SOCKET_PATH}" ]]; then
-  rm -f "${BUS_SOCKET_PATH}" >/dev/null 2>&1 || true
-fi
-
 cat >"${MCP_PLIST}" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -101,10 +154,7 @@ cat >"${MCP_PLIST}" <<PLIST
     <key>ProgramArguments</key>
     <array>
       <string>${NODE_BIN}</string>
-      <string>${REPO_ROOT}/dist/server.js</string>
-      <string>--http</string>
-      <string>--http-port</string>
-      <string>${MCP_PORT}</string>
+      <string>${REPO_ROOT}/scripts/mcp_http_runner.mjs</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -122,6 +172,12 @@ cat >"${MCP_PLIST}" <<PLIST
       <string>${ALLOWED_ORIGINS}</string>
       <key>MCP_HTTP_BEARER_TOKEN</key>
       <string>${HTTP_BEARER_TOKEN}</string>
+      <key>TRICHAT_BUS_SOCKET_PATH</key>
+      <string>${BUS_SOCKET_PATH}</string>
+      <key>MCP_AUTONOMY_BOOTSTRAP_ON_START</key>
+      <string>0</string>
+      <key>MCP_AUTONOMY_MAINTAIN_ON_START</key>
+      <string>0</string>
       <key>PATH</key>
       <string>${PATH}</string>
     </dict>
@@ -151,9 +207,8 @@ cat >"${AUTO_PLIST}" <<PLIST
 
     <key>ProgramArguments</key>
     <array>
-      <string>/bin/zsh</string>
-      <string>-lc</string>
-      <string>cd ${REPO_ROOT} &amp;&amp; ./scripts/imprint_auto_snapshot_ctl.sh start</string>
+      <string>${NODE_BIN}</string>
+      <string>${REPO_ROOT}/scripts/imprint_auto_snapshot_runner.mjs</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -190,8 +245,8 @@ cat >"${WORKER_PLIST}" <<PLIST
 
     <key>ProgramArguments</key>
     <array>
-      <string>${PYTHON_BIN}</string>
-      <string>${REPO_ROOT}/scripts/imprint_inbox_worker.py</string>
+      <string>${NODE_BIN}</string>
+      <string>${REPO_ROOT}/scripts/imprint_inbox_worker_runner.mjs</string>
       <string>--repo-root</string>
       <string>${REPO_ROOT}</string>
       <string>--poll-interval</string>
@@ -215,6 +270,14 @@ cat >"${WORKER_PLIST}" <<PLIST
       <string>1</string>
       <key>ANAMNESIS_IMPRINT_PROFILE_ID</key>
       <string>${ANAMNESIS_IMPRINT_PROFILE_ID:-default}</string>
+      <key>ANAMNESIS_INBOX_MCP_TRANSPORT</key>
+      <string>http</string>
+      <key>ANAMNESIS_INBOX_MCP_URL</key>
+      <string>http://127.0.0.1:${MCP_HTTP_PORT:-8787}/</string>
+      <key>ANAMNESIS_INBOX_MCP_ORIGIN</key>
+      <string>http://127.0.0.1</string>
+      <key>MCP_HTTP_BEARER_TOKEN</key>
+      <string>${HTTP_BEARER_TOKEN}</string>
     </dict>
 
     <key>RunAtLoad</key>
@@ -242,9 +305,8 @@ cat >"${KEEPALIVE_PLIST}" <<PLIST
 
     <key>ProgramArguments</key>
     <array>
-      <string>/bin/zsh</string>
-      <string>-lc</string>
-      <string>cd ${REPO_ROOT} &amp;&amp; ./scripts/autonomy_keepalive.sh</string>
+      <string>${NODE_BIN}</string>
+      <string>${REPO_ROOT}/scripts/autonomy_keepalive_runner.mjs</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -256,6 +318,12 @@ cat >"${KEEPALIVE_PLIST}" <<PLIST
       <string>${PATH}</string>
       <key>MCP_HTTP_BEARER_TOKEN</key>
       <string>${HTTP_BEARER_TOKEN}</string>
+      <key>AUTONOMY_BOOTSTRAP_TRANSPORT</key>
+      <string>http</string>
+      <key>TRICHAT_MCP_URL</key>
+      <string>http://127.0.0.1:${MCP_HTTP_PORT:-8787}/</string>
+      <key>TRICHAT_MCP_ORIGIN</key>
+      <string>http://127.0.0.1</string>
     </dict>
 
     <key>RunAtLoad</key>
@@ -276,7 +344,65 @@ cat >"${KEEPALIVE_PLIST}" <<PLIST
 </plist>
 PLIST
 
+if [[ "${MLX_SERVER_ENABLED}" == "1" && -n "${MLX_PYTHON}" && -n "${MLX_MODEL}" ]]; then
+cat >"${MLX_PLIST}" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>${MLX_LABEL}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>${MLX_PYTHON}</string>
+      <string>-m</string>
+      <string>mlx_lm.server</string>
+      <string>--model</string>
+      <string>${MLX_MODEL}</string>
+      <string>--host</string>
+      <string>${MLX_HOST}</string>
+      <string>--port</string>
+      <string>${MLX_PORT}</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>${REPO_ROOT}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>${PATH}</string>
+      <key>PYTHONUNBUFFERED</key>
+      <string>1</string>
+      <key>HF_HUB_DISABLE_TELEMETRY</key>
+      <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/mlx-server.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/mlx-server.err.log</string>
+  </dict>
+</plist>
+PLIST
+else
+  launchctl bootout "${DOMAIN}" "${MLX_PLIST}" >/dev/null 2>&1 || true
+  launchctl disable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
+  rm -f "${MLX_PLIST}" >/dev/null 2>&1 || true
+fi
+
 chmod 644 "${MCP_PLIST}" "${AUTO_PLIST}" "${WORKER_PLIST}" "${KEEPALIVE_PLIST}"
+if [[ -f "${MLX_PLIST}" ]]; then
+  chmod 644 "${MLX_PLIST}"
+fi
 
 npm run build >/dev/null
 
@@ -284,41 +410,44 @@ launchctl bootout "${DOMAIN}" "${MCP_PLIST}" >/dev/null 2>&1 || true
 launchctl bootout "${DOMAIN}" "${AUTO_PLIST}" >/dev/null 2>&1 || true
 launchctl bootout "${DOMAIN}" "${WORKER_PLIST}" >/dev/null 2>&1 || true
 launchctl bootout "${DOMAIN}" "${KEEPALIVE_PLIST}" >/dev/null 2>&1 || true
+if [[ -f "${MLX_PLIST}" ]]; then
+  launchctl bootout "${DOMAIN}" "${MLX_PLIST}" >/dev/null 2>&1 || true
+fi
 
 launchctl bootstrap "${DOMAIN}" "${MCP_PLIST}"
+launchctl enable "${DOMAIN}/${MCP_LABEL}" >/dev/null 2>&1 || true
+launchctl kickstart -k "${DOMAIN}/${MCP_LABEL}" >/dev/null 2>&1 || true
+wait_for_mcp_ready
+
 launchctl bootstrap "${DOMAIN}" "${AUTO_PLIST}"
 launchctl bootstrap "${DOMAIN}" "${WORKER_PLIST}"
 launchctl bootstrap "${DOMAIN}" "${KEEPALIVE_PLIST}"
+if [[ -f "${MLX_PLIST}" ]]; then
+  launchctl bootstrap "${DOMAIN}" "${MLX_PLIST}"
+fi
 
-launchctl enable "${DOMAIN}/${MCP_LABEL}" >/dev/null 2>&1 || true
 launchctl enable "${DOMAIN}/${AUTO_LABEL}" >/dev/null 2>&1 || true
 launchctl enable "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
 launchctl enable "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
+if [[ -f "${MLX_PLIST}" ]]; then
+  launchctl enable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
+fi
 
-launchctl kickstart -k "${DOMAIN}/${MCP_LABEL}" >/dev/null 2>&1 || true
 launchctl kickstart -k "${DOMAIN}/${AUTO_LABEL}" >/dev/null 2>&1 || true
 launchctl kickstart -k "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
 launchctl kickstart -k "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
-
-for _ in 1 2 3 4 5; do
-  if "${REPO_ROOT}/scripts/imprint_auto_snapshot_ctl.sh" start >/dev/null 2>&1; then
-    break
-  fi
-  sleep 2
-done
-
-for _ in 1 2 3 4 5; do
-  if "${REPO_ROOT}/scripts/autonomy_keepalive.sh" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 2
-done
+if [[ -f "${MLX_PLIST}" ]]; then
+  launchctl kickstart -k "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
+fi
 
 echo "Installed launchd agents:" >&2
 echo "- ${MCP_PLIST}" >&2
 echo "- ${AUTO_PLIST}" >&2
 echo "- ${WORKER_PLIST}" >&2
 echo "- ${KEEPALIVE_PLIST}" >&2
+if [[ -f "${MLX_PLIST}" ]]; then
+echo "- ${MLX_PLIST}" >&2
+fi
 
 echo "{" >&2
 echo "  \"ok\": true," >&2
@@ -327,6 +456,7 @@ echo "  \"mcp_label\": \"${MCP_LABEL}\"," >&2
 echo "  \"auto_snapshot_label\": \"${AUTO_LABEL}\"," >&2
 echo "  \"worker_label\": \"${WORKER_LABEL}\"," >&2
 echo "  \"keepalive_label\": \"${KEEPALIVE_LABEL}\"," >&2
+echo "  \"mlx_label\": \"${MLX_LABEL}\"," >&2
 echo "  \"mcp_port\": ${MCP_PORT}," >&2
 echo "  \"http_token_file\": \"${TOKEN_FILE}\"" >&2
 echo "}" >&2

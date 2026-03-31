@@ -88,6 +88,27 @@ test("storage guard restores from startup backup when db header is corrupted", a
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
+test("storage guard skips startup backup when the database exceeds the startup size threshold", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-storage-guard-skip-backup-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+
+  const session = await openClient(dbPath, {
+    ANAMNESIS_HUB_STARTUP_BACKUP_MAX_BYTES: "1",
+  });
+  try {
+    const health = await callTool(session.client, "health.storage", {});
+    assert.equal(health.ok, true);
+  } finally {
+    await session.client.close().catch(() => {});
+  }
+
+  const backupDir = path.join(tempDir, "backups");
+  const backups = fs.existsSync(backupDir) ? fs.readdirSync(backupDir) : [];
+  assert.equal(backups.length, 0);
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
 async function openClient(dbPath, extraEnv) {
   const transport = new StdioClientTransport({
     command: "node",

@@ -1,6 +1,8 @@
+import crypto from "node:crypto";
 import { z } from "zod";
 import { type GoalRecord, type PlanRecord, type PlanStepRecord, Storage } from "../storage.js";
 import { summarizeAdaptiveSessionHealth } from "./agent_session.js";
+import { routeObjectiveBackends } from "./model_router.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { evaluatePlanStepReadiness, getPlanStepApprovalGateKind } from "./plan.js";
 import { matchDomainSpecialists } from "./specialist_catalog.js";
@@ -113,6 +115,14 @@ export const goalAutorunSchema = z.object({
   ...sourceSchema.shape,
 });
 
+export const goalHygieneSchema = z.object({
+  mutation: mutationSchema,
+  goal_id: z.string().min(1).optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+  archive_idle_ephemeral_goals: z.boolean().default(true),
+  ...sourceSchema.shape,
+});
+
 export const goalAutorunDaemonSchema = z
   .object({
     action: z.enum(["status", "start", "stop", "run_once"]).default("status"),
@@ -220,6 +230,12 @@ type GoalAutorunDaemonConfig = {
   source_agent?: string;
 };
 
+type GoalAutorunCooldownReason =
+  | "idle_no_ready_work"
+  | "running_worker"
+  | "human_gate"
+  | "policy_gate";
+
 type PlanAdaptiveRoutingSummary = {
   worker_step_count: number;
   mode_counts: Record<AdaptiveRoutingMode, number>;
@@ -271,6 +287,7 @@ const goalAutorunRuntime: {
   total_executed_goals: number;
   total_skipped_goals: number;
   no_progress_count: number;
+  last_idle_at: string | null;
 } = {
   running: false,
   timer: null,
@@ -283,6 +300,7 @@ const goalAutorunRuntime: {
   total_executed_goals: 0,
   total_skipped_goals: 0,
   no_progress_count: 0,
+  last_idle_at: null,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -305,13 +323,148 @@ function readBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
 }
 
+function parseTimestamp(value: string | null) {
+  if (!value) {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function computeGoalAutorunFingerprint(goal: GoalRecord) {
+  const payload = {
+    goal_id: goal.goal_id,
+    title: goal.title,
+    objective: goal.objective,
+    status: goal.status,
+    priority: goal.priority,
+    risk_tier: goal.risk_tier,
+    autonomy_mode: goal.autonomy_mode,
+    target_entity_type: goal.target_entity_type,
+    target_entity_id: goal.target_entity_id,
+    active_plan_id: goal.active_plan_id,
+    result_summary: goal.result_summary,
+    tags: [...goal.tags].sort(),
+  };
+  return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+function hasGoalCooldownFingerprintChanged(goal: GoalRecord, expectedFingerprint: string | null) {
+  if (!expectedFingerprint) {
+    return false;
+  }
+  return computeGoalAutorunFingerprint(goal) !== expectedFingerprint;
+}
+
+function readGoalAutorunCooldown(goal: GoalRecord) {
+  const record = isRecord(goal.metadata.autorun_cooldown) ? goal.metadata.autorun_cooldown : null;
+  if (!record) {
+    return null;
+  }
+  const untilAt = readString(record.until_at);
+  const lastSeenAt = readString(record.last_seen_at);
+  const reason = readString(record.reason) as GoalAutorunCooldownReason | null;
+  const untilTimestamp = parseTimestamp(untilAt);
+  if (!reason || untilTimestamp === null || Date.now() >= untilTimestamp) {
+    return null;
+  }
+  if (hasGoalCooldownFingerprintChanged(goal, readString(record.goal_fingerprint))) {
+    return null;
+  }
+  return {
+    reason,
+    until_at: untilAt,
+    last_seen_at: lastSeenAt,
+    count: readFiniteNumber(record.count) ?? 0,
+  };
+}
+
+function computeGoalAutorunCooldownSeconds(reason: GoalAutorunCooldownReason, count: number) {
+  const normalizedCount = Math.max(1, Math.floor(count));
+  const baseSeconds =
+    reason === "idle_no_ready_work" ? 300 : reason === "running_worker" ? 60 : 180;
+  const exponent = Math.max(0, normalizedCount - 1);
+  return Math.min(1800, baseSeconds * Math.pow(2, exponent));
+}
+
+function persistGoalAutorunCooldown(
+  storage: Storage,
+  goal: GoalRecord,
+  reason: GoalAutorunCooldownReason,
+  source?: {
+    source_client?: string;
+    source_model?: string;
+    source_agent?: string;
+  }
+) {
+  const now = new Date().toISOString();
+  const existing = isRecord(goal.metadata.autorun_cooldown) ? goal.metadata.autorun_cooldown : null;
+  const sameReason =
+    readString(existing?.reason) === reason &&
+    !hasGoalCooldownFingerprintChanged(goal, readString(existing?.goal_fingerprint));
+  const count = sameReason ? (readFiniteNumber(existing?.count) ?? 0) + 1 : 1;
+  const cooldownSeconds = computeGoalAutorunCooldownSeconds(reason, count);
+  const untilAt = new Date(Date.now() + cooldownSeconds * 1000).toISOString();
+  const goalFingerprint = computeGoalAutorunFingerprint(goal);
+  return storage.updateGoalMetadata({
+    goal_id: goal.goal_id,
+    metadata: {
+      autorun_cooldown: {
+        reason,
+        count,
+        cooldown_seconds: cooldownSeconds,
+        first_seen_at: sameReason ? readString(existing?.first_seen_at) ?? now : now,
+        last_seen_at: now,
+        until_at: untilAt,
+        goal_fingerprint: goalFingerprint,
+      },
+    },
+    source_client: source?.source_client,
+    source_model: source?.source_model,
+    source_agent: source?.source_agent,
+  }).goal;
+}
+
+function clearGoalAutorunCooldown(
+  storage: Storage,
+  goal: GoalRecord,
+  source?: {
+    source_client?: string;
+    source_model?: string;
+    source_agent?: string;
+  }
+) {
+  if (!isRecord(goal.metadata.autorun_cooldown)) {
+    return goal;
+  }
+  return storage.updateGoalMetadata({
+    goal_id: goal.goal_id,
+    metadata: {
+      autorun_cooldown: null,
+    },
+    source_client: source?.source_client,
+    source_model: source?.source_model,
+    source_agent: source?.source_agent,
+  }).goal;
+}
+
 function mergeGoalExecuteTriChatAgentIds(storage: Storage, objective: string, providedAgentIds: string[] | undefined) {
   const objectiveText = readString(objective) ?? "";
   const matchedAgentIds =
     objectiveText.length > 0
       ? matchDomainSpecialists(storage, objectiveText, 6, 0.3).flatMap((entry) => entry.recommended_trichat_agent_ids)
       : [];
-  return [...new Set([...(providedAgentIds ?? []), ...matchedAgentIds].map((entry) => String(entry ?? "").trim()).filter(Boolean))];
+  if (objectiveText.length === 0) {
+    return [...new Set([...(providedAgentIds ?? []), ...matchedAgentIds].map((entry) => String(entry ?? "").trim()).filter(Boolean))];
+  }
+  return routeObjectiveBackends(storage, {
+    objective: objectiveText,
+    explicit_agent_ids: [...(providedAgentIds ?? []), ...matchedAgentIds].map((entry) => String(entry ?? "").trim()).filter(Boolean),
+    quality_preference: "balanced",
+    fallback_workspace_root: process.cwd(),
+    fallback_worker_count: 1,
+    fallback_shell: "/bin/zsh",
+  }).effective_agent_ids;
 }
 
 function buildGoalExecuteDerivedMutation(
@@ -390,6 +543,162 @@ function countKeywordHits(text: string, keywords: string[]) {
     }
   }
   return count;
+}
+
+function readGoalRetentionPolicy(goal: GoalRecord) {
+  const metadata = isRecord(goal.metadata) ? goal.metadata : {};
+  const explicitAutoArchive = readBoolean(metadata.auto_archive_when_idle);
+  const explicitAfterSeconds = readFiniteNumber(metadata.auto_archive_after_seconds);
+  const retentionClass = readString(metadata.retention_class);
+  const intakeTool = readString(metadata.intake_tool);
+  const titleText = `${goal.title} ${goal.objective}`.trim().toLowerCase();
+  const tags = normalizedTagSet(goal);
+  const inferredEphemeral =
+    retentionClass === "ephemeral" ||
+    tags.has("smoke") ||
+    tags.has("demo") ||
+    tags.has("presentation") ||
+    countKeywordHits(titleText, ["demo", "smoke", "presentation-ready"]) > 0 ||
+    intakeTool === "autonomy.bootstrap";
+  const autoArchiveWhenIdle = explicitAutoArchive ?? inferredEphemeral;
+  const autoArchiveAfterSeconds = Math.max(
+    0,
+    explicitAfterSeconds ??
+      (tags.has("presentation") || titleText.includes("presentation-ready")
+        ? 900
+        : inferredEphemeral
+          ? 1800
+          : 0)
+  );
+  return {
+    auto_archive_when_idle: autoArchiveWhenIdle,
+    auto_archive_after_seconds: autoArchiveWhenIdle ? autoArchiveAfterSeconds : null,
+    retention_class: inferredEphemeral ? "ephemeral" : retentionClass ?? "durable",
+  };
+}
+
+function shouldCompactIdleGoal(params: {
+  goal: GoalRecord;
+  blockedApprovalStep: { gate_type: string | null } | null;
+  runningWorkerStep: PlanStepRecord | undefined;
+  hasRunningTriChat: boolean;
+  cooldown: ReturnType<typeof readGoalAutorunCooldown> | null;
+  explicitGoalId: boolean;
+  ignoreCooldownRequirement?: boolean;
+}) {
+  if (params.explicitGoalId) {
+    return false;
+  }
+  if (params.runningWorkerStep || params.hasRunningTriChat) {
+    return false;
+  }
+  if (params.goal.target_entity_id || params.goal.risk_tier === "critical") {
+    return false;
+  }
+  const policy = readGoalRetentionPolicy(params.goal);
+  if (!policy.auto_archive_when_idle || policy.auto_archive_after_seconds === null) {
+    return false;
+  }
+  const createdAt = parseTimestamp(params.goal.created_at);
+  if (createdAt === null) {
+    return false;
+  }
+  const ageSeconds = Math.max(0, (Date.now() - createdAt) / 1000);
+  if (ageSeconds < policy.auto_archive_after_seconds) {
+    return false;
+  }
+  const cooldownCount = params.cooldown?.count ?? 0;
+  if (!params.ignoreCooldownRequirement && policy.auto_archive_after_seconds > 0 && cooldownCount < 1) {
+    return false;
+  }
+  if (params.blockedApprovalStep) {
+    return params.blockedApprovalStep.gate_type === "human" || params.blockedApprovalStep.gate_type === "policy";
+  }
+  return true;
+}
+
+async function compactIdleGoalForAutorun(
+  storage: Storage,
+  invokeTool: (toolName: string, input: Record<string, unknown>) => Promise<unknown>,
+  params: {
+    goal: GoalRecord;
+    plan: PlanRecord;
+    summary: ReturnType<typeof summarizeGoalExecution>;
+    cooldown: ReturnType<typeof readGoalAutorunCooldown> | null;
+    mutation: { idempotency_key: string; side_effect_fingerprint: string };
+    source: {
+      source_client?: string;
+      source_model?: string;
+      source_agent?: string;
+    };
+  }
+) {
+  if (params.plan.status !== "archived") {
+    await invokeTool("plan.update", {
+      mutation: buildGoalExecuteDerivedMutation(params.mutation, `autorun-archive-plan:${params.goal.goal_id}`),
+      plan_id: params.plan.plan_id,
+      status: "archived",
+      metadata: {
+        archived_by: "goal.autorun",
+        archive_reason: "stale_idle_ephemeral_goal",
+        goal_id: params.goal.goal_id,
+      },
+      source_client: params.source.source_client,
+      source_model: params.source.source_model,
+      source_agent: params.source.source_agent,
+    });
+  }
+
+  const archivedGoal = storage.updateGoal({
+    goal_id: params.goal.goal_id,
+    status: "archived",
+    result_summary: "Goal auto-archived after remaining idle beyond its retention window.",
+    result: {
+      archived_by: "goal.autorun",
+      archive_reason: "stale_idle_ephemeral_goal",
+      plan_id: params.plan.plan_id,
+      cooldown_reason: params.cooldown?.reason ?? null,
+      cooldown_count: params.cooldown?.count ?? 0,
+      execution_summary: params.summary,
+    },
+    metadata: {
+      autorun_cooldown: null,
+      archived_by: "goal.autorun",
+      archived_reason: "stale_idle_ephemeral_goal",
+      archived_at: new Date().toISOString(),
+    },
+    event_type: "auto_archived",
+    event_summary: "Goal auto-archived after remaining idle beyond its retention window.",
+    event_details: {
+      plan_id: params.plan.plan_id,
+      cooldown_reason: params.cooldown?.reason ?? null,
+      cooldown_count: params.cooldown?.count ?? 0,
+    },
+    source_client: params.source.source_client,
+    source_model: params.source.source_model,
+    source_agent: params.source.source_agent,
+  }).goal;
+
+  storage.appendRuntimeEvent({
+    event_type: "goal.autorun_compacted",
+    entity_type: "goal",
+    entity_id: archivedGoal.goal_id,
+    status: archivedGoal.status,
+    summary: `goal.autorun archived stale idle goal ${archivedGoal.goal_id}.`,
+    details: {
+      goal_id: archivedGoal.goal_id,
+      plan_id: params.plan.plan_id,
+      reason: "stale_idle_ephemeral_goal",
+      cooldown_reason: params.cooldown?.reason ?? null,
+      cooldown_count: params.cooldown?.count ?? 0,
+      execution_summary: params.summary,
+    },
+    source_client: params.source.source_client,
+    source_model: params.source.source_model,
+    source_agent: params.source.source_agent,
+  });
+
+  return archivedGoal;
 }
 
 export function buildExplicitPlannerSelection(hookName: string): PlannerSelection {
@@ -1408,7 +1717,13 @@ function persistWorkerPoolRecoverySuppression(
   };
 }
 
-function listGoalAutorunCandidates(storage: Storage, input: Pick<GoalAutorunLikeInput, "goal_id" | "limit">) {
+function listGoalAutorunCandidates(
+  storage: Storage,
+  input: Pick<GoalAutorunLikeInput, "goal_id" | "limit">,
+  options?: {
+    ignore_cooldown?: boolean;
+  }
+) {
   if (input.goal_id) {
     const goal = storage.getGoalById(input.goal_id);
     return goal ? [goal] : [];
@@ -1422,6 +1737,9 @@ function listGoalAutorunCandidates(storage: Storage, input: Pick<GoalAutorunLike
   for (const status of statuses) {
     for (const goal of storage.listGoals({ status, limit: perStatusLimit })) {
       if (seen.has(goal.goal_id)) {
+        continue;
+      }
+      if (!options?.ignore_cooldown && readGoalAutorunCooldown(goal)) {
         continue;
       }
       seen.add(goal.goal_id);
@@ -1854,6 +2172,7 @@ async function executeGoalAutorunPass(
   const results: Array<Record<string, unknown>> = [];
   let executedCount = 0;
   let skippedCount = 0;
+  let compactedCount = 0;
 
   for (const goal of candidates) {
     const source = {
@@ -1942,6 +2261,7 @@ async function executeGoalAutorunPass(
         source_model: input.source_model,
         source_agent: input.source_agent,
       })) as Record<string, unknown>;
+      clearGoalAutorunCooldown(storage, goal, source);
       executedCount += 1;
       results.push({
         goal_id: goal.goal_id,
@@ -2002,6 +2322,7 @@ async function executeGoalAutorunPass(
           source_model: input.source_model,
           source_agent: input.source_agent,
         })) as Record<string, unknown>;
+        clearGoalAutorunCooldown(storage, goal, source);
         executedCount += 1;
         results.push({
           goal_id: goal.goal_id,
@@ -2042,8 +2363,44 @@ async function executeGoalAutorunPass(
     );
     const blockedApprovalStep = summary.blocked_approval_steps[0] ?? null;
     const hasRunningTriChat = steps.some((step) => step.status === "running" && step.executor_kind === "trichat");
+    const currentCooldown = readGoalAutorunCooldown(goal);
+
+    if (
+      shouldCompactIdleGoal({
+        goal,
+        blockedApprovalStep,
+        runningWorkerStep,
+        hasRunningTriChat,
+        cooldown: currentCooldown,
+        explicitGoalId: Boolean(input.goal_id),
+      })
+    ) {
+      const archivedGoal = await compactIdleGoalForAutorun(storage, invokeTool, {
+        goal,
+        plan: planRecord,
+        summary,
+        cooldown: currentCooldown,
+        mutation,
+        source,
+      });
+      compactedCount += 1;
+      results.push({
+        goal_id: archivedGoal.goal_id,
+        plan_id: planRecord.plan_id,
+        action: "archived",
+        reason: "stale_idle_ephemeral_goal",
+      });
+      continue;
+    }
 
     if (blockedApprovalStep) {
+      const cooledGoal = persistGoalAutorunCooldown(
+        storage,
+        goal,
+        blockedApprovalStep.gate_type === "policy" ? "policy_gate" : "human_gate",
+        source
+      );
+      const cooldown = readGoalAutorunCooldown(cooledGoal);
       skippedCount += 1;
       results.push({
         goal_id: goal.goal_id,
@@ -2052,11 +2409,14 @@ async function executeGoalAutorunPass(
         reason: blockedApprovalStep.gate_type === "policy" ? "policy_gate" : "human_gate",
         blocked_step: blockedApprovalStep,
         execution_summary: summary,
+        autorun_cooldown_until: cooldown?.until_at ?? null,
       });
       continue;
     }
 
     if (runningWorkerStep) {
+      const cooledGoal = persistGoalAutorunCooldown(storage, goal, "running_worker", source);
+      const cooldown = readGoalAutorunCooldown(cooledGoal);
       skippedCount += 1;
       results.push({
         goal_id: goal.goal_id,
@@ -2069,11 +2429,14 @@ async function executeGoalAutorunPass(
           task_id: runningWorkerStep.task_id,
         },
         execution_summary: summary,
+        autorun_cooldown_until: cooldown?.until_at ?? null,
       });
       continue;
     }
 
     if (summary.ready_count === 0 && !hasRunningTriChat) {
+      const cooledGoal = persistGoalAutorunCooldown(storage, goal, "idle_no_ready_work", source);
+      const cooldown = readGoalAutorunCooldown(cooledGoal);
       skippedCount += 1;
       results.push({
         goal_id: goal.goal_id,
@@ -2081,6 +2444,7 @@ async function executeGoalAutorunPass(
         action: "skipped",
         reason: "idle_no_ready_work",
         execution_summary: summary,
+        autorun_cooldown_until: cooldown?.until_at ?? null,
       });
       continue;
     }
@@ -2109,6 +2473,7 @@ async function executeGoalAutorunPass(
       source_model: input.source_model,
       source_agent: input.source_agent,
     })) as Record<string, unknown>;
+    clearGoalAutorunCooldown(storage, goal, source);
     executedCount += 1;
     results.push({
       goal_id: goal.goal_id,
@@ -2128,6 +2493,7 @@ async function executeGoalAutorunPass(
       goal_id: input.goal_id ?? null,
       scanned_count: candidates.length,
       executed_count: executedCount,
+      compacted_count: compactedCount,
       skipped_count: skippedCount,
       dry_run: input.dry_run ?? false,
     },
@@ -2140,6 +2506,128 @@ async function executeGoalAutorunPass(
     ok: true,
     scanned_count: candidates.length,
     executed_count: executedCount,
+    compacted_count: compactedCount,
+    progress_count: executedCount + compactedCount,
+    skipped_count: skippedCount,
+    results,
+    event,
+  };
+}
+
+async function executeGoalHygienePass(
+  storage: Storage,
+  invokeTool: (toolName: string, input: Record<string, unknown>) => Promise<unknown>,
+  input: z.infer<typeof goalHygieneSchema>
+) {
+  const candidates = listGoalAutorunCandidates(
+    storage,
+    {
+      goal_id: input.goal_id,
+      limit: input.limit,
+    },
+    { ignore_cooldown: true }
+  );
+  const results: Array<Record<string, unknown>> = [];
+  let archivedCount = 0;
+  let skippedCount = 0;
+
+  for (const goal of candidates) {
+    const source = {
+      source_client: input.source_client,
+      source_model: input.source_model,
+      source_agent: input.source_agent,
+    };
+    const planResolution = resolveGoalExecutionPlan(
+      storage,
+      {
+        goal_id: goal.goal_id,
+        create_plan_if_missing: false,
+        pack_id: "agentic",
+        autorun: true,
+        mutation: input.mutation,
+      },
+      goal
+    );
+    const plan = planResolution.plan;
+    if (!plan || isTerminalPlanStatus(plan.status)) {
+      skippedCount += 1;
+      results.push({
+        goal_id: goal.goal_id,
+        plan_id: plan?.plan_id ?? null,
+        action: "skipped",
+        reason: !plan ? "missing_plan" : "terminal_plan",
+      });
+      continue;
+    }
+
+    const steps = storage.listPlanSteps(plan.plan_id);
+    const summary = summarizeGoalExecution(plan, steps);
+    const runningWorkerStep = steps.find(
+      (step) => step.status === "running" && (step.executor_kind === "worker" || step.executor_kind === "task")
+    );
+    const blockedApprovalStep = summary.blocked_approval_steps[0] ?? null;
+    const hasRunningTriChat = steps.some((step) => step.status === "running" && step.executor_kind === "trichat");
+
+    if (
+      input.archive_idle_ephemeral_goals !== false &&
+      shouldCompactIdleGoal({
+        goal,
+        blockedApprovalStep,
+        runningWorkerStep,
+        hasRunningTriChat,
+        cooldown: null,
+        explicitGoalId: Boolean(input.goal_id),
+        ignoreCooldownRequirement: true,
+      })
+    ) {
+      const archivedGoal = await compactIdleGoalForAutorun(storage, invokeTool, {
+        goal,
+        plan,
+        summary,
+        cooldown: null,
+        mutation: input.mutation,
+        source,
+      });
+      archivedCount += 1;
+      results.push({
+        goal_id: archivedGoal.goal_id,
+        plan_id: plan.plan_id,
+        action: "archived",
+        reason: "stale_idle_ephemeral_goal",
+      });
+      continue;
+    }
+
+    skippedCount += 1;
+    results.push({
+      goal_id: goal.goal_id,
+      plan_id: plan.plan_id,
+      action: "skipped",
+      reason: "not_compactable",
+    });
+  }
+
+  const event = storage.appendRuntimeEvent({
+    event_type: "goal.hygiene",
+    entity_type: "goal",
+    entity_id: input.goal_id ?? null,
+    summary: `goal.hygiene scanned ${candidates.length} goal(s) and archived ${archivedCount}.`,
+    details: {
+      goal_id: input.goal_id ?? null,
+      scanned_count: candidates.length,
+      archived_count: archivedCount,
+      skipped_count: skippedCount,
+      archive_idle_ephemeral_goals: input.archive_idle_ephemeral_goals !== false,
+    },
+    source_client: input.source_client,
+    source_model: input.source_model,
+    source_agent: input.source_agent,
+  });
+
+  return {
+    ok: true,
+    scanned_count: candidates.length,
+    archived_count: archivedCount,
     skipped_count: skippedCount,
     results,
     event,
@@ -2158,6 +2646,7 @@ function getGoalAutorunStatus() {
     total_executed_goals: goalAutorunRuntime.total_executed_goals,
     total_skipped_goals: goalAutorunRuntime.total_skipped_goals,
     no_progress_count: goalAutorunRuntime.no_progress_count,
+    last_idle_at: goalAutorunRuntime.last_idle_at,
   };
 }
 
@@ -2229,8 +2718,20 @@ async function runGoalAutorunTick(
     goalAutorunRuntime.tick_count += 1;
     goalAutorunRuntime.total_executed_goals += result.executed_count;
     goalAutorunRuntime.total_skipped_goals += result.skipped_count;
-    goalAutorunRuntime.no_progress_count = result.executed_count === 0 ? goalAutorunRuntime.no_progress_count + 1 : 0;
-    if (goalAutorunRuntime.no_progress_count >= 3) {
+    if (result.scanned_count === 0) {
+      goalAutorunRuntime.no_progress_count = 0;
+      goalAutorunRuntime.last_idle_at = goalAutorunRuntime.last_tick_at;
+    } else {
+      goalAutorunRuntime.no_progress_count =
+        result.progress_count === 0 ? goalAutorunRuntime.no_progress_count + 1 : 0;
+      if (result.progress_count > 0) {
+        goalAutorunRuntime.last_idle_at = null;
+      }
+    }
+    if (
+      goalAutorunRuntime.no_progress_count >= 3 &&
+      (goalAutorunRuntime.no_progress_count === 3 || goalAutorunRuntime.no_progress_count % 10 === 0)
+    ) {
       storage.appendRuntimeEvent({
         event_type: "goal.autorun_stalled",
         entity_type: "goal",
@@ -2398,5 +2899,19 @@ export async function goalAutorun(
     mutation: input.mutation,
     payload: input,
     execute: async () => executeGoalAutorunPass(storage, invokeTool, input),
+  });
+}
+
+export async function goalHygiene(
+  storage: Storage,
+  invokeTool: (toolName: string, input: Record<string, unknown>) => Promise<unknown>,
+  input: z.infer<typeof goalHygieneSchema>
+) {
+  return runIdempotentMutation({
+    storage,
+    tool_name: "goal.hygiene",
+    mutation: input.mutation,
+    payload: input,
+    execute: async () => executeGoalHygienePass(storage, invokeTool, input),
   });
 }

@@ -1,5 +1,6 @@
 import path from "node:path";
 import fs from "node:fs";
+import os from "node:os";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -95,6 +96,20 @@ import {
 import { evalRun, evalRunSchema, evalSuiteList, evalSuiteListSchema, evalSuiteUpsert, evalSuiteUpsertSchema } from "./tools/eval.js";
 import { eventPublish, eventPublishSchema, eventSummary, eventSummarySchema, eventTail, eventTailSchema } from "./tools/event.js";
 import {
+  countActionableRecentObservabilityDocuments,
+  observabilityDashboard,
+  observabilityDashboardSchema,
+  observabilityIngest,
+  observabilityIngestSchema,
+  isActionableRecentObservabilityDocument,
+  observabilitySearch,
+  observabilitySearchSchema,
+  observabilityShip,
+  observabilityShipSchema,
+} from "./tools/observability.js";
+import { workflowExport, workflowExportSchema } from "./tools/workflow_export.js";
+import { buildOfficeGuiSnapshot } from "./office_gui_snapshot.js";
+import {
   goalAutorun,
   goalAutorunDaemonControl,
   goalAutorunDaemonSchema,
@@ -103,6 +118,8 @@ import {
   goalCreateSchema,
   goalExecute,
   goalExecuteSchema,
+  goalHygiene,
+  goalHygieneSchema,
   goalGet,
   goalGetSchema,
   initializeGoalAutorunDaemon,
@@ -164,6 +181,7 @@ import { knowledgeDecay, knowledgeDecaySchema, knowledgePromote, knowledgePromot
 import { decisionLink, decisionLinkSchema } from "./tools/decision.js";
 import { simulateWorkflow, simulateWorkflowSchema } from "./tools/simulate.js";
 import { healthPolicy, healthPolicySchema, healthStorage, healthStorageSchema, healthTools, healthToolsSchema } from "./tools/health.js";
+import { storageBackups, storageBackupsSchema } from "./tools/storage_maintenance.js";
 import { incidentOpen, incidentOpenSchema, incidentTimeline, incidentTimelineSchema } from "./tools/incident.js";
 import { queryPlan, queryPlanSchema } from "./tools/query_plan.js";
 import { migrationStatus, migrationStatusSchema } from "./tools/migration.js";
@@ -176,6 +194,7 @@ import {
   taskCompleteSchema,
   taskCreate,
   taskCreateSchema,
+  taskExecutionSchema,
   taskFail,
   taskFailSchema,
   taskHeartbeat,
@@ -188,19 +207,48 @@ import {
   taskTimelineSchema,
   taskRetry,
   taskRetrySchema,
+  taskRecoverExpired,
+  taskRecoverExpiredSchema,
   taskAutoRetryControl,
   taskAutoRetrySchema,
   initializeTaskAutoRetryDaemon,
 } from "./tools/task.js";
-import { workerFabric, workerFabricSchema } from "./tools/worker_fabric.js";
-import { modelRouter, modelRouterSchema } from "./tools/model_router.js";
+import {
+  buildWorkerFabricSlots,
+  rankWorkerFabricSlots,
+  resolveEffectiveWorkerFabric,
+  resolveTaskExecutionRouting,
+  workerFabric,
+  workerFabricSchema,
+} from "./tools/worker_fabric.js";
+import { clusterTopology, clusterTopologySchema } from "./tools/cluster_topology.js";
+import { modelRouter, modelRouterSchema, routeObjectiveBackends } from "./tools/model_router.js";
 import { orgProgram, orgProgramSchema } from "./tools/org_program.js";
+import { optimizer, optimizerSchema } from "./tools/optimizer.js";
+import { swarmProfile, swarmProfileSchema } from "./tools/swarm_profile.js";
 import { taskCompile, taskCompileSchema } from "./tools/task_compiler.js";
 import { autonomyBootstrap, autonomyBootstrapSchema } from "./tools/autonomy_bootstrap.js";
-import { autonomyMaintain, autonomyMaintainSchema, initializeAutonomyMaintainDaemon } from "./tools/autonomy_maintain.js";
+import {
+  autonomyMaintain,
+  autonomyMaintainSchema,
+  buildEvalHealth,
+  computeEvalDependencyFingerprint,
+  getAutonomyMaintainRuntimeStatus,
+  initializeAutonomyMaintainDaemon,
+} from "./tools/autonomy_maintain.js";
 import { autonomyCommand, autonomyCommandSchema } from "./tools/autonomy_command.js";
 import { autonomyIdeIngress, autonomyIdeIngressSchema } from "./tools/autonomy_ide_ingress.js";
 import { providerBridge, providerBridgeSchema } from "./tools/provider_bridge.js";
+import { runtimeWorker, runtimeWorkerSchema } from "./tools/runtime_worker.js";
+import { notifierSend, notifierSendSchema } from "./tools/notifier.js";
+import { officeSnapshot, officeSnapshotSchema } from "./tools/office_snapshot.js";
+import { operatorBrief, operatorBriefSchema } from "./tools/operator_brief.js";
+import {
+  getReactionEngineRuntimeStatus,
+  initializeReactionEngineDaemon,
+  reactionEngineControl,
+  reactionEngineSchema,
+} from "./tools/reaction_engine.js";
 import { matchDomainSpecialists, specialistCatalog, specialistCatalogSchema } from "./tools/specialist_catalog.js";
 import {
   trichatChaos,
@@ -290,21 +338,73 @@ const storagePathEnv = process.env.ANAMNESIS_HUB_DB_PATH ?? process.env.MCP_HUB_
 const storagePath = storagePathEnv
   ? path.resolve(storagePathEnv)
   : path.join(repoRoot, "data", "hub.sqlite");
+function resolveDefaultTriChatBusSocketPath(root: string) {
+  if (process.env.TRICHAT_BUS_SOCKET_PATH?.trim()) {
+    return path.resolve(process.env.TRICHAT_BUS_SOCKET_PATH);
+  }
+  const legacyPath = path.join(root, "data", "trichat.bus.sock");
+  if (Buffer.byteLength(legacyPath) < 100) {
+    return legacyPath;
+  }
+  const digest = crypto.createHash("sha256").update(root).digest("hex").slice(0, 12);
+  const cacheBase =
+    process.platform === "darwin"
+      ? path.join(os.homedir(), "Library", "Caches", "mcplayground")
+      : path.join(os.homedir(), ".cache", "mcplayground");
+  const candidates = [
+    path.join(cacheBase, `trichat-${digest}.sock`),
+    path.join("/tmp", `mcplayground-trichat-${digest}.sock`),
+  ];
+  return candidates.find((entry) => Buffer.byteLength(entry) < 100) ?? candidates[candidates.length - 1];
+}
+
 const storage = new Storage(storagePath);
 storage.init();
+const startupModeArgs = process.argv.slice(2);
+const startupHttpEnabled = startupModeArgs.includes("--http") || process.env.MCP_HTTP === "1";
+const backgroundOwnerEnabled = parseBooleanEnv(process.env.MCP_BACKGROUND_OWNER, startupHttpEnabled);
 initializeAutoSquishDaemon(storage);
 initializeTaskAutoRetryDaemon(storage);
 initializeTriChatAutoRetentionDaemon(storage);
 initializeTriChatTurnWatchdogDaemon(storage);
 initializeTriChatAutopilotDaemon(storage, invokeRegisteredTool);
 const triChatBusRuntime = new TriChatBusRuntime(storage, {
-  socket_path: process.env.TRICHAT_BUS_SOCKET_PATH
-    ? path.resolve(process.env.TRICHAT_BUS_SOCKET_PATH)
-    : path.join(repoRoot, "data", "trichat.bus.sock"),
+  socket_path: resolveDefaultTriChatBusSocketPath(repoRoot),
 });
 triChatBusRuntime.initialize({
-  auto_start: parseBooleanEnv(process.env.TRICHAT_BUS_AUTOSTART, true),
+  auto_start: backgroundOwnerEnabled && parseBooleanEnv(process.env.TRICHAT_BUS_AUTOSTART, true),
 });
+let shutdownRegistered = false;
+function registerRuntimeShutdownHandlers() {
+  if (shutdownRegistered) {
+    return;
+  }
+  shutdownRegistered = true;
+  let stopping = false;
+  const stopBus = () => {
+    if (stopping) {
+      return;
+    }
+    stopping = true;
+    try {
+      triChatBusRuntime.stop();
+    } catch {
+      // Best-effort shutdown.
+    }
+  };
+  process.once("SIGTERM", () => {
+    stopBus();
+    process.exit(0);
+  });
+  process.once("SIGINT", () => {
+    stopBus();
+    process.exit(130);
+  });
+  process.once("exit", () => {
+    stopBus();
+  });
+}
+registerRuntimeShutdownHandlers();
 
 const SERVER_NAME = "mcplayground-core-template";
 const SERVER_VERSION = "1.0.0";
@@ -426,14 +526,23 @@ function resolveEffectiveTriChatAgentIds(
     objectiveText.length > 0
       ? matchDomainSpecialists(storage, objectiveText, 6, 0.3).flatMap((entry) => entry.recommended_trichat_agent_ids)
       : [];
-  const merged = [
+  const mergedExplicit = [
     ...new Set(
-      [...(explicitAgentIds ?? []), ...matchedAgentIds]
-        .map((entry) => readString(entry))
-        .filter((entry): entry is string => Boolean(entry))
+      [...(explicitAgentIds ?? []), ...matchedAgentIds].map((entry) => readString(entry)).filter((entry): entry is string => Boolean(entry))
     ),
   ];
-  return merged.length > 0 ? merged : undefined;
+  if (objectiveText.length === 0) {
+    return mergedExplicit.length > 0 ? mergedExplicit : undefined;
+  }
+  const routed = routeObjectiveBackends(storage, {
+    objective: objectiveText,
+    explicit_agent_ids: mergedExplicit,
+    quality_preference: "balanced",
+    fallback_workspace_root: process.cwd(),
+    fallback_worker_count: 1,
+    fallback_shell: "/bin/zsh",
+  });
+  return routed.effective_agent_ids.length > 0 ? routed.effective_agent_ids : undefined;
 }
 
 function readInteger(value: unknown): number | undefined {
@@ -445,6 +554,114 @@ function readInteger(value: unknown): number | undefined {
 
 function readBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function mergeUniqueStrings(...values: Array<readonly string[] | undefined>) {
+  return [
+    ...new Set(
+      values
+        .flatMap((entries) => [...(entries ?? [])])
+        .map((entry) => readString(entry))
+        .filter((entry): entry is string => Boolean(entry))
+    ),
+  ];
+}
+
+function readQualityPreference(value: unknown): "speed" | "balanced" | "quality" | "cost" | undefined {
+  const normalized = readString(value);
+  if (normalized === "speed" || normalized === "balanced" || normalized === "quality" || normalized === "cost") {
+    return normalized;
+  }
+  return undefined;
+}
+
+function planDispatchTaskExecution(
+  storage: Storage,
+  params: {
+    objective: string;
+    project_dir: string;
+    metadata: Record<string, unknown>;
+    tags: string[];
+  }
+) {
+  const baseExecution = isRecord(params.metadata.task_execution)
+    ? params.metadata.task_execution
+    : isRecord(params.metadata.execution)
+      ? params.metadata.execution
+      : {};
+  const basePreferredModelTags = readStringArray(baseExecution.preferred_model_tags);
+  const baseRequiredModelTags = readStringArray(baseExecution.required_model_tags);
+  const basePreferredBackendIds = readStringArray(baseExecution.preferred_backend_ids);
+  const baseRequiredBackendIds = readStringArray(baseExecution.required_backend_ids);
+  const qualityPreference = readQualityPreference(baseExecution.quality_preference) ?? "balanced";
+  const modelRouterSelection = routeObjectiveBackends(storage, {
+    objective: params.objective,
+    preferred_tags: mergeUniqueStrings(basePreferredModelTags, params.tags),
+    required_tags: baseRequiredModelTags,
+    required_backend_ids: baseRequiredBackendIds,
+    quality_preference: qualityPreference,
+    fallback_workspace_root: params.project_dir,
+    fallback_worker_count: 1,
+    fallback_shell: "/bin/zsh",
+  });
+  const selectedBackend = modelRouterSelection.route.selected_backend;
+  const plannedCandidates = modelRouterSelection.route.planned_backends.slice(0, 4);
+  const taskExecutionInput = {
+    preferred_host_ids: mergeUniqueStrings(
+      readStringArray(baseExecution.preferred_host_ids),
+      selectedBackend?.host_id ? [selectedBackend.host_id] : undefined,
+      plannedCandidates.map((entry) => entry.host_id).filter((entry): entry is string => Boolean(entry))
+    ),
+    allowed_host_ids: readStringArray(baseExecution.allowed_host_ids),
+    preferred_host_tags: mergeUniqueStrings(readStringArray(baseExecution.preferred_host_tags)),
+    required_host_tags: mergeUniqueStrings(readStringArray(baseExecution.required_host_tags)),
+    preferred_backend_ids: mergeUniqueStrings(
+      basePreferredBackendIds,
+      selectedBackend?.backend_id ? [selectedBackend.backend_id] : undefined
+    ),
+    required_backend_ids: baseRequiredBackendIds,
+    preferred_model_tags: mergeUniqueStrings(basePreferredModelTags, modelRouterSelection.preferred_tags),
+    required_model_tags: baseRequiredModelTags,
+    isolation_mode: readString(baseExecution.isolation_mode) ?? "git_worktree",
+    task_kind: modelRouterSelection.task_kind,
+    quality_preference: qualityPreference,
+    selected_backend_id: selectedBackend?.backend_id,
+    selected_backend_provider: selectedBackend?.provider,
+    selected_backend_locality: selectedBackend?.locality,
+    selected_host_id: selectedBackend?.host_id,
+    routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
+    planned_backend_candidates: plannedCandidates.map((entry) => ({
+      backend_id: entry.backend_id,
+      provider: entry.provider,
+      host_id: entry.host_id,
+      node_id: entry.node_id,
+      title: entry.title,
+      score: entry.score,
+    })),
+  };
+  const parsedTaskExecution = taskExecutionSchema.parse(taskExecutionInput);
+  const fabricState = resolveEffectiveWorkerFabric(storage, {
+    fallback_workspace_root: params.project_dir,
+    fallback_worker_count: 1,
+    fallback_shell: "/bin/zsh",
+  });
+  const rankedSlots = rankWorkerFabricSlots(
+    buildWorkerFabricSlots(storage, {
+      fallback_workspace_root: params.project_dir,
+      fallback_worker_count: 1,
+      fallback_shell: "/bin/zsh",
+    }),
+    resolveTaskExecutionRouting({ task_execution: parsedTaskExecution }),
+    fabricState.strategy,
+    fabricState.default_host_id
+  );
+  return {
+    model_router: modelRouterSelection,
+    task_execution: {
+      ...parsedTaskExecution,
+      selected_worker_host_id: rankedSlots[0]?.host_id ?? null,
+    },
+  };
 }
 
 function normalizeRoutingRule(value: unknown) {
@@ -958,6 +1175,12 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
             const rawInput = isRecord(step.input) ? step.input : {};
             const payload = isRecord(rawInput.payload) ? rawInput.payload : {};
             const rawMetadata = isRecord(rawInput.metadata) ? rawInput.metadata : {};
+            const taskExecutionPlan = planDispatchTaskExecution(storage, {
+              objective: readString(rawInput.objective) ?? step.title,
+              project_dir: readString(rawInput.project_dir) ?? ".",
+              metadata: rawMetadata,
+              tags: readStringArray(rawInput.tags) ?? ["plan.dispatch", executorKind],
+            });
             const explicitRouting =
               isRecord(rawInput.routing)
                 ? rawInput.routing
@@ -989,6 +1212,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
                 goal_id: plan.goal_id,
               },
               routing,
+              task_execution: taskExecutionPlan.task_execution,
               priority: readInteger(rawInput.priority),
               max_attempts: readInteger(rawInput.max_attempts),
               available_at: readString(rawInput.available_at),
@@ -1000,6 +1224,8 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               metadata: {
                 ...rawMetadata,
                 adaptive_assignment: adaptiveAssignment,
+                task_execution: taskExecutionPlan.task_execution,
+                model_router: taskExecutionPlan.model_router,
                 plan_dispatch: {
                   plan_id: plan.plan_id,
                   step_id: step.step_id,
@@ -1024,6 +1250,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
                   task_id: taskId,
                   objective: readString(rawInput.objective) ?? step.title,
                   adaptive_assignment: adaptiveAssignment,
+                  task_execution: taskExecutionPlan.task_execution,
                 },
               },
             });
@@ -1042,6 +1269,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
                 task_id: taskId,
                 objective: readString(rawInput.objective) ?? step.title,
                 adaptive_assignment: adaptiveAssignment,
+                task_execution: taskExecutionPlan.task_execution,
               },
               source_client: input.source_client,
               source_model: input.source_model,
@@ -1055,6 +1283,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               action: "task_created",
               task_id: taskId,
               adaptive_assignment: adaptiveAssignment,
+              task_execution: taskExecutionPlan.task_execution,
               step_status_after: updated.step.status,
               task: taskResult,
               event: dispatchEvent,
@@ -1744,6 +1973,10 @@ registerTool("goal.autorun", "Scan eligible goals and re-enter goal.execute wher
   goalAutorun(storage, invokeRegisteredTool, input)
 );
 
+registerTool("goal.hygiene", "Archive stale idle ephemeral goals so background autonomy stays focused on live operator work.", goalHygieneSchema, (input) =>
+  goalHygiene(storage, invokeRegisteredTool, input)
+);
+
 registerTool(
   "goal.autorun_daemon",
   "Manage the bounded periodic goal.autorun daemon for unattended continuation.",
@@ -1783,11 +2016,41 @@ registerTool("event.summary", "Summarize the shared kernel event feed by type an
   eventSummary(storage, input)
 );
 
+registerTool("observability.ingest", "Ingest normalized observability documents into the shared indexed telemetry store.", observabilityIngestSchema, (input) =>
+  observabilityIngest(storage, input)
+);
+
+registerTool("observability.search", "Search indexed observability documents and optionally include matching runtime events.", observabilitySearchSchema, (input) =>
+  observabilitySearch(storage, input)
+);
+
+registerTool("observability.dashboard", "Summarize indexed observability data into a Kibana-like operator dashboard payload.", observabilityDashboardSchema, (input) =>
+  observabilityDashboard(storage, input)
+);
+
+registerTool("observability.ship", "Ship file, metric, and control-plane data into the indexed observability store.", observabilityShipSchema, (input) =>
+  observabilityShip(storage, input)
+);
+
 registerTool(
   "kernel.summary",
   "Summarize goals, plans, tasks, sessions, experiments, artifacts, and recent events into one kernel snapshot.",
   kernelSummarySchema,
   (input) => kernelSummary(storage, input)
+);
+
+registerTool(
+  "office.snapshot",
+  "Read a lightweight storage-backed operator snapshot for the Agent Office GUI without fanning out across many heavy MCP calls.",
+  officeSnapshotSchema,
+  (input) => officeSnapshot(storage, input)
+);
+
+registerTool(
+  "operator.brief",
+  "Return the current operator brief for the active goal, delegation chain, and runtime handoff state.",
+  operatorBriefSchema,
+  (input) => operatorBrief(storage, input)
 );
 
 registerTool("artifact.record", "Persist a durable artifact and optionally link it to goals, plans, tasks, runs, or other entities.", artifactRecordSchema, (input) =>
@@ -1849,6 +2112,13 @@ registerTool("eval.suite_list", "List durable eval suites.", evalSuiteListSchema
 
 registerTool("eval.run", "Execute a durable eval suite against real benchmark suites and model-router decisions.", evalRunSchema, (input) =>
   evalRun(storage, input)
+);
+
+registerTool(
+  "workflow.export",
+  "Export a reproducible workflow bundle, JSONL run metrics, and an Argo-style DAG contract from a durable goal or plan.",
+  workflowExportSchema,
+  (input) => workflowExport(storage, input)
 );
 
 registerTool("playbook.list", "List built-in workflow playbooks inspired by external agent methodologies.", playbookListSchema, (input) =>
@@ -2154,11 +2424,19 @@ registerTool("task.retry", "Requeue a failed task for retry with optional delay.
   taskRetry(storage, input)
 );
 
+registerTool("task.recover_expired", "Recover running tasks whose leases expired so abandoned work does not stay stuck indefinitely.", taskRecoverExpiredSchema, (input) =>
+  taskRecoverExpired(storage, input)
+);
+
 registerTool("task.auto_retry", "Manage failed-task auto-retry daemon with deterministic backoff.", taskAutoRetrySchema, (input) =>
   taskAutoRetryControl(storage, input)
 );
 registerTool("worker.fabric", "Manage the distributed worker fabric across local and remote execution hosts.", workerFabricSchema, (input) =>
   workerFabric(storage, input)
+);
+
+registerTool("cluster.topology", "Track the current and planned lab topology so autonomy can reason about active and future execution capacity.", clusterTopologySchema, (input) =>
+  clusterTopology(storage, input)
 );
 
 registerTool("model.router", "Manage and route across measured local and remote model backends.", modelRouterSchema, (input) =>
@@ -2177,6 +2455,17 @@ registerTool(
   "Run bounded background upkeep so the control plane stays ready, autorun keeps scanning, learning stays visible, and eval health stays fresh without recursive self-improvement.",
   autonomyMaintainSchema,
   (input) => autonomyMaintain(storage, invokeRegisteredTool, input)
+);
+
+registerTool(
+  "reaction.engine",
+  "Run event-driven human-attention reactions so the system pushes actionable alerts instead of waiting for dashboard polling.",
+  reactionEngineSchema,
+  (input) => reactionEngineControl(storage, invokeRegisteredTool, input)
+);
+
+registerTool("notifier.send", "Send a real desktop or webhook notification from the MCP control plane.", notifierSendSchema, (input) =>
+  notifierSend(storage, input)
 );
 
 registerTool(
@@ -2211,8 +2500,29 @@ registerTool("org.program", "Version and promote role programs for ring leader, 
   orgProgram(storage, input)
 );
 
+registerTool(
+  "optimizer",
+  "Generate bounded role-program variants, score them against real compile previews, and promote only measured improvements.",
+  optimizerSchema,
+  (input) => optimizer(storage, input)
+);
+
+registerTool(
+  "swarm.profile",
+  "Select a concrete collaboration topology, memory preflight, and checkpoint policy for autonomous execution.",
+  swarmProfileSchema,
+  (input) => swarmProfile(input)
+);
+
 registerTool("task.compile", "Compile an objective into a durable DAG-style plan with explicit owners, evidence contracts, and rollback notes.", taskCompileSchema, (input) =>
   taskCompile(storage, input)
+);
+
+registerTool(
+  "runtime.worker",
+  "Launch and manage tmux-backed, worktree-isolated coding-worker runtimes that can execute and close linked MCP tasks.",
+  runtimeWorkerSchema,
+  (input) => runtimeWorker(storage, input)
 );
 
 registerTool("trichat.thread_open", "Create or update a durable tri-chat thread.", trichatThreadOpenSchema, (input) =>
@@ -2704,6 +3014,10 @@ registerTool("health.storage", "Check local storage health.", healthStorageSchem
   healthStorage(storage)
 );
 
+registerTool("storage.backups", "Inspect and prune local storage backup artifacts.", storageBackupsSchema, (input) =>
+  storageBackups(storage, input)
+);
+
 registerTool("health.policy", "Check policy subsystem health and guardrails.", healthPolicySchema, () =>
   healthPolicy()
 );
@@ -2724,9 +3038,8 @@ registerTool("migration.status", "Read applied schema migration versions and met
   migrationStatus(storage)
 );
 
-const startupArgs = process.argv.slice(2);
 const requestedDomainPacks = parseEnabledDomainPackIds(
-  getArgValue(startupArgs, "--domain-packs") ?? process.env.MCP_DOMAIN_PACKS
+  getArgValue(startupModeArgs, "--domain-packs") ?? process.env.MCP_DOMAIN_PACKS
 );
 const domainPackRegistration = registerDomainPacks(requestedDomainPacks, {
   storage,
@@ -2756,8 +3069,11 @@ initializeImprintAutoSnapshotDaemon(storage, {
   server_version: SERVER_VERSION,
   get_tool_names: () => Array.from(toolRegistry.keys()),
 });
-initializeGoalAutorunDaemon(storage, invokeRegisteredTool);
-initializeAutonomyMaintainDaemon(storage, invokeRegisteredTool);
+if (backgroundOwnerEnabled) {
+  initializeGoalAutorunDaemon(storage, invokeRegisteredTool);
+  initializeAutonomyMaintainDaemon(storage, invokeRegisteredTool);
+  initializeReactionEngineDaemon(storage, invokeRegisteredTool);
+}
 
 function createServerInstance() {
   const server = new Server(
@@ -2795,69 +3111,231 @@ function createServerInstance() {
   return server;
 }
 
+function buildHttpHealthSnapshot() {
+  const workerFabric = resolveEffectiveWorkerFabric(storage, {
+    fallback_workspace_root: repoRoot,
+    fallback_worker_count: 1,
+    fallback_shell: "/bin/zsh",
+  });
+  const healthCounts = workerFabric.hosts.reduce<Record<"healthy" | "degraded" | "offline", number>>(
+    (acc, host) => {
+      acc[host.telemetry.health_state] += 1;
+      return acc;
+    },
+    { healthy: 0, degraded: 0, offline: 0 }
+  );
+  const autonomyState = storage.getAutonomyMaintainState();
+  const autonomyRuntime = getAutonomyMaintainRuntimeStatus();
+  const minimumEvalScore = Number(autonomyRuntime.config.minimum_eval_score ?? autonomyState?.minimum_eval_score ?? 75);
+  const evalHealth = buildEvalHealth(autonomyState, {
+    run_eval_if_due: autonomyRuntime.config.run_eval_if_due ?? autonomyState?.run_eval_if_due ?? true,
+    eval_interval_seconds: Number(autonomyRuntime.config.eval_interval_seconds ?? autonomyState?.eval_interval_seconds ?? 21600),
+    eval_suite_id: String(autonomyRuntime.config.eval_suite_id ?? autonomyState?.eval_suite_id ?? "autonomy.control-plane"),
+    minimum_eval_score: minimumEvalScore,
+    current_dependency_fingerprint: computeEvalDependencyFingerprint(
+      storage,
+      String(autonomyRuntime.config.eval_suite_id ?? autonomyState?.eval_suite_id ?? "autonomy.control-plane")
+    ),
+  });
+  const reactionState = storage.getReactionEngineState();
+  const reactionRuntime = getReactionEngineRuntimeStatus();
+  const observability = storage.summarizeObservabilityDocuments({});
+  const observabilityRecentWindow = new Date(Date.now() - 15 * 60_000).toISOString();
+  const recentObservabilityDocs = storage.listObservabilityDocuments({
+    since: observabilityRecentWindow,
+    levels: ["critical", "error", "warn", "info", "debug", "trace"],
+    limit: 500,
+  });
+  const recentCriticalCount = countActionableRecentObservabilityDocuments(storage, recentObservabilityDocs, "critical");
+  const recentErrorCount = countActionableRecentObservabilityDocuments(storage, recentObservabilityDocs, "error");
+  const attention: string[] = [];
+  const autonomyStale =
+    autonomyState?.enabled === true &&
+    Date.now() - Date.parse(autonomyState.last_run_at ?? "") >
+      Math.max(
+        Number(autonomyRuntime.config.interval_seconds ?? autonomyState?.interval_seconds ?? 120) * 3000,
+        300_000
+      );
+  const reactionStale =
+    reactionState?.enabled === true &&
+    Date.now() - Date.parse(reactionState.last_run_at ?? "") >
+      Math.max(
+        Number(reactionState.interval_seconds ?? 120) * 3000,
+        300_000
+      );
+  if (healthCounts.healthy < 1) {
+    attention.push("worker_fabric.unhealthy");
+  }
+  if (autonomyState?.enabled !== true || autonomyRuntime.running !== true) {
+    attention.push("autonomy_maintain.not_running");
+  } else if (autonomyStale) {
+    attention.push("autonomy_maintain.stale");
+  }
+  if (autonomyState?.last_error) {
+    attention.push("autonomy_maintain.error");
+  }
+  if (!evalHealth.healthy) {
+    attention.push("autonomy_eval.unhealthy");
+  }
+  if (reactionState?.enabled !== true || reactionRuntime.running !== true) {
+    attention.push("reaction_engine.not_running");
+  } else if (reactionStale) {
+    attention.push("reaction_engine.stale");
+  }
+  if (observability.count < 1) {
+    attention.push("observability.empty");
+  }
+  if (recentCriticalCount > 0) {
+    attention.push("observability.critical_recent");
+  } else if (recentErrorCount > 0) {
+    attention.push("observability.error_recent");
+  }
+  const ready =
+    healthCounts.healthy > 0 &&
+    autonomyState?.enabled === true &&
+    autonomyRuntime.running === true &&
+    !autonomyStale &&
+    !autonomyState?.last_error &&
+    evalHealth.healthy &&
+    reactionState?.enabled === true &&
+    reactionRuntime.running === true &&
+    !reactionStale &&
+    !reactionState?.last_error &&
+    observability.count > 0 &&
+    recentCriticalCount < 1;
+
+  return {
+    ready,
+    state: ready ? "ready" : "degraded",
+    attention,
+    worker_fabric: {
+      host_count: workerFabric.hosts.length,
+      enabled_host_count: workerFabric.hosts.filter((host) => host.enabled).length,
+      healthy_host_count: healthCounts.healthy,
+      degraded_host_count: healthCounts.degraded,
+      offline_host_count: healthCounts.offline,
+    },
+    autonomy_maintain: {
+      enabled: autonomyState?.enabled === true,
+      runtime_running: autonomyRuntime.running === true,
+      stale: autonomyStale,
+      last_run_at: autonomyState?.last_run_at ?? null,
+      eval_due: evalHealth.due,
+      eval_health: {
+        suite_id: evalHealth.suite_id,
+        minimum_eval_score: minimumEvalScore,
+        last_eval_score: evalHealth.last_eval_score,
+        healthy: evalHealth.healthy,
+      },
+    },
+    reaction_engine: {
+      enabled: reactionState?.enabled === true,
+      runtime_running: reactionRuntime.running === true,
+      stale: reactionStale,
+      last_run_at: reactionState?.last_run_at ?? null,
+    },
+    observability: {
+      document_count: observability.count,
+      recent_error_count: recentErrorCount,
+      recent_critical_count: recentCriticalCount,
+    },
+    model_router: {
+      enabled: Boolean(storage.getModelRouterState()?.enabled),
+      backend_count: storage.getModelRouterState()?.backends.length ?? 0,
+      enabled_backend_count: (storage.getModelRouterState()?.backends ?? []).filter((backend) => backend.enabled).length,
+      default_backend_id: storage.getModelRouterState()?.default_backend_id ?? null,
+    },
+    ts: new Date().toISOString(),
+  };
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const httpEnabled = args.includes("--http") || process.env.MCP_HTTP === "1";
   const bootstrapOnStart = parseBooleanEnv(process.env.MCP_AUTONOMY_BOOTSTRAP_ON_START, true);
   const maintainOnStart = parseBooleanEnv(process.env.MCP_AUTONOMY_MAINTAIN_ON_START, true);
+  const maintainRunImmediatelyOnStart = parseBooleanEnv(
+    process.env.MCP_AUTONOMY_MAINTAIN_RUN_IMMEDIATELY_ON_START,
+    httpEnabled
+  );
   const startupNonce = `${Date.now()}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
 
-  if (httpEnabled && bootstrapOnStart) {
-    try {
-      await autonomyBootstrap(storage, invokeRegisteredTool, {
-        action: "ensure",
-        local_host_id: "local",
-        mutation: {
-          idempotency_key: `server-startup-autonomy-${startupNonce}`,
-          side_effect_fingerprint: `server-startup-autonomy-${startupNonce}`,
-        },
-        probe_ollama_url: process.env.TRICHAT_OLLAMA_URL,
-        autostart_ring_leader: parseBooleanEnv(process.env.TRICHAT_RING_LEADER_AUTOSTART, true),
-        run_immediately: false,
-        seed_org_programs: true,
-        seed_benchmark_suite: true,
-        seed_eval_suite: true,
-        source_client: "server.startup",
-      });
-    } catch (error) {
-      console.warn(
-        `[autonomy.bootstrap] startup ensure failed: ${error instanceof Error ? error.message : String(error)}`
-      );
+  const runStartupConvergence = async () => {
+    if (!backgroundOwnerEnabled) {
+      return;
     }
-  }
+    const persistedAutopilotState = storage.getTriChatAutopilotState();
+    const startupAutostartRingLeader =
+      parseBooleanEnv(process.env.TRICHAT_RING_LEADER_AUTOSTART, true) && !persistedAutopilotState;
+    if (bootstrapOnStart) {
+      try {
+        await autonomyBootstrap(storage, invokeRegisteredTool, {
+          action: "ensure",
+          local_host_id: "local",
+          mutation: {
+            idempotency_key: `server-startup-autonomy-${startupNonce}`,
+            side_effect_fingerprint: `server-startup-autonomy-${startupNonce}`,
+          },
+          probe_ollama_url: process.env.TRICHAT_OLLAMA_URL,
+          autostart_ring_leader: startupAutostartRingLeader,
+          run_immediately: false,
+          seed_org_programs: true,
+          seed_benchmark_suite: true,
+          seed_eval_suite: true,
+          source_client: "server.startup",
+        });
+      } catch (error) {
+        console.warn(
+          `[autonomy.bootstrap] startup ensure failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
 
-  if (httpEnabled && maintainOnStart) {
-    try {
-      await autonomyMaintain(storage, invokeRegisteredTool, {
-        action: "start",
-        local_host_id: "local",
-        mutation: {
-          idempotency_key: `server-startup-autonomy-maintain-${startupNonce}`,
-          side_effect_fingerprint: `server-startup-autonomy-maintain-${startupNonce}`,
-        },
-        probe_ollama_url: process.env.TRICHAT_OLLAMA_URL,
-        ensure_bootstrap: true,
-        autostart_ring_leader: parseBooleanEnv(process.env.TRICHAT_RING_LEADER_AUTOSTART, true),
-        bootstrap_run_immediately: false,
-        start_goal_autorun_daemon: true,
-        maintain_tmux_controller: true,
-        run_eval_if_due: true,
-        eval_interval_seconds: 21600,
-        eval_suite_id: "autonomy.control-plane",
-        minimum_eval_score: 75,
-        refresh_learning_summary: true,
-        learning_review_interval_seconds: 300,
-        interval_seconds: 120,
-        publish_runtime_event: true,
-        run_immediately: true,
-        source_client: "server.startup",
-      });
-    } catch (error) {
-      console.warn(
-        `[autonomy.maintain] startup run failed: ${error instanceof Error ? error.message : String(error)}`
-      );
+    if (maintainOnStart) {
+      try {
+        await autonomyMaintain(storage, invokeRegisteredTool, {
+          action: "start",
+          local_host_id: "local",
+          mutation: {
+            idempotency_key: `server-startup-autonomy-maintain-${startupNonce}`,
+            side_effect_fingerprint: `server-startup-autonomy-maintain-${startupNonce}`,
+          },
+          probe_ollama_url: process.env.TRICHAT_OLLAMA_URL,
+          ensure_bootstrap: true,
+          autostart_ring_leader: startupAutostartRingLeader,
+          bootstrap_run_immediately: false,
+          start_goal_autorun_daemon: true,
+          start_task_auto_retry_daemon: true,
+          start_transcript_auto_squish_daemon: true,
+          start_imprint_auto_snapshot_daemon: true,
+          start_trichat_auto_retention_daemon: true,
+          start_trichat_turn_watchdog_daemon: true,
+          run_task_recovery: true,
+          start_runtime_workers: true,
+          maintain_tmux_controller: true,
+          run_eval_if_due: true,
+          eval_interval_seconds: 21600,
+          eval_suite_id: "autonomy.control-plane",
+          minimum_eval_score: 75,
+          run_optimizer_if_due: true,
+          optimizer_interval_seconds: 14400,
+          optimizer_min_improvement: 2,
+          refresh_learning_summary: true,
+          learning_review_interval_seconds: 300,
+          run_goal_hygiene: true,
+          start_reaction_engine_daemon: true,
+          interval_seconds: 120,
+          publish_runtime_event: true,
+          run_immediately: maintainRunImmediatelyOnStart,
+          source_client: "server.startup",
+        });
+      } catch (error) {
+        console.warn(
+          `[autonomy.maintain] startup run failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
     }
-  }
+  };
 
   if (httpEnabled) {
     const port = Number(getArgValue(args, "--http-port") ?? process.env.MCP_HTTP_PORT ?? 8787);
@@ -2871,9 +3349,47 @@ async function main() {
       host,
       allowedOrigins,
       bearerToken: process.env.MCP_HTTP_BEARER_TOKEN ?? null,
+      healthSnapshot: buildHttpHealthSnapshot,
+      officeSnapshot: ({ threadId, theme }) =>
+        buildOfficeGuiSnapshot(
+          officeSnapshot(storage, {
+            thread_id: threadId,
+            turn_limit: 12,
+            task_limit: 24,
+            session_limit: 50,
+            event_limit: 24,
+            learning_limit: 120,
+            runtime_worker_limit: 20,
+            include_kernel: true,
+            include_learning: true,
+            include_bus: true,
+            include_adapter: true,
+            include_runtime_workers: true,
+          }) as Record<string, unknown>,
+          { theme }
+        ),
+      officeRawSnapshot: ({ threadId }) =>
+        officeSnapshot(storage, {
+          thread_id: threadId,
+          turn_limit: 12,
+          task_limit: 24,
+          session_limit: 50,
+          event_limit: 24,
+          learning_limit: 120,
+          runtime_worker_limit: 20,
+          include_kernel: true,
+          include_learning: true,
+          include_bus: true,
+          include_adapter: true,
+          include_runtime_workers: true,
+        }),
     });
+    void runStartupConvergence();
   } else {
     await startStdioTransport(createServerInstance());
+    if (backgroundOwnerEnabled) {
+      void runStartupConvergence();
+    }
   }
 }
 

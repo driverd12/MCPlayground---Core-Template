@@ -46,12 +46,21 @@ TRANSPORT="$(resolve_transport)"
 ensure_autonomy_entry() {
   local should_ensure="${TRICHAT_AUTONOMY_ENSURE_ON_ENTRY:-1}"
   local mode="${TRICHAT_AUTONOMY_ENSURE_MODE:-required}"
+  local attempts="${TRICHAT_AUTONOMY_ENSURE_ATTEMPTS:-3}"
+  local backoff_seconds="${TRICHAT_AUTONOMY_ENSURE_BACKOFF_SECONDS:-2}"
   if [[ "${ACTION}" != "start" || "${should_ensure}" == "0" ]]; then
     return 0
   fi
-  if "${REPO_ROOT}/scripts/autonomy_ctl.sh" ensure >/dev/null 2>&1; then
-    return 0
-  fi
+  local attempt=1
+  while [[ "${attempt}" -le "${attempts}" ]]; do
+    if "${REPO_ROOT}/scripts/autonomy_ctl.sh" ensure >/dev/null 2>&1; then
+      return 0
+    fi
+    if [[ "${attempt}" -lt "${attempts}" ]]; then
+      sleep "${backoff_seconds}"
+    fi
+    attempt="$((attempt + 1))"
+  done
   if [[ "${mode}" == "best_effort" ]]; then
     echo "[ring-leader] warning: autonomy bootstrap ensure failed; continuing due to TRICHAT_AUTONOMY_ENSURE_MODE=best_effort" >&2
     return 0
@@ -98,6 +107,36 @@ NODE
 )"
 fi
 
+resolve_dynamic_tmux_cap() {
+  local field="${1:-safe_worker_count}"
+  node --input-type=module - "${field}" "${REPO_ROOT}" <<'NODE'
+const field = String(process.argv[2] || "safe_worker_count");
+const repoRoot = String(process.argv[3] || process.cwd());
+try {
+  const modulePath = new URL(`file://${repoRoot}/dist/local_host_profile.js`);
+  const { captureLocalHostProfile } = await import(modulePath.href);
+  const profile = captureLocalHostProfile({ workspace_root: repoRoot });
+  const value = Number(profile?.[field]);
+  if (!Number.isFinite(value) || value <= 0) {
+    process.exit(1);
+  }
+  process.stdout.write(String(Math.trunc(value)));
+} catch {
+  process.exit(1);
+}
+NODE
+}
+
+DEFAULT_TMUX_WORKER_COUNT="${TRICHAT_RING_LEADER_TMUX_WORKER_COUNT:-}"
+if [[ -z "${DEFAULT_TMUX_WORKER_COUNT}" ]]; then
+  DEFAULT_TMUX_WORKER_COUNT="$(resolve_dynamic_tmux_cap safe_worker_count 2>/dev/null || printf '4')"
+fi
+
+DEFAULT_TMUX_MAX_QUEUE_PER_WORKER="${TRICHAT_RING_LEADER_TMUX_MAX_QUEUE_PER_WORKER:-}"
+if [[ -z "${DEFAULT_TMUX_MAX_QUEUE_PER_WORKER}" ]]; then
+  DEFAULT_TMUX_MAX_QUEUE_PER_WORKER="$(resolve_dynamic_tmux_cap safe_max_queue_per_worker 2>/dev/null || printf '8')"
+fi
+
 if [[ "${ACTION}" == "status" ]]; then
   node ./scripts/mcp_tool_call.mjs \
     --tool trichat.autopilot \
@@ -130,15 +169,15 @@ ARGS_JSON="$(node --input-type=module - <<'NODE' \
 "${SPECIALIST_IDS}" \
 "${TRICHAT_RING_LEADER_MAX_ROUNDS:-2}" \
 "${TRICHAT_RING_LEADER_MIN_SUCCESS_AGENTS:-2}" \
-"${TRICHAT_RING_LEADER_BRIDGE_TIMEOUT_SECONDS:-90}" \
-"${TRICHAT_RING_LEADER_BRIDGE_DRY_RUN:-0}" \
-"${TRICHAT_RING_LEADER_EXECUTE_ENABLED:-1}" \
-"${TRICHAT_RING_LEADER_EXECUTE_BACKEND:-auto}" \
-"${TRICHAT_RING_LEADER_TMUX_SESSION_NAME:-ring-leader-autopilot}" \
-"${TRICHAT_RING_LEADER_TMUX_WORKER_COUNT:-4}" \
-"${TRICHAT_RING_LEADER_TMUX_MAX_QUEUE_PER_WORKER:-8}" \
-"${TRICHAT_RING_LEADER_TMUX_AUTO_SCALE_WORKERS:-1}" \
-"${TRICHAT_RING_LEADER_TMUX_SYNC_AFTER_DISPATCH:-1}" \
+  "${TRICHAT_RING_LEADER_BRIDGE_TIMEOUT_SECONDS:-90}" \
+  "${TRICHAT_RING_LEADER_BRIDGE_DRY_RUN:-0}" \
+  "${TRICHAT_RING_LEADER_EXECUTE_ENABLED:-1}" \
+  "${TRICHAT_RING_LEADER_EXECUTE_BACKEND:-auto}" \
+  "${TRICHAT_RING_LEADER_TMUX_SESSION_NAME:-ring-leader-autopilot}" \
+  "${DEFAULT_TMUX_WORKER_COUNT}" \
+  "${DEFAULT_TMUX_MAX_QUEUE_PER_WORKER}" \
+  "${TRICHAT_RING_LEADER_TMUX_AUTO_SCALE_WORKERS:-1}" \
+  "${TRICHAT_RING_LEADER_TMUX_SYNC_AFTER_DISPATCH:-1}" \
 "${TRICHAT_RING_LEADER_CONFIDENCE_THRESHOLD:-0.45}" \
 "${TRICHAT_RING_LEADER_MAX_CONSECUTIVE_ERRORS:-3}" \
 "${TRICHAT_RING_LEADER_ADR_POLICY:-high_impact}" \

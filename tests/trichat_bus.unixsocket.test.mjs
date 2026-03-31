@@ -23,6 +23,7 @@ test("trichat.bus streams message_post events over Unix socket while persisting 
     env: inheritedEnv({
       ANAMNESIS_HUB_DB_PATH: dbPath,
       TRICHAT_BUS_SOCKET_PATH: busSocketPath,
+      MCP_BACKGROUND_OWNER: "1",
     }),
     stderr: "pipe",
   });

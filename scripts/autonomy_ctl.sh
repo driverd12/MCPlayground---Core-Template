@@ -32,19 +32,20 @@ STDIO_COMMAND="${TRICHAT_MCP_STDIO_COMMAND:-node}"
 STDIO_ARGS="${TRICHAT_MCP_STDIO_ARGS:-dist/server.js}"
 
 resolve_transport() {
+  if [[ "${ACTION}" == "status" ]]; then
+    printf 'stdio\n'
+    return 0
+  fi
   local preferred="${TRICHAT_RING_LEADER_TRANSPORT:-}"
   if [[ -n "${preferred}" ]]; then
     printf '%s\n' "${preferred}"
     return 0
   fi
   if [[ -n "${MCP_HTTP_BEARER_TOKEN:-}" ]]; then
-    if node ./scripts/mcp_tool_call.mjs \
-      --tool health.storage \
-      --args '{}' \
-      --transport http \
-      --url "${HTTP_URL}" \
-      --origin "${HTTP_ORIGIN}" \
-      --cwd "${REPO_ROOT}" >/dev/null 2>&1; then
+    if curl -fsS \
+      -H "Authorization: Bearer ${MCP_HTTP_BEARER_TOKEN}" \
+      -H "Origin: ${HTTP_ORIGIN}" \
+      "${HTTP_URL%/}/health" >/dev/null 2>&1; then
       printf 'http\n'
       return 0
     fi
@@ -77,7 +78,13 @@ NODE
 call_tool_json() {
   local tool_name="${1}"
   local args_json="${2}"
-  node ./scripts/mcp_tool_call.mjs \
+  local timeout_ms="${MCP_TOOL_CALL_TIMEOUT_MS:-180000}"
+  local max_attempts="${MCP_TOOL_CALL_HTTP_MAX_ATTEMPTS:-10}"
+  if [[ "${ACTION}" == "status" ]]; then
+    timeout_ms="${AUTONOMY_STATUS_TIMEOUT_MS:-8000}"
+    max_attempts="${AUTONOMY_STATUS_HTTP_MAX_ATTEMPTS:-1}"
+  fi
+  MCP_TOOL_CALL_TIMEOUT_MS="${timeout_ms}" MCP_TOOL_CALL_HTTP_MAX_ATTEMPTS="${max_attempts}" node ./scripts/mcp_tool_call.mjs \
     --tool "${tool_name}" \
     --args "${args_json}" \
     --transport "${TRANSPORT}" \
@@ -86,6 +93,64 @@ call_tool_json() {
     --stdio-command "${STDIO_COMMAND}" \
     --stdio-args "${STDIO_ARGS}" \
     --cwd "${REPO_ROOT}"
+}
+
+start_maintain_entry() {
+  local quiet="${1:-1}"
+  local args_json
+  args_json="$(node --input-type=module - \
+    "${AUTONOMY_KEEPALIVE_INTERVAL_SECONDS:-120}" \
+    "${AUTONOMY_LEARNING_REVIEW_INTERVAL_SECONDS:-300}" \
+    "${AUTONOMY_EVAL_INTERVAL_SECONDS:-21600}" \
+    "${AUTONOMY_BOOTSTRAP_RUN_IMMEDIATELY:-0}" \
+    "${TRICHAT_RING_LEADER_AUTOSTART:-1}" \
+    <<'NODE'
+function parseBoolean(value, fallback) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function parseIntValue(value, fallback, min, max) {
+  const parsed = Number.parseInt(String(value || "").trim(), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+const [intervalSeconds, learningIntervalSeconds, evalIntervalSeconds, runImmediately, autostartRingLeader] = process.argv.slice(2);
+const stamp = Date.now();
+
+process.stdout.write(
+  JSON.stringify({
+    action: "start",
+    mutation: {
+      idempotency_key: `autonomy-maintain-start-${stamp}-${process.pid}`,
+      side_effect_fingerprint: `autonomy-maintain-start-${stamp}-${process.pid}`,
+    },
+    interval_seconds: parseIntValue(intervalSeconds, 120, 5, 3600),
+    learning_review_interval_seconds: parseIntValue(learningIntervalSeconds, 300, 60, 604800),
+    eval_interval_seconds: parseIntValue(evalIntervalSeconds, 21600, 300, 604800),
+    bootstrap_run_immediately: parseBoolean(runImmediately, false),
+    autostart_ring_leader: parseBoolean(autostartRingLeader, true),
+    ensure_bootstrap: true,
+    start_goal_autorun_daemon: true,
+    maintain_tmux_controller: true,
+    run_eval_if_due: true,
+    eval_suite_id: "autonomy.control-plane",
+    minimum_eval_score: 75,
+    refresh_learning_summary: true,
+    publish_runtime_event: true,
+    source_client: "autonomy_ctl.sh",
+  })
+);
+NODE
+)"
+  if [[ "${quiet}" == "1" ]]; then
+    call_tool_json autonomy.maintain "${args_json}" >/dev/null
+  else
+    call_tool_json autonomy.maintain "${args_json}"
+  fi
 }
 
 ensure_autonomy_entry() {
@@ -128,7 +193,7 @@ NODE
   else
     bootstrap_result="$(call_tool_json autonomy.bootstrap "${args_json}")"
   fi
-  run_maintain_entry 1
+  start_maintain_entry 1
   if [[ "${quiet}" != "1" ]]; then
     printf '%s\n' "${bootstrap_result}"
   fi
@@ -195,8 +260,48 @@ NODE
 TRANSPORT="$(resolve_transport)"
 
 if [[ "${ACTION}" == "status" ]]; then
-  BOOTSTRAP_STATUS="$(call_tool_json autonomy.bootstrap '{"action":"status"}')"
-  MAINTAIN_STATUS="$(call_tool_json autonomy.maintain '{"action":"status"}')"
+  BOOTSTRAP_STATUS="$(MCP_TOOL_CALL_TIMEOUT_MS="${AUTONOMY_STATUS_TIMEOUT_MS:-8000}" node ./scripts/mcp_tool_call.mjs --tool autonomy.bootstrap --args '{"action":"status","fast":true}' --transport stdio --stdio-command "${STDIO_COMMAND}" --stdio-args "${STDIO_ARGS}" --cwd "${REPO_ROOT}")"
+  READY_JSON=""
+  if [[ -n "${MCP_HTTP_BEARER_TOKEN:-}" ]]; then
+    READY_JSON="$(
+      curl -fsS \
+        -H "Authorization: Bearer ${MCP_HTTP_BEARER_TOKEN}" \
+        -H "Origin: ${HTTP_ORIGIN}" \
+        "${HTTP_URL%/}/ready" 2>/dev/null || true
+    )"
+  fi
+  if [[ -n "${READY_JSON}" ]]; then
+    MAINTAIN_STATUS="$(python3 - "${READY_JSON}" <<'PY'
+import json
+import sys
+
+ready = json.loads(sys.argv[1])
+maintain = ready.get("autonomy_maintain") or {}
+payload = {
+    "state": {
+        "enabled": bool(maintain.get("enabled")),
+        "last_run_at": maintain.get("last_run_at"),
+        "last_error": None,
+    },
+    "runtime": {
+        "running": bool(maintain.get("runtime_running")),
+        "last_error": None,
+    },
+    "due": {
+        "stale": bool(maintain.get("stale")),
+        "eval": bool(maintain.get("eval_due")),
+    },
+    "eval_health": maintain.get("eval_health") or {},
+    "attention": ready.get("attention") or [],
+    "fast": True,
+    "source": "ready",
+}
+print(json.dumps(payload))
+PY
+)"
+  else
+    MAINTAIN_STATUS="$(MCP_TOOL_CALL_TIMEOUT_MS="${AUTONOMY_STATUS_TIMEOUT_MS:-8000}" node ./scripts/mcp_tool_call.mjs --tool autonomy.maintain --args '{"action":"status"}' --transport stdio --stdio-command "${STDIO_COMMAND}" --stdio-args "${STDIO_ARGS}" --cwd "${REPO_ROOT}")"
+  fi
   python3 - "${BOOTSTRAP_STATUS}" "${MAINTAIN_STATUS}" <<'PY'
 import json
 import sys

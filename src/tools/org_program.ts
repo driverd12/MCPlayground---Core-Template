@@ -63,7 +63,7 @@ export const orgProgramSchema = z
     }
   });
 
-function loadOrgPrograms(storage: Storage): OrgProgramsStateRecord {
+export function loadOrgPrograms(storage: Storage): OrgProgramsStateRecord {
   return (
     storage.getOrgProgramsState() ?? {
       enabled: true,
@@ -86,7 +86,50 @@ function normalizeVersion(version: OrgProgramVersionRecord): OrgProgramVersionRe
   };
 }
 
-function upsertVersion(role: OrgProgramRoleRecord, version: OrgProgramVersionRecord) {
+export type OrgProgramSignals = {
+  bounded_execution: boolean;
+  explicit_evidence: boolean;
+  rollback_ready: boolean;
+  local_first: boolean;
+  parallel_delegation: boolean;
+  specialist_routing: boolean;
+  fail_closed: boolean;
+  verification_first: boolean;
+};
+
+function normalizeSignalsText(version: Pick<OrgProgramVersionRecord, "doctrine" | "delegation_contract" | "evaluation_standard"> | null) {
+  if (!version) {
+    return "";
+  }
+  return `${version.doctrine}\n${version.delegation_contract}\n${version.evaluation_standard}`.toLowerCase();
+}
+
+function includesAny(text: string, patterns: RegExp[]) {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+export function deriveOrgProgramSignals(
+  version: Pick<OrgProgramVersionRecord, "doctrine" | "delegation_contract" | "evaluation_standard"> | null
+): OrgProgramSignals {
+  const text = normalizeSignalsText(version);
+  return {
+    bounded_execution: includesAny(text, [/\bbounded\b/, /\bnarrow\b/, /smallest safe/, /single owner/, /\bnon-overlapping\b/]),
+    explicit_evidence: includesAny(text, [/\bevidence\b/, /\bproof\b/, /\breproducible\b/, /\bvalidation\b/, /\bartifact\b/]),
+    rollback_ready: includesAny(text, [/\brollback\b/, /\breversible\b/, /\brevert\b/]),
+    local_first: includesAny(text, [/\blocal-first\b/, /\bprefer local\b/, /\blocal execution\b/, /\bon-device\b/]),
+    parallel_delegation: includesAny(text, [/\bparallel\b/, /delegation batch/, /\bbatch\b/, /\bmultiple leaf\b/]),
+    specialist_routing: includesAny(text, [/\bspecialist\b/, /\bsubject matter\b/, /\bdomain\b/, /\bleaf\b/, /\bdirector\b/]),
+    fail_closed: includesAny(text, [/\bfail closed\b/, /\bescalat\b/, /\bstop when confidence\b/, /\bweak confidence\b/]),
+    verification_first: includesAny(text, [/\bverify\b/, /\bverification\b/, /\bacceptance\b/, /\bcheck\b/, /\bgate\b/]),
+  };
+}
+
+export function getEffectiveOrgProgramSignals(storage: Storage, roleId: string) {
+  const effective = getEffectiveOrgProgram(storage, roleId);
+  return deriveOrgProgramSignals(effective?.version ?? null);
+}
+
+export function upsertVersion(role: OrgProgramRoleRecord, version: OrgProgramVersionRecord) {
   const versions = role.versions.filter((entry) => entry.version_id !== version.version_id).concat([version]).sort((left, right) =>
     left.created_at.localeCompare(right.created_at)
   );

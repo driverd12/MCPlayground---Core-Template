@@ -139,6 +139,108 @@ test("autonomy.command auto-spawns matched SMEs and folds their bounded workstre
   }
 });
 
+test("autonomy.command uses routed bridge candidates to augment research intake without dropping local specialists", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-command-router-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+  const ollama = await startFakeOllamaServer({
+    models: [{ name: "llama3.2:3b" }],
+  });
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+    TRICHAT_OLLAMA_URL: ollama.url,
+    GOOGLE_API_KEY: "test-gemini-key",
+    TRICHAT_RING_LEADER_AUTOSTART: "1",
+    TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+    TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+    TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+  });
+
+  try {
+    const intake = await callTool(session.client, "autonomy.command", {
+      mutation: nextMutation("autonomy-command-router", "autonomy.command", () => mutationCounter++),
+      objective: "Research and compare hosted versus local model-routing strategies for tomorrow's presentation.",
+      title: "Research routing intake",
+      trichat_bridge_dry_run: true,
+      dispatch_limit: 12,
+      max_passes: 3,
+    });
+
+    assert.equal(intake.ok, true);
+    assert.ok(intake.model_router);
+    assert.equal(intake.model_router.task_kind, "research");
+    assert.ok(intake.model_router.routed_bridge_agent_ids.includes("gemini"));
+    assert.ok(intake.model_router.effective_agent_ids.includes("research-director"));
+    assert.ok(intake.model_router.effective_agent_ids.includes("gemini"));
+    assert.equal(intake.goal.metadata.model_router_task_kind, "research");
+    assert.ok(intake.goal.metadata.routed_bridge_agent_ids.includes("gemini"));
+  } finally {
+    await session.client.close().catch(() => {});
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("autonomy.command selects a swarm profile, reuses prior memory, and records checkpoint artifacts", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-command-swarm-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+  const ollama = await startFakeOllamaServer({
+    models: [{ name: "llama3.2:3b" }],
+  });
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+    TRICHAT_OLLAMA_URL: ollama.url,
+    TRICHAT_RING_LEADER_AUTOSTART: "1",
+    TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+    TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+    TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+  });
+
+  try {
+    await callTool(session.client, "memory.append", {
+      mutation: nextMutation("autonomy-command-swarm", "memory.append", () => mutationCounter++),
+      text: "dns cutover rollback verification bounded dns cutover rollback verification",
+      tags: ["dns", "rollback", "verification"],
+    });
+
+    const intake = await callTool(session.client, "autonomy.command", {
+      mutation: nextMutation("autonomy-command-swarm", "autonomy.command", () => mutationCounter++),
+      objective: "Plan a bounded DNS cutover with rollback and verification for tomorrow morning.",
+      title: "DNS cutover autonomy intake",
+      trichat_bridge_dry_run: true,
+      dispatch_limit: 12,
+      max_passes: 3,
+    });
+
+    assert.equal(intake.ok, true);
+    assert.equal(typeof intake.swarm.profile.topology, "string");
+    assert.equal(intake.goal.metadata.swarm_profile.topology, intake.swarm.profile.topology);
+    assert.equal(intake.plan.metadata.swarm_profile.topology, intake.swarm.profile.topology);
+    assert.equal(intake.swarm.memory_preflight.match_count >= 1, true);
+    assert.equal(intake.plan.metadata.memory_preflight.match_count >= 1, true);
+    assert.equal(intake.swarm.checkpoints.length >= 2, true);
+
+    const artifacts = await callTool(session.client, "artifact.list", {
+      goal_id: intake.goal.goal_id,
+      artifact_type: "swarm.checkpoint",
+      limit: 10,
+    });
+    assert.equal(artifacts.artifacts.length >= 2, true);
+    assert.ok(
+      artifacts.artifacts.some((artifact) => artifact.plan_id === intake.plan.plan_id || artifact.goal_id === intake.goal.goal_id)
+    );
+  } finally {
+    await session.client.close().catch(() => {});
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function openClient(extraEnv) {
   const transport = new StdioClientTransport({
     command: "node",

@@ -31,6 +31,7 @@ import { buildIsolatedExecutionPlan, buildRemoteExecutionCommand } from "../exec
 import {
   buildWorkerFabricSlots,
   computeHostHealthScore,
+  rankWorkerFabricSlots,
   resolveEffectiveWorkerFabric,
   resolveTaskExecutionRouting,
   type WorkerFabricSlot,
@@ -51,6 +52,7 @@ import {
   listDomainSpecialistAgentDefinitions,
   matchDomainSpecialists,
 } from "./specialist_catalog.js";
+import { deriveOrgProgramSignals, getEffectiveOrgProgram } from "./org_program.js";
 
 const threadStatusSchema = z.enum(["active", "archived"]);
 const adapterChannelSchema = z.enum(["command", "model"]);
@@ -62,6 +64,16 @@ const DEFAULT_TURN_AGENT_IDS = [...DEFAULT_CONSENSUS_AGENT_IDS];
 const BRIDGE_PROTOCOL_VERSION = "trichat-bridge-v1";
 const BRIDGE_RESPONSE_KIND = "trichat.adapter.response";
 const BRIDGE_PONG_KIND = "trichat.adapter.pong";
+const ADAPTER_CIRCUIT_FAILURE_THRESHOLD = clampInt(
+  Number(process.env.TRICHAT_ADAPTER_CIRCUIT_FAILURE_THRESHOLD || "2"),
+  1,
+  10
+);
+const ADAPTER_CIRCUIT_OPEN_SECONDS = clampInt(
+  Number(process.env.TRICHAT_ADAPTER_CIRCUIT_OPEN_SECONDS || "180"),
+  15,
+  3600
+);
 const TURN_PHASE_ORDER: ReadonlyArray<string> = [
   "plan",
   "propose",
@@ -580,6 +592,7 @@ const autoRetentionRuntime: {
   in_tick: boolean;
   started_at: string | null;
   last_tick_at: string | null;
+  last_success_at: string | null;
   last_error: string | null;
   tick_count: number;
   total_candidates: number;
@@ -591,6 +604,7 @@ const autoRetentionRuntime: {
   in_tick: false,
   started_at: null,
   last_tick_at: null,
+  last_success_at: null,
   last_error: null,
   tick_count: 0,
   total_candidates: 0,
@@ -604,6 +618,7 @@ const turnWatchdogRuntime: {
   in_tick: boolean;
   started_at: string | null;
   last_tick_at: string | null;
+  last_success_at: string | null;
   last_error: string | null;
   tick_count: number;
   stale_detected_count: number;
@@ -617,6 +632,7 @@ const turnWatchdogRuntime: {
   in_tick: false,
   started_at: null,
   last_tick_at: null,
+  last_success_at: null,
   last_error: null,
   tick_count: 0,
   stale_detected_count: 0,
@@ -2192,6 +2208,7 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
     const sessionActive = runtime.dry_run ? true : tmuxSessionExists(resolved.session_name);
     const reconciled = reconcileTmuxTaskResidue(resolved, {
       session_active: sessionActive,
+      worker_slots: workerSlots,
     });
     const state = reconciled.state;
     const summarized = summarizeTmuxState(state, input.include_completed ?? false, workerSlots);
@@ -2221,12 +2238,15 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
     payload: input,
     execute: async () => {
       if (input.action === "start") {
-        const desired = reconcileTmuxTaskResidue(resolveTmuxControllerState(storage, input)).state;
+        const baseState = resolveTmuxControllerState(storage, input);
         const workerSlots = buildWorkerFabricSlots(storage, {
-          fallback_workspace_root: desired.workspace,
-          fallback_worker_count: desired.worker_count,
-          fallback_shell: desired.shell,
+          fallback_workspace_root: baseState.workspace,
+          fallback_worker_count: baseState.worker_count,
+          fallback_shell: baseState.shell,
         });
+        const desired = reconcileTmuxTaskResidue(baseState, {
+          worker_slots: workerSlots,
+        }).state;
         ensureTmuxSession(desired, workerSlots);
         const persisted = storage.setTriChatTmuxControllerState({
           ...desired,
@@ -2258,6 +2278,7 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
           },
           {
             session_active: false,
+            worker_slots: workerSlots,
           }
         );
         const persisted = storage.setTriChatTmuxControllerState(reconciled.state);
@@ -2282,7 +2303,9 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
           worker_slots: workerSlots,
           capture_lines: input.capture_lines ?? 400,
         });
-        const reconciled = reconcileTmuxTaskResidue(synced.state);
+        const reconciled = reconcileTmuxTaskResidue(synced.state, {
+          worker_slots: workerSlots,
+        });
         const persisted = storage.setTriChatTmuxControllerState({
           ...reconciled.state,
           tasks: pruneTmuxTaskHistory(reconciled.state.tasks),
@@ -2364,7 +2387,9 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
             worker_slots: workerSlots,
             capture_lines: input.capture_lines ?? 400,
           });
-          nextState = reconcileTmuxTaskResidue(sync.state).state;
+          nextState = reconcileTmuxTaskResidue(sync.state, {
+            worker_slots: workerSlots,
+          }).state;
           const scaleDecision = maybeScaleUpTmuxWorkers(nextState, {
             auto_scale_workers: input.auto_scale_workers ?? true,
             min_worker_count: input.min_worker_count,
@@ -2457,7 +2482,9 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
           worker_slots: workerSlots,
           capture_lines: input.capture_lines ?? 400,
         });
-        let nextState = reconcileTmuxTaskResidue(syncBefore.state).state;
+        let nextState = reconcileTmuxTaskResidue(syncBefore.state, {
+          worker_slots: workerSlots,
+        }).state;
         const materialized = materializeTmuxInputTasks(input.tasks ?? [], nextState.next_task_seq, {
           default_thread_id: null,
           default_turn_id: null,
@@ -2467,7 +2494,9 @@ export function trichatTmuxController(storage: Storage, input: z.infer<typeof tr
           next_task_seq: materialized.next_task_seq,
           tasks: [...nextState.tasks, ...materialized.tasks],
         };
-        nextState = reconcileTmuxTaskResidue(nextState).state;
+        nextState = reconcileTmuxTaskResidue(nextState, {
+          worker_slots: workerSlots,
+        }).state;
 
         const assignment = assignQueuedTmuxTasks(nextState, workerSlots, fabric.strategy, fabric.default_host_id);
         nextState = assignment.state;
@@ -4610,7 +4639,10 @@ function ensureAutopilotDelegationSuccessCriteriaContext(
     if (!normalizedEntry) {
       return false;
     }
-    if (/\b(slice|delegated|dashboard|implementation slice|bounded objective)\b/i.test(normalizedEntry)) {
+    if (/\b(slice|delegated|implementation slice|bounded objective)\b/i.test(normalizedEntry)) {
+      return true;
+    }
+    if (/\bdashboard\b/i.test(normalizedEntry) && /\b(slice|bounded|scope)\b/i.test(normalizedEntry)) {
       return true;
     }
     return /\bhandoff\b/i.test(normalizedEntry) && /\b(slice|bounded|scope)\b/i.test(normalizedEntry);
@@ -6784,6 +6816,33 @@ async function runAutopilotBridgeAsk(
   error: string | null;
 }> {
   const workspace = process.cwd();
+  const adapterState = getLatestAdapterState(storage, input.agent_id, "model");
+  if (isAdapterCircuitOpen(adapterState)) {
+    const error = `adapter circuit open${adapterState?.open_until ? ` until ${adapterState.open_until}` : ""}`;
+    recordAdapterAskTelemetry(storage, {
+      agent_id: input.agent_id,
+      duration_ms: 0,
+      outcome: "circuit_open",
+      error,
+      quality_warnings: ["adapter_circuit_open"],
+      source: "trichat.autopilot",
+    });
+    return {
+      ok: false,
+      content: null,
+      strategy: "",
+      commands: [],
+      confidence: 0.2,
+      mentorship_note: null,
+      delegate_agent_id: null,
+      task_objective: null,
+      success_criteria: [],
+      evidence_requirements: [],
+      rollback_notes: [],
+      delegations: [],
+      error,
+    };
+  }
   const resolution = resolveAdapterProtocolCommand({
     agent_id: input.agent_id,
     workspace,
@@ -6796,6 +6855,14 @@ async function runAutopilotBridgeAsk(
     ask_dry_run: input.config.bridge_dry_run,
   });
   if (!resolution.command) {
+    recordAdapterAskTelemetry(storage, {
+      agent_id: input.agent_id,
+      duration_ms: 0,
+      outcome: "handshake_failed",
+      error: "bridge command not resolved",
+      quality_warnings: ["bridge_command_missing"],
+      source: "trichat.autopilot",
+    });
     return {
       ok: false,
       content: null,
@@ -6880,6 +6947,15 @@ async function runAutopilotBridgeAsk(
     require_content: true,
   });
   if (execution.error || validationError) {
+    const outcome = validationError ? "handshake_failed" : "response_error";
+    recordAdapterAskTelemetry(storage, {
+      agent_id: input.agent_id,
+      duration_ms: execution.duration_ms,
+      outcome,
+      error: execution.error ?? validationError,
+      quality_warnings: validationError ? ["protocol_validation_failed"] : ["response_error"],
+      source: "trichat.autopilot",
+    });
     return {
       ok: false,
       content: null,
@@ -6898,12 +6974,21 @@ async function runAutopilotBridgeAsk(
   }
   const content = safeAdapterEnvelopeField(execution.envelope?.content) ?? "";
   const parsed = parseAutopilotProposal(content);
+  const degradedQuality = !parsed.structured_output || parsed.quality_warnings.length > 0;
+  const adjustedConfidence = degradedQuality ? Math.min(parsed.confidence, 0.68) : parsed.confidence;
+  recordAdapterAskTelemetry(storage, {
+    agent_id: input.agent_id,
+    duration_ms: execution.duration_ms,
+    outcome: degradedQuality ? "response_degraded" : "response_ok",
+    quality_warnings: parsed.quality_warnings,
+    source: "trichat.autopilot",
+  });
   return {
     ok: true,
     content,
     strategy: parsed.strategy,
     commands: parsed.commands,
-    confidence: parsed.confidence,
+    confidence: adjustedConfidence,
     mentorship_note: parsed.mentorship_note,
     delegate_agent_id: parsed.delegate_agent_id,
     task_objective: parsed.task_objective,
@@ -7292,14 +7377,18 @@ async function pauseAutopilotDaemon(storage: Storage, config: TriChatAutopilotCo
 }
 
 function getAutopilotStatus(storage?: Storage) {
-  const effectiveAgentPool = resolveAutopilotAgentPool(storage, autopilotRuntime.config, autopilotRuntime.config.objective);
-  const sessionId = buildAutopilotAgentSessionId(autopilotRuntime.config);
-  const session = storage ? storage.getAgentSessionById(sessionId) : null;
   const persisted = storage ? storage.getTriChatAutopilotState() : null;
+  const effectiveConfig = persisted ? resolveAutopilotConfig(persisted, autopilotRuntime.config) : autopilotRuntime.config;
+  const effectiveAgentPool = resolveAutopilotAgentPool(storage, effectiveConfig, effectiveConfig.objective);
+  const sessionId = buildAutopilotAgentSessionId(effectiveConfig);
+  const session = storage ? storage.getAgentSessionById(sessionId) : null;
+  const inferredRunning = autopilotRuntime.running || (Boolean(persisted?.enabled) && Boolean(session));
   return {
-    running: autopilotRuntime.running,
+    running: inferredRunning,
+    local_running: autopilotRuntime.running,
+    inferred_running: !autopilotRuntime.running && inferredRunning,
     in_tick: autopilotRuntime.in_tick,
-    config: { ...autopilotRuntime.config },
+    config: { ...effectiveConfig },
     persisted: persisted
       ? {
           enabled: persisted.enabled,
@@ -7968,6 +8057,8 @@ function buildAutopilotCouncilPrompt(input: {
           `Source rollback notes: ${input.delegation_brief.rollback_notes.join(" | ") || "none"}`,
         ]
       : [];
+  const roleProgram = input.storage ? getEffectiveOrgProgram(input.storage, input.agent_id) : null;
+  const roleProgramSignals = deriveOrgProgramSignals(roleProgram?.version ?? null);
   const learningLines =
     input.learning_notes.length > 0
       ? [
@@ -7986,6 +8077,11 @@ function buildAutopilotCouncilPrompt(input: {
     `Objective source: ${input.objective_source}`,
     `Agent description: ${agent?.description ?? "none"}`,
     `Agent doctrine: ${compactConsensusText(agent?.system_prompt ?? "Stay bounded, evidence-based, and narrow to the assigned lane.", 520)}`,
+    `Role program summary: ${roleProgram?.version.summary ?? "none"}`,
+    `Role doctrine override: ${compactConsensusText(roleProgram?.version.doctrine ?? "none", 520)}`,
+    `Role delegation contract: ${compactConsensusText(roleProgram?.version.delegation_contract ?? "none", 420)}`,
+    `Role evaluation standard: ${compactConsensusText(roleProgram?.version.evaluation_standard ?? "none", 420)}`,
+    `Role signals: bounded=${roleProgramSignals.bounded_execution ? "yes" : "no"} evidence=${roleProgramSignals.explicit_evidence ? "yes" : "no"} rollback=${roleProgramSignals.rollback_ready ? "yes" : "no"} local_first=${roleProgramSignals.local_first ? "yes" : "no"} parallel=${roleProgramSignals.parallel_delegation ? "yes" : "no"} specialist=${roleProgramSignals.specialist_routing ? "yes" : "no"} fail_closed=${roleProgramSignals.fail_closed ? "yes" : "no"} verify=${roleProgramSignals.verification_first ? "yes" : "no"}`,
     `Lead agent: ${input.lead_agent_id ?? "none"}`,
     `Specialists: ${input.specialist_agent_ids.join(", ") || "none"}`,
     `Target council: ${input.target_agent_ids.join(", ") || "default"}`,
@@ -8016,6 +8112,8 @@ function parseAutopilotProposal(content: string): {
   evidence_requirements: string[];
   rollback_notes: string[];
   delegations: AutopilotDelegationBrief[];
+  structured_output: boolean;
+  quality_warnings: string[];
 } {
   const jsonSlice = extractJSONObject(content);
   if (!jsonSlice) {
@@ -8030,6 +8128,8 @@ function parseAutopilotProposal(content: string): {
       evidence_requirements: [],
       rollback_notes: [],
       delegations: [],
+      structured_output: false,
+      quality_warnings: ["missing_json_object"],
     };
   }
   try {
@@ -8096,6 +8196,8 @@ function parseAutopilotProposal(content: string): {
       evidence_requirements: selectedDelegation?.evidence_requirements ?? evidenceRequirements,
       rollback_notes: selectedDelegation?.rollback_notes ?? rollbackNotes,
       delegations,
+      structured_output: true,
+      quality_warnings: [],
     };
   } catch {
     return {
@@ -8109,6 +8211,8 @@ function parseAutopilotProposal(content: string): {
       evidence_requirements: [],
       rollback_notes: [],
       delegations: [],
+      structured_output: false,
+      quality_warnings: ["invalid_json_object"],
     };
   }
 }
@@ -8492,6 +8596,127 @@ function buildAdapterTelemetryStatus(
     recent_events: recentEvents,
     last_open_events: lastOpenEvents,
   };
+}
+
+function readNonNegativeInteger(value: unknown, fallback = 0) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return fallback;
+  }
+  return Math.max(0, Math.trunc(value));
+}
+
+function getLatestAdapterState(
+  storage: Storage,
+  agentId: string,
+  channel: z.infer<typeof adapterChannelSchema>
+) {
+  return storage.listTriChatAdapterStates({
+    agent_id: agentId,
+    channel,
+    limit: 1,
+  })[0] ?? null;
+}
+
+function isAdapterCircuitOpen(state: ReturnType<typeof getLatestAdapterState>): boolean {
+  if (!state || state.open !== true) {
+    return false;
+  }
+  const openUntilMs = state.open_until ? Date.parse(state.open_until) : Number.NaN;
+  return Number.isFinite(openUntilMs) && openUntilMs > Date.now();
+}
+
+function recordAdapterAskTelemetry(
+  storage: Storage,
+  input: {
+    agent_id: string;
+    duration_ms: number;
+    outcome: "response_ok" | "response_degraded" | "response_error" | "handshake_failed" | "circuit_open";
+    error?: string | null;
+    quality_warnings?: string[];
+    source: string;
+  }
+) {
+  const now = new Date().toISOString();
+  const existing = getLatestAdapterState(storage, input.agent_id, "model");
+  const metadata = isRecord(existing?.metadata) ? { ...existing.metadata } : {};
+  const previousConsecutiveFailures = readNonNegativeInteger(metadata.consecutive_failures, 0);
+  const isSuccess = input.outcome === "response_ok" || input.outcome === "response_degraded";
+  const isFailure = input.outcome === "response_error" || input.outcome === "handshake_failed";
+  const degradedTurnIncrement = input.outcome === "response_degraded" ? 1 : 0;
+  const nextConsecutiveFailures = isSuccess ? 0 : isFailure ? previousConsecutiveFailures + 1 : previousConsecutiveFailures;
+  const tripOpened = isFailure && nextConsecutiveFailures >= ADAPTER_CIRCUIT_FAILURE_THRESHOLD;
+  const existingCircuitOpen = isAdapterCircuitOpen(existing);
+  const openUntil = tripOpened
+    ? new Date(Date.now() + ADAPTER_CIRCUIT_OPEN_SECONDS * 1000).toISOString()
+    : input.outcome === "circuit_open" && existingCircuitOpen
+      ? existing?.open_until ?? null
+      : null;
+
+  const nextState = storage.upsertTriChatAdapterStates({
+    states: [
+      {
+        agent_id: input.agent_id,
+        channel: "model",
+        updated_at: now,
+        open: tripOpened || (input.outcome === "circuit_open" && existingCircuitOpen),
+        open_until: openUntil,
+        failure_count: (existing?.failure_count ?? 0) + (isFailure ? 1 : 0),
+        trip_count: (existing?.trip_count ?? 0) + (tripOpened ? 1 : 0),
+        success_count: (existing?.success_count ?? 0) + (isSuccess ? 1 : 0),
+        last_error: isFailure ? (input.error?.trim() || null) : null,
+        last_opened_at: tripOpened ? now : existing?.last_opened_at ?? null,
+        turn_count: (existing?.turn_count ?? 0) + 1,
+        degraded_turn_count: (existing?.degraded_turn_count ?? 0) + degradedTurnIncrement,
+        last_result: input.outcome,
+        metadata: {
+          ...metadata,
+          consecutive_failures: nextConsecutiveFailures,
+          last_latency_ms: Number.isFinite(input.duration_ms) ? Number(input.duration_ms.toFixed(2)) : null,
+          last_event_type: input.outcome,
+          last_quality_warnings: [...new Set((input.quality_warnings ?? []).map((entry) => String(entry).trim()).filter(Boolean))],
+        },
+      },
+    ],
+  })[0];
+
+  const events: Array<{
+    agent_id: string;
+    channel: "model";
+    event_type: string;
+    open_until: string | null;
+    error_text: string | null;
+    details: Record<string, unknown>;
+  }> = [
+    {
+      agent_id: input.agent_id,
+      channel: "model" as const,
+      event_type: input.outcome,
+      open_until: openUntil,
+      error_text: input.error?.trim() || null,
+      details: {
+        source: input.source,
+        latency_ms: Number.isFinite(input.duration_ms) ? Number(input.duration_ms.toFixed(2)) : null,
+        quality_warnings: [...new Set((input.quality_warnings ?? []).map((entry) => String(entry).trim()).filter(Boolean))],
+      },
+    },
+  ];
+  if (tripOpened) {
+    events.push({
+      agent_id: input.agent_id,
+      channel: "model" as const,
+      event_type: "trip_opened",
+      open_until: openUntil,
+      error_text: input.error?.trim() || `adapter circuit opened after ${nextConsecutiveFailures} failures`,
+      details: {
+        source: input.source,
+        threshold: ADAPTER_CIRCUIT_FAILURE_THRESHOLD,
+        open_for_seconds: ADAPTER_CIRCUIT_OPEN_SECONDS,
+        consecutive_failures: nextConsecutiveFailures,
+      },
+    });
+  }
+  storage.appendTriChatAdapterEvents({ events });
+  return nextState;
 }
 
 function evaluateConsensusTurn(
@@ -10267,6 +10492,7 @@ function getAutoRetentionStatus() {
     config: { ...autoRetentionRuntime.config },
     started_at: autoRetentionRuntime.started_at,
     last_tick_at: autoRetentionRuntime.last_tick_at,
+    last_success_at: autoRetentionRuntime.last_success_at,
     last_error: autoRetentionRuntime.last_error,
     stats: {
       tick_count: autoRetentionRuntime.tick_count,
@@ -10276,11 +10502,16 @@ function getAutoRetentionStatus() {
   };
 }
 
+export function getTriChatAutoRetentionRuntimeStatus() {
+  return getAutoRetentionStatus();
+}
+
 function startAutoRetentionDaemon(storage: Storage) {
   stopAutoRetentionDaemon();
   autoRetentionRuntime.running = true;
   autoRetentionRuntime.in_tick = false;
   autoRetentionRuntime.started_at = new Date().toISOString();
+  autoRetentionRuntime.last_success_at = null;
   autoRetentionRuntime.last_error = null;
   autoRetentionRuntime.timer = setInterval(() => {
     try {
@@ -10329,6 +10560,7 @@ function runAutoRetentionTick(
     autoRetentionRuntime.total_candidates += result.candidate_count;
     autoRetentionRuntime.total_deleted += result.deleted_count;
     autoRetentionRuntime.last_tick_at = completedAt;
+    autoRetentionRuntime.last_success_at = completedAt;
     autoRetentionRuntime.last_error = null;
 
     return {
@@ -10381,6 +10613,7 @@ function getTurnWatchdogStatus() {
     config: { ...turnWatchdogRuntime.config },
     started_at: turnWatchdogRuntime.started_at,
     last_tick_at: turnWatchdogRuntime.last_tick_at,
+    last_success_at: turnWatchdogRuntime.last_success_at,
     last_error: turnWatchdogRuntime.last_error,
     last_slo_snapshot_id: turnWatchdogRuntime.last_slo_snapshot_id,
     stats: {
@@ -10392,11 +10625,16 @@ function getTurnWatchdogStatus() {
   };
 }
 
+export function getTriChatTurnWatchdogRuntimeStatus() {
+  return getTurnWatchdogStatus();
+}
+
 function startTurnWatchdogDaemon(storage: Storage) {
   stopTurnWatchdogDaemon();
   turnWatchdogRuntime.running = true;
   turnWatchdogRuntime.in_tick = false;
   turnWatchdogRuntime.started_at = new Date().toISOString();
+  turnWatchdogRuntime.last_success_at = null;
   turnWatchdogRuntime.last_error = null;
   turnWatchdogRuntime.timer = setInterval(() => {
     try {
@@ -10488,6 +10726,7 @@ function runTurnWatchdogTick(
     turnWatchdogRuntime.escalated_count += escalatedTurnIds.length;
     turnWatchdogRuntime.last_escalated_turn_ids = escalatedTurnIds.slice(0, 20);
     turnWatchdogRuntime.last_tick_at = completedAt;
+    turnWatchdogRuntime.last_success_at = completedAt;
     turnWatchdogRuntime.last_error = null;
 
     let snapshotRecord: ReturnType<Storage["appendTriChatSloSnapshot"]> | null = null;
@@ -10897,15 +11136,12 @@ function evaluateTurnAutoFinalizationInvariants(
 
 function buildTmuxControllerStatus(storage: Storage, input: z.infer<typeof trichatTmuxControllerSchema>) {
   const resolved = resolveTmuxControllerState(storage, input);
-  const workerSlots = buildWorkerFabricSlots(storage, {
-    fallback_workspace_root: resolved.workspace,
-    fallback_worker_count: resolved.worker_count,
-    fallback_shell: resolved.shell,
-  });
   const runtime = getTmuxRuntimeInfo();
   const sessionActive = runtime.dry_run ? true : tmuxSessionExists(resolved.session_name);
+  const workerSlots = fallbackTmuxWorkerSlots(resolved);
   const reconciled = reconcileTmuxTaskResidue(resolved, {
     session_active: sessionActive,
+    worker_slots: workerSlots,
   });
   const state = reconciled.state;
   const summarized = summarizeTmuxState(state, input.include_completed ?? false, workerSlots);
@@ -10915,7 +11151,9 @@ function buildTmuxControllerStatus(storage: Storage, input: z.infer<typeof trich
     runtime,
     session_active: sessionActive,
     state: summarized,
-    dashboard: buildTmuxDashboard(state, summarized.workers, workerSlots),
+    dashboard: buildTmuxDashboard(state, summarized.workers, workerSlots, {
+      include_lane_signals: false,
+    }),
     reconciliation: reconciled.summary,
   };
 }
@@ -10939,6 +11177,7 @@ function fallbackTmuxWorkerSlots(state: TriChatTmuxControllerStateRecord): Worke
       cpu_utilization: null,
       ram_available_gb: null,
       ram_total_gb: null,
+      swap_used_gb: null,
       gpu_utilization: null,
       gpu_memory_available_gb: null,
       gpu_memory_total_gb: null,
@@ -11033,9 +11272,13 @@ function summarizeTmuxState(
 function buildTmuxDashboard(
   state: TriChatTmuxControllerStateRecord,
   workerSnapshots?: TriChatTmuxWorkerSnapshot[],
-  workerSlots?: WorkerFabricSlot[]
+  workerSlots?: WorkerFabricSlot[],
+  options?: {
+    include_lane_signals?: boolean;
+  }
 ): TriChatTmuxDashboardPayload {
   const nowMs = Date.now();
+  const includeLaneSignals = options?.include_lane_signals ?? true;
   const queueCandidates = state.tasks.filter((task) => task.status === "queued" || task.status === "dispatched");
   let queueOldestTaskId: string | null = null;
   let queueAgeSeconds: number | null = null;
@@ -11077,7 +11320,8 @@ function buildTmuxDashboard(
   const lastFailureAt =
     latestFailure?.completed_at ?? latestFailure?.dispatched_at ?? latestFailure?.created_at ?? null;
   const snapshots = workerSnapshots ?? buildTmuxWorkerSnapshots(state);
-  const laneSignals = buildTmuxWorkerLaneSignals(state, snapshots, workerSlots);
+  const laneSignals = includeLaneSignals ? buildTmuxWorkerLaneSignals(state, snapshots, workerSlots) : null;
+  const laneUpdatedAt = new Date().toISOString();
   const hostLoadMap = new Map<
     string,
     {
@@ -11129,9 +11373,13 @@ function buildTmuxDashboard(
     queue_oldest_task_id: queueOldestTaskId,
     host_load: [...hostLoadMap.values()].sort((left, right) => left.host_id.localeCompare(right.host_id)),
     worker_load: snapshots.map((snapshot) => ({
-      lane_state: laneSignals.get(snapshot.worker_id)?.lane_state ?? "unknown",
-      lane_signal: laneSignals.get(snapshot.worker_id)?.lane_signal ?? null,
-      lane_updated_at: laneSignals.get(snapshot.worker_id)?.lane_updated_at ?? new Date().toISOString(),
+      lane_state: laneSignals
+        ? (laneSignals.get(snapshot.worker_id)?.lane_state ?? "unknown")
+        : state.enabled
+          ? "unknown"
+          : "offline",
+      lane_signal: laneSignals ? (laneSignals.get(snapshot.worker_id)?.lane_signal ?? null) : "status fast path",
+      lane_updated_at: laneSignals ? (laneSignals.get(snapshot.worker_id)?.lane_updated_at ?? laneUpdatedAt) : laneUpdatedAt,
       worker_id: snapshot.worker_id,
       host_id: snapshot.host_id,
       active_queue: snapshot.active_queue,
@@ -11339,6 +11587,7 @@ function reconcileTmuxTaskResidue(
   state: TriChatTmuxControllerStateRecord,
   options?: {
     session_active?: boolean;
+    worker_slots?: WorkerFabricSlot[];
   }
 ): TriChatTmuxReconcileResult {
   const runtime = getTmuxRuntimeInfo();
@@ -11346,6 +11595,9 @@ function reconcileTmuxTaskResidue(
   const now = new Date().toISOString();
   let orphanedCancelled = 0;
   let supersededCancelled = 0;
+  const activeWorkerIds = new Set(
+    (options?.worker_slots ?? fallbackTmuxWorkerSlots(state)).map((slot) => slot.worker_id)
+  );
 
   let tasks = state.tasks.map((task) => ({
     ...task,
@@ -11373,6 +11625,29 @@ function reconcileTmuxTaskResidue(
     });
   }
 
+  tasks = tasks.map((task) => {
+    if (!sessionActive || isTerminalTmuxTaskStatus(task.status)) {
+      return task;
+    }
+    const workerId = String(task.worker_id ?? "").trim();
+    if (!workerId || activeWorkerIds.has(workerId)) {
+      return task;
+    }
+    orphanedCancelled += 1;
+    return {
+      ...task,
+      status: "cancelled",
+      completed_at: task.completed_at ?? now,
+      exit_code: null,
+      metadata: {
+        ...(task.metadata ?? {}),
+        tmux_reconciled_at: now,
+        tmux_reconciled_state: "worker_unavailable",
+        tmux_reconciled_reason: `assigned worker unavailable (${workerId})`,
+      },
+    };
+  });
+
   const keepLatestByKey = new Map<string, string>();
   for (const task of [...tasks].sort((left, right) => right.seq - left.seq)) {
     const key = buildTmuxReadOnlySupersessionKey(task);
@@ -11383,7 +11658,7 @@ function reconcileTmuxTaskResidue(
   }
 
   tasks = tasks.map((task) => {
-    if (isTerminalTmuxTaskStatus(task.status) || task.status === "running") {
+    if (isTerminalTmuxTaskStatus(task.status)) {
       return task;
     }
     const key = buildTmuxReadOnlySupersessionKey(task);
@@ -11867,6 +12142,24 @@ function materializeTmuxInputTasks(
       allowed_host_ids: normalizeStringArray(executionMetadata.allowed_host_ids),
       preferred_host_tags: normalizeStringArray(executionMetadata.preferred_host_tags),
       required_host_tags: normalizeStringArray(executionMetadata.required_host_tags),
+      preferred_backend_ids: normalizeStringArray(executionMetadata.preferred_backend_ids),
+      required_backend_ids: normalizeStringArray(executionMetadata.required_backend_ids),
+      preferred_model_tags: normalizeStringArray(executionMetadata.preferred_model_tags),
+      required_model_tags: normalizeStringArray(executionMetadata.required_model_tags),
+      task_kind: typeof executionMetadata.task_kind === "string" ? executionMetadata.task_kind : null,
+      quality_preference: typeof executionMetadata.quality_preference === "string" ? executionMetadata.quality_preference : null,
+      selected_backend_id: typeof executionMetadata.selected_backend_id === "string" ? executionMetadata.selected_backend_id : null,
+      selected_backend_provider:
+        typeof executionMetadata.selected_backend_provider === "string" ? executionMetadata.selected_backend_provider : null,
+      selected_backend_locality:
+        typeof executionMetadata.selected_backend_locality === "string" ? executionMetadata.selected_backend_locality : null,
+      selected_host_id: typeof executionMetadata.selected_host_id === "string" ? executionMetadata.selected_host_id : null,
+      selected_worker_host_id:
+        typeof executionMetadata.selected_worker_host_id === "string" ? executionMetadata.selected_worker_host_id : null,
+      routed_bridge_agent_ids: normalizeStringArray(executionMetadata.routed_bridge_agent_ids),
+      planned_backend_candidates: Array.isArray(executionMetadata.planned_backend_candidates)
+        ? executionMetadata.planned_backend_candidates
+        : [],
     };
     const ownershipScope = resolveTmuxTaskOwnershipScope({
       command,
@@ -11972,6 +12265,19 @@ function assignQueuedTmuxTasks(
         allowed_host_ids: executionRouting.allowed_host_ids,
         preferred_host_tags: executionRouting.preferred_host_tags,
         required_host_tags: executionRouting.required_host_tags,
+        preferred_backend_ids: executionRouting.preferred_backend_ids,
+        required_backend_ids: executionRouting.required_backend_ids,
+        preferred_model_tags: executionRouting.preferred_model_tags,
+        required_model_tags: executionRouting.required_model_tags,
+        task_kind: executionRouting.task_kind,
+        quality_preference: executionRouting.quality_preference,
+        selected_backend_id: executionRouting.selected_backend_id,
+        selected_backend_provider: executionRouting.selected_backend_provider,
+        selected_backend_locality: executionRouting.selected_backend_locality,
+        selected_host_id: executionRouting.selected_host_id,
+        selected_worker_host_id: executionRouting.selected_worker_host_id,
+        routed_bridge_agent_ids: executionRouting.routed_bridge_agent_ids,
+        planned_backend_candidates: executionRouting.planned_backend_candidates,
       },
     };
     if (ownershipMode === "mutating" && ownershipScope && busyOwnershipScopes.has(ownershipScope)) {
@@ -11985,7 +12291,9 @@ function assignQueuedTmuxTasks(
       continue;
     }
 
-    const candidates = slots
+    const rankedBaseSlots = rankWorkerFabricSlots(slots, executionRouting, fabricStrategy, defaultHostId);
+    const slotRankByWorkerId = new Map(rankedBaseSlots.map((slot, index) => [slot.worker_id, index]));
+    const candidates = rankedBaseSlots
       .map((slot) => {
         const workerId = slot.worker_id;
         const stats = workerStats.get(workerId);
@@ -11994,56 +12302,13 @@ function assignQueuedTmuxTasks(
           worker_id: workerId,
           active_queue: stats?.active_queue ?? 0,
           active_load: stats?.active_load ?? 0,
+          placement_rank: slotRankByWorkerId.get(workerId) ?? Number.MAX_SAFE_INTEGER,
         };
-      })
-      .filter((slot) => {
-        if (executionRouting.allowed_host_ids.length > 0 && !executionRouting.allowed_host_ids.includes(slot.host_id)) {
-          return false;
-        }
-        if (executionRouting.required_host_tags.length > 0) {
-          const hostTags = new Set(slot.tags.map((entry) => entry.toLowerCase()));
-          if (!executionRouting.required_host_tags.every((tag) => hostTags.has(tag.toLowerCase()))) {
-            return false;
-          }
-        }
-        return true;
       })
       .filter((entry) => entry.active_queue < state.max_queue_per_worker)
       .sort((left, right) => {
-        const leftPreferredHost = executionRouting.preferred_host_ids.includes(left.host_id) ? 1 : 0;
-        const rightPreferredHost = executionRouting.preferred_host_ids.includes(right.host_id) ? 1 : 0;
-        if (leftPreferredHost !== rightPreferredHost) {
-          return rightPreferredHost - leftPreferredHost;
-        }
-        const leftPreferredTags = executionRouting.preferred_host_tags.filter((tag) =>
-          left.tags.map((entry) => entry.toLowerCase()).includes(tag.toLowerCase())
-        ).length;
-        const rightPreferredTags = executionRouting.preferred_host_tags.filter((tag) =>
-          right.tags.map((entry) => entry.toLowerCase()).includes(tag.toLowerCase())
-        ).length;
-        if (leftPreferredTags !== rightPreferredTags) {
-          return rightPreferredTags - leftPreferredTags;
-        }
-        if (fabricStrategy === "prefer_local") {
-          const leftLocal = left.transport === "local" ? 1 : 0;
-          const rightLocal = right.transport === "local" ? 1 : 0;
-          if (leftLocal !== rightLocal) {
-            return rightLocal - leftLocal;
-          }
-        }
-        if (defaultHostId) {
-          const leftDefault = left.host_id === defaultHostId ? 1 : 0;
-          const rightDefault = right.host_id === defaultHostId ? 1 : 0;
-          if (leftDefault !== rightDefault) {
-            return rightDefault - leftDefault;
-          }
-        }
-        if (fabricStrategy === "prefer_capacity") {
-          const leftCapacity = Number(left.capabilities.gpu_memory_gb ?? left.capabilities.ram_gb ?? 0);
-          const rightCapacity = Number(right.capabilities.gpu_memory_gb ?? right.capabilities.ram_gb ?? 0);
-          if (leftCapacity !== rightCapacity) {
-            return rightCapacity - leftCapacity;
-          }
+        if (left.placement_rank !== right.placement_rank) {
+          return left.placement_rank - right.placement_rank;
         }
         if (left.active_load !== right.active_load) {
           return left.active_load - right.active_load;
@@ -12305,6 +12570,7 @@ function dispatchTmuxTask(
       isolation_mode: executionRouting.isolation_mode,
       isolated_workspace: isolatedPlan.workspace,
       host_id: workerSlot?.host_id ?? "local",
+      selected_worker_host_id: workerSlot?.host_id ?? "local",
     },
   };
   const executableCommand =
@@ -12561,6 +12827,7 @@ function isAdapterSampleEvent(eventType: string, latencyMs: number | null): bool
   }
   return (
     eventType === "response_ok" ||
+    eventType === "response_degraded" ||
     eventType === "response_error" ||
     eventType === "handshake_failed" ||
     eventType === "trip_opened"

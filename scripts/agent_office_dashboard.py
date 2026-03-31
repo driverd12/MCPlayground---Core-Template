@@ -6,12 +6,17 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import curses
+import dataclasses
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -166,6 +171,13 @@ def parse_any_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def parse_any_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def iso_to_epoch(value: Optional[str]) -> float:
     text = str(value or "").strip()
     if not text:
@@ -246,6 +258,137 @@ def theme_label(theme: str) -> str:
     return THEME_LABELS.get(normalize_theme(theme), THEME_LABELS[THEME_ORDER[0]])
 
 
+def snapshot_cache_dir(repo_root: Path) -> Path:
+    override = os.environ.get("TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return repo_root / "data" / "imprint" / "office_snapshot_cache"
+
+
+def snapshot_cache_token(value: Any, fallback: str) -> str:
+    normalized = re.sub(r"[^a-z0-9._-]+", "-", str(value or "").strip().lower()).strip("-.")
+    return normalized or fallback
+
+
+def snapshot_cache_path(repo_root: Path, thread_id: str, theme: str) -> Path:
+    return snapshot_cache_dir(repo_root) / (
+        f"thread-{snapshot_cache_token(thread_id, 'ring-leader-main')}"
+        f"--theme-{snapshot_cache_token(normalize_theme(theme), THEME_ORDER[0])}.json"
+    )
+
+
+def snapshot_latest_cache_path(repo_root: Path, theme: str) -> Path:
+    return snapshot_cache_dir(repo_root) / f"latest--theme-{snapshot_cache_token(normalize_theme(theme), THEME_ORDER[0])}.json"
+
+
+def snapshot_cache_max_age_seconds(refresh_interval: float) -> float:
+    override = os.environ.get("TRICHAT_OFFICE_SNAPSHOT_CACHE_MAX_AGE_SECONDS", "").strip()
+    if override:
+        try:
+            return max(1.0, float(override))
+        except ValueError:
+            pass
+    return max(3.0, min(30.0, max(1.0, float(refresh_interval)) * 2.5))
+
+
+def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{int(time.time() * 1000)}.tmp")
+    try:
+        temp_path.write_text(json.dumps(payload, ensure_ascii=True, separators=(",", ":")), encoding="utf-8")
+        os.replace(temp_path, path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
+def _read_json_if_exists(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _snapshot_agent_count(payload: Dict[str, Any]) -> int:
+    return len(as_list(payload.get("agents")))
+
+
+def write_snapshot_cache(repo_root: Path, payload: Dict[str, Any]) -> Optional[Path]:
+    thread_id = str(payload.get("thread_id") or "").strip()
+    theme = normalize_theme(payload.get("theme"))
+    if not thread_id:
+        return None
+    record = dict(payload)
+    record["theme"] = theme
+    record["cache"] = {
+        "written_at": now_iso(),
+        "source": "dashboard-refresh",
+        "thread_id": thread_id,
+        "theme": theme,
+    }
+    primary_path = snapshot_cache_path(repo_root, thread_id, theme)
+    latest_path = snapshot_latest_cache_path(repo_root, theme)
+    previous_primary = _read_json_if_exists(primary_path)
+    previous_latest = _read_json_if_exists(latest_path)
+    previous_richest = previous_primary
+    if _snapshot_agent_count(previous_latest or {}) > _snapshot_agent_count(previous_richest or {}):
+        previous_richest = previous_latest
+    current_agents = _snapshot_agent_count(record)
+    previous_agents = _snapshot_agent_count(previous_richest or {})
+    if as_list(record.get("errors")) and previous_agents > current_agents:
+        preserved = dict(previous_richest or {})
+        preserved["errors"] = list(record.get("errors") or [])
+        preserved["theme"] = theme
+        preserved["cache"] = {
+            "written_at": now_iso(),
+            "source": "dashboard-refresh-preserved",
+            "thread_id": thread_id,
+            "theme": theme,
+        }
+        record = preserved
+    _write_json_atomic(primary_path, record)
+    _write_json_atomic(latest_path, record)
+    return primary_path
+
+
+def read_snapshot_cache(
+    repo_root: Path,
+    thread_id: Optional[str],
+    theme: str,
+    max_age_seconds: float,
+) -> Optional[Dict[str, Any]]:
+    normalized_theme = normalize_theme(theme)
+    requested_thread_id = str(thread_id or "").strip()
+    candidates = [
+        snapshot_cache_path(repo_root, requested_thread_id, normalized_theme)
+    ] if requested_thread_id else [snapshot_latest_cache_path(repo_root, normalized_theme)]
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload_thread_id = str(payload.get("thread_id") or "").strip()
+        if requested_thread_id and payload_thread_id != requested_thread_id:
+            continue
+        if normalize_theme(payload.get("theme")) != normalized_theme:
+            continue
+        fetched_at = parse_any_float(payload.get("fetched_at"), 0.0)
+        if fetched_at <= 0:
+            continue
+        if max(0.0, time.time() - fetched_at) > max(1.0, float(max_age_seconds)):
+            continue
+        return payload
+    return None
+
+
 def build_scene_banner(theme: str, width: int, frame: int) -> List[str]:
     width = max(24, width)
     normalized = normalize_theme(theme)
@@ -302,6 +445,7 @@ class McpToolCaller:
         stdio_args: str,
         retries: int,
         retry_delay_seconds: float,
+        tool_timeout_seconds: float,
     ) -> None:
         self.repo_root = repo_root
         self.transport = transport
@@ -311,9 +455,44 @@ class McpToolCaller:
         self.stdio_args = stdio_args
         self.retries = max(0, retries)
         self.retry_delay_seconds = max(0.05, retry_delay_seconds)
+        self.tool_timeout_seconds = max(1.0, tool_timeout_seconds)
         self.helper = repo_root / "scripts" / "mcp_tool_call.mjs"
         if not self.helper.exists():
             raise RuntimeError(f"missing helper: {self.helper}")
+
+    def can_use_http_snapshot(self) -> bool:
+        if self.transport != "http":
+            return False
+        return os.environ.get("AGENT_OFFICE_DISABLE_HTTP_SNAPSHOT", "").strip().lower() not in {"1", "true", "yes"}
+
+    def fetch_http_snapshot(self, thread_id: str, theme: str) -> Dict[str, Any]:
+        if not self.can_use_http_snapshot():
+            return {}
+        base_url = self.url.rstrip("/")
+        query = urllib.parse.urlencode({"thread_id": thread_id, "theme": theme, "format": "raw"})
+        request = urllib.request.Request(
+            f"{base_url}/office/api/snapshot?{query}",
+            headers={
+                "Accept": "application/json",
+                "Origin": self.origin,
+                **(
+                    {"Authorization": f"Bearer {os.environ.get('MCP_HTTP_BEARER_TOKEN', '').strip()}"}
+                    if os.environ.get("MCP_HTTP_BEARER_TOKEN", "").strip()
+                    else {}
+                ),
+            },
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.tool_timeout_seconds) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"http snapshot unavailable: {error}") from error
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"invalid JSON from office snapshot: {error}") from error
+        return as_dict(payload)
 
     def call_tool(self, tool: str, args: Dict[str, Any]) -> Any:
         command = [
@@ -339,12 +518,20 @@ class McpToolCaller:
         attempts = self.retries + 1
         last_error = "unknown error"
         for attempt in range(1, attempts + 1):
-            proc = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            try:
+                proc = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=self.tool_timeout_seconds,
+                )
+            except subprocess.TimeoutExpired:
+                last_error = f"timeout after {self.tool_timeout_seconds:.1f}s"
+                if attempt < attempts:
+                    time.sleep(self.retry_delay_seconds * attempt)
+                    continue
+                raise RuntimeError(f"MCP tool failed ({tool}): {last_error}") from None
             if proc.returncode == 0:
                 stdout = (proc.stdout or "").strip()
                 if not stdout:
@@ -358,6 +545,14 @@ class McpToolCaller:
             if attempt < attempts:
                 time.sleep(self.retry_delay_seconds * attempt)
         raise RuntimeError(f"MCP tool failed ({tool}): {last_error}")
+
+
+def snapshot_max_workers(transport: str, request_count: int) -> int:
+    if request_count <= 1:
+        return 1
+    if transport == "http":
+        return max(2, min(4, request_count))
+    return max(2, min(8, request_count))
 
 
 @dataclass
@@ -408,6 +603,8 @@ class DashboardSnapshot:
     learning: Dict[str, Any]
     autopilot: Dict[str, Any]
     autonomy_maintain: Dict[str, Any] = field(default_factory=dict)
+    runtime_workers: Dict[str, Any] = field(default_factory=dict)
+    operator_brief: Dict[str, Any] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
     agent_sessions: Dict[str, Any] = field(default_factory=dict)
     task_running: Dict[str, Any] = field(default_factory=dict)
@@ -443,6 +640,43 @@ def build_agent_catalog(roster_payload: Dict[str, Any]) -> Dict[str, DashboardAg
             active=agent_id in active_ids,
         )
     return catalog
+
+
+def load_roster_config(repo_root: Path) -> Dict[str, Any]:
+    config_path = repo_root / "config" / "trichat_agents.json"
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def build_config_roster_fallback(
+    repo_root: Path,
+    workboard_payload: Dict[str, Any],
+    agent_sessions_payload: Dict[str, Any],
+    learning_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    config = load_roster_config(repo_root)
+    agents = as_list(config.get("agents"))
+    if not agents:
+        return {}
+    current_turn = maybe_turn(workboard_payload)
+    metadata = as_dict(current_turn.get("metadata"))
+    active_agent_ids = dedupe(
+        [metadata.get("lead_agent_id"), current_turn.get("selected_agent")]
+        + as_list(current_turn.get("expected_agents"))
+        + as_list(metadata.get("specialist_agent_ids"))
+        + [as_dict(session).get("agent_id") for session in as_list(agent_sessions_payload.get("sessions"))]
+        + [as_dict(entry).get("agent_id") for entry in as_list(learning_payload.get("top_agents"))]
+        + as_list(config.get("default_agent_ids"))
+    )
+    return {
+        "default_agent_ids": dedupe(as_list(config.get("default_agent_ids"))),
+        "active_agent_ids": active_agent_ids,
+        "agents": agents,
+        "source": "config-fallback",
+    }
 
 
 def maybe_turn(workboard_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1168,6 +1402,227 @@ def sprite_scene_lines(presence: OfficePresence, frame: int) -> List[str]:
     return [top, face, arms, feet]
 
 
+def blank_canvas(width: int, height: int, fill: str = " ") -> List[List[str]]:
+    return [[fill for _ in range(max(0, width))] for _ in range(max(0, height))]
+
+
+def paint_text(canvas: List[List[str]], x: int, y: int, text: str) -> None:
+    if y < 0 or y >= len(canvas):
+        return
+    row = canvas[y]
+    for offset, char in enumerate(str(text)):
+        target_x = x + offset
+        if 0 <= target_x < len(row):
+            row[target_x] = char
+
+
+def paint_box(canvas: List[List[str]], x: int, y: int, width: int, height: int, title: str = "") -> None:
+    if width < 2 or height < 2:
+        return
+    horizontal = "-" * max(0, width - 2)
+    paint_text(canvas, x, y, f"+{horizontal}+")
+    for row in range(y + 1, y + height - 1):
+        paint_text(canvas, x, row, "|" + (" " * max(0, width - 2)) + "|")
+    paint_text(canvas, x, y + height - 1, f"+{horizontal}+")
+    label = compact_single_line(title, max(0, width - 4))
+    if label:
+        paint_text(canvas, x + 2, y, label)
+
+
+def canvas_to_lines(canvas: List[List[str]], width: int) -> List[str]:
+    lines: List[str] = []
+    for row in canvas:
+        line = "".join(row)
+        lines.append(fit_text(line[:width], width))
+    return lines
+
+
+def desk_monitor(state: str, frame: int) -> str:
+    if state == "working":
+        return "[==]" if frame % 2 == 0 else "[=~]"
+    if state == "supervising":
+        return "[>>]"
+    if state == "talking":
+        return "[~~]"
+    if state == "break":
+        return "[::]"
+    if state == "sleeping":
+        return "[zz]"
+    if state == "blocked":
+        return "[!!]"
+    if state == "offline":
+        return "[xx]"
+    return "[..]"
+
+
+def sprite_badge(presence: OfficePresence, frame: int) -> List[str]:
+    motion = {
+        "working": "W",
+        "supervising": ">",
+        "talking": "~",
+        "break": ":",
+        "sleeping": "z",
+        "blocked": "!",
+        "offline": "x",
+        "idle": ".",
+    }.get(presence.state, ".")
+    blink = "'" if frame % 2 else "."
+    token = presence.agent.token[:2].ljust(2)
+    return [
+        f" .{blink}--{blink}. ",
+        f" |{token}{motion}| ",
+        " '/__\\' ",
+    ]
+
+
+def place_presence_tile(
+    canvas: List[List[str]],
+    presence: OfficePresence,
+    x: int,
+    y: int,
+    width: int,
+    frame: int,
+    label: Optional[str] = None,
+    *,
+    compact: bool = False,
+) -> None:
+    label_text = compact_single_line(label or presence.agent.display_name, max(6, width))
+    badge = sprite_badge(presence, frame)
+    if compact:
+        paint_text(canvas, x, y, fit_text(desk_monitor(presence.state, frame), min(4, width)))
+        paint_text(canvas, x, y + 1, badge[0][:width])
+        paint_text(canvas, x, y + 2, badge[1][:width])
+        paint_text(canvas, x, y + 3, label_text[:width])
+        return
+    paint_text(canvas, x, y, fit_text(desk_monitor(presence.state, frame), min(4, width)))
+    paint_text(canvas, x, y + 1, "._[]_.")
+    for offset, line in enumerate(badge, start=2):
+        paint_text(canvas, x, y + offset, line[:width])
+    paint_text(canvas, x, y + 5, label_text[:width])
+
+
+def compute_room_slots(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    slot_width: int,
+    slot_height: int,
+    *,
+    top_pad: int = 3,
+) -> List[Tuple[int, int]]:
+    usable_width = max(1, width - 4)
+    usable_height = max(1, height - (top_pad + 2))
+    columns = max(1, usable_width // max(1, slot_width + 1))
+    rows = max(1, usable_height // max(1, slot_height + 1))
+    slots: List[Tuple[int, int]] = []
+    for row in range(rows):
+        for column in range(columns):
+            slot_x = x + 2 + (column * (slot_width + 1))
+            slot_y = y + top_pad + (row * (slot_height + 1))
+            if slot_x + slot_width - 1 <= x + width - 2 and slot_y + slot_height - 1 <= y + height - 2:
+                slots.append((slot_x, slot_y))
+    return slots
+
+
+def sort_presence_for_floorplan(presence: OfficePresence) -> Tuple[int, int, int, str]:
+    state_rank = {
+        "working": 0,
+        "supervising": 1,
+        "idle": 2,
+        "talking": 3,
+        "break": 4,
+        "sleeping": 5,
+        "blocked": 6,
+        "offline": 7,
+    }.get(presence.state, 8)
+    return (
+        TIER_RANK.get(presence.agent.tier, 9),
+        ROLE_RANK.get(presence.agent.role, 9),
+        state_rank,
+        presence.agent.display_name.lower(),
+    )
+
+
+def render_floorplan_scene(
+    presences: List[OfficePresence],
+    width: int,
+    height: int,
+    frame: int,
+    theme: str,
+    learned_count: int = 0,
+    queue_depth: int = 0,
+) -> List[str]:
+    width = max(60, width)
+    height = max(18, height)
+    canvas = blank_canvas(width, height)
+    paint_box(canvas, 0, 0, width, height, f" MISSION FLOOR :: {theme_label(theme)} ")
+    for row in range(1, height - 1):
+        for column in range(1, width - 1):
+            if canvas[row][column] == " ":
+                canvas[row][column] = "." if (row + column + frame) % 7 == 0 else " "
+
+    side_width = max(22, min(28, width // 3))
+    main_width = width - side_width - 3
+    top_height = max(8, min(9, height // 2))
+    bottom_height = height - top_height - 3
+
+    command_room = (2, 2, main_width, top_height)
+    lounge_room = (main_width + 3, 2, side_width, top_height)
+    build_room = (2, top_height + 3, main_width, bottom_height)
+    ops_room = (main_width + 3, top_height + 3, side_width, bottom_height)
+
+    lounge_presences = [p for p in presences if p.location in {"cooler", "lounge", "sofa"} or p.state in {"talking", "break", "sleeping"}]
+    blocked_presences = [p for p in presences if p.state in {"blocked", "offline"} and p not in lounge_presences]
+    command_presences = [
+        p
+        for p in presences
+        if p not in lounge_presences
+        and p not in blocked_presences
+        and (p.agent.tier in {"lead", "director"} or p.agent.role in {"planner", "orchestrator", "reliability-critic"})
+    ]
+    build_presences = [p for p in presences if p not in lounge_presences and p not in blocked_presences and p not in command_presences]
+
+    paint_box(canvas, *command_room, title=f" COMMAND DECK [{len(command_presences)}] ")
+    paint_box(canvas, *lounge_room, title=f" LOUNGE + WATER [{len(lounge_presences)}] ")
+    paint_box(canvas, *build_room, title=f" BUILD BAY [{len(build_presences)}] ")
+    paint_box(canvas, *ops_room, title=f" OPS RACK [{len(blocked_presences)}] ")
+
+    paint_text(canvas, command_room[0] + 2, command_room[1] + 1, "window ===  map wall []  coffee [::]")
+    paint_text(canvas, lounge_room[0] + 2, lounge_room[1] + 1, "water [OO]  sofa [__]  snack bar")
+    paint_text(canvas, build_room[0] + 2, build_room[1] + 1, "bench []  docs ==  patch lane <>")
+    paint_text(canvas, ops_room[0] + 2, ops_room[1] + 1, "router ##  telemetry []")
+
+    command_slots = compute_room_slots(*command_room, slot_width=10, slot_height=4, top_pad=3)
+    lounge_slots = compute_room_slots(*lounge_room, slot_width=10, slot_height=4, top_pad=3)
+    build_slots = compute_room_slots(*build_room, slot_width=10, slot_height=6, top_pad=3)
+    ops_slots = compute_room_slots(*ops_room, slot_width=10, slot_height=6, top_pad=3)
+
+    for presence, slot in zip(sorted(command_presences, key=sort_presence_for_floorplan), command_slots):
+        place_presence_tile(canvas, presence, slot[0], slot[1], 10, frame, compact=True)
+    for presence, slot in zip(sorted(build_presences, key=sort_presence_for_floorplan), build_slots):
+        place_presence_tile(canvas, presence, slot[0], slot[1], 10, frame)
+    for presence, slot in zip(sorted(lounge_presences, key=sort_presence_for_floorplan), lounge_slots):
+        place_presence_tile(canvas, presence, slot[0], slot[1], 10, frame, compact=True)
+    for presence, slot in zip(sorted(blocked_presences, key=sort_presence_for_floorplan), ops_slots):
+        place_presence_tile(canvas, presence, slot[0], slot[1], 10, frame)
+
+    counts = state_counts(presences)
+    ops_lines = [
+        f"work {counts.get('working', 0):>2}",
+        f"lead {counts.get('supervising', 0):>2}",
+        f"chat {counts.get('talking', 0):>2}",
+        f"rest {counts.get('break', 0) + counts.get('sleeping', 0):>2}",
+        f"block {counts.get('blocked', 0) + counts.get('offline', 0):>1}",
+        f"learn {learned_count:>2}",
+        f"queue {queue_depth:>2}",
+    ]
+    for index, line in enumerate(ops_lines, start=3):
+        paint_text(canvas, ops_room[0] + ops_room[2] - 11, ops_room[1] + index, line[:9])
+
+    return canvas_to_lines(canvas, width)
+
+
 def render_agent_card(presence: OfficePresence, width: int, frame: int) -> List[str]:
     width = max(24, width)
     inner = width - 2
@@ -1268,20 +1723,89 @@ def render_office_view(snapshot: DashboardSnapshot, width: int, height: int, fra
         f"sleep={counts.get('sleeping', 0)} blocked={counts.get('blocked', 0) + counts.get('offline', 0)} "
         f"learned={parse_any_int(snapshot.learning.get('active_entry_count'))}"
     )
+    tmux_dashboard = as_dict(snapshot.tmux.get("dashboard"))
+    tmux_queue_depth = parse_any_int(tmux_dashboard.get("queue_depth"))
+    kernel_worker_fabric = as_dict(snapshot.kernel.get("worker_fabric"))
+    local_host = next(
+        (
+            as_dict(host)
+            for host in as_list(kernel_worker_fabric.get("hosts"))
+            if str(as_dict(host).get("host_id") or "").strip()
+            == str(kernel_worker_fabric.get("default_host_id") or "local").strip()
+        ),
+        {},
+    )
+    local_cpu = parse_any_float(local_host.get("cpu_utilization")) * 100
+    local_ram = parse_any_float(local_host.get("ram_available_gb"))
+    router = as_dict(snapshot.kernel.get("model_router"))
+    router_backend = compact_single_line(str(router.get("default_backend_id") or "n/a"), 28)
     available_width = max(40, width)
-    columns = 3 if available_width >= 94 else 2 if available_width >= 62 else 1
-    gap = 2
-    card_width = max(24, min(32, (available_width - (gap * (columns - 1))) // columns))
-    cards = [render_agent_card(presence, card_width, frame) for presence in presences]
     lines = build_scene_banner(theme, available_width, frame)
     lines.append(fit_text(banner, available_width))
-    lines.append(fit_text("Desk row :: ring leader, directors, leaf SMEs, and support mentors on one live floor", available_width))
-    lines.append(fit_text("Truth mode :: active states require durable task/session/bus/adapter evidence; no title-guessing", available_width))
+    lines.append(
+        fit_text(
+            "Truth mode :: active states require durable task/session/bus/adapter evidence; no title-guessing",
+            available_width,
+        )
+    )
+    lines.append(
+        fit_text(
+            f"Live infra :: queue={tmux_queue_depth} cpu={local_cpu:.0f}% ram={local_ram:.1f}GB backend={router_backend}",
+            available_width,
+        )
+    )
     lines.append("")
-    lines.extend(render_card_grid(cards, columns=columns, gap=gap))
-    lines.append("")
-    lines.extend(render_lounge_line(presences, available_width, frame))
+    if available_width >= 80 and height >= 24:
+        scene_height = max(18, height - len(lines) - 2)
+        lines.extend(
+            render_floorplan_scene(
+                presences,
+                available_width,
+                scene_height,
+                frame,
+                theme,
+                learned_count=parse_any_int(snapshot.learning.get("active_entry_count")),
+                queue_depth=tmux_queue_depth,
+            )
+        )
+    else:
+        columns = 3 if available_width >= 94 else 2 if available_width >= 62 else 1
+        gap = 2
+        card_width = max(24, min(32, (available_width - (gap * (columns - 1))) // columns))
+        cards = [render_agent_card(presence, card_width, frame) for presence in presences]
+        lines.extend(render_card_grid(cards, columns=columns, gap=gap))
+        lines.append("")
+        lines.extend(render_lounge_line(presences, available_width, frame))
     return lines[: max(1, height)]
+
+
+def partition_office_presences(presences: List[OfficePresence]) -> Dict[str, List[OfficePresence]]:
+    lounge_presences = [
+        presence
+        for presence in presences
+        if presence.location in {"cooler", "lounge", "sofa"} or presence.state in {"talking", "break", "sleeping"}
+    ]
+    blocked_presences = [
+        presence for presence in presences if presence.state in {"blocked", "offline"} and presence not in lounge_presences
+    ]
+    command_presences = [
+        presence
+        for presence in presences
+        if presence not in lounge_presences
+        and presence not in blocked_presences
+        and (presence.agent.tier in {"lead", "director"} or presence.agent.role in {"planner", "orchestrator", "reliability-critic"})
+    ]
+    build_presences = [
+        presence
+        for presence in presences
+        if presence not in lounge_presences and presence not in blocked_presences and presence not in command_presences
+    ]
+    return {
+        "command": sorted(command_presences, key=sort_presence_for_floorplan),
+        "lounge": sorted(lounge_presences, key=sort_presence_for_floorplan),
+        "build": sorted(build_presences, key=sort_presence_for_floorplan),
+        "ops": sorted(blocked_presences, key=sort_presence_for_floorplan),
+    }
 
 
 def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -> List[str]:
@@ -1296,15 +1820,29 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
     kernel_overview = as_dict(kernel.get("overview"))
     kernel_tasks = as_dict(as_dict(kernel.get("tasks")).get("counts"))
     kernel_worker_fabric = as_dict(kernel.get("worker_fabric"))
+    kernel_worker_hosts = as_list(kernel_worker_fabric.get("hosts"))
+    kernel_cluster_topology = as_dict(kernel.get("cluster_topology"))
     kernel_model_router = as_dict(kernel.get("model_router"))
+    kernel_routing_outlook = as_list(kernel_model_router.get("routing_outlook"))
+    kernel_model_backends = as_list(kernel_model_router.get("backends"))
     kernel_evals = as_dict(kernel.get("evals"))
+    kernel_observability = as_dict(kernel.get("observability"))
     kernel_org_programs = as_dict(kernel.get("org_programs"))
+    kernel_swarm = as_dict(kernel.get("swarm"))
+    kernel_swarm_profiles = as_list(kernel_swarm.get("active_profiles"))
     kernel_autonomy_maintain = as_dict(kernel.get("autonomy_maintain"))
+    kernel_reaction_engine = as_dict(kernel.get("reaction_engine"))
+    kernel_workflow_exports = as_dict(kernel.get("workflow_exports"))
+    kernel_runtime_workers = as_dict(kernel.get("runtime_workers"))
     learning = snapshot.learning
     autonomy_maintain = snapshot.autonomy_maintain
     autonomy_maintain_state = as_dict(autonomy_maintain.get("state"))
     autonomy_maintain_runtime = as_dict(autonomy_maintain.get("runtime"))
     autonomy_maintain_due = as_dict(autonomy_maintain.get("due"))
+    autonomy_maintain_subsystems = as_dict(autonomy_maintain.get("subsystems"))
+    runtime_workers = snapshot.runtime_workers
+    runtime_worker_summary = as_dict(runtime_workers.get("summary"))
+    runtime_worker_latest = as_dict(runtime_workers.get("session") or as_dict(kernel_runtime_workers.get("latest_session")))
     learning_top_agents = as_list(learning.get("top_agents"))
     kernel_learning = as_dict(kernel.get("learning"))
     learning_coverage = as_dict(kernel_learning.get("active_session_coverage"))
@@ -1330,21 +1868,71 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
         or str(autopilot_session_metadata.get("last_execution_task_id") or "").strip()
     )
     current_task = task_index.get(current_task_id, {})
+    default_host_id = str(kernel_worker_fabric.get("default_host_id") or "local").strip() or "local"
+    local_host = next(
+        (
+            as_dict(host)
+            for host in kernel_worker_hosts
+            if str(as_dict(host).get("host_id") or "").strip() == default_host_id
+        ),
+        {},
+    )
+    default_backend_id = str(kernel_model_router.get("default_backend_id") or "").strip()
+    router_backend = {}
+    for candidate in kernel_model_backends:
+        item = as_dict(candidate)
+        backend_id = str(item.get("backend_id") or "").strip()
+        if default_backend_id and backend_id == default_backend_id:
+            router_backend = item
+            break
+    if not router_backend and kernel_model_backends:
+        router_backend = as_dict(kernel_model_backends[0])
+    active_swarm_profile = as_dict(kernel_swarm_profiles[0]) if kernel_swarm_profiles else {}
+    operator_brief = as_dict(snapshot.operator_brief)
+    operator_brief_delegation = as_dict(operator_brief.get("delegation_brief"))
+    operator_brief_compile = as_dict(operator_brief.get("compile_brief_artifact"))
     current_objective = compact_single_line(
         str(
-            current_task.get("objective")
+            operator_brief.get("current_objective")
+            or current_task.get("objective")
             or as_dict(current_task.get("payload")).get("task_objective")
             or autopilot_session_metadata.get("last_source_task_objective")
             or ""
         ),
         220,
     )
-    delegation_brief = primary_delegation_brief(latest_decision, latest, autopilot_session_metadata)
-    spawn_path = build_spawn_path(latest_decision, latest, autopilot_session_metadata)
+    delegation_brief = operator_brief_delegation or primary_delegation_brief(latest_decision, latest, autopilot_session_metadata)
+    spawn_path = (
+        build_spawn_path(latest_decision, latest, autopilot_session_metadata)
+        if not operator_brief_delegation
+        else compact_single_line(
+            f"ring-leader -> {operator_brief_delegation.get('delegate_agent_id') or 'n/a'}",
+            120,
+        )
+    )
     execution_task_ids = dedupe(
-        as_list(as_dict(last_tick.get("execution")).get("task_ids"))
+        as_list(operator_brief.get("execution_backlog"))
+        + as_list(as_dict(last_tick.get("execution")).get("task_ids"))
         + as_list(autopilot_session_metadata.get("last_execution_task_ids"))
     )
+    maintain_subsystem_tokens = []
+    for key, label in [
+        ("transcript_auto_squish", "squish"),
+        ("imprint_auto_snapshot", "snap"),
+        ("trichat_auto_retention", "retain"),
+        ("trichat_turn_watchdog", "watch"),
+    ]:
+        subsystem = as_dict(autonomy_maintain_subsystems.get(key))
+        if not subsystem.get("enabled"):
+            continue
+        token = "ok"
+        if subsystem.get("last_error"):
+            token = "err"
+        elif not subsystem.get("running"):
+            token = "down"
+        elif subsystem.get("stale"):
+            token = "stale"
+        maintain_subsystem_tokens.append(f"{label}={token}")
     lines = [
         fit_text("BRIEFING BOARD", width),
         fit_text(f"Thread: {snapshot.thread_id}", width),
@@ -1391,11 +1979,43 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
             width,
         ),
         fit_text(
+            "Local :: "
+            f"cpu={parse_any_float(local_host.get('cpu_utilization')) * 100:.0f}% "
+            f"ram={parse_any_float(local_host.get('ram_available_gb')):.1f}/{parse_any_float(local_host.get('ram_total_gb')):.1f}GB "
+            f"swap={parse_any_float(local_host.get('swap_used_gb')):.1f}GB "
+            f"thermal={local_host.get('thermal_pressure') or 'n/a'} "
+            f"workers={parse_any_int(local_host.get('worker_count'))}/{parse_any_int(local_host.get('recommended_worker_count'))} "
+            f"models={parse_any_int(local_host.get('max_local_model_concurrency'))} "
+            f"age={human_duration(age_seconds(local_host.get('heartbeat_at')))}",
+            width,
+        ),
+        fit_text(
+            "Topology :: "
+            f"nodes={parse_any_int(kernel_cluster_topology.get('node_count'))} "
+            f"active={parse_any_int(kernel_cluster_topology.get('active_node_count'))} "
+            f"planned={parse_any_int(kernel_cluster_topology.get('planned_node_count'))} "
+            f"default={kernel_cluster_topology.get('default_node_id') or 'n/a'}",
+            width,
+        ),
+        fit_text(
             "Router :: "
             f"backends={parse_any_int(kernel_model_router.get('backend_count'))} "
             f"enabled={parse_any_int(kernel_model_router.get('enabled_backend_count'))} "
             f"default={kernel_model_router.get('default_backend_id') or 'n/a'} "
             f"strategy={kernel_model_router.get('strategy') or 'n/a'}",
+            width,
+        ),
+        fit_text(
+            "Router live :: "
+            f"backend={router_backend.get('backend_id') or 'n/a'} "
+            f"probe={'ok' if router_backend.get('probe_healthy') is True else 'down' if router_backend.get('probe_healthy') is False else 'n/a'} "
+            f"known={'yes' if router_backend.get('probe_model_known') is True else 'no' if router_backend.get('probe_model_known') is False else 'n/a'} "
+            f"loaded={'warm' if router_backend.get('probe_model_loaded') is True else 'cold' if router_backend.get('probe_model_loaded') is False else 'n/a'} "
+            f"lat={parse_any_float(router_backend.get('latency_ms_p50')):.0f}ms "
+            f"tps={parse_any_float(router_backend.get('throughput_tps')):.1f} "
+            f"res={parse_any_int(router_backend.get('probe_resident_model_count'))} "
+            f"vram={parse_any_float(router_backend.get('probe_resident_vram_gb')):.1f}GB "
+            f"age={human_duration(age_seconds(router_backend.get('probe_generated_at') or router_backend.get('heartbeat_at')))}",
             width,
         ),
         fit_text(
@@ -1406,9 +2026,29 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
             width,
         ),
         fit_text(
+            "Observability :: "
+            f"docs={parse_any_int(kernel_observability.get('document_count'))} "
+            f"errors15m={parse_any_int(kernel_observability.get('recent_error_count'))} "
+            f"critical15m={parse_any_int(kernel_observability.get('recent_critical_count'))} "
+            f"top_source={as_dict(as_list(kernel_observability.get('source_kind_counts'))[0] if as_list(kernel_observability.get('source_kind_counts')) else {}).get('source_kind') or 'n/a'} "
+            f"top_service={as_dict(as_list(kernel_observability.get('service_counts'))[0] if as_list(kernel_observability.get('service_counts')) else {}).get('service') or 'n/a'}",
+            width,
+        ),
+        fit_text(
             "Org :: "
             f"roles={parse_any_int(kernel_org_programs.get('role_count'))} "
-            f"active_versions={parse_any_int(kernel_org_programs.get('active_version_count'))}",
+            f"active_versions={parse_any_int(kernel_org_programs.get('active_version_count'))} "
+            f"candidates={parse_any_int(kernel_org_programs.get('candidate_version_count'))} "
+            f"optimized={parse_any_int(kernel_org_programs.get('optimized_role_count'))}",
+            width,
+        ),
+        fit_text(
+            "Swarm :: "
+            f"active={parse_any_int(kernel_swarm.get('active_profile_count'))} "
+            f"hier={parse_any_int(as_dict(kernel_swarm.get('topology_counts')).get('hierarchical'))} "
+            f"mesh={parse_any_int(as_dict(kernel_swarm.get('topology_counts')).get('mesh'))} "
+            f"adaptive={parse_any_int(as_dict(kernel_swarm.get('topology_counts')).get('adaptive'))} "
+            f"checkpoints={parse_any_int(kernel_swarm.get('checkpoint_artifact_count'))}",
             width,
         ),
         fit_text(
@@ -1420,6 +2060,36 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
             f"last_eval={kernel_autonomy_maintain.get('last_eval_score') if kernel_autonomy_maintain.get('last_eval_score') is not None else 'n/a'}",
             width,
         ),
+        fit_text(
+            "Daemons :: " + (", ".join(maintain_subsystem_tokens) or "none"),
+            width,
+        ),
+        fit_text(
+            "Reactions :: "
+            f"enabled={'yes' if kernel_reaction_engine.get('enabled') else 'no'} "
+            f"running={'yes' if as_dict(kernel_reaction_engine.get('runtime')).get('running') else 'no'} "
+            f"stale={'yes' if kernel_reaction_engine.get('stale') else 'no'} "
+            f"channels={','.join(as_list(kernel_reaction_engine.get('channels'))[:3]) or 'none'} "
+            f"sent={parse_any_int(kernel_reaction_engine.get('last_sent_count'))}",
+            width,
+        ),
+        fit_text(
+            "Runtime Workers :: "
+            f"active={parse_any_int(kernel_runtime_workers.get('active_count') or runtime_worker_summary.get('active_count'))} "
+            f"failed={parse_any_int(as_dict(kernel_runtime_workers.get('counts')).get('failed') or as_dict(runtime_worker_summary.get('counts')).get('failed'))} "
+            f"sessions={parse_any_int(kernel_runtime_workers.get('session_count') or runtime_worker_summary.get('session_count'))} "
+            f"latest={runtime_worker_latest.get('runtime_id') or 'n/a'}:{runtime_worker_latest.get('status') or 'n/a'} "
+            f"task={runtime_worker_latest.get('task_id') or 'n/a'}",
+            width,
+        ),
+        fit_text(
+            "Exports :: "
+            f"bundles={parse_any_int(kernel_workflow_exports.get('bundle_count'))} "
+            f"metrics={parse_any_int(kernel_workflow_exports.get('metrics_count'))} "
+            f"argo={parse_any_int(kernel_workflow_exports.get('argo_contract_count'))} "
+            f"latest={human_duration(age_seconds(as_dict(kernel_workflow_exports.get('latest_bundle')).get('created_at')))}",
+            width,
+        ),
         "",
         fit_text(
             "Latest decision :: "
@@ -1429,6 +2099,23 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
             width,
         ),
     ]
+    if kernel_routing_outlook:
+        for entry in kernel_routing_outlook[:4]:
+            item = as_dict(entry)
+            task_kind = str(item.get("task_kind") or "n/a").strip() or "n/a"
+            selected_backend = str(item.get("selected_backend_id") or "n/a").strip() or "n/a"
+            selected_provider = str(item.get("selected_provider") or "n/a").strip() or "n/a"
+            top_planned_backend = str(item.get("top_planned_backend_id") or "n/a").strip() or "n/a"
+            top_planned_node = str(item.get("top_planned_node_id") or "n/a").strip() or "n/a"
+            planned_count = parse_any_int(item.get("planned_backend_count"))
+            lines.append(
+                fit_text(
+                    f"Hybrid {task_kind} :: live={selected_backend}/{selected_provider} "
+                    f"next={top_planned_backend}@{top_planned_node} "
+                    f"planned={planned_count}",
+                    width,
+                )
+            )
     if last_tick:
         adjustment = float(learning_signal.get("confidence_adjustment") or 0)
         lines.append(
@@ -1485,6 +2172,29 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
         lines.append("")
         lines.append(fit_text("Selected strategy:", width))
         lines.extend(wrap_lines(strategy, width, 4))
+    if active_swarm_profile:
+        lines.append("")
+        lines.append(fit_text("Swarm profile:", width))
+        lines.append(
+            fit_text(
+                "  "
+                f"topology={active_swarm_profile.get('topology') or 'n/a'} "
+                f"consensus={active_swarm_profile.get('consensus_mode') or 'n/a'} "
+                f"queen={active_swarm_profile.get('queen_mode') or 'n/a'} "
+                f"mode={active_swarm_profile.get('execution_mode') or 'n/a'}",
+                width,
+            )
+        )
+        lines.append(
+            fit_text(
+                "  "
+                f"cadence={active_swarm_profile.get('checkpoint_cadence') or 'n/a'} "
+                f"memory_hits={parse_any_int(active_swarm_profile.get('memory_match_count'))} "
+                f"checkpoints={parse_any_int(active_swarm_profile.get('checkpoint_count'))} "
+                f"last={human_duration(age_seconds(active_swarm_profile.get('last_checkpoint_at')))}",
+                width,
+            )
+        )
     lines.append("")
     lines.append(fit_text(f"Spawn path: {spawn_path}", width))
     if current_objective:
@@ -1515,6 +2225,16 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
             task = task_index.get(str(task_id), {})
             title = compact_single_line(str(task.get("objective") or task.get("task_id") or task_id), 96)
             lines.append(fit_text(f"- {task_id}: {title}", width))
+    if operator_brief_compile:
+        lines.append("")
+        lines.append(
+            fit_text(
+                "Compile brief :: "
+                f"{operator_brief_compile.get('artifact_id') or 'n/a'} "
+                f"type={operator_brief_compile.get('artifact_type') or 'n/a'}",
+                width,
+            )
+        )
     if learning_top_agents:
         lines.append("")
         lines.append(fit_text("Most learned agents:", width))
@@ -1540,6 +2260,225 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
             )
         )
     return lines[: max(1, height)]
+
+
+def build_gui_snapshot(snapshot: DashboardSnapshot, theme: str) -> Dict[str, Any]:
+    agents = select_display_agents(snapshot.roster, snapshot.workboard)
+    presences = derive_presence_map(
+        agents,
+        snapshot.workboard,
+        snapshot.tmux,
+        snapshot.task_running,
+        snapshot.task_pending,
+        snapshot.agent_sessions,
+        snapshot.adapter,
+        snapshot.bus_tail,
+        snapshot.fetched_at,
+    )
+    rooms = partition_office_presences(presences)
+    counts = state_counts(presences)
+    kernel = as_dict(snapshot.kernel)
+    kernel_overview = as_dict(kernel.get("overview"))
+    kernel_worker_fabric = as_dict(kernel.get("worker_fabric"))
+    kernel_model_router = as_dict(kernel.get("model_router"))
+    kernel_runtime_workers = as_dict(kernel.get("runtime_workers"))
+    kernel_reaction_engine = as_dict(kernel.get("reaction_engine"))
+    kernel_autonomy_maintain = as_dict(kernel.get("autonomy_maintain"))
+    kernel_swarm = as_dict(kernel.get("swarm"))
+    kernel_observability = as_dict(kernel.get("observability"))
+    kernel_workflow_exports = as_dict(kernel.get("workflow_exports"))
+    tmux_state = as_dict(snapshot.tmux.get("state"))
+    tmux_dashboard = as_dict(snapshot.tmux.get("dashboard"))
+    task_counts = as_dict(snapshot.task_summary.get("counts"))
+    learning = as_dict(snapshot.learning)
+    workboard = as_dict(snapshot.workboard)
+    latest_turn = as_dict(workboard.get("latest_turn"))
+    latest_decision = as_dict(workboard.get("latest_decision"))
+    autopilot_session = latest_autopilot_session(snapshot)
+    autopilot_session_metadata = as_dict(autopilot_session.get("metadata"))
+    last_tick = as_dict(snapshot.autopilot.get("last_tick"))
+    task_index = build_task_index(snapshot.task_running, snapshot.task_pending)
+    current_task_id = (
+        str(autopilot_session_metadata.get("current_task_id") or "").strip()
+        or str(autopilot_session_metadata.get("last_source_task_id") or "").strip()
+        or str(autopilot_session_metadata.get("last_claimed_task_id") or "").strip()
+        or str(autopilot_session_metadata.get("last_execution_task_id") or "").strip()
+    )
+    current_task = task_index.get(current_task_id, {})
+    runtime_workers = as_dict(snapshot.runtime_workers)
+    runtime_worker_summary = as_dict(runtime_workers.get("summary"))
+    runtime_worker_latest = as_dict(runtime_workers.get("session") or as_dict(kernel_runtime_workers.get("latest_session")))
+    default_host_id = str(kernel_worker_fabric.get("default_host_id") or "local").strip() or "local"
+    local_host = next(
+        (
+            as_dict(host)
+            for host in as_list(kernel_worker_fabric.get("hosts"))
+            if str(as_dict(host).get("host_id") or "").strip() == default_host_id
+        ),
+        {},
+    )
+    default_backend_id = str(kernel_model_router.get("default_backend_id") or "").strip()
+    router_backend = {}
+    for candidate in as_list(kernel_model_router.get("backends")):
+        item = as_dict(candidate)
+        backend_id = str(item.get("backend_id") or "").strip()
+        if default_backend_id and backend_id == default_backend_id:
+            router_backend = item
+            break
+    if not router_backend and as_list(kernel_model_router.get("backends")):
+        router_backend = as_dict(as_list(kernel_model_router.get("backends"))[0])
+    delegation_brief = primary_delegation_brief(latest_decision, latest_turn, autopilot_session_metadata)
+    execution_task_ids = dedupe(
+        as_list(as_dict(last_tick.get("execution")).get("task_ids"))
+        + as_list(autopilot_session_metadata.get("last_execution_task_ids"))
+    )
+
+    return {
+        "thread_id": snapshot.thread_id,
+        "fetched_at": snapshot.fetched_at,
+        "fetched_at_iso": datetime.fromtimestamp(snapshot.fetched_at, tz=timezone.utc).isoformat(),
+        "theme": normalize_theme(theme),
+        "errors": list(snapshot.errors),
+        "counts": counts,
+        "agents": [
+            {
+                "agent": dataclasses.asdict(presence.agent),
+                "token": presence.agent.token,
+                "state": presence.state,
+                "activity": presence.activity,
+                "location": presence.location,
+                "actions": list(presence.actions),
+                "evidence_source": presence.evidence_source,
+                "evidence_detail": presence.evidence_detail,
+            }
+            for presence in presences
+        ],
+        "rooms": {
+            room_name: [presence.agent.agent_id for presence in room_presences]
+            for room_name, room_presences in rooms.items()
+        },
+        "summary": {
+            "tasks": {
+                "pending": parse_any_int(task_counts.get("pending")),
+                "running": parse_any_int(task_counts.get("running")),
+                "failed": parse_any_int(task_counts.get("failed")),
+                "completed": parse_any_int(task_counts.get("completed")),
+            },
+            "tmux": {
+                "enabled": bool(tmux_state.get("enabled")),
+                "worker_count": parse_any_int(tmux_state.get("worker_count")),
+                "queue_depth": parse_any_int(tmux_dashboard.get("queue_depth")),
+                "queue_age_seconds": float(tmux_dashboard.get("queue_age_seconds") or 0),
+                "failure_count": parse_any_int(tmux_dashboard.get("failure_count")),
+            },
+            "kernel": {
+                "state": kernel.get("state") or "n/a",
+                "active_sessions": parse_any_int(kernel_overview.get("active_session_count")),
+                "healthy": parse_any_int(as_dict(kernel.get("adaptive_session_counts")).get("healthy")),
+                "degraded": parse_any_int(as_dict(kernel.get("adaptive_session_counts")).get("degraded")),
+                "attention": as_list(kernel.get("attention"))[:6],
+            },
+            "local_host": {
+                "host_id": default_host_id,
+                "cpu_utilization": parse_any_float(local_host.get("cpu_utilization")),
+                "ram_available_gb": parse_any_float(local_host.get("ram_available_gb")),
+                "ram_total_gb": parse_any_float(local_host.get("ram_total_gb")),
+                "swap_used_gb": parse_any_float(local_host.get("swap_used_gb")),
+                "thermal_pressure": local_host.get("thermal_pressure") or "n/a",
+                "worker_count": parse_any_int(local_host.get("worker_count")),
+                "recommended_worker_count": parse_any_int(local_host.get("recommended_worker_count")),
+                "max_local_model_concurrency": parse_any_int(local_host.get("max_local_model_concurrency")),
+            },
+            "router": {
+                "backend_count": parse_any_int(kernel_model_router.get("backend_count")),
+                "enabled_backend_count": parse_any_int(kernel_model_router.get("enabled_backend_count")),
+                "default_backend_id": kernel_model_router.get("default_backend_id") or "n/a",
+                "strategy": kernel_model_router.get("strategy") or "n/a",
+                "routing_outlook": as_list(kernel_model_router.get("routing_outlook"))[:6],
+                "live_backend": {
+                    "backend_id": router_backend.get("backend_id") or "n/a",
+                    "probe_healthy": router_backend.get("probe_healthy"),
+                    "probe_model_known": router_backend.get("probe_model_known"),
+                    "probe_model_loaded": router_backend.get("probe_model_loaded"),
+                    "latency_ms_p50": parse_any_float(router_backend.get("latency_ms_p50")),
+                    "throughput_tps": parse_any_float(router_backend.get("throughput_tps")),
+                    "probe_resident_model_count": parse_any_int(router_backend.get("probe_resident_model_count")),
+                    "probe_resident_vram_gb": parse_any_float(router_backend.get("probe_resident_vram_gb")),
+                },
+            },
+            "runtime_workers": {
+                "session_count": parse_any_int(kernel_runtime_workers.get("session_count") or runtime_worker_summary.get("session_count")),
+                "active_count": parse_any_int(kernel_runtime_workers.get("active_count") or runtime_worker_summary.get("active_count")),
+                "failed_count": parse_any_int(
+                    as_dict(kernel_runtime_workers.get("counts")).get("failed")
+                    or as_dict(runtime_worker_summary.get("counts")).get("failed")
+                ),
+                "latest_session": runtime_worker_latest,
+            },
+            "learning": {
+                "active_entry_count": parse_any_int(learning.get("active_entry_count")),
+                "agents_with_active_entries": parse_any_int(learning.get("agents_with_active_entries")),
+                "prefer_count": parse_any_int(learning.get("prefer_count")),
+                "avoid_count": parse_any_int(learning.get("avoid_count")),
+                "top_agents": as_list(learning.get("top_agents"))[:8],
+            },
+            "reaction_engine": {
+                "enabled": bool(kernel_reaction_engine.get("enabled")),
+                "runtime_running": bool(as_dict(kernel_reaction_engine.get("runtime")).get("running")),
+                "stale": bool(kernel_reaction_engine.get("stale")),
+                "channels": as_list(kernel_reaction_engine.get("channels"))[:4],
+                "last_sent_count": parse_any_int(kernel_reaction_engine.get("last_sent_count")),
+            },
+            "observability": {
+                "document_count": parse_any_int(kernel_observability.get("document_count")),
+                "recent_error_count": parse_any_int(kernel_observability.get("recent_error_count")),
+                "recent_critical_count": parse_any_int(kernel_observability.get("recent_critical_count")),
+                "source_kind_counts": as_list(kernel_observability.get("source_kind_counts"))[:4],
+                "service_counts": as_list(kernel_observability.get("service_counts"))[:4],
+            },
+            "maintain": {
+                "enabled": bool(as_dict(snapshot.autonomy_maintain.get("state")).get("enabled")),
+                "running": bool(as_dict(snapshot.autonomy_maintain.get("runtime")).get("running")),
+                "stale": bool(as_dict(snapshot.autonomy_maintain.get("due")).get("stale")),
+                "eval_due": bool(as_dict(snapshot.autonomy_maintain.get("due")).get("eval")),
+                "last_eval_score": kernel_autonomy_maintain.get("last_eval_score"),
+                "subsystems": as_dict(snapshot.autonomy_maintain.get("subsystems")),
+            },
+            "swarm": {
+                "active_profile_count": parse_any_int(kernel_swarm.get("active_profile_count")),
+                "checkpoint_artifact_count": parse_any_int(kernel_swarm.get("checkpoint_artifact_count")),
+                "active_profiles": as_list(kernel_swarm.get("active_profiles"))[:4],
+            },
+            "workflow_exports": {
+                "bundle_count": parse_any_int(kernel_workflow_exports.get("bundle_count")),
+                "metrics_count": parse_any_int(kernel_workflow_exports.get("metrics_count")),
+                "argo_contract_count": parse_any_int(kernel_workflow_exports.get("argo_contract_count")),
+            },
+        },
+        "current": {
+            "decision_summary": latest_decision.get("decision_summary") or latest_turn.get("decision_summary") or "",
+            "selected_strategy": latest_decision.get("selected_strategy") or latest_turn.get("selected_strategy") or "",
+            "selected_agent": latest_decision.get("selected_agent") or latest_turn.get("selected_agent") or "",
+            "current_task_id": current_task_id,
+            "current_objective": compact_single_line(
+                str(
+                    current_task.get("objective")
+                    or as_dict(current_task.get("payload")).get("task_objective")
+                    or autopilot_session_metadata.get("last_source_task_objective")
+                    or ""
+                ),
+                220,
+            ),
+            "spawn_path": build_spawn_path(latest_decision, latest_turn, autopilot_session_metadata),
+            "delegation_brief": delegation_brief,
+            "execution_task_ids": execution_task_ids,
+            "confidence_method": as_dict(last_tick.get("confidence_method") or autopilot_session_metadata.get("last_confidence_method")),
+            "learning_signal": as_dict(last_tick.get("learning_signal") or autopilot_session_metadata.get("last_learning_signal")),
+            "last_tick": last_tick,
+        },
+        "events": as_list(snapshot.bus_tail.get("events"))[:20],
+        "runtime_sessions": as_list(runtime_workers.get("sessions"))[:20],
+    }
 
 
 def render_lanes_view(snapshot: DashboardSnapshot, width: int, height: int) -> List[str]:
@@ -1574,7 +2513,10 @@ def render_lanes_view(snapshot: DashboardSnapshot, width: int, height: int) -> L
                     f"score={float(host.get('health_score') or 0):.2f} "
                     f"workers={parse_any_int(host.get('worker_count'))} "
                     f"queue={parse_any_int(host.get('active_queue'))} "
-                    f"load={parse_any_int(host.get('active_load'))}",
+                    f"load={parse_any_int(host.get('active_load'))} "
+                    f"cpu={parse_any_float(host.get('cpu_utilization')) * 100:.0f}% "
+                    f"ram={parse_any_float(host.get('ram_available_gb')):.1f}GB "
+                    f"thermal={host.get('thermal_pressure') or 'n/a'}",
                     width,
                 )
             )
@@ -1604,6 +2546,9 @@ def render_lanes_view(snapshot: DashboardSnapshot, width: int, height: int) -> L
 def render_workers_view(snapshot: DashboardSnapshot, width: int, height: int) -> List[str]:
     tmux_state = as_dict(snapshot.tmux.get("state"))
     tasks = as_list(tmux_state.get("tasks"))
+    runtime_worker_state = snapshot.runtime_workers
+    runtime_worker_summary = as_dict(runtime_worker_state.get("summary"))
+    runtime_worker_sessions = [as_dict(session) for session in as_list(runtime_worker_state.get("sessions"))]
     fallback_backlog = [
         as_dict(task)
         for task in as_list(snapshot.task_pending.get("tasks")) + as_list(snapshot.task_running.get("tasks"))
@@ -1618,6 +2563,12 @@ def render_workers_view(snapshot: DashboardSnapshot, width: int, height: int) ->
     lines = [
         fit_text("WORKER TASK QUEUE", width),
         fit_text(
+            f"runtime_sessions={parse_any_int(runtime_worker_summary.get('session_count'))} "
+            f"runtime_active={parse_any_int(runtime_worker_summary.get('active_count'))} "
+            f"runtime_failed={parse_any_int(as_dict(runtime_worker_summary.get('counts')).get('failed'))}",
+            width,
+        ),
+        fit_text(
             f"total={parse_any_int(as_dict(tmux_state.get('counts')).get('total'))} "
             f"running={parse_any_int(as_dict(tmux_state.get('counts')).get('running'))} "
             f"queued={parse_any_int(as_dict(tmux_state.get('counts')).get('queued'))} "
@@ -1626,8 +2577,32 @@ def render_workers_view(snapshot: DashboardSnapshot, width: int, height: int) ->
         ),
         "",
     ]
-    if not tasks and not fallback_backlog:
-        lines.append(fit_text("No tmux tasks recorded.", width))
+    if runtime_worker_sessions:
+        lines.append(fit_text("Runtime worker sessions:", width))
+        for session in runtime_worker_sessions[: max(2, min(6, height - 8))]:
+            lines.append(
+                fit_text(
+                    f"{session.get('session_id') or 'session'} [{session.get('status') or 'n/a'}] "
+                    f"{session.get('runtime_id') or 'n/a'} task={session.get('task_id') or 'n/a'}",
+                    width,
+                )
+            )
+            lines.append(
+                fit_text(
+                    f"  worktree: {compact_single_line(str(session.get('worktree_path') or 'n/a'), max(24, width - 12))}",
+                    width,
+                )
+            )
+            if session.get("last_error"):
+                lines.append(
+                    fit_text(
+                        f"  error: {compact_single_line(str(session.get('last_error') or ''), max(20, width - 10))}",
+                        width,
+                    )
+                )
+            lines.append("")
+    if not tasks and not fallback_backlog and not runtime_worker_sessions:
+        lines.append(fit_text("No tmux or runtime-worker tasks recorded.", width))
         return lines[: max(1, height)]
     for task_raw in tasks[: max(4, height - 6)]:
         task = as_dict(task_raw)
@@ -1805,7 +2780,81 @@ def pick_resume_thread(caller: McpToolCaller) -> str:
     return DEFAULT_THREAD_ID
 
 
-def fetch_snapshot(caller: McpToolCaller, thread_id: str) -> DashboardSnapshot:
+def fetch_snapshot(caller: McpToolCaller, thread_id: str, theme: str = "night") -> DashboardSnapshot:
+    if caller.can_use_http_snapshot():
+        try:
+            payload = caller.fetch_http_snapshot(thread_id, theme)
+            if payload:
+                return DashboardSnapshot(
+                    thread_id=str(payload.get("thread_id") or thread_id).strip() or thread_id,
+                    fetched_at=time.time(),
+                    roster=as_dict(payload.get("roster")),
+                    workboard=as_dict(payload.get("workboard")),
+                    tmux=as_dict(payload.get("tmux")),
+                    task_summary=as_dict(payload.get("task_summary")),
+                    adapter=as_dict(payload.get("adapter")),
+                    bus_tail=as_dict(payload.get("bus_tail")),
+                    trichat_summary=as_dict(payload.get("trichat_summary")),
+                    kernel=as_dict(payload.get("kernel")),
+                    learning=as_dict(payload.get("learning")),
+                    autopilot=as_dict(payload.get("autopilot")),
+                    autonomy_maintain=as_dict(payload.get("autonomy_maintain")),
+                    runtime_workers=as_dict(payload.get("runtime_workers")),
+                    operator_brief=as_dict(payload.get("operator_brief")),
+                    errors=[compact_single_line(str(item), 160) for item in as_list(payload.get("errors"))],
+                    agent_sessions=as_dict(payload.get("agent_sessions")),
+                    task_running=as_dict(payload.get("task_running")),
+                    task_pending=as_dict(payload.get("task_pending")),
+                )
+        except Exception:
+            pass
+
+    office_snapshot_error: Optional[str] = None
+    try:
+        payload = as_dict(
+            caller.call_tool(
+                "office.snapshot",
+                {
+                    "thread_id": thread_id,
+                    "turn_limit": 12,
+                    "task_limit": 24,
+                    "session_limit": 50,
+                    "event_limit": 24,
+                    "learning_limit": 120,
+                    "runtime_worker_limit": 20,
+                    "include_kernel": True,
+                    "include_learning": True,
+                    "include_bus": True,
+                    "include_adapter": True,
+                    "include_runtime_workers": True,
+                },
+            )
+        )
+        if payload:
+            return DashboardSnapshot(
+                thread_id=str(payload.get("thread_id") or thread_id).strip() or thread_id,
+                fetched_at=time.time(),
+                roster=as_dict(payload.get("roster")),
+                workboard=as_dict(payload.get("workboard")),
+                tmux=as_dict(payload.get("tmux")),
+                task_summary=as_dict(payload.get("task_summary")),
+                adapter=as_dict(payload.get("adapter")),
+                bus_tail=as_dict(payload.get("bus_tail")),
+                trichat_summary=as_dict(payload.get("trichat_summary")),
+                kernel=as_dict(payload.get("kernel")),
+                learning=as_dict(payload.get("learning")),
+                autopilot=as_dict(payload.get("autopilot")),
+                autonomy_maintain=as_dict(payload.get("autonomy_maintain")),
+                runtime_workers=as_dict(payload.get("runtime_workers")),
+                operator_brief=as_dict(payload.get("operator_brief")),
+                errors=[compact_single_line(str(item), 160) for item in as_list(payload.get("errors"))],
+                agent_sessions=as_dict(payload.get("agent_sessions")),
+                task_running=as_dict(payload.get("task_running")),
+                task_pending=as_dict(payload.get("task_pending")),
+            )
+    except Exception as error:  # noqa: BLE001
+        office_snapshot_error = compact_single_line(f"office_snapshot: {error}", 160)
+
     requests = {
         "roster": ("trichat.roster", {"active_only": False}),
         "workboard": ("trichat.workboard", {"thread_id": thread_id, "limit": 12}),
@@ -1821,10 +2870,22 @@ def fetch_snapshot(caller: McpToolCaller, thread_id: str) -> DashboardSnapshot:
         "learning": ("agent.learning_summary", {"limit": 200, "top_agents_limit": 8, "recent_limit": 8}),
         "autopilot": ("trichat.autopilot", {"action": "status"}),
         "autonomy_maintain": ("autonomy.maintain", {"action": "status"}),
+        "runtime_workers": ("runtime.worker", {"action": "status", "limit": 20}),
+        "operator_brief": (
+            "operator.brief",
+            {
+                "thread_id": thread_id,
+                "include_kernel": False,
+                "include_runtime_brief": False,
+                "include_compile_brief": True,
+            },
+        ),
     }
     results: Dict[str, Dict[str, Any]] = {}
     errors: List[str] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(requests)) as pool:
+    if office_snapshot_error:
+        errors.append(office_snapshot_error)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=snapshot_max_workers(caller.transport, len(requests))) as pool:
         futures = {
             pool.submit(caller.call_tool, tool, args): name
             for name, (tool, args) in requests.items()
@@ -1836,6 +2897,15 @@ def fetch_snapshot(caller: McpToolCaller, thread_id: str) -> DashboardSnapshot:
             except Exception as error:  # noqa: BLE001
                 results[name] = {}
                 errors.append(compact_single_line(f"{name}: {error}", 160))
+    if not as_list(as_dict(results.get("roster", {})).get("agents")):
+        fallback_roster = build_config_roster_fallback(
+            caller.repo_root,
+            as_dict(results.get("workboard", {})),
+            as_dict(results.get("agent_sessions", {})),
+            as_dict(results.get("learning", {})),
+        )
+        if fallback_roster:
+            results["roster"] = fallback_roster
     return DashboardSnapshot(
         thread_id=thread_id,
         fetched_at=time.time(),
@@ -1853,6 +2923,8 @@ def fetch_snapshot(caller: McpToolCaller, thread_id: str) -> DashboardSnapshot:
         learning=results.get("learning", {}),
         autopilot=results.get("autopilot", {}),
         autonomy_maintain=results.get("autonomy_maintain", {}),
+        runtime_workers=results.get("runtime_workers", {}),
+        operator_brief=results.get("operator_brief", {}),
         errors=errors,
     )
 
@@ -1870,6 +2942,7 @@ class OfficeDashboardApp:
             stdio_args=args.stdio_args,
             retries=args.mcp_retries,
             retry_delay_seconds=args.mcp_retry_delay,
+            tool_timeout_seconds=args.mcp_timeout_seconds,
         )
         self.thread_id = args.thread_id or (pick_resume_thread(self.caller) if args.resume_latest else DEFAULT_THREAD_ID)
         self.view = args.view if args.view in VIEW_ORDER else DEFAULT_VIEW
@@ -1882,7 +2955,8 @@ class OfficeDashboardApp:
     def refresh(self) -> None:
         self.last_refresh_started = time.time()
         try:
-            self.snapshot = fetch_snapshot(self.caller, self.thread_id)
+            self.snapshot = fetch_snapshot(self.caller, self.thread_id, self.theme)
+            write_snapshot_cache(self.repo_root, build_gui_snapshot(self.snapshot, self.theme))
             if self.snapshot.errors:
                 self.last_error = " | ".join(self.snapshot.errors[:2])
             else:
@@ -1906,6 +2980,7 @@ class OfficeDashboardApp:
             learning={},
             autopilot={},
             autonomy_maintain={},
+            operator_brief={},
             errors=[self.last_error] if self.last_error else [],
         )
         lines = render_view(snapshot, self.view, self.args.width, self.args.height, frame=0, theme=self.theme)
@@ -1974,7 +3049,12 @@ class OfficeDashboardApp:
             learning={},
             autopilot={},
             autonomy_maintain={},
+            runtime_workers={},
+            operator_brief={},
             errors=[self.last_error] if self.last_error else [],
+            agent_sessions={},
+            task_running={},
+            task_pending={},
         )
         header = (
             f"Agent Office Dashboard [{self.view}] "
@@ -2027,8 +3107,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stdio-args", default=os.environ.get("TRICHAT_MCP_STDIO_ARGS", "dist/server.js"), help="STDIO MCP args.")
     parser.add_argument("--mcp-retries", type=int, default=1, help="Retry count for MCP calls.")
     parser.add_argument("--mcp-retry-delay", type=float, default=0.2, help="Base retry delay for MCP calls.")
+    parser.add_argument(
+        "--mcp-timeout-seconds",
+        type=float,
+        default=float(os.environ.get("TRICHAT_OFFICE_TOOL_TIMEOUT_SECONDS", "8.0")),
+        help="Per-tool timeout for MCP helper subprocesses.",
+    )
     parser.add_argument("--theme", default=os.environ.get("TRICHAT_OFFICE_THEME", "night"), choices=THEME_ORDER, help="Dashboard theme.")
     parser.add_argument("--once", action="store_true", help="Render once to stdout without curses.")
+    parser.add_argument("--json-snapshot", action="store_true", help="Print a structured JSON office snapshot and exit.")
     parser.add_argument("--width", type=int, default=118, help="Plain render width when --once is used.")
     parser.add_argument("--height", type=int, default=44, help="Plain render height when --once is used.")
     return parser
@@ -2038,6 +3125,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     app = OfficeDashboardApp(args)
+    if args.json_snapshot:
+        app.refresh()
+        snapshot = app.snapshot or DashboardSnapshot(
+            thread_id=app.thread_id,
+            fetched_at=time.time(),
+            roster={},
+            workboard={},
+            tmux={},
+            task_summary={},
+            adapter={},
+            bus_tail={},
+            trichat_summary={},
+            kernel={},
+            learning={},
+            autopilot={},
+            autonomy_maintain={},
+            runtime_workers={},
+            operator_brief={},
+            errors=[app.last_error] if app.last_error else [],
+            agent_sessions={},
+            task_running={},
+            task_pending={},
+        )
+        print(json.dumps(build_gui_snapshot(snapshot, app.theme), indent=2))
+        return 0
     if args.once:
         return app.run_once()
     return app.run_curses()

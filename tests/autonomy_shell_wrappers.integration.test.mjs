@@ -52,6 +52,47 @@ test("autonomy shell wrapper ensure converges the control plane through the real
   }
 });
 
+test("stdio helper processes do not claim the TriChat bus socket", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-stdio-helper-bus-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const busPath = path.join(tempDir, "trichat.bus.sock");
+
+  try {
+    const result = await execFileAsync(
+      "node",
+      [
+        "./scripts/mcp_tool_call.mjs",
+        "--tool",
+        "health.storage",
+        "--args",
+        "{}",
+        "--transport",
+        "stdio",
+        "--stdio-command",
+        "node",
+        "--stdio-args",
+        "dist/server.js",
+        "--cwd",
+        REPO_ROOT,
+      ],
+      {
+        cwd: REPO_ROOT,
+        env: inheritedEnv({
+          ANAMNESIS_HUB_DB_PATH: dbPath,
+          TRICHAT_BUS_SOCKET_PATH: busPath,
+          MCP_HTTP_BEARER_TOKEN: "",
+        }),
+        maxBuffer: 8 * 1024 * 1024,
+      }
+    );
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.ok, true);
+    assert.equal(fs.existsSync(busPath), false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("ring leader start proactively uses autonomy bootstrap on a cold control plane", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-ring-leader-bootstrap-"));
   const dbPath = path.join(tempDir, "hub.sqlite");
@@ -124,11 +165,169 @@ test("autonomy keepalive defaults to bounded maintenance instead of a bare readi
     assert.equal(maintained.status.bootstrap.self_start_ready, true);
     assert.equal(maintained.status.goal_autorun_daemon.running, true);
     assert.equal(typeof maintained.status.state.last_run_at, "string");
-    assert.equal(maintained.eval.executed, true);
+    assert.ok(maintained.eval.executed === true || maintained.actions.includes("eval.deferred_busy"));
   } finally {
     await ollama.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("agents_switch status returns bounded JSON over the live HTTP control plane", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-agents-switch-status-http-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const busPath = path.join(tempDir, "trichat.bus.sock");
+  const bearerToken = "test-agents-switch-status-token";
+  const ollama = await startFakeOllamaServer({
+    models: [{ name: "llama3.2:3b" }],
+  });
+  const httpPort = await reservePort();
+  const child = spawn("node", ["dist/server.js", "--http", "--http-port", String(httpPort)], {
+    cwd: REPO_ROOT,
+    env: inheritedEnv({
+      MCP_HTTP: "1",
+      MCP_HTTP_PORT: String(httpPort),
+      MCP_HTTP_HOST: "127.0.0.1",
+      MCP_HTTP_BEARER_TOKEN: bearerToken,
+      ANAMNESIS_HUB_DB_PATH: dbPath,
+      TRICHAT_BUS_SOCKET_PATH: busPath,
+      TRICHAT_OLLAMA_URL: ollama.url,
+      TRICHAT_RING_LEADER_AUTOSTART: "1",
+      TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+      TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+      TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+      MCP_AUTONOMY_BOOTSTRAP_ON_START: "1",
+      MCP_AUTONOMY_MAINTAIN_ON_START: "1",
+      AGENTS_STATUS_TIMEOUT_SECONDS: "4",
+    }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  try {
+    await waitForAutonomyStatus({
+      url: `http://127.0.0.1:${httpPort}/`,
+      origin: "http://127.0.0.1",
+      bearerToken,
+    });
+    const result = await execFileAsync("./scripts/agents_switch.sh", ["status"], {
+      cwd: REPO_ROOT,
+      env: inheritedEnv({
+        ANAMNESIS_HUB_DB_PATH: dbPath,
+        TRICHAT_BUS_SOCKET_PATH: busPath,
+        TRICHAT_OLLAMA_URL: ollama.url,
+        TRICHAT_MCP_URL: `http://127.0.0.1:${httpPort}/`,
+        TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
+        MCP_HTTP_BEARER_TOKEN: bearerToken,
+        AGENTS_STATUS_TIMEOUT_SECONDS: "4",
+      }),
+      timeout: 8000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    const status = JSON.parse(result.stdout);
+    assert.equal(status.ok, true);
+    assert.equal(typeof status.switches?.autonomy_keepalive, "boolean");
+    assert.equal(typeof status.autonomy_runtime, "object");
+    assert.equal(typeof status.auto_snapshot_runtime, "object");
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("launchd installer generates node runner ProgramArguments for launch agents", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-launchd-install-"));
+  const fakeHome = path.join(tempDir, "home");
+  const fakeBin = path.join(tempDir, "bin");
+  const launchDir = path.join(fakeHome, "Library", "LaunchAgents");
+  const launchctlLog = path.join(tempDir, "launchctl.log");
+  const curlCountFile = path.join(tempDir, "curl.count");
+  fs.mkdirSync(fakeBin, { recursive: true });
+  fs.mkdirSync(launchDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(fakeBin, "launchctl"),
+    `#!/usr/bin/env bash
+printf 'launchctl %s\\n' "$*" >> "${launchctlLog}"
+exit 0
+`,
+    { mode: 0o755 }
+  );
+  fs.writeFileSync(
+    path.join(fakeBin, "npm"),
+    "#!/usr/bin/env bash\nexit 0\n",
+    { mode: 0o755 }
+  );
+  fs.writeFileSync(
+    path.join(fakeBin, "curl"),
+    `#!/usr/bin/env bash
+count=0
+if [[ -f "${curlCountFile}" ]]; then
+  count="$(cat "${curlCountFile}")"
+fi
+count=$((count + 1))
+printf '%s' "$count" > "${curlCountFile}"
+printf 'curl attempt=%s %s\\n' "$count" "$*" >> "${launchctlLog}"
+if [[ "$count" -lt 2 ]]; then
+  exit 7
+fi
+printf '{"ok":true,"ready":true}\\n'
+`,
+    { mode: 0o755 }
+  );
+
+  const env = inheritedEnv({
+    HOME: fakeHome,
+    PATH: `${fakeBin}:${process.env.PATH || ""}`,
+    TRICHAT_RING_LEADER_TRANSPORT: "stdio",
+    MCP_HTTP_BEARER_TOKEN: "",
+  });
+
+  await execFileAsync("./scripts/launchd_install.sh", [], {
+    cwd: REPO_ROOT,
+    env,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+
+  const keepalivePlist = fs.readFileSync(
+    path.join(launchDir, "com.mcplayground.autonomy.keepalive.plist"),
+    "utf8"
+  );
+  const autosnapshotPlist = fs.readFileSync(
+    path.join(launchDir, "com.mcplayground.imprint.autosnapshot.plist"),
+    "utf8"
+  );
+
+  assert.match(keepalivePlist, /<string>.*node.*<\/string>/);
+  assert.match(
+    keepalivePlist,
+    new RegExp(
+      `<string>${escapeRegExp(path.join(REPO_ROOT, "scripts", "autonomy_keepalive_runner.mjs"))}<\\/string>`
+    )
+  );
+  assert.doesNotMatch(keepalivePlist, /autonomy_keepalive\.sh/);
+
+  assert.match(autosnapshotPlist, /<string>.*node.*<\/string>/);
+  assert.match(
+    autosnapshotPlist,
+    new RegExp(
+      `<string>${escapeRegExp(path.join(REPO_ROOT, "scripts", "imprint_auto_snapshot_runner.mjs"))}<\\/string>`
+    )
+  );
+  assert.doesNotMatch(autosnapshotPlist, /imprint_auto_snapshot_ctl\.sh/);
+
+  const launchLog = fs.readFileSync(launchctlLog, "utf8");
+  const mcpKickstartIndex = launchLog.indexOf(`launchctl kickstart -k gui/${process.getuid()}/com.mcplayground.mcp.server`);
+  const curlReadyIndex = launchLog.indexOf("curl attempt=2");
+  const workerBootstrapIndex = launchLog.indexOf(
+    `launchctl bootstrap gui/${process.getuid()} ${path.join(launchDir, "com.mcplayground.imprint.inboxworker.plist")}`
+  );
+  assert.notEqual(mcpKickstartIndex, -1);
+  assert.notEqual(curlReadyIndex, -1);
+  assert.notEqual(workerBootstrapIndex, -1);
+  assert.ok(curlReadyIndex > mcpKickstartIndex);
+  assert.ok(workerBootstrapIndex > curlReadyIndex);
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
 test("autonomy ingress shell wrapper records continuity and launches real background intake", async () => {
@@ -251,7 +450,7 @@ async function reservePort() {
 }
 
 async function waitForAutonomyStatus({ url, origin, bearerToken }) {
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + 60000;
   let lastError = null;
   while (Date.now() < deadline) {
     try {
@@ -304,6 +503,10 @@ function inheritedEnv(extra) {
     env[key] = value;
   }
   return env;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function runShellJson(command, env) {

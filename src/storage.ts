@@ -8,7 +8,10 @@ const SQLITE_HEADER = Buffer.from("SQLite format 3\u0000", "utf8");
 type StorageGuardOptions = {
   backup_dir: string;
   backup_keep: number;
+  backup_max_total_bytes: number;
+  backup_min_interval_seconds: number;
   startup_backup_enabled: boolean;
+  startup_backup_max_bytes: number;
   startup_quick_check_enabled: boolean;
   auto_restore_from_backup: boolean;
   allow_fresh_on_corruption: boolean;
@@ -18,6 +21,17 @@ type StorageGuardOptions = {
 type StorageGuardOutcome = {
   quarantined_paths: string[];
   restored_from_backup: string | null;
+};
+
+type StorageBackupArtifactKind = "snapshot" | "temp" | "journal" | "wal" | "shm" | "other";
+
+type StorageBackupArtifactRecord = {
+  path: string;
+  basename: string;
+  kind: StorageBackupArtifactKind;
+  size_bytes: number;
+  mtime_ms: number;
+  mtime_iso: string | null;
 };
 
 export type TrustTier = "raw" | "verified" | "policy-backed" | "deprecated";
@@ -438,6 +452,44 @@ export type TaskEventRecord = {
   details: Record<string, unknown>;
 };
 
+export type RuntimeWorkerRuntimeId = "codex" | "shell";
+export type RuntimeWorkerSessionStatus =
+  | "launching"
+  | "running"
+  | "idle"
+  | "completed"
+  | "failed"
+  | "stopped";
+
+export type RuntimeWorkerSessionRecord = {
+  session_id: string;
+  created_at: string;
+  updated_at: string;
+  runtime_id: RuntimeWorkerRuntimeId;
+  status: RuntimeWorkerSessionStatus;
+  task_id: string | null;
+  goal_id: string | null;
+  plan_id: string | null;
+  step_id: string | null;
+  worker_id: string;
+  title: string;
+  objective: string;
+  repo_root: string;
+  project_dir: string;
+  worktree_path: string;
+  branch_name: string | null;
+  tmux_session_name: string;
+  transcript_path: string | null;
+  brief_path: string | null;
+  last_command_at: string | null;
+  last_activity_at: string | null;
+  last_error: string | null;
+  metadata: Record<string, unknown>;
+  source_client: string | null;
+  source_model: string | null;
+  source_agent: string | null;
+};
+
 export type TriChatThreadStatus = "active" | "archived";
 
 export type TriChatThreadRecord = {
@@ -571,6 +623,7 @@ export type TriChatAdapterTelemetrySummaryRecord = {
 
 export type TaskSummaryRecord = {
   counts: Record<TaskStatus, number>;
+  expired_running_count: number;
   running: Array<{
     task_id: string;
     objective: string;
@@ -684,6 +737,31 @@ export type RuntimeEventRecord = {
   source_agent: string | null;
 };
 
+export type ObservabilityLevel = "trace" | "debug" | "info" | "warn" | "error" | "critical";
+
+export type ObservabilityDocumentRecord = {
+  document_id: string;
+  created_at: string;
+  updated_at: string;
+  index_name: string;
+  source_kind: string;
+  source_ref: string | null;
+  level: ObservabilityLevel | null;
+  host_id: string | null;
+  service: string | null;
+  event_type: string | null;
+  title: string | null;
+  body_text: string;
+  attributes: Record<string, unknown>;
+  tags: string[];
+};
+
+export type ObservabilitySearchHit = {
+  score: number;
+  match_reason: string;
+  document: ObservabilityDocumentRecord;
+};
+
 export type TranscriptAutoSquishStateRecord = {
   enabled: boolean;
   interval_seconds: number;
@@ -727,6 +805,7 @@ export type WorkerFabricHostTelemetryRecord = {
   cpu_utilization: number | null;
   ram_available_gb: number | null;
   ram_total_gb: number | null;
+  swap_used_gb: number | null;
   gpu_utilization: number | null;
   gpu_memory_available_gb: number | null;
   gpu_memory_total_gb: number | null;
@@ -754,6 +833,43 @@ export type WorkerFabricStateRecord = {
   strategy: "balanced" | "prefer_local" | "prefer_capacity" | "resource_aware";
   default_host_id: string | null;
   hosts: WorkerFabricHostRecord[];
+  updated_at: string;
+};
+
+export type ClusterTopologyNodeStatus = "planned" | "provisioning" | "active" | "maintenance" | "retired";
+export type ClusterTopologyNodeClass = "control-plane" | "cpu-memory" | "gpu-workstation" | "virtualization";
+
+export type ClusterTopologyDesiredBackendRecord = {
+  backend_id: string;
+  provider: ModelRouterProvider;
+  model_id: string;
+  tags: string[];
+  metadata: Record<string, unknown>;
+};
+
+export type ClusterTopologyNodeRecord = {
+  node_id: string;
+  title: string;
+  status: ClusterTopologyNodeStatus;
+  node_class: ClusterTopologyNodeClass;
+  host_id: string | null;
+  transport: WorkerFabricTransport;
+  ssh_destination: string | null;
+  workspace_root: string | null;
+  worker_count: number | null;
+  tags: string[];
+  preferred_domains: string[];
+  desired_backends: ClusterTopologyDesiredBackendRecord[];
+  capabilities: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ClusterTopologyStateRecord = {
+  enabled: boolean;
+  default_node_id: string | null;
+  nodes: ClusterTopologyNodeRecord[];
   updated_at: string;
 };
 
@@ -794,7 +910,35 @@ export type BenchmarkSuitesStateRecord = {
   updated_at: string;
 };
 
-export type ModelRouterProvider = "ollama" | "mlx" | "llama.cpp" | "vllm" | "openai" | "custom";
+export type ModelRouterProvider =
+  | "ollama"
+  | "mlx"
+  | "llama.cpp"
+  | "vllm"
+  | "openai"
+  | "google"
+  | "cursor"
+  | "anthropic"
+  | "github-copilot"
+  | "custom";
+
+function normalizeModelRouterProvider(value: unknown): ModelRouterProvider {
+  const providerRaw = String(value ?? "custom").trim().toLowerCase();
+  if (
+    providerRaw === "ollama" ||
+    providerRaw === "mlx" ||
+    providerRaw === "llama.cpp" ||
+    providerRaw === "vllm" ||
+    providerRaw === "openai" ||
+    providerRaw === "google" ||
+    providerRaw === "cursor" ||
+    providerRaw === "anthropic" ||
+    providerRaw === "github-copilot"
+  ) {
+    return providerRaw;
+  }
+  return "custom";
+}
 export type ModelRouterStrategy =
   | "balanced"
   | "prefer_speed"
@@ -957,9 +1101,13 @@ export type GoalAutorunStateRecord = {
 
 export type AutonomyMaintainStateRecord = {
   enabled: boolean;
+  local_host_id: string;
   interval_seconds: number;
   learning_review_interval_seconds: number;
+  run_eval_if_due: boolean;
   eval_interval_seconds: number;
+  eval_suite_id: string;
+  minimum_eval_score: number;
   last_run_at: string | null;
   last_bootstrap_ready_at: string | null;
   last_goal_autorun_daemon_at: string | null;
@@ -970,8 +1118,32 @@ export type AutonomyMaintainStateRecord = {
   last_eval_run_at: string | null;
   last_eval_run_id: string | null;
   last_eval_score: number | null;
+  last_eval_dependency_fingerprint: string | null;
+  last_observability_ship_at: string | null;
   last_actions: string[];
   last_attention: string[];
+  last_error: string | null;
+  updated_at: string;
+};
+
+export type ReactionEngineNotificationRecord = {
+  key: string;
+  title: string;
+  level: "info" | "warn" | "critical";
+  sent_at: string;
+};
+
+export type ReactionEngineStateRecord = {
+  enabled: boolean;
+  interval_seconds: number;
+  dedupe_window_seconds: number;
+  channels: string[];
+  last_run_at: string | null;
+  last_sent_at: string | null;
+  last_sent_count: number;
+  last_alert_key: string | null;
+  last_alert_seen_count: number;
+  recent_notifications: ReactionEngineNotificationRecord[];
   last_error: string | null;
   updated_at: string;
 };
@@ -1149,6 +1321,82 @@ export class Storage {
     return this.dbPath;
   }
 
+  getStorageBackupStatus(params?: { recent_limit?: number }) {
+    const recentLimit = Math.max(1, Math.min(100, params?.recent_limit ?? 12));
+    const artifacts = listDatabaseBackupArtifacts(this.dbPath, this.guardOptions);
+    const snapshots = artifacts.filter((entry) => entry.kind === "snapshot");
+    const tempArtifacts = artifacts.filter((entry) => entry.kind === "temp");
+    const journals = artifacts.filter((entry) => entry.kind === "journal");
+    const auxiliary = artifacts.filter((entry) => entry.kind === "wal" || entry.kind === "shm" || entry.kind === "other");
+    const keep = this.guardOptions.backup_keep;
+    const maxTotalBytes = this.guardOptions.backup_max_total_bytes;
+    let reclaimableBytes = tempArtifacts.reduce((sum, entry) => sum + entry.size_bytes, 0) +
+      journals.reduce((sum, entry) => sum + entry.size_bytes, 0) +
+      auxiliary.reduce((sum, entry) => sum + entry.size_bytes, 0);
+    const reclaimablePaths = [
+      ...tempArtifacts.map((entry) => entry.path),
+      ...journals.map((entry) => entry.path),
+      ...auxiliary.map((entry) => entry.path),
+    ];
+    const sortedSnapshots = [...snapshots].sort((left, right) => right.mtime_ms - left.mtime_ms);
+    for (const snapshot of sortedSnapshots.slice(keep)) {
+      reclaimableBytes += snapshot.size_bytes;
+      reclaimablePaths.push(snapshot.path);
+    }
+    if (maxTotalBytes > 0) {
+      let retainedBytes = sortedSnapshots
+        .slice(0, Math.min(keep, sortedSnapshots.length))
+        .reduce((sum, entry) => sum + entry.size_bytes, 0);
+      for (const snapshot of sortedSnapshots.slice(keep)) {
+        retainedBytes += snapshot.size_bytes;
+        if (retainedBytes > maxTotalBytes && !reclaimablePaths.includes(snapshot.path)) {
+          reclaimableBytes += snapshot.size_bytes;
+          reclaimablePaths.push(snapshot.path);
+        }
+      }
+    }
+    return {
+      backup_dir: this.guardOptions.backup_dir,
+      backup_keep: keep,
+      backup_max_total_bytes: maxTotalBytes,
+      artifact_count: artifacts.length,
+      snapshot_count: snapshots.length,
+      temp_count: tempArtifacts.length,
+      journal_count: journals.length,
+      auxiliary_count: auxiliary.length,
+      total_bytes: artifacts.reduce((sum, entry) => sum + entry.size_bytes, 0),
+      snapshot_bytes: snapshots.reduce((sum, entry) => sum + entry.size_bytes, 0),
+      temp_bytes: tempArtifacts.reduce((sum, entry) => sum + entry.size_bytes, 0),
+      reclaimable_bytes: reclaimableBytes,
+      reclaimable_count: reclaimablePaths.length,
+      recent_artifacts: artifacts
+        .slice(0, recentLimit)
+        .map((entry) => ({
+          path: entry.path,
+          basename: entry.basename,
+          kind: entry.kind,
+          size_bytes: entry.size_bytes,
+          mtime_iso: entry.mtime_iso,
+        })),
+    };
+  }
+
+  pruneStorageBackups(params?: {
+    keep?: number;
+    max_total_bytes?: number;
+    dry_run?: boolean;
+    temp_max_age_seconds?: number;
+  }) {
+    return withDatabaseBackupLock(this.dbPath, this.guardOptions, () =>
+      pruneDatabaseBackupArtifacts(this.dbPath, this.guardOptions, {
+        keep: params?.keep,
+        max_total_bytes: params?.max_total_bytes,
+        dry_run: params?.dry_run,
+        temp_max_age_seconds: params?.temp_max_age_seconds,
+      })
+    );
+  }
+
   init(): void {
     if (this.guardOutcome.restored_from_backup) {
       writeStorageGuardLog(
@@ -1231,6 +1479,16 @@ export class Storage {
         name: "add-agent-learning-ledger-schema",
         run: () => this.applyAgentLearningSchemaMigration(),
       },
+      {
+        version: 15,
+        name: "add-runtime-worker-session-schema",
+        run: () => this.applyRuntimeWorkerSessionSchemaMigration(),
+      },
+      {
+        version: 16,
+        name: "add-observability-documents-schema",
+        run: () => this.applyObservabilitySchemaMigration(),
+      },
     ]);
     this.ensureRuntimeSchemaCompleteness();
     this.createStartupBackupSnapshot();
@@ -1292,6 +1550,13 @@ export class Storage {
     if (this.dbPath === ":memory:") {
       return;
     }
+    const dbSizeBytes = databaseArtifactBytes(this.dbPath);
+    if (this.guardOptions.startup_backup_max_bytes > 0 && dbSizeBytes > this.guardOptions.startup_backup_max_bytes) {
+      writeStorageGuardLog(
+        `[storage] startup backup skipped: database size ${dbSizeBytes} exceeds max ${this.guardOptions.startup_backup_max_bytes}`
+      );
+      return;
+    }
 
     fs.mkdirSync(this.guardOptions.backup_dir, { recursive: true });
     const base = path.basename(this.dbPath);
@@ -1300,10 +1565,31 @@ export class Storage {
     const finalPath = path.join(this.guardOptions.backup_dir, `${base}.${stamp}.sqlite`);
     const escapedTmpPath = tmpPath.replace(/'/g, "''");
     try {
-      this.db.pragma("wal_checkpoint(PASSIVE)");
-      this.db.exec(`VACUUM INTO '${escapedTmpPath}'`);
-      moveFileWithFallback(tmpPath, finalPath);
-      pruneDatabaseBackups(this.dbPath, this.guardOptions);
+      withDatabaseBackupLock(this.dbPath, this.guardOptions, () => {
+        pruneDatabaseBackups(this.dbPath, this.guardOptions);
+        const latestSnapshot = listDatabaseBackupArtifacts(this.dbPath, this.guardOptions).find(
+          (entry) => entry.kind === "snapshot"
+        );
+        const minIntervalMs = this.guardOptions.backup_min_interval_seconds * 1000;
+        const dbArtifactLatestMtimeMs = databaseArtifactLatestMtimeMs(this.dbPath);
+        const databaseChangedSinceLatestSnapshot =
+          latestSnapshot && dbArtifactLatestMtimeMs > 0 ? dbArtifactLatestMtimeMs > latestSnapshot.mtime_ms : false;
+        if (
+          latestSnapshot &&
+          minIntervalMs > 0 &&
+          Date.now() - latestSnapshot.mtime_ms < minIntervalMs &&
+          !databaseChangedSinceLatestSnapshot
+        ) {
+          writeStorageGuardLog(
+            `[storage] startup backup skipped: latest snapshot ${latestSnapshot.basename} is newer than cooldown ${this.guardOptions.backup_min_interval_seconds}s`
+          );
+          return;
+        }
+        this.db.pragma("wal_checkpoint(FULL)");
+        this.db.exec(`VACUUM INTO '${escapedTmpPath}'`);
+        moveFileWithFallback(tmpPath, finalPath);
+        pruneDatabaseBackups(this.dbPath, this.guardOptions);
+      });
     } catch (error) {
       removeFileIfExists(tmpPath);
       const message = error instanceof Error ? error.message : String(error);
@@ -1811,12 +2097,16 @@ export class Storage {
   listTranscriptRunsWithPending(limit = 50): Array<{
     run_id: string;
     unsquished_count: number;
+    oldest_timestamp: string;
     last_timestamp: string;
   }> {
     const boundedLimit = Math.max(1, Math.min(500, limit));
     const rows = this.db
       .prepare(
-        `SELECT run_id, COUNT(*) AS unsquished_count, MAX(timestamp) AS last_timestamp
+        `SELECT run_id,
+                COUNT(*) AS unsquished_count,
+                MIN(timestamp) AS oldest_timestamp,
+                MAX(timestamp) AS last_timestamp
          FROM transcript_lines
          WHERE run_id IS NOT NULL
            AND is_squished = 0
@@ -1829,6 +2119,7 @@ export class Storage {
     return rows.map((row) => ({
       run_id: String(row.run_id ?? ""),
       unsquished_count: Number(row.unsquished_count ?? 0),
+      oldest_timestamp: String(row.oldest_timestamp ?? ""),
       last_timestamp: String(row.last_timestamp ?? ""),
     }));
   }
@@ -2109,9 +2400,13 @@ export class Storage {
     const config = parseJsonObject(row.config_json);
     return {
       enabled: Number(row.enabled ?? 0) === 1,
+      local_host_id: asNullableString(config.local_host_id)?.trim() || "local",
       interval_seconds: parseBoundedInt(config.interval_seconds, 120, 5, 3600),
       learning_review_interval_seconds: parseBoundedInt(config.learning_review_interval_seconds, 300, 60, 604800),
+      run_eval_if_due: typeof config.run_eval_if_due === "boolean" ? config.run_eval_if_due : true,
       eval_interval_seconds: parseBoundedInt(config.eval_interval_seconds, 21600, 300, 604800),
+      eval_suite_id: asNullableString(config.eval_suite_id)?.trim() || "autonomy.control-plane",
+      minimum_eval_score: parseBoundedInt(config.minimum_eval_score, 75, 0, 100),
       last_run_at: asNullableString(config.last_run_at)?.trim() || null,
       last_bootstrap_ready_at: asNullableString(config.last_bootstrap_ready_at)?.trim() || null,
       last_goal_autorun_daemon_at: asNullableString(config.last_goal_autorun_daemon_at)?.trim() || null,
@@ -2125,6 +2420,8 @@ export class Storage {
         typeof config.last_eval_score === "number" && Number.isFinite(config.last_eval_score)
           ? Number(config.last_eval_score.toFixed(4))
           : null,
+      last_eval_dependency_fingerprint: asNullableString(config.last_eval_dependency_fingerprint)?.trim() || null,
+      last_observability_ship_at: asNullableString(config.last_observability_ship_at)?.trim() || null,
       last_actions: dedupeNonEmpty(Array.isArray(config.last_actions) ? config.last_actions.map((entry) => String(entry ?? "")) : []),
       last_attention: dedupeNonEmpty(Array.isArray(config.last_attention) ? config.last_attention.map((entry) => String(entry ?? "")) : []),
       last_error: asNullableString(config.last_error)?.trim() || null,
@@ -2134,9 +2431,13 @@ export class Storage {
 
   setAutonomyMaintainState(params: {
     enabled: boolean;
+    local_host_id?: string;
     interval_seconds: number;
     learning_review_interval_seconds: number;
+    run_eval_if_due?: boolean;
     eval_interval_seconds: number;
+    eval_suite_id?: string;
+    minimum_eval_score?: number;
     last_run_at?: string | null;
     last_bootstrap_ready_at?: string | null;
     last_goal_autorun_daemon_at?: string | null;
@@ -2147,6 +2448,8 @@ export class Storage {
     last_eval_run_at?: string | null;
     last_eval_run_id?: string | null;
     last_eval_score?: number | null;
+    last_eval_dependency_fingerprint?: string | null;
+    last_observability_ship_at?: string | null;
     last_actions?: string[];
     last_attention?: string[];
     last_error?: string | null;
@@ -2154,9 +2457,13 @@ export class Storage {
     const now = new Date().toISOString();
     const normalized = {
       enabled: Boolean(params.enabled),
+      local_host_id: params.local_host_id?.trim() || "local",
       interval_seconds: parseBoundedInt(params.interval_seconds, 120, 5, 3600),
       learning_review_interval_seconds: parseBoundedInt(params.learning_review_interval_seconds, 300, 60, 604800),
+      run_eval_if_due: typeof params.run_eval_if_due === "boolean" ? params.run_eval_if_due : true,
       eval_interval_seconds: parseBoundedInt(params.eval_interval_seconds, 21600, 300, 604800),
+      eval_suite_id: params.eval_suite_id?.trim() || "autonomy.control-plane",
+      minimum_eval_score: parseBoundedInt(params.minimum_eval_score, 75, 0, 100),
       last_run_at: params.last_run_at?.trim() || null,
       last_bootstrap_ready_at: params.last_bootstrap_ready_at?.trim() || null,
       last_goal_autorun_daemon_at: params.last_goal_autorun_daemon_at?.trim() || null,
@@ -2170,14 +2477,20 @@ export class Storage {
         typeof params.last_eval_score === "number" && Number.isFinite(params.last_eval_score)
           ? Number(params.last_eval_score.toFixed(4))
           : null,
+      last_eval_dependency_fingerprint: params.last_eval_dependency_fingerprint?.trim() || null,
+      last_observability_ship_at: params.last_observability_ship_at?.trim() || null,
       last_actions: [...new Set((params.last_actions ?? []).map((entry) => String(entry ?? "").trim()).filter(Boolean))],
       last_attention: [...new Set((params.last_attention ?? []).map((entry) => String(entry ?? "").trim()).filter(Boolean))],
       last_error: params.last_error?.trim() || null,
     };
     const configJson = stableStringify({
+      local_host_id: normalized.local_host_id,
       interval_seconds: normalized.interval_seconds,
       learning_review_interval_seconds: normalized.learning_review_interval_seconds,
+      run_eval_if_due: normalized.run_eval_if_due,
       eval_interval_seconds: normalized.eval_interval_seconds,
+      eval_suite_id: normalized.eval_suite_id,
+      minimum_eval_score: normalized.minimum_eval_score,
       last_run_at: normalized.last_run_at,
       last_bootstrap_ready_at: normalized.last_bootstrap_ready_at,
       last_goal_autorun_daemon_at: normalized.last_goal_autorun_daemon_at,
@@ -2188,6 +2501,8 @@ export class Storage {
       last_eval_run_at: normalized.last_eval_run_at,
       last_eval_run_id: normalized.last_eval_run_id,
       last_eval_score: normalized.last_eval_score,
+      last_eval_dependency_fingerprint: normalized.last_eval_dependency_fingerprint,
+      last_observability_ship_at: normalized.last_observability_ship_at,
       last_actions: normalized.last_actions,
       last_attention: normalized.last_attention,
       last_error: normalized.last_error,
@@ -2203,6 +2518,122 @@ export class Storage {
            updated_at = excluded.updated_at`
       )
       .run("autonomy.maintain", normalized.enabled ? 1 : 0, configJson, now);
+
+    return {
+      ...normalized,
+      updated_at: now,
+    };
+  }
+
+  getReactionEngineState(): ReactionEngineStateRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT enabled, config_json, updated_at
+         FROM daemon_configs
+         WHERE daemon_key = ?`
+      )
+      .get("reaction.engine") as Record<string, unknown> | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    const config = parseJsonObject(row.config_json);
+    const recentNotifications: ReactionEngineNotificationRecord[] = Array.isArray(config.recent_notifications)
+      ? config.recent_notifications
+          .map((entry) => parseLooseObject(entry))
+          .map((entry): ReactionEngineNotificationRecord => {
+            const level: ReactionEngineNotificationRecord["level"] =
+              entry.level === "critical" || entry.level === "warn" || entry.level === "info"
+                ? entry.level
+                : "info";
+            return {
+              key: String(entry.key ?? "").trim(),
+              title: String(entry.title ?? "").trim(),
+              level,
+              sent_at: asNullableString(entry.sent_at)?.trim() || "",
+            };
+          })
+          .filter((entry) => entry.key && entry.sent_at)
+      : [];
+
+    return {
+      enabled: Number(row.enabled ?? 0) === 1,
+      interval_seconds: parseBoundedInt(config.interval_seconds, 120, 5, 3600),
+      dedupe_window_seconds: parseBoundedInt(config.dedupe_window_seconds, 1800, 30, 604800),
+      channels: dedupeNonEmpty(Array.isArray(config.channels) ? config.channels.map((entry) => String(entry ?? "")) : ["desktop"]),
+      last_run_at: asNullableString(config.last_run_at)?.trim() || null,
+      last_sent_at: asNullableString(config.last_sent_at)?.trim() || null,
+      last_sent_count: parseBoundedInt(config.last_sent_count, 0, 0, 1_000_000),
+      last_alert_key: asNullableString(config.last_alert_key)?.trim() || null,
+      last_alert_seen_count: parseBoundedInt(config.last_alert_seen_count, 0, 0, 1_000_000),
+      recent_notifications: recentNotifications.slice(-40),
+      last_error: asNullableString(config.last_error)?.trim() || null,
+      updated_at: String(row.updated_at ?? ""),
+    };
+  }
+
+  setReactionEngineState(params: {
+    enabled: boolean;
+    interval_seconds: number;
+    dedupe_window_seconds: number;
+    channels: string[];
+    last_run_at?: string | null;
+    last_sent_at?: string | null;
+    last_sent_count?: number;
+    last_alert_key?: string | null;
+    last_alert_seen_count?: number;
+    recent_notifications?: ReactionEngineNotificationRecord[];
+    last_error?: string | null;
+  }): ReactionEngineStateRecord {
+    const now = new Date().toISOString();
+    const normalized = {
+      enabled: Boolean(params.enabled),
+      interval_seconds: parseBoundedInt(params.interval_seconds, 120, 5, 3600),
+      dedupe_window_seconds: parseBoundedInt(params.dedupe_window_seconds, 1800, 30, 604800),
+      channels: dedupeNonEmpty((params.channels ?? ["desktop"]).map((entry) => String(entry ?? "").trim())),
+      last_run_at: params.last_run_at?.trim() || null,
+      last_sent_at: params.last_sent_at?.trim() || null,
+      last_sent_count: parseBoundedInt(params.last_sent_count, 0, 0, 1_000_000),
+      last_alert_key: params.last_alert_key?.trim() || null,
+      last_alert_seen_count: parseBoundedInt(params.last_alert_seen_count, 0, 0, 1_000_000),
+      recent_notifications: (params.recent_notifications ?? [])
+        .map((entry) => ({
+          key: String(entry.key ?? "").trim(),
+          title: String(entry.title ?? "").trim(),
+          level:
+            entry.level === "critical" || entry.level === "warn" || entry.level === "info"
+              ? entry.level
+              : "info",
+          sent_at: String(entry.sent_at ?? "").trim(),
+        }))
+        .filter((entry) => entry.key && entry.sent_at)
+        .slice(-40),
+      last_error: params.last_error?.trim() || null,
+    };
+    const configJson = stableStringify({
+      interval_seconds: normalized.interval_seconds,
+      dedupe_window_seconds: normalized.dedupe_window_seconds,
+      channels: normalized.channels,
+      last_run_at: normalized.last_run_at,
+      last_sent_at: normalized.last_sent_at,
+      last_sent_count: normalized.last_sent_count,
+      last_alert_key: normalized.last_alert_key,
+      last_alert_seen_count: normalized.last_alert_seen_count,
+      recent_notifications: normalized.recent_notifications,
+      last_error: normalized.last_error,
+    });
+
+    this.db
+      .prepare(
+        `INSERT INTO daemon_configs (daemon_key, enabled, config_json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(daemon_key) DO UPDATE SET
+           enabled = excluded.enabled,
+           config_json = excluded.config_json,
+           updated_at = excluded.updated_at`
+      )
+      .run("reaction.engine", normalized.enabled ? 1 : 0, configJson, now);
 
     return {
       ...normalized,
@@ -2780,6 +3211,8 @@ export class Storage {
               telemetry.ram_available_gb == null ? null : parseBoundedFloat(telemetry.ram_available_gb, 0, 0, 1_000_000),
             ram_total_gb:
               telemetry.ram_total_gb == null ? null : parseBoundedFloat(telemetry.ram_total_gb, 0, 0, 1_000_000),
+            swap_used_gb:
+              telemetry.swap_used_gb == null ? null : parseBoundedFloat(telemetry.swap_used_gb, 0, 0, 1_000_000),
             gpu_utilization: telemetry.gpu_utilization == null ? null : parseBoundedFloat(telemetry.gpu_utilization, 0, 0, 1),
             gpu_memory_available_gb:
               telemetry.gpu_memory_available_gb == null ? null : parseBoundedFloat(telemetry.gpu_memory_available_gb, 0, 0, 1_000_000),
@@ -2860,6 +3293,8 @@ export class Storage {
               telemetry.ram_available_gb == null ? null : parseBoundedFloat(telemetry.ram_available_gb, 0, 0, 1_000_000),
             ram_total_gb:
               telemetry.ram_total_gb == null ? null : parseBoundedFloat(telemetry.ram_total_gb, 0, 0, 1_000_000),
+            swap_used_gb:
+              telemetry.swap_used_gb == null ? null : parseBoundedFloat(telemetry.swap_used_gb, 0, 0, 1_000_000),
             gpu_utilization: telemetry.gpu_utilization == null ? null : parseBoundedFloat(telemetry.gpu_utilization, 0, 0, 1),
             gpu_memory_available_gb:
               telemetry.gpu_memory_available_gb == null ? null : parseBoundedFloat(telemetry.gpu_memory_available_gb, 0, 0, 1_000_000),
@@ -2904,6 +3339,194 @@ export class Storage {
            updated_at = excluded.updated_at`
       )
       .run("worker.fabric", normalized.enabled ? 1 : 0, configJson, now);
+
+    return normalized;
+  }
+
+  getClusterTopologyState(): ClusterTopologyStateRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT enabled, config_json, updated_at
+         FROM daemon_configs
+         WHERE daemon_key = ?`
+      )
+      .get("cluster.topology") as Record<string, unknown> | undefined;
+    if (!row) {
+      return null;
+    }
+
+    const config = parseJsonObject(row.config_json);
+    const nodes = (Array.isArray(config.nodes) ? config.nodes : [])
+      .map((entry) => {
+        if (!entry || typeof entry !== "object") {
+          return null;
+        }
+        const item = entry as Record<string, unknown>;
+        const nodeId = String(item.node_id ?? "").trim().toLowerCase();
+        const title = String(item.title ?? "").trim();
+        if (!nodeId || !title) {
+          return null;
+        }
+        const statusRaw = String(item.status ?? "planned").trim().toLowerCase();
+        const status: ClusterTopologyNodeStatus =
+          statusRaw === "provisioning" || statusRaw === "active" || statusRaw === "maintenance" || statusRaw === "retired"
+            ? statusRaw
+            : "planned";
+        const nodeClassRaw = String(item.node_class ?? "cpu-memory").trim().toLowerCase();
+        const nodeClass: ClusterTopologyNodeClass =
+          nodeClassRaw === "control-plane" ||
+          nodeClassRaw === "gpu-workstation" ||
+          nodeClassRaw === "virtualization"
+            ? nodeClassRaw
+            : "cpu-memory";
+        const desiredBackends = (Array.isArray(item.desired_backends) ? item.desired_backends : [])
+          .map((backendEntry) => {
+            if (!backendEntry || typeof backendEntry !== "object") {
+              return null;
+            }
+            const backend = backendEntry as Record<string, unknown>;
+            const backendId = String(backend.backend_id ?? "").trim();
+            const modelId = String(backend.model_id ?? "").trim();
+            if (!backendId || !modelId) {
+              return null;
+            }
+            return {
+              backend_id: backendId,
+              provider: normalizeModelRouterProvider(backend.provider),
+              model_id: modelId,
+              tags: dedupeNonEmpty(Array.isArray(backend.tags) ? backend.tags : []),
+              metadata: parseLooseObject(backend.metadata),
+            } satisfies ClusterTopologyDesiredBackendRecord;
+          })
+          .filter((backend): backend is ClusterTopologyDesiredBackendRecord => Boolean(backend))
+          .sort((left, right) => left.backend_id.localeCompare(right.backend_id));
+        return {
+          node_id: nodeId,
+          title,
+          status,
+          node_class: nodeClass,
+          host_id: asNullableString(item.host_id),
+          transport: String(item.transport ?? "local").trim().toLowerCase() === "ssh" ? "ssh" : "local",
+          ssh_destination: asNullableString(item.ssh_destination),
+          workspace_root: asNullableString(item.workspace_root),
+          worker_count:
+            item.worker_count == null ? null : parseBoundedInt(item.worker_count, 1, 1, 64),
+          tags: dedupeNonEmpty(Array.isArray(item.tags) ? item.tags : []),
+          preferred_domains: dedupeNonEmpty(Array.isArray(item.preferred_domains) ? item.preferred_domains : []),
+          desired_backends: desiredBackends,
+          capabilities: parseLooseObject(item.capabilities),
+          metadata: parseLooseObject(item.metadata),
+          created_at: normalizeIsoTimestamp(asNullableString(item.created_at) ?? undefined, String(row.updated_at ?? "")),
+          updated_at: normalizeIsoTimestamp(asNullableString(item.updated_at) ?? undefined, String(row.updated_at ?? "")),
+        } satisfies ClusterTopologyNodeRecord;
+      })
+      .filter((entry): entry is ClusterTopologyNodeRecord => Boolean(entry))
+      .sort((left, right) => left.node_id.localeCompare(right.node_id));
+
+    const defaultNodeIdRaw = asNullableString(config.default_node_id);
+    const defaultNodeId =
+      defaultNodeIdRaw && nodes.some((node) => node.node_id === defaultNodeIdRaw) ? defaultNodeIdRaw : null;
+
+    return {
+      enabled: Number(row.enabled ?? 0) === 1,
+      default_node_id: defaultNodeId,
+      nodes,
+      updated_at: String(row.updated_at ?? ""),
+    };
+  }
+
+  setClusterTopologyState(params: {
+    enabled: boolean;
+    default_node_id?: string | null;
+    nodes: ClusterTopologyNodeRecord[];
+  }): ClusterTopologyStateRecord {
+    const now = new Date().toISOString();
+    const nodes = (params.nodes ?? [])
+      .map((node) => {
+        const nodeId = String(node.node_id ?? "").trim().toLowerCase();
+        const title = String(node.title ?? "").trim();
+        if (!nodeId || !title) {
+          return null;
+        }
+        const desiredBackends = (node.desired_backends ?? [])
+          .map((backend) => {
+            const backendId = String(backend.backend_id ?? "").trim();
+            const modelId = String(backend.model_id ?? "").trim();
+            if (!backendId || !modelId) {
+              return null;
+            }
+            return {
+              backend_id: backendId,
+              provider: normalizeModelRouterProvider(backend.provider),
+              model_id: modelId,
+              tags: dedupeNonEmpty(backend.tags ?? []),
+              metadata: parseLooseObject(backend.metadata),
+            } satisfies ClusterTopologyDesiredBackendRecord;
+          })
+          .filter((backend): backend is ClusterTopologyDesiredBackendRecord => Boolean(backend))
+          .sort((left, right) => left.backend_id.localeCompare(right.backend_id));
+        return {
+          node_id: nodeId,
+          title,
+          status:
+            node.status === "provisioning" ||
+            node.status === "active" ||
+            node.status === "maintenance" ||
+            node.status === "retired"
+              ? node.status
+              : "planned",
+          node_class:
+            node.node_class === "control-plane" ||
+            node.node_class === "gpu-workstation" ||
+            node.node_class === "virtualization"
+              ? node.node_class
+              : "cpu-memory",
+          host_id: asNullableString(node.host_id),
+          transport: node.transport === "ssh" ? "ssh" : "local",
+          ssh_destination: asNullableString(node.ssh_destination),
+          workspace_root: asNullableString(node.workspace_root),
+          worker_count: node.worker_count == null ? null : parseBoundedInt(node.worker_count, 1, 1, 64),
+          tags: dedupeNonEmpty(node.tags ?? []),
+          preferred_domains: dedupeNonEmpty(node.preferred_domains ?? []),
+          desired_backends: desiredBackends,
+          capabilities: parseLooseObject(node.capabilities),
+          metadata: parseLooseObject(node.metadata),
+          created_at: normalizeIsoTimestamp(asNullableString(node.created_at) ?? undefined, now),
+          updated_at: now,
+        } satisfies ClusterTopologyNodeRecord;
+      })
+      .filter((entry): entry is ClusterTopologyNodeRecord => Boolean(entry))
+      .sort((left, right) => left.node_id.localeCompare(right.node_id));
+
+    const defaultNodeIdRaw = params.default_node_id?.trim().toLowerCase() || null;
+    const defaultNodeId =
+      defaultNodeIdRaw && nodes.some((node) => node.node_id === defaultNodeIdRaw) ? defaultNodeIdRaw : null;
+
+    const normalized: ClusterTopologyStateRecord = {
+      enabled: Boolean(params.enabled),
+      default_node_id: defaultNodeId,
+      nodes,
+      updated_at: now,
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO daemon_configs (daemon_key, enabled, config_json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(daemon_key) DO UPDATE SET
+           enabled = excluded.enabled,
+           config_json = excluded.config_json,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        "cluster.topology",
+        normalized.enabled ? 1 : 0,
+        stableStringify({
+          default_node_id: normalized.default_node_id,
+          nodes: normalized.nodes,
+        }),
+        now
+      );
 
     return normalized;
   }
@@ -3116,19 +3739,10 @@ export class Storage {
         if (!backendId || !modelId) {
           return null;
         }
-        const providerRaw = String(item.provider ?? "custom").trim().toLowerCase();
-        const provider: ModelRouterProvider =
-          providerRaw === "ollama" ||
-          providerRaw === "mlx" ||
-          providerRaw === "llama.cpp" ||
-          providerRaw === "vllm" ||
-          providerRaw === "openai"
-            ? providerRaw
-            : "custom";
         return {
           backend_id: backendId,
           enabled: parseBoolean(item.enabled, true),
-          provider,
+          provider: normalizeModelRouterProvider(item.provider),
           model_id: modelId,
           endpoint: asNullableString(item.endpoint),
           host_id: asNullableString(item.host_id),
@@ -3152,9 +3766,7 @@ export class Storage {
       .filter((entry): entry is ModelRouterBackendRecord => Boolean(entry))
       .sort((left, right) => left.backend_id.localeCompare(right.backend_id));
 
-    const defaultBackendIdRaw = asNullableString(config.default_backend_id);
-    const defaultBackendId =
-      defaultBackendIdRaw && backends.some((backend) => backend.backend_id === defaultBackendIdRaw) ? defaultBackendIdRaw : null;
+    const defaultBackendId = asNullableString(config.default_backend_id);
 
     return {
       enabled: Number(row.enabled ?? 0) === 1,
@@ -3186,18 +3798,10 @@ export class Storage {
         if (!backendId || !modelId) {
           return null;
         }
-        const provider: ModelRouterProvider =
-          backend.provider === "ollama" ||
-          backend.provider === "mlx" ||
-          backend.provider === "llama.cpp" ||
-          backend.provider === "vllm" ||
-          backend.provider === "openai"
-            ? backend.provider
-            : "custom";
         return {
           backend_id: backendId,
           enabled: Boolean(backend.enabled),
-          provider,
+          provider: normalizeModelRouterProvider(backend.provider),
           model_id: modelId,
           endpoint: asNullableString(backend.endpoint),
           host_id: asNullableString(backend.host_id),
@@ -3226,9 +3830,7 @@ export class Storage {
       })
       .filter((entry): entry is ModelRouterBackendRecord => Boolean(entry))
       .sort((left, right) => left.backend_id.localeCompare(right.backend_id));
-    const defaultBackendIdRaw = params.default_backend_id?.trim() || null;
-    const defaultBackendId =
-      defaultBackendIdRaw && backends.some((backend) => backend.backend_id === defaultBackendIdRaw) ? defaultBackendIdRaw : null;
+    const defaultBackendId = params.default_backend_id?.trim() || null;
 
     const normalized: ModelRouterStateRecord = {
       enabled: Boolean(params.enabled),
@@ -4253,6 +4855,94 @@ export class Storage {
     const goal = this.getGoalById(goalId);
     if (!goal) {
       throw new Error(`Failed to read goal after metadata update: ${goalId}`);
+    }
+    return { goal };
+  }
+
+  updateGoal(params: {
+    goal_id: string;
+    status?: GoalStatus;
+    active_plan_id?: string | null;
+    result_summary?: string | null;
+    result?: Record<string, unknown> | null;
+    metadata?: Record<string, unknown>;
+    event_type?: string;
+    event_summary?: string;
+    event_details?: Record<string, unknown>;
+    source_client?: string;
+    source_model?: string;
+    source_agent?: string;
+  }): { goal: GoalRecord } {
+    const goalId = params.goal_id.trim();
+    if (!goalId) {
+      throw new Error("goal_id is required");
+    }
+    const existing = this.getGoalById(goalId);
+    if (!existing) {
+      throw new Error(`Goal not found: ${goalId}`);
+    }
+    const now = new Date().toISOString();
+    const status = params.status === undefined ? existing.status : normalizeGoalStatus(params.status);
+    const activePlanId =
+      params.active_plan_id === undefined ? existing.active_plan_id : params.active_plan_id?.trim() || null;
+    const resultSummary =
+      params.result_summary === undefined
+        ? existing.result_summary
+        : params.result_summary === null
+          ? null
+          : params.result_summary.trim() || null;
+    const result =
+      params.result === undefined ? existing.result : params.result === null ? null : parseLooseObject(params.result);
+    const metadata =
+      params.metadata === undefined ? existing.metadata : { ...existing.metadata, ...parseLooseObject(params.metadata) };
+    const statusChanged = status !== existing.status;
+
+    this.db
+      .prepare(
+        `UPDATE goals
+         SET updated_at = ?,
+             status = ?,
+             active_plan_id = ?,
+             result_summary = ?,
+             result_json = ?,
+             metadata_json = ?,
+             source_client = ?,
+             source_model = ?,
+             source_agent = ?
+         WHERE goal_id = ?`
+      )
+      .run(
+        now,
+        status,
+        activePlanId,
+        resultSummary,
+        result === null ? null : stableStringify(result),
+        stableStringify(metadata),
+        params.source_client ?? existing.source_client,
+        params.source_model ?? existing.source_model,
+        params.source_agent ?? existing.source_agent,
+        goalId
+      );
+
+    if (statusChanged || params.event_summary?.trim()) {
+      this.appendGoalEvent({
+        goal_id: goalId,
+        event_type: params.event_type?.trim() || (statusChanged ? "status_updated" : "updated"),
+        from_status: statusChanged ? existing.status : null,
+        to_status: statusChanged ? status : null,
+        summary:
+          params.event_summary?.trim() ||
+          (statusChanged ? `Goal status updated to ${status}.` : "Goal updated."),
+        details: params.event_details ?? {},
+        source_client: params.source_client,
+        source_model: params.source_model,
+        source_agent: params.source_agent,
+      });
+    }
+
+    const goal = this.getGoalById(goalId);
+    if (!goal) {
+      throw new Error(`Failed to read goal after update: ${goalId}`);
     }
     return { goal };
   }
@@ -7085,6 +7775,127 @@ export class Storage {
     return retry();
   }
 
+  recoverExpiredRunningTasks(params?: {
+    limit?: number;
+  }): {
+    scanned_count: number;
+    recovered_count: number;
+    failed_count: number;
+    results: Array<{
+      task_id: string;
+      previous_owner_id: string | null;
+      lease_expires_at: string | null;
+      action: "requeued" | "failed";
+      available_at: string | null;
+      reason: string;
+    }>;
+  } {
+    const boundedLimit = Math.max(1, Math.min(500, params?.limit ?? 25));
+    const now = new Date().toISOString();
+
+    const recover = this.db.transaction(() => {
+      const expiredRows = this.db
+        .prepare(
+          `SELECT t.task_id, t.attempt_count, t.max_attempts, l.owner_id, l.lease_expires_at
+           FROM tasks t
+           INNER JOIN task_leases l ON l.task_id = t.task_id
+           WHERE t.status = 'running'
+             AND l.lease_expires_at IS NOT NULL
+             AND l.lease_expires_at <= ?
+           ORDER BY l.lease_expires_at ASC, t.updated_at ASC
+           LIMIT ?`
+        )
+        .all(now, boundedLimit) as Array<Record<string, unknown>>;
+
+      const results: Array<{
+        task_id: string;
+        previous_owner_id: string | null;
+        lease_expires_at: string | null;
+        action: "requeued" | "failed";
+        available_at: string | null;
+        reason: string;
+      }> = [];
+      let recoveredCount = 0;
+      let failedCount = 0;
+
+      for (const row of expiredRows) {
+        const taskId = String(row.task_id ?? "");
+        const previousOwnerId = asNullableString(row.owner_id);
+        const leaseExpiresAt = asNullableString(row.lease_expires_at);
+        const attemptCount = Number(row.attempt_count ?? 0);
+        const maxAttempts = Number(row.max_attempts ?? 3);
+        const exhaustAttempts = attemptCount >= maxAttempts;
+        const nextStatus: TaskStatus = exhaustAttempts ? "failed" : "pending";
+        const availableAt = exhaustAttempts ? null : now;
+        const reason = exhaustAttempts ? "lease_expired_max_attempts_exceeded" : "lease_expired_requeued";
+
+        this.db
+          .prepare(
+            `UPDATE tasks
+             SET status = ?,
+                 updated_at = ?,
+                 available_at = ?,
+                 started_at = NULL,
+                 finished_at = ?,
+                 last_error = ?,
+                 result_json = NULL
+             WHERE task_id = ?
+               AND status = 'running'`
+          )
+          .run(
+            nextStatus,
+            now,
+            availableAt,
+            exhaustAttempts ? now : null,
+            exhaustAttempts ? "Task lease expired while the worker stopped heartbeating." : null,
+            taskId
+          );
+
+        this.db.prepare(`DELETE FROM task_leases WHERE task_id = ?`).run(taskId);
+        this.appendTaskEvent({
+          task_id: taskId,
+          event_type: exhaustAttempts ? "lease_expired_failed" : "lease_expired_requeued",
+          from_status: "running",
+          to_status: nextStatus,
+          worker_id: previousOwnerId ?? undefined,
+          summary: exhaustAttempts
+            ? "Expired running task failed after exhausting retry budget."
+            : "Expired running task was requeued for recovery.",
+          details: {
+            previous_owner_id: previousOwnerId,
+            lease_expires_at: leaseExpiresAt,
+            attempt_count: attemptCount,
+            max_attempts: maxAttempts,
+            available_at: availableAt,
+          },
+        });
+
+        if (exhaustAttempts) {
+          failedCount += 1;
+        } else {
+          recoveredCount += 1;
+        }
+        results.push({
+          task_id: taskId,
+          previous_owner_id: previousOwnerId,
+          lease_expires_at: leaseExpiresAt,
+          action: exhaustAttempts ? "failed" : "requeued",
+          available_at: availableAt,
+          reason,
+        });
+      }
+
+      return {
+        scanned_count: expiredRows.length,
+        recovered_count: recoveredCount,
+        failed_count: failedCount,
+        results,
+      };
+    });
+
+    return recover();
+  }
+
   listFailedTasksForAutoRetry(limit: number): Array<{
     task_id: string;
     attempt_count: number;
@@ -7135,10 +7946,35 @@ export class Storage {
     return rows.reverse().map((row) => mapTaskEventRow(row));
   }
 
+  listTaskEvents(params?: {
+    since?: string;
+    limit?: number;
+  }): TaskEventRecord[] {
+    const whereClauses: string[] = [];
+    const values: Array<string | number> = [];
+    if (params?.since?.trim()) {
+      whereClauses.push("created_at > ?");
+      values.push(normalizeIsoTimestamp(params.since, params.since));
+    }
+    const boundedLimit = Math.max(1, Math.min(5000, parseBoundedInt(params?.limit, 250, 1, 5000)));
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(
+        `SELECT id, task_id, created_at, event_type, from_status, to_status, worker_id, summary, details_json
+         FROM task_events
+         ${whereSql}
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`
+      )
+      .all(...values, boundedLimit) as Array<Record<string, unknown>>;
+    return rows.reverse().map((row) => mapTaskEventRow(row));
+  }
+
   getTaskSummary(params?: {
     running_limit?: number;
   }): TaskSummaryRecord {
     const runningLimit = parseBoundedInt(params?.running_limit, 10, 1, 200);
+    const now = new Date().toISOString();
     const countRows = this.db
       .prepare(
         `SELECT status, COUNT(*) AS count
@@ -7192,6 +8028,10 @@ export class Storage {
 
     return {
       counts,
+      expired_running_count: runningRows.filter((row) => {
+        const leaseExpiresAt = asNullableString(row.lease_expires_at);
+        return leaseExpiresAt !== null && leaseExpiresAt <= now;
+      }).length,
       running: runningRows.map((row) => ({
         task_id: String(row.task_id ?? ""),
         objective: String(row.objective ?? ""),
@@ -8983,6 +9823,299 @@ export class Storage {
     }));
   }
 
+  createRuntimeWorkerSession(params: {
+    session_id?: string;
+    runtime_id: RuntimeWorkerRuntimeId;
+    status?: RuntimeWorkerSessionStatus;
+    task_id?: string | null;
+    goal_id?: string | null;
+    plan_id?: string | null;
+    step_id?: string | null;
+    worker_id: string;
+    title: string;
+    objective: string;
+    repo_root: string;
+    project_dir: string;
+    worktree_path: string;
+    branch_name?: string | null;
+    tmux_session_name: string;
+    transcript_path?: string | null;
+    brief_path?: string | null;
+    last_command_at?: string | null;
+    last_activity_at?: string | null;
+    last_error?: string | null;
+    metadata?: Record<string, unknown>;
+    source_client?: string;
+    source_model?: string;
+    source_agent?: string;
+  }): { created: boolean; session: RuntimeWorkerSessionRecord } {
+    const now = new Date().toISOString();
+    const sessionId = params.session_id?.trim() || crypto.randomUUID();
+    const existing = this.getRuntimeWorkerSessionById(sessionId);
+    if (existing) {
+      return {
+        created: false,
+        session: existing,
+      };
+    }
+    const runtimeId = normalizeRuntimeWorkerRuntimeId(params.runtime_id);
+    const status = normalizeRuntimeWorkerSessionStatus(params.status);
+    const title = params.title.trim();
+    const objective = params.objective.trim();
+    const workerId = params.worker_id.trim();
+    const repoRoot = params.repo_root.trim();
+    const projectDir = params.project_dir.trim();
+    const worktreePath = params.worktree_path.trim();
+    const tmuxSessionName = params.tmux_session_name.trim();
+    if (!title || !objective || !workerId || !repoRoot || !projectDir || !worktreePath || !tmuxSessionName) {
+      throw new Error(
+        "title, objective, worker_id, repo_root, project_dir, worktree_path, and tmux_session_name are required"
+      );
+    }
+
+    this.db
+      .prepare(
+        `INSERT INTO runtime_worker_sessions (
+          session_id, created_at, updated_at, runtime_id, status, task_id, goal_id, plan_id, step_id,
+          worker_id, title, objective, repo_root, project_dir, worktree_path, branch_name, tmux_session_name,
+          transcript_path, brief_path, last_command_at, last_activity_at, last_error, metadata_json,
+          source_client, source_model, source_agent
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        sessionId,
+        now,
+        now,
+        runtimeId,
+        status,
+        params.task_id?.trim() || null,
+        params.goal_id?.trim() || null,
+        params.plan_id?.trim() || null,
+        params.step_id?.trim() || null,
+        workerId,
+        title,
+        objective,
+        repoRoot,
+        projectDir,
+        worktreePath,
+        params.branch_name?.trim() || null,
+        tmuxSessionName,
+        params.transcript_path?.trim() || null,
+        params.brief_path?.trim() || null,
+        params.last_command_at?.trim() || null,
+        params.last_activity_at?.trim() || null,
+        params.last_error?.trim() || null,
+        stableStringify(parseLooseObject(params.metadata ?? {})),
+        params.source_client ?? null,
+        params.source_model ?? null,
+        params.source_agent ?? null
+      );
+
+    const session = this.getRuntimeWorkerSessionById(sessionId);
+    if (!session) {
+      throw new Error(`Failed to read runtime worker session after create: ${sessionId}`);
+    }
+    this.appendRuntimeEvent({
+      event_type: "runtime_worker.created",
+      entity_type: "runtime_worker_session",
+      entity_id: session.session_id,
+      status: session.status,
+      summary: `Runtime worker ${session.runtime_id} session created.`,
+      details: {
+        task_id: session.task_id,
+        worker_id: session.worker_id,
+        tmux_session_name: session.tmux_session_name,
+        worktree_path: session.worktree_path,
+      },
+      source_client: session.source_client ?? undefined,
+      source_model: session.source_model ?? undefined,
+      source_agent: session.source_agent ?? undefined,
+      created_at: session.created_at,
+    });
+    return {
+      created: true,
+      session,
+    };
+  }
+
+  getRuntimeWorkerSessionById(sessionId: string): RuntimeWorkerSessionRecord | null {
+    const normalized = sessionId.trim();
+    if (!normalized) {
+      return null;
+    }
+    const row = this.db
+      .prepare(
+        `SELECT session_id, created_at, updated_at, runtime_id, status, task_id, goal_id, plan_id, step_id, worker_id,
+                title, objective, repo_root, project_dir, worktree_path, branch_name, tmux_session_name, transcript_path,
+                brief_path, last_command_at, last_activity_at, last_error, metadata_json, source_client, source_model,
+                source_agent
+         FROM runtime_worker_sessions
+         WHERE session_id = ?`
+      )
+      .get(normalized) as Record<string, unknown> | undefined;
+    if (!row) {
+      return null;
+    }
+    return mapRuntimeWorkerSessionRow(row);
+  }
+
+  getLatestRuntimeWorkerSessionForTask(taskId: string): RuntimeWorkerSessionRecord | null {
+    const normalized = taskId.trim();
+    if (!normalized) {
+      return null;
+    }
+    const row = this.db
+      .prepare(
+        `SELECT session_id, created_at, updated_at, runtime_id, status, task_id, goal_id, plan_id, step_id, worker_id,
+                title, objective, repo_root, project_dir, worktree_path, branch_name, tmux_session_name, transcript_path,
+                brief_path, last_command_at, last_activity_at, last_error, metadata_json, source_client, source_model,
+                source_agent
+         FROM runtime_worker_sessions
+         WHERE task_id = ?
+         ORDER BY updated_at DESC
+         LIMIT 1`
+      )
+      .get(normalized) as Record<string, unknown> | undefined;
+    if (!row) {
+      return null;
+    }
+    return mapRuntimeWorkerSessionRow(row);
+  }
+
+  listRuntimeWorkerSessions(params?: {
+    status?: RuntimeWorkerSessionStatus;
+    task_id?: string;
+    runtime_id?: RuntimeWorkerRuntimeId;
+    limit?: number;
+  }): RuntimeWorkerSessionRecord[] {
+    const whereClauses: string[] = [];
+    const values: Array<string | number> = [];
+    if (params?.status) {
+      whereClauses.push("status = ?");
+      values.push(normalizeRuntimeWorkerSessionStatus(params.status));
+    }
+    const taskId = params?.task_id?.trim();
+    if (taskId) {
+      whereClauses.push("task_id = ?");
+      values.push(taskId);
+    }
+    if (params?.runtime_id) {
+      whereClauses.push("runtime_id = ?");
+      values.push(normalizeRuntimeWorkerRuntimeId(params.runtime_id));
+    }
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+    const limit = Math.max(1, Math.min(500, params?.limit ?? 50));
+    const rows = this.db
+      .prepare(
+        `SELECT session_id, created_at, updated_at, runtime_id, status, task_id, goal_id, plan_id, step_id, worker_id,
+                title, objective, repo_root, project_dir, worktree_path, branch_name, tmux_session_name, transcript_path,
+                brief_path, last_command_at, last_activity_at, last_error, metadata_json, source_client, source_model,
+                source_agent
+         FROM runtime_worker_sessions
+         ${whereSql}
+         ORDER BY updated_at DESC
+         LIMIT ?`
+      )
+      .all(...values, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => mapRuntimeWorkerSessionRow(row));
+  }
+
+  updateRuntimeWorkerSession(params: {
+    session_id: string;
+    status?: RuntimeWorkerSessionStatus;
+    task_id?: string | null;
+    goal_id?: string | null;
+    plan_id?: string | null;
+    step_id?: string | null;
+    transcript_path?: string | null;
+    brief_path?: string | null;
+    last_command_at?: string | null;
+    last_activity_at?: string | null;
+    last_error?: string | null;
+    metadata?: Record<string, unknown>;
+  }): { session: RuntimeWorkerSessionRecord } {
+    const sessionId = params.session_id.trim();
+    if (!sessionId) {
+      throw new Error("session_id is required");
+    }
+    const existing = this.getRuntimeWorkerSessionById(sessionId);
+    if (!existing) {
+      throw new Error(`Runtime worker session not found: ${sessionId}`);
+    }
+    const nextStatus = params.status ? normalizeRuntimeWorkerSessionStatus(params.status) : existing.status;
+    const nextTaskId = params.task_id === undefined ? existing.task_id : params.task_id?.trim() || null;
+    const nextGoalId = params.goal_id === undefined ? existing.goal_id : params.goal_id?.trim() || null;
+    const nextPlanId = params.plan_id === undefined ? existing.plan_id : params.plan_id?.trim() || null;
+    const nextStepId = params.step_id === undefined ? existing.step_id : params.step_id?.trim() || null;
+    const nextTranscriptPath =
+      params.transcript_path === undefined ? existing.transcript_path : params.transcript_path?.trim() || null;
+    const nextBriefPath = params.brief_path === undefined ? existing.brief_path : params.brief_path?.trim() || null;
+    const nextLastCommandAt =
+      params.last_command_at === undefined ? existing.last_command_at : params.last_command_at?.trim() || null;
+    const nextLastActivityAt =
+      params.last_activity_at === undefined ? existing.last_activity_at : params.last_activity_at?.trim() || null;
+    const nextLastError = params.last_error === undefined ? existing.last_error : params.last_error?.trim() || null;
+    const nextMetadata =
+      params.metadata === undefined
+        ? existing.metadata
+        : {
+            ...existing.metadata,
+            ...parseLooseObject(params.metadata),
+          };
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        `UPDATE runtime_worker_sessions
+         SET updated_at = ?, status = ?, task_id = ?, goal_id = ?, plan_id = ?, step_id = ?, transcript_path = ?,
+             brief_path = ?, last_command_at = ?, last_activity_at = ?, last_error = ?, metadata_json = ?
+         WHERE session_id = ?`
+      )
+      .run(
+        now,
+        nextStatus,
+        nextTaskId,
+        nextGoalId,
+        nextPlanId,
+        nextStepId,
+        nextTranscriptPath,
+        nextBriefPath,
+        nextLastCommandAt,
+        nextLastActivityAt,
+        nextLastError,
+        stableStringify(nextMetadata),
+        sessionId
+      );
+
+    const session = this.getRuntimeWorkerSessionById(sessionId);
+    if (!session) {
+      throw new Error(`Failed to read runtime worker session after update: ${sessionId}`);
+    }
+    if (existing.status !== session.status || existing.last_error !== session.last_error) {
+      this.appendRuntimeEvent({
+        event_type: "runtime_worker.status",
+        entity_type: "runtime_worker_session",
+        entity_id: session.session_id,
+        status: session.status,
+        summary: `Runtime worker ${session.runtime_id} session is ${session.status}.`,
+        details: {
+          previous_status: existing.status,
+          task_id: session.task_id,
+          worker_id: session.worker_id,
+          tmux_session_name: session.tmux_session_name,
+          last_error: session.last_error,
+        },
+        source_client: session.source_client ?? undefined,
+        source_model: session.source_model ?? undefined,
+        source_agent: session.source_agent ?? undefined,
+        created_at: session.updated_at,
+      });
+    }
+    return {
+      session,
+    };
+  }
+
   acquireLock(params: {
     lock_key: string;
     owner_id: string;
@@ -9461,6 +10594,343 @@ export class Storage {
     };
   }
 
+  upsertObservabilityDocument(params: {
+    document_id?: string;
+    created_at?: string;
+    updated_at?: string;
+    index_name: string;
+    source_kind: string;
+    source_ref?: string | null;
+    level?: ObservabilityLevel | null;
+    host_id?: string | null;
+    service?: string | null;
+    event_type?: string | null;
+    title?: string | null;
+    body_text?: string | null;
+    attributes?: Record<string, unknown>;
+    tags?: string[];
+  }): ObservabilityDocumentRecord {
+    const indexName = params.index_name.trim();
+    if (!indexName) {
+      throw new Error("index_name is required");
+    }
+    const sourceKind = params.source_kind.trim();
+    if (!sourceKind) {
+      throw new Error("source_kind is required");
+    }
+    const createdAt = normalizeIsoTimestamp(params.created_at, new Date().toISOString());
+    const updatedAt = normalizeIsoTimestamp(params.updated_at, createdAt);
+    const documentId = params.document_id?.trim() || crypto.randomUUID();
+    const levelRaw = asNullableString(params.level);
+    const level =
+      levelRaw === "trace" ||
+      levelRaw === "debug" ||
+      levelRaw === "info" ||
+      levelRaw === "warn" ||
+      levelRaw === "error" ||
+      levelRaw === "critical"
+        ? levelRaw
+        : null;
+    this.db
+      .prepare(
+        `INSERT INTO observability_documents (
+           document_id, created_at, updated_at, index_name, source_kind, source_ref, level, host_id, service,
+           event_type, title, body_text, attributes_json, tags_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(document_id) DO UPDATE SET
+           updated_at = excluded.updated_at,
+           index_name = excluded.index_name,
+           source_kind = excluded.source_kind,
+           source_ref = excluded.source_ref,
+           level = excluded.level,
+           host_id = excluded.host_id,
+           service = excluded.service,
+           event_type = excluded.event_type,
+           title = excluded.title,
+           body_text = excluded.body_text,
+           attributes_json = excluded.attributes_json,
+           tags_json = excluded.tags_json`
+      )
+      .run(
+        documentId,
+        createdAt,
+        updatedAt,
+        indexName,
+        sourceKind,
+        params.source_ref?.trim() || null,
+        level,
+        params.host_id?.trim() || null,
+        params.service?.trim() || null,
+        params.event_type?.trim() || null,
+        params.title?.trim() || null,
+        params.body_text?.trim() || "",
+        stableStringify(params.attributes ?? {}),
+        stableStringify([...(params.tags ?? []).map((entry) => String(entry ?? "").trim()).filter(Boolean)])
+      );
+
+    const row = this.db
+      .prepare(
+        `SELECT document_id, created_at, updated_at, index_name, source_kind, source_ref, level, host_id, service,
+                event_type, title, body_text, attributes_json, tags_json
+         FROM observability_documents
+         WHERE document_id = ?`
+      )
+      .get(documentId) as Record<string, unknown> | undefined;
+    if (!row) {
+      throw new Error(`Failed to read observability document after upsert: ${documentId}`);
+    }
+    return mapObservabilityDocumentRow(row);
+  }
+
+  listObservabilityDocuments(params?: {
+    index_names?: string[];
+    source_kind?: string;
+    source_ref?: string;
+    host_id?: string;
+    service?: string;
+    levels?: string[];
+    event_types?: string[];
+    tags?: string[];
+    since?: string;
+    limit?: number;
+  }): ObservabilityDocumentRecord[] {
+    const whereClauses: string[] = [];
+    const values: Array<string | number> = [];
+
+    const indexNames = (params?.index_names ?? []).map((entry) => entry.trim()).filter(Boolean);
+    if (indexNames.length > 0) {
+      const placeholders = indexNames.map(() => "?").join(", ");
+      whereClauses.push(`index_name IN (${placeholders})`);
+      values.push(...indexNames);
+    }
+    const sourceKind = params?.source_kind?.trim();
+    if (sourceKind) {
+      whereClauses.push("source_kind = ?");
+      values.push(sourceKind);
+    }
+    const sourceRef = params?.source_ref?.trim();
+    if (sourceRef) {
+      whereClauses.push("source_ref = ?");
+      values.push(sourceRef);
+    }
+    const hostId = params?.host_id?.trim();
+    if (hostId) {
+      whereClauses.push("host_id = ?");
+      values.push(hostId);
+    }
+    const service = params?.service?.trim();
+    if (service) {
+      whereClauses.push("service = ?");
+      values.push(service);
+    }
+    const levels = (params?.levels ?? []).map((entry) => entry.trim()).filter(Boolean);
+    if (levels.length > 0) {
+      const placeholders = levels.map(() => "?").join(", ");
+      whereClauses.push(`level IN (${placeholders})`);
+      values.push(...levels);
+    }
+    const eventTypes = (params?.event_types ?? []).map((entry) => entry.trim()).filter(Boolean);
+    if (eventTypes.length > 0) {
+      const placeholders = eventTypes.map(() => "?").join(", ");
+      whereClauses.push(`event_type IN (${placeholders})`);
+      values.push(...eventTypes);
+    }
+    if (params?.since?.trim()) {
+      whereClauses.push("created_at > ?");
+      values.push(normalizeIsoTimestamp(params.since, params.since));
+    }
+    const tags = [...new Set((params?.tags ?? []).map((entry) => entry.trim()).filter(Boolean))];
+    if (tags.length > 0) {
+      for (const tag of tags) {
+        whereClauses.push("tags_json LIKE ?");
+        values.push(`%\"${tag.replace(/[%_]/g, "\\$&")}\"%`);
+      }
+    }
+
+    const limit = parseBoundedInt(params?.limit, 100, 1, 5000);
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(
+        `SELECT document_id, created_at, updated_at, index_name, source_kind, source_ref, level, host_id, service,
+                event_type, title, body_text, attributes_json, tags_json
+         FROM observability_documents
+         ${whereSql}
+         ORDER BY created_at DESC, document_id ASC
+         LIMIT ?`
+      )
+      .all(...values, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => mapObservabilityDocumentRow(row));
+  }
+
+  searchObservabilityDocuments(params?: {
+    query?: string;
+    index_names?: string[];
+    source_kind?: string;
+    source_ref?: string;
+    host_id?: string;
+    service?: string;
+    levels?: string[];
+    event_types?: string[];
+    tags?: string[];
+    since?: string;
+    limit?: number;
+  }): ObservabilitySearchHit[] {
+    const query = params?.query?.trim();
+    const limit = parseBoundedInt(params?.limit, 50, 1, 500);
+    const candidates = this.listObservabilityDocuments({
+      index_names: params?.index_names,
+      source_kind: params?.source_kind,
+      source_ref: params?.source_ref,
+      host_id: params?.host_id,
+      service: params?.service,
+      levels: params?.levels,
+      event_types: params?.event_types,
+      tags: params?.tags,
+      since: params?.since,
+      limit: query ? Math.max(limit * 5, 100) : limit,
+    });
+    if (!query) {
+      return candidates.slice(0, limit).map((document) => ({
+        score: 0,
+        match_reason: "latest",
+        document,
+      }));
+    }
+    const hits = candidates
+      .map((document) => {
+        const haystack = [
+          document.index_name,
+          document.source_kind,
+          document.source_ref ?? "",
+          document.host_id ?? "",
+          document.service ?? "",
+          document.event_type ?? "",
+          document.title ?? "",
+          document.body_text,
+          ...document.tags,
+          stableStringify(document.attributes),
+        ].join(" ");
+        const score = computeTermScore(haystack, query);
+        return {
+          score,
+          match_reason: score > 0 ? "term_match" : "no_match",
+          document,
+        };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => {
+        if (left.score !== right.score) {
+          return right.score - left.score;
+        }
+        return right.document.created_at.localeCompare(left.document.created_at);
+      });
+    return hits.slice(0, limit);
+  }
+
+  summarizeObservabilityDocuments(params?: {
+    index_names?: string[];
+    source_kind?: string;
+    host_id?: string;
+    service?: string;
+    levels?: string[];
+    event_types?: string[];
+    since?: string;
+  }) {
+    const whereClauses: string[] = [];
+    const values: Array<string | number> = [];
+
+    const indexNames = (params?.index_names ?? []).map((entry) => entry.trim()).filter(Boolean);
+    if (indexNames.length > 0) {
+      const placeholders = indexNames.map(() => "?").join(", ");
+      whereClauses.push(`index_name IN (${placeholders})`);
+      values.push(...indexNames);
+    }
+    const sourceKind = params?.source_kind?.trim();
+    if (sourceKind) {
+      whereClauses.push("source_kind = ?");
+      values.push(sourceKind);
+    }
+    const hostId = params?.host_id?.trim();
+    if (hostId) {
+      whereClauses.push("host_id = ?");
+      values.push(hostId);
+    }
+    const service = params?.service?.trim();
+    if (service) {
+      whereClauses.push("service = ?");
+      values.push(service);
+    }
+    const levels = (params?.levels ?? []).map((entry) => entry.trim()).filter(Boolean);
+    if (levels.length > 0) {
+      const placeholders = levels.map(() => "?").join(", ");
+      whereClauses.push(`level IN (${placeholders})`);
+      values.push(...levels);
+    }
+    const eventTypes = (params?.event_types ?? []).map((entry) => entry.trim()).filter(Boolean);
+    if (eventTypes.length > 0) {
+      const placeholders = eventTypes.map(() => "?").join(", ");
+      whereClauses.push(`event_type IN (${placeholders})`);
+      values.push(...eventTypes);
+    }
+    if (params?.since?.trim()) {
+      whereClauses.push("created_at > ?");
+      values.push(normalizeIsoTimestamp(params.since, params.since));
+    }
+
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+    const countRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count, MAX(created_at) AS latest_created_at
+         FROM observability_documents
+         ${whereSql}`
+      )
+      .get(...values) as Record<string, unknown> | undefined;
+    const buildCounts = (column: string, alias: string) =>
+      this.db
+        .prepare(
+          `SELECT ${column} AS ${alias}, COUNT(*) AS count
+           FROM observability_documents
+           ${whereSql}
+           GROUP BY ${column}
+           ORDER BY count DESC, ${column} ASC`
+        )
+        .all(...values) as Array<Record<string, unknown>>;
+    const indexRows = buildCounts("index_name", "index_name");
+    const sourceRows = buildCounts("source_kind", "source_kind");
+    const levelRows = buildCounts("level", "level");
+    const serviceRows = buildCounts("service", "service");
+    const hostRows = buildCounts("host_id", "host_id");
+    const eventTypeRows = buildCounts("event_type", "event_type");
+    return {
+      count: Number(countRow?.count ?? 0),
+      latest_created_at: asNullableString(countRow?.latest_created_at),
+      index_name_counts: indexRows.map((row) => ({
+        index_name: String(row.index_name ?? ""),
+        count: Number(row.count ?? 0),
+      })),
+      source_kind_counts: sourceRows.map((row) => ({
+        source_kind: String(row.source_kind ?? ""),
+        count: Number(row.count ?? 0),
+      })),
+      level_counts: levelRows.map((row) => ({
+        level: asNullableString(row.level),
+        count: Number(row.count ?? 0),
+      })),
+      service_counts: serviceRows.map((row) => ({
+        service: asNullableString(row.service),
+        count: Number(row.count ?? 0),
+      })),
+      host_counts: hostRows.map((row) => ({
+        host_id: asNullableString(row.host_id),
+        count: Number(row.count ?? 0),
+      })),
+      event_type_counts: eventTypeRows.map((row) => ({
+        event_type: asNullableString(row.event_type),
+        count: Number(row.count ?? 0),
+      })),
+    };
+  }
+
   getIncidentTimeline(incidentId: string, limit: number): {
     incident: IncidentRecord | null;
     events: IncidentEventRecord[];
@@ -9549,6 +11019,7 @@ export class Storage {
       "incidents",
       "incident_events",
       "runtime_events",
+      "observability_documents",
       "schema_migrations",
       "daemon_configs",
       "imprint_profiles",
@@ -9656,6 +11127,8 @@ export class Storage {
     this.applyAgentLearningSchemaMigration();
     this.applyExperimentSchemaMigration();
     this.applyRuntimeEventBusMigration();
+    this.applyRuntimeWorkerSessionSchemaMigration();
+    this.applyObservabilitySchemaMigration();
   }
 
   private applyCoreSchemaMigration(): void {
@@ -9924,6 +11397,9 @@ export class Storage {
     `);
 
     this.ensureIndex("idx_tasks_status_available", "tasks", "status, available_at, priority DESC, created_at ASC");
+    this.ensureIndex("idx_tasks_status_priority_created", "tasks", "status, priority DESC, created_at ASC");
+    this.ensureIndex("idx_tasks_status_priority_updated", "tasks", "status, priority DESC, updated_at DESC");
+    this.ensureIndex("idx_tasks_status_updated", "tasks", "status, updated_at DESC");
     this.ensureIndex("idx_tasks_updated", "tasks", "updated_at DESC");
     this.ensureIndex("idx_task_events_task", "task_events", "task_id, created_at ASC");
     this.ensureIndex("idx_task_leases_expiry", "task_leases", "lease_expires_at ASC");
@@ -10271,6 +11747,72 @@ export class Storage {
     this.ensureIndex("idx_runtime_events_type_seq", "runtime_events", "event_type, event_seq DESC");
     this.ensureIndex("idx_runtime_events_entity_seq", "runtime_events", "entity_type, entity_id, event_seq DESC");
     this.ensureIndex("idx_runtime_events_agent_seq", "runtime_events", "source_agent, event_seq DESC");
+  }
+
+  private applyRuntimeWorkerSessionSchemaMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS runtime_worker_sessions (
+        session_id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        runtime_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        task_id TEXT,
+        goal_id TEXT,
+        plan_id TEXT,
+        step_id TEXT,
+        worker_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        objective TEXT NOT NULL,
+        repo_root TEXT NOT NULL,
+        project_dir TEXT NOT NULL,
+        worktree_path TEXT NOT NULL,
+        branch_name TEXT,
+        tmux_session_name TEXT NOT NULL,
+        transcript_path TEXT,
+        brief_path TEXT,
+        last_command_at TEXT,
+        last_activity_at TEXT,
+        last_error TEXT,
+        metadata_json TEXT NOT NULL,
+        source_client TEXT,
+        source_model TEXT,
+        source_agent TEXT
+      );
+    `);
+
+    this.ensureIndex("idx_runtime_worker_sessions_status", "runtime_worker_sessions", "status, updated_at DESC");
+    this.ensureIndex("idx_runtime_worker_sessions_task", "runtime_worker_sessions", "task_id, updated_at DESC");
+    this.ensureIndex("idx_runtime_worker_sessions_runtime", "runtime_worker_sessions", "runtime_id, updated_at DESC");
+  }
+
+  private applyObservabilitySchemaMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS observability_documents (
+        document_id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        index_name TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_ref TEXT,
+        level TEXT,
+        host_id TEXT,
+        service TEXT,
+        event_type TEXT,
+        title TEXT,
+        body_text TEXT NOT NULL,
+        attributes_json TEXT NOT NULL,
+        tags_json TEXT NOT NULL
+      );
+    `);
+
+    this.ensureIndex("idx_observability_created", "observability_documents", "created_at DESC");
+    this.ensureIndex("idx_observability_index_created", "observability_documents", "index_name, created_at DESC");
+    this.ensureIndex("idx_observability_source_created", "observability_documents", "source_kind, created_at DESC");
+    this.ensureIndex("idx_observability_host_created", "observability_documents", "host_id, created_at DESC");
+    this.ensureIndex("idx_observability_service_created", "observability_documents", "service, created_at DESC");
+    this.ensureIndex("idx_observability_level_created", "observability_documents", "level, created_at DESC");
+    this.ensureIndex("idx_observability_event_created", "observability_documents", "event_type, created_at DESC");
   }
 
   private applyTriChatSchemaMigration(): void {
@@ -10926,6 +12468,35 @@ function mapRuntimeEventRow(row: Record<string, unknown>): RuntimeEventRecord {
   };
 }
 
+function mapObservabilityDocumentRow(row: Record<string, unknown>): ObservabilityDocumentRecord {
+  const levelRaw = asNullableString(row.level);
+  const level =
+    levelRaw === "trace" ||
+    levelRaw === "debug" ||
+    levelRaw === "info" ||
+    levelRaw === "warn" ||
+    levelRaw === "error" ||
+    levelRaw === "critical"
+      ? levelRaw
+      : null;
+  return {
+    document_id: String(row.document_id ?? ""),
+    created_at: String(row.created_at ?? ""),
+    updated_at: String(row.updated_at ?? ""),
+    index_name: String(row.index_name ?? ""),
+    source_kind: String(row.source_kind ?? ""),
+    source_ref: asNullableString(row.source_ref),
+    level,
+    host_id: asNullableString(row.host_id),
+    service: asNullableString(row.service),
+    event_type: asNullableString(row.event_type),
+    title: asNullableString(row.title),
+    body_text: String(row.body_text ?? ""),
+    attributes: parseJsonObject(row.attributes_json),
+    tags: safeParseJsonArray(row.tags_json),
+  };
+}
+
 function mapTaskRow(row: Record<string, unknown>): TaskRecord {
   const leaseOwnerId = asNullableString(row.lease_owner_id);
   const leaseExpiresAt = asNullableString(row.lease_expires_at);
@@ -10986,6 +12557,37 @@ function mapTaskEventRow(row: Record<string, unknown>): TaskEventRecord {
     worker_id: asNullableString(row.worker_id),
     summary: asNullableString(row.summary),
     details: parseJsonObject(row.details_json),
+  };
+}
+
+function mapRuntimeWorkerSessionRow(row: Record<string, unknown>): RuntimeWorkerSessionRecord {
+  return {
+    session_id: String(row.session_id ?? ""),
+    created_at: String(row.created_at ?? ""),
+    updated_at: String(row.updated_at ?? ""),
+    runtime_id: normalizeRuntimeWorkerRuntimeId(row.runtime_id),
+    status: normalizeRuntimeWorkerSessionStatus(row.status),
+    task_id: asNullableString(row.task_id),
+    goal_id: asNullableString(row.goal_id),
+    plan_id: asNullableString(row.plan_id),
+    step_id: asNullableString(row.step_id),
+    worker_id: String(row.worker_id ?? ""),
+    title: String(row.title ?? ""),
+    objective: String(row.objective ?? ""),
+    repo_root: String(row.repo_root ?? ""),
+    project_dir: String(row.project_dir ?? ""),
+    worktree_path: String(row.worktree_path ?? ""),
+    branch_name: asNullableString(row.branch_name),
+    tmux_session_name: String(row.tmux_session_name ?? ""),
+    transcript_path: asNullableString(row.transcript_path),
+    brief_path: asNullableString(row.brief_path),
+    last_command_at: asNullableString(row.last_command_at),
+    last_activity_at: asNullableString(row.last_activity_at),
+    last_error: asNullableString(row.last_error),
+    metadata: parseJsonObject(row.metadata_json),
+    source_client: asNullableString(row.source_client),
+    source_model: asNullableString(row.source_model),
+    source_agent: asNullableString(row.source_agent),
   };
 }
 
@@ -11347,6 +12949,28 @@ function normalizeTaskStatus(value: unknown): TaskStatus {
   return "pending";
 }
 
+function normalizeRuntimeWorkerRuntimeId(value: unknown): RuntimeWorkerRuntimeId {
+  const normalized = String(value ?? "codex").trim().toLowerCase();
+  if (normalized === "shell") {
+    return "shell";
+  }
+  return "codex";
+}
+
+function normalizeRuntimeWorkerSessionStatus(value: unknown): RuntimeWorkerSessionStatus {
+  const normalized = String(value ?? "launching").trim().toLowerCase();
+  if (
+    normalized === "running" ||
+    normalized === "idle" ||
+    normalized === "completed" ||
+    normalized === "failed" ||
+    normalized === "stopped"
+  ) {
+    return normalized;
+  }
+  return "launching";
+}
+
 function normalizeAgentSessionStatus(value: unknown): AgentSessionStatus {
   const normalized = String(value ?? "active");
   if (
@@ -11622,8 +13246,26 @@ function resolveStorageGuardOptions(dbPath: string): StorageGuardOptions {
   const backupDir = backupDirRaw ? path.resolve(backupDirRaw) : path.join(dbDir, "backups");
   return {
     backup_dir: backupDir,
-    backup_keep: parseBoundedInt(process.env.ANAMNESIS_HUB_BACKUP_KEEP, 24, 1, 500),
+    backup_keep: parseBoundedInt(process.env.ANAMNESIS_HUB_BACKUP_KEEP, 6, 1, 500),
+    backup_max_total_bytes: parseBoundedInt(
+      process.env.ANAMNESIS_HUB_BACKUP_MAX_TOTAL_BYTES,
+      96 * 1024 * 1024 * 1024,
+      0,
+      Number.MAX_SAFE_INTEGER
+    ),
+    backup_min_interval_seconds: parseBoundedInt(
+      process.env.ANAMNESIS_HUB_BACKUP_MIN_INTERVAL_SECONDS,
+      21600,
+      0,
+      604800
+    ),
     startup_backup_enabled: parseBoolean(process.env.ANAMNESIS_HUB_STARTUP_BACKUP, true),
+    startup_backup_max_bytes: parseBoundedInt(
+      process.env.ANAMNESIS_HUB_STARTUP_BACKUP_MAX_BYTES,
+      512 * 1024 * 1024,
+      0,
+      Number.MAX_SAFE_INTEGER
+    ),
     startup_quick_check_enabled: parseBoolean(process.env.ANAMNESIS_HUB_RUN_QUICK_CHECK_ON_START, true),
     auto_restore_from_backup: parseBoolean(process.env.ANAMNESIS_HUB_AUTO_RESTORE_FROM_BACKUP, true),
     allow_fresh_on_corruption: parseBoolean(process.env.ANAMNESIS_HUB_ALLOW_FRESH_DB_ON_CORRUPTION, false),
@@ -11807,26 +13449,185 @@ function removeDatabaseArtifacts(dbPath: string): void {
   }
 }
 
-function pruneDatabaseBackups(dbPath: string, options: StorageGuardOptions): void {
-  if (!fs.existsSync(options.backup_dir)) {
-    return;
+function databaseArtifactBytes(dbPath: string): number {
+  if (dbPath === ":memory:") {
+    return 0;
+  }
+  const suffixes = ["", "-wal", "-shm"];
+  let total = 0;
+  for (const suffix of suffixes) {
+    const filePath = `${dbPath}${suffix}`;
+    try {
+      total += fs.statSync(filePath).size;
+    } catch {
+      continue;
+    }
+  }
+  return total;
+}
+
+function databaseArtifactLatestMtimeMs(dbPath: string): number {
+  if (dbPath === ":memory:") {
+    return 0;
+  }
+  const suffixes = ["", "-wal", "-shm"];
+  let latest = 0;
+  for (const suffix of suffixes) {
+    const filePath = `${dbPath}${suffix}`;
+    try {
+      latest = Math.max(latest, fs.statSync(filePath).mtimeMs);
+    } catch {
+      continue;
+    }
+  }
+  return latest;
+}
+
+function classifyBackupArtifactKind(entry: string): StorageBackupArtifactKind {
+  if (entry.endsWith(".tmp.sqlite")) {
+    return "temp";
+  }
+  if (entry.endsWith(".tmp.sqlite-journal") || entry.endsWith(".sqlite-journal")) {
+    return "journal";
+  }
+  if (entry.endsWith(".tmp.sqlite-wal") || entry.endsWith(".sqlite-wal")) {
+    return "wal";
+  }
+  if (entry.endsWith(".tmp.sqlite-shm") || entry.endsWith(".sqlite-shm")) {
+    return "shm";
+  }
+  if (entry.endsWith(".sqlite")) {
+    return "snapshot";
+  }
+  return "other";
+}
+
+function listDatabaseBackupArtifacts(dbPath: string, options: StorageGuardOptions): StorageBackupArtifactRecord[] {
+  if (dbPath === ":memory:" || !fs.existsSync(options.backup_dir)) {
+    return [];
   }
   const base = path.basename(dbPath);
-  const backups = fs
+  return fs
     .readdirSync(options.backup_dir)
-    .filter((entry) => entry.startsWith(`${base}.`) && entry.endsWith(".sqlite"))
+    .filter((entry) => entry.startsWith(`${base}.`))
     .map((entry) => path.join(options.backup_dir, entry))
     .filter((entry) => fs.existsSync(entry))
-    .sort((left, right) => safeMtimeMs(right) - safeMtimeMs(left));
+    .map((entryPath) => {
+      const stats = fs.statSync(entryPath);
+      return {
+        path: entryPath,
+        basename: path.basename(entryPath),
+        kind: classifyBackupArtifactKind(path.basename(entryPath)),
+        size_bytes: stats.size,
+        mtime_ms: stats.mtimeMs,
+        mtime_iso: Number.isFinite(stats.mtimeMs) ? new Date(stats.mtimeMs).toISOString() : null,
+      } satisfies StorageBackupArtifactRecord;
+    })
+    .sort((left, right) => right.mtime_ms - left.mtime_ms);
+}
 
-  if (backups.length <= options.backup_keep) {
-    return;
+function withDatabaseBackupLock<T>(dbPath: string, options: StorageGuardOptions, callback: () => T): T {
+  const lockPath = path.join(options.backup_dir, `${path.basename(dbPath)}.lock`);
+  fs.mkdirSync(options.backup_dir, { recursive: true });
+  try {
+    const stats = fs.statSync(lockPath);
+    if (Date.now() - stats.mtimeMs > 60 * 60 * 1000) {
+      removeFileIfExists(lockPath);
+    }
+  } catch {
+    // ignore missing or unreadable lock files
+  }
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(lockPath, "wx");
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? String((error as NodeJS.ErrnoException).code ?? "") : "";
+    if (code === "EEXIST") {
+      throw new Error(`backup lock already held: ${lockPath}`);
+    }
+    throw error;
   }
 
-  const toDelete = backups.slice(options.backup_keep);
-  for (const entry of toDelete) {
-    removeFileIfExists(entry);
+  try {
+    fs.writeFileSync(fd, `${process.pid}\n`, { encoding: "utf8" });
+    return callback();
+  } finally {
+    if (fd !== null) {
+      fs.closeSync(fd);
+    }
+    removeFileIfExists(lockPath);
   }
+}
+
+function pruneDatabaseBackupArtifacts(
+  dbPath: string,
+  options: StorageGuardOptions,
+  params?: {
+    keep?: number;
+    max_total_bytes?: number;
+    dry_run?: boolean;
+    temp_max_age_seconds?: number;
+  }
+) {
+  const dryRun = params?.dry_run ?? false;
+  const keep = Math.max(1, Math.min(500, params?.keep ?? options.backup_keep));
+  const maxTotalBytes = Math.max(0, params?.max_total_bytes ?? options.backup_max_total_bytes);
+  const tempMaxAgeMs = Math.max(0, (params?.temp_max_age_seconds ?? 900) * 1000);
+  const nowMs = Date.now();
+  const artifacts = listDatabaseBackupArtifacts(dbPath, options);
+  const deleted: Array<{ path: string; kind: StorageBackupArtifactKind; size_bytes: number }> = [];
+  const deleteArtifact = (artifact: StorageBackupArtifactRecord) => {
+    deleted.push({ path: artifact.path, kind: artifact.kind, size_bytes: artifact.size_bytes });
+    if (!dryRun) {
+      removeFileIfExists(artifact.path);
+    }
+  };
+
+  const sortedSnapshots = artifacts.filter((entry) => entry.kind === "snapshot");
+  for (const artifact of artifacts) {
+    if (artifact.kind === "temp" || artifact.kind === "journal" || artifact.kind === "wal" || artifact.kind === "shm") {
+      if (nowMs - artifact.mtime_ms >= tempMaxAgeMs) {
+        deleteArtifact(artifact);
+      }
+    }
+  }
+
+  for (const artifact of sortedSnapshots.slice(keep)) {
+    deleteArtifact(artifact);
+  }
+
+  if (maxTotalBytes > 0) {
+    let retainedBytes = 0;
+    for (const artifact of sortedSnapshots.slice(0, keep)) {
+      if (!deleted.some((entry) => entry.path === artifact.path)) {
+        retainedBytes += artifact.size_bytes;
+      }
+    }
+    for (const artifact of sortedSnapshots.slice(keep)) {
+      if (deleted.some((entry) => entry.path === artifact.path)) {
+        continue;
+      }
+      retainedBytes += artifact.size_bytes;
+      if (retainedBytes > maxTotalBytes) {
+        deleteArtifact(artifact);
+      }
+    }
+  }
+
+  return {
+    backup_dir: options.backup_dir,
+    dry_run: dryRun,
+    keep,
+    max_total_bytes: maxTotalBytes,
+    temp_max_age_seconds: Math.floor(tempMaxAgeMs / 1000),
+    deleted_count: deleted.length,
+    reclaimed_bytes: deleted.reduce((sum, entry) => sum + entry.size_bytes, 0),
+    deleted,
+  };
+}
+
+function pruneDatabaseBackups(dbPath: string, options: StorageGuardOptions): void {
+  pruneDatabaseBackupArtifacts(dbPath, options);
 }
 
 function safeCloseDatabase(db: Database.Database): void {

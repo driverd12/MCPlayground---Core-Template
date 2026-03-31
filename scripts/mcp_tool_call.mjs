@@ -14,6 +14,8 @@ function parseArgs(argv) {
     stdioCommand: process.env.MCP_TOOL_CALL_STDIO_COMMAND ?? "node",
     stdioArgs: process.env.MCP_TOOL_CALL_STDIO_ARGS ?? "dist/server.js",
     cwd: process.cwd(),
+    timeoutMs: Number.parseInt(String(process.env.MCP_TOOL_CALL_TIMEOUT_MS ?? "").trim(), 10),
+    maxAttempts: Number.parseInt(String(process.env.MCP_TOOL_CALL_HTTP_MAX_ATTEMPTS ?? "").trim(), 10),
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -34,6 +36,10 @@ function parseArgs(argv) {
       out.stdioArgs = argv[++i] ?? out.stdioArgs;
     } else if (token === "--cwd") {
       out.cwd = argv[++i] ?? out.cwd;
+    } else if (token === "--timeout-ms") {
+      out.timeoutMs = Number.parseInt(String(argv[++i] ?? "").trim(), 10);
+    } else if (token === "--max-attempts") {
+      out.maxAttempts = Number.parseInt(String(argv[++i] ?? "").trim(), 10);
     } else if (token === "--help" || token === "-h") {
       printHelp();
       process.exit(0);
@@ -44,6 +50,14 @@ function parseArgs(argv) {
 
   if (!out.tool) {
     throw new Error("--tool is required");
+  }
+
+  if (!Number.isFinite(out.timeoutMs) || out.timeoutMs <= 0) {
+    out.timeoutMs = out.transport === "http" ? 15000 : 60000;
+  }
+
+  if (!Number.isFinite(out.maxAttempts) || out.maxAttempts <= 0) {
+    out.maxAttempts = out.transport === "http" ? 10 : 1;
   }
 
   return out;
@@ -77,6 +91,56 @@ function asJson(text) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      promise.finally(() => clearTimeout(timer)).catch(() => clearTimeout(timer));
+    }),
+  ]);
+}
+
+function isRetryableHttpError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /fetch failed|ECONNREFUSED|ECONNRESET|EPIPE|socket hang up|UND_ERR|timed out|429|502|503|504/i.test(
+    message
+  );
+}
+
+async function invokeToolOnce(options, args) {
+  const transport =
+    options.transport === "http"
+      ? createHttpTransport(options)
+      : createStdioTransport(options);
+
+  const client = new Client({ name: "mcplayground-mcp-tool-call", version: "0.1.0" }, { capabilities: {} });
+  try {
+    await withTimeout(client.connect(transport), options.timeoutMs, `connect ${options.transport}:${options.tool}`);
+    const response = await withTimeout(
+      client.callTool({ name: options.tool, arguments: args }),
+      options.timeoutMs,
+      `call ${options.transport}:${options.tool}`
+    );
+    const text = extractText(response);
+    if (response.isError) {
+      throw new Error(`Tool ${options.tool} failed: ${text}`);
+    }
+    return asJson(text);
+  } finally {
+    await Promise.race([
+      client.close().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 750)),
+    ]);
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   let args;
@@ -86,31 +150,39 @@ async function main() {
     throw new Error(`Invalid --args JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  const transport =
-    options.transport === "http"
-      ? createHttpTransport(options)
-      : createStdioTransport(options);
-
-  const client = new Client({ name: "mcplayground-mcp-tool-call", version: "0.1.0" }, { capabilities: {} });
-
-  try {
-    await client.connect(transport);
-    const response = await client.callTool({ name: options.tool, arguments: args });
-    const text = extractText(response);
-    if (response.isError) {
-      throw new Error(`Tool ${options.tool} failed: ${text}`);
+  const maxAttempts = options.transport === "http" ? options.maxAttempts : 1;
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const parsed = await invokeToolOnce(options, args);
+      process.stdout.write(`${JSON.stringify(parsed, null, 2)}\n`);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (options.transport !== "http" || attempt >= maxAttempts || !isRetryableHttpError(error)) {
+        throw error;
+      }
+      await sleep(Math.min(2000, 200 * attempt));
     }
-    const parsed = asJson(text);
-    process.stdout.write(`${JSON.stringify(parsed, null, 2)}\n`);
-  } finally {
-    await Promise.race([
-      client.close().catch(() => {}),
-      new Promise((resolve) => setTimeout(resolve, 750)),
-    ]);
   }
+  throw lastError ?? new Error("Tool invocation failed");
 }
 
 function createStdioTransport(options) {
+  const childEnv = { ...process.env };
+  childEnv.MCP_HTTP = "0";
+  childEnv.MCP_HTTP_HOST = "";
+  childEnv.MCP_HTTP_PORT = "";
+  childEnv.MCP_HTTP_ALLOWED_ORIGINS = "";
+  childEnv.MCP_HTTP_BEARER_TOKEN = "";
+  childEnv.ANAMNESIS_MCP_HTTP_PORT = "";
+  childEnv.ANAMNESIS_MCP_HTTP_BEARER_TOKEN = "";
+  childEnv.MCP_BACKGROUND_OWNER = "0";
+  childEnv.TRICHAT_BUS_AUTOSTART = "0";
+  childEnv.TRICHAT_RING_LEADER_AUTOSTART = "0";
+  childEnv.MCP_AUTONOMY_BOOTSTRAP_ON_START = "0";
+  childEnv.MCP_AUTONOMY_MAINTAIN_ON_START = "0";
+  childEnv.ANAMNESIS_HUB_STARTUP_BACKUP = "0";
   return new StdioClientTransport({
     command: options.stdioCommand,
     args: String(options.stdioArgs)
@@ -118,7 +190,7 @@ function createStdioTransport(options) {
       .map((entry) => entry.trim())
       .filter(Boolean),
     cwd: options.cwd,
-    env: process.env,
+    env: childEnv,
     stderr: "pipe",
   });
 }

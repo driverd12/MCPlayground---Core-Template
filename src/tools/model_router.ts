@@ -4,7 +4,9 @@ import {
   type ModelRouterBackendRecord,
   type ModelRouterStateRecord,
   type ModelRouterTaskKind,
+  type WorkerFabricStateRecord,
 } from "../storage.js";
+import { planClusterTopologyBackends } from "./cluster_topology.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { computeHostHealthScore, resolveEffectiveWorkerFabric } from "./worker_fabric.js";
 
@@ -19,7 +21,9 @@ const sourceSchema = z.object({
 const backendSchema = z.object({
   backend_id: z.string().min(1),
   enabled: z.boolean().optional(),
-  provider: z.enum(["ollama", "mlx", "llama.cpp", "vllm", "openai", "custom"]).default("custom"),
+  provider: z
+    .enum(["ollama", "mlx", "llama.cpp", "vllm", "openai", "google", "cursor", "anthropic", "github-copilot", "custom"])
+    .default("custom"),
   model_id: z.string().min(1),
   endpoint: z.string().min(1).optional(),
   host_id: z.string().min(1).optional(),
@@ -92,11 +96,62 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function readString(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function readBoolean(value: unknown) {
+  return typeof value === "boolean" ? value : null;
+}
+
+function isoAgeSeconds(value: unknown) {
+  const text = readString(value);
+  if (!text) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const timestamp = Date.parse(text);
+  if (!Number.isFinite(timestamp)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.max(0, (Date.now() - timestamp) / 1000);
+}
+
 function normalizeStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
   }
   return [...new Set(value.map((entry) => String(entry ?? "").trim()).filter(Boolean))];
+}
+
+function inferBackendLocality(input: {
+  locality?: "local" | "remote" | null;
+  host_id?: string | null;
+  endpoint?: string | null;
+}) {
+  if (input.locality === "local" || input.locality === "remote") {
+    return input.locality;
+  }
+  const hostId = readString(input.host_id);
+  if (hostId === "local") {
+    return "local" as const;
+  }
+  const endpoint = readString(input.endpoint);
+  if (endpoint) {
+    try {
+      const url = new URL(endpoint);
+      const hostname = url.hostname.trim().toLowerCase();
+      if (hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1") {
+        return "local" as const;
+      }
+    } catch {
+      // ignore invalid endpoints and fall through to host-based inference.
+    }
+  }
+  return hostId ? "remote" as const : "local" as const;
 }
 
 function loadModelRouterState(storage: Storage): ModelRouterStateRecord {
@@ -119,7 +174,11 @@ function normalizeBackend(input: ModelRouterBackendRecord): ModelRouterBackendRe
     model_id: input.model_id.trim(),
     endpoint: input.endpoint?.trim() || null,
     host_id: input.host_id?.trim() || null,
-    locality: input.locality === "remote" ? "remote" : "local",
+    locality: inferBackendLocality({
+      locality: input.locality,
+      host_id: input.host_id,
+      endpoint: input.endpoint,
+    }),
     context_window: Math.max(256, Math.min(10_000_000, Math.trunc(input.context_window || 8192))),
     throughput_tps:
       typeof input.throughput_tps === "number" && Number.isFinite(input.throughput_tps) ? Number(input.throughput_tps.toFixed(4)) : null,
@@ -167,6 +226,41 @@ function resolveTaskAffinity(backend: ModelRouterBackendRecord, taskKind: ModelR
   return tags.has(taskKind) ? 0.9 : 0.55;
 }
 
+function resolveAcceleratorFit(
+  backend: ModelRouterBackendRecord,
+  taskKind: ModelRouterTaskKind | null,
+  preferredTags: string[]
+) {
+  const tags = new Set(backend.tags.map((entry) => entry.toLowerCase()));
+  const capabilities = isRecord(backend.capabilities) ? backend.capabilities : {};
+  const acceleratorKind = readString(capabilities.accelerator_kind)?.toLowerCase();
+  const gpuApi = readString(capabilities.gpu_api)?.toLowerCase();
+  const hasGpu =
+    tags.has("gpu") ||
+    backend.provider === "mlx" ||
+    backend.provider === "vllm" ||
+    backend.provider === "llama.cpp" ||
+    acceleratorKind === "apple-metal" ||
+    acceleratorKind === "nvidia-cuda";
+  if (!hasGpu) {
+    return 0.55;
+  }
+  let score = 0.78;
+  if (taskKind === "coding" || taskKind === "research" || taskKind === "planning") {
+    score += 0.1;
+  }
+  if (preferredTags.some((tag) => ["gpu", "metal", "cuda", "apple-silicon", "local"].includes(tag.toLowerCase()))) {
+    score += 0.08;
+  }
+  if (backend.provider === "mlx" && (gpuApi === "metal" || tags.has("metal"))) {
+    score += 0.08;
+  }
+  if ((backend.provider === "vllm" || backend.provider === "llama.cpp") && (gpuApi === "cuda" || tags.has("cuda"))) {
+    score += 0.08;
+  }
+  return Math.max(0.1, Math.min(1, Number(score.toFixed(4))));
+}
+
 function resolveRouteStrategy(inputPreference: RouteQualityPreference | undefined, stateStrategy: ModelRouterStateRecord["strategy"]) {
   if (inputPreference === "speed") {
     return "prefer_speed" as const;
@@ -178,6 +272,58 @@ function resolveRouteStrategy(inputPreference: RouteQualityPreference | undefine
     return "prefer_cost" as const;
   }
   return stateStrategy;
+}
+
+function resolveOperationalReadinessScore(input: {
+  locality: "local" | "remote";
+  probe_healthy: boolean | null;
+  probe_model_known: boolean | null;
+  probe_model_loaded: boolean | null;
+}) {
+  if (input.locality === "local") {
+    if (input.probe_healthy === true) {
+      return 1;
+    }
+    if (input.probe_healthy === false) {
+      if (input.probe_model_known === true && input.probe_model_loaded === true) {
+        return 0.82;
+      }
+      if (input.probe_model_known === true) {
+        return 0.35;
+      }
+      return 0.02;
+    }
+    if (input.probe_model_known === true && input.probe_model_loaded === true) {
+      return 0.88;
+    }
+    if (input.probe_model_known === true) {
+      return 0.68;
+    }
+    return 0.55;
+  }
+  if (input.probe_healthy === true) {
+    return 0.92;
+  }
+  if (input.probe_healthy === false) {
+    return 0.4;
+  }
+  return 0.6;
+}
+
+function resolveDefaultAlignmentScore(
+  backend: ModelRouterBackendRecord,
+  defaultBackendId: string | null,
+  preferredTags: string[]
+) {
+  const lowerTags = new Set(backend.tags.map((entry) => entry.toLowerCase()));
+  const prefersPrimary = preferredTags.some((tag) => ["primary", "local", backend.provider].includes(tag.toLowerCase()));
+  if (backend.backend_id === defaultBackendId) {
+    return 1;
+  }
+  if (lowerTags.has("primary")) {
+    return prefersPrimary ? 0.85 : 0.7;
+  }
+  return 0.35;
 }
 
 export function routeModelBackends(
@@ -193,14 +339,22 @@ export function routeModelBackends(
     fallback_workspace_root?: string;
     fallback_worker_count?: number;
     fallback_shell?: string;
+    effective_worker_fabric?: WorkerFabricStateRecord;
   }
 ) {
   const state = loadModelRouterState(storage);
+  const planned_backends = planClusterTopologyBackends(storage, {
+    task_kind: input.task_kind,
+    preferred_tags: input.preferred_tags,
+    required_tags: input.required_tags,
+    required_backend_ids: input.required_backend_ids,
+  });
   if (!state.enabled || state.backends.length === 0) {
     return {
       state,
       selected_backend: null,
       ranked_backends: [],
+      planned_backends,
       strategy: resolveRouteStrategy(input.quality_preference, state.strategy),
       task_kind: input.task_kind ?? null,
       context_tokens: input.context_tokens ?? null,
@@ -211,11 +365,13 @@ export function routeModelBackends(
   const preferredTags = normalizeStringArray(input.preferred_tags);
   const requiredBackendIds = normalizeStringArray(input.required_backend_ids);
   const effectiveStrategy = resolveRouteStrategy(input.quality_preference, state.strategy);
-  const fabric = resolveEffectiveWorkerFabric(storage, {
-    fallback_workspace_root: input.fallback_workspace_root ?? process.cwd(),
-    fallback_worker_count: input.fallback_worker_count ?? 1,
-    fallback_shell: input.fallback_shell ?? "/bin/zsh",
-  });
+  const fabric =
+    input.effective_worker_fabric ??
+    resolveEffectiveWorkerFabric(storage, {
+      fallback_workspace_root: input.fallback_workspace_root ?? process.cwd(),
+      fallback_worker_count: input.fallback_worker_count ?? 1,
+      fallback_shell: input.fallback_shell ?? "/bin/zsh",
+    });
   const hostHealthById = new Map(
     fabric.hosts.map((host) => [host.host_id, computeHostHealthScore(host.telemetry)])
   );
@@ -225,6 +381,10 @@ export function routeModelBackends(
     .filter((backend) => requiredBackendIds.length === 0 || requiredBackendIds.includes(backend.backend_id))
     .filter((backend) => requiredTags.every((tag) => backend.tags.map((entry) => entry.toLowerCase()).includes(tag.toLowerCase())))
     .map((backend) => {
+      const probeHealthy = readBoolean((backend.capabilities as Record<string, unknown>).probe_healthy);
+      const probeModelKnown = readBoolean((backend.capabilities as Record<string, unknown>).probe_model_known);
+      const probeModelLoaded = readBoolean((backend.capabilities as Record<string, unknown>).probe_model_loaded);
+      const probeAgeSeconds = isoAgeSeconds((backend.capabilities as Record<string, unknown>).probe_generated_at);
       const contextFit =
         typeof input.context_tokens === "number" && input.context_tokens > 0
           ? Math.max(0.1, Math.min(1, backend.context_window / input.context_tokens))
@@ -247,25 +407,94 @@ export function routeModelBackends(
           ? 0.6
           : preferredTags.filter((tag) => backend.tags.map((entry) => entry.toLowerCase()).includes(tag.toLowerCase())).length /
             preferredTags.length;
+      const acceleratorFit = resolveAcceleratorFit(backend, input.task_kind ?? null, preferredTags);
+      const probeFreshnessScore =
+        !Number.isFinite(probeAgeSeconds) || probeAgeSeconds === Number.POSITIVE_INFINITY
+          ? 0.45
+          : probeAgeSeconds <= 300
+            ? 1
+            : probeAgeSeconds <= 900
+              ? 0.8
+              : probeAgeSeconds <= 1800
+                ? 0.6
+                : 0.35;
+      const probeHealthScore = probeHealthy === null ? 0.55 : probeHealthy ? 1 : 0.15;
+      const modelKnownScore = probeModelKnown === null ? 0.7 : probeModelKnown ? 1 : 0.05;
+      const modelLoadedScore = probeModelLoaded === null ? 0.6 : probeModelLoaded ? 1 : 0.4;
+      const operationalReadiness = resolveOperationalReadinessScore({
+        locality: backend.locality,
+        probe_healthy: probeHealthy,
+        probe_model_known: probeModelKnown,
+        probe_model_loaded: probeModelLoaded,
+      });
+      const defaultAlignment = resolveDefaultAlignmentScore(backend, state.default_backend_id, preferredTags);
       const hostHealth =
         backend.host_id && hostHealthById.has(backend.host_id) ? hostHealthById.get(backend.host_id)! : backend.locality === "local" ? 0.9 : 0.7;
       const strategyScore =
         effectiveStrategy === "prefer_speed"
-          ? latencyScore * 0.45 + throughputScore * 0.2 + qualityScore * 0.15 + contextFit * 0.1 + hostHealth * 0.1
+          ? latencyScore * 0.35 +
+            throughputScore * 0.18 +
+            qualityScore * 0.12 +
+            contextFit * 0.08 +
+            hostHealth * 0.1 +
+            probeHealthScore * 0.1 +
+            probeFreshnessScore * 0.04 +
+            modelKnownScore * 0.02 +
+            modelLoadedScore * 0.01 +
+            operationalReadiness * 0.08 +
+            defaultAlignment * 0.02
           : effectiveStrategy === "prefer_quality"
-            ? qualityScore * 0.45 + taskAffinity * 0.2 + contextFit * 0.15 + hostHealth * 0.1 + latencyScore * 0.1
+            ? qualityScore * 0.29 +
+              taskAffinity * 0.16 +
+              contextFit * 0.12 +
+              hostHealth * 0.08 +
+              latencyScore * 0.07 +
+              probeHealthScore * 0.08 +
+              probeFreshnessScore * 0.03 +
+              modelKnownScore * 0.02 +
+              modelLoadedScore * 0.02 +
+              preferredTagScore * 0.06 +
+              operationalReadiness * 0.05 +
+              defaultAlignment * 0.02
             : effectiveStrategy === "prefer_cost"
-              ? costScore * 0.45 + hostHealth * 0.2 + latencyScore * 0.15 + qualityScore * 0.1 + contextFit * 0.1
+              ? costScore * 0.35 +
+                hostHealth * 0.18 +
+                latencyScore * 0.12 +
+                qualityScore * 0.08 +
+                contextFit * 0.08 +
+                probeHealthScore * 0.1 +
+                probeFreshnessScore * 0.05 +
+                modelKnownScore * 0.03 +
+                modelLoadedScore * 0.01 +
+                operationalReadiness * 0.06 +
+                defaultAlignment * 0.02
               : effectiveStrategy === "prefer_context_fit"
-                ? contextFit * 0.45 + qualityScore * 0.15 + latencyScore * 0.15 + taskAffinity * 0.15 + hostHealth * 0.1
+                ? contextFit * 0.35 +
+                  qualityScore * 0.12 +
+                  latencyScore * 0.12 +
+                  taskAffinity * 0.12 +
+                  hostHealth * 0.1 +
+                  probeHealthScore * 0.1 +
+                  probeFreshnessScore * 0.05 +
+                  modelKnownScore * 0.03 +
+                  modelLoadedScore * 0.01 +
+                  operationalReadiness * 0.06 +
+                  defaultAlignment * 0.02
                 : qualityScore * 0.25 +
                   latencyScore * 0.2 +
                   contextFit * 0.15 +
                   throughputScore * 0.1 +
                   costScore * 0.1 +
                   taskAffinity * 0.1 +
-                  preferredTagScore * 0.05 +
-                  hostHealth * 0.05;
+                  preferredTagScore * 0.04 +
+                  acceleratorFit * 0.04 +
+                  hostHealth * 0.05 +
+                  probeHealthScore * 0.06 +
+                  probeFreshnessScore * 0.03 +
+                  modelKnownScore * 0.005 +
+                  modelLoadedScore * 0.005 +
+                  operationalReadiness * 0.08 +
+                  defaultAlignment * 0.02;
       return {
         backend,
         score: Number(strategyScore.toFixed(4)),
@@ -278,7 +507,14 @@ export function routeModelBackends(
           cost_score: Number(costScore.toFixed(4)),
           task_affinity: Number(taskAffinity.toFixed(4)),
           preferred_tag_score: Number(preferredTagScore.toFixed(4)),
+          accelerator_fit: Number(acceleratorFit.toFixed(4)),
           host_health: Number(hostHealth.toFixed(4)),
+          probe_health: Number(probeHealthScore.toFixed(4)),
+          probe_freshness: Number(probeFreshnessScore.toFixed(4)),
+          model_known: Number(modelKnownScore.toFixed(4)),
+          model_loaded: Number(modelLoadedScore.toFixed(4)),
+          operational_readiness: Number(operationalReadiness.toFixed(4)),
+          default_alignment: Number(defaultAlignment.toFixed(4)),
         },
       };
     })
@@ -298,10 +534,150 @@ export function routeModelBackends(
     state,
     selected_backend: ranked[0]?.backend ?? null,
     ranked_backends: ranked,
+    planned_backends,
     strategy: effectiveStrategy,
     task_kind: input.task_kind ?? null,
     context_tokens: input.context_tokens ?? null,
     latency_budget_ms: input.latency_budget_ms ?? null,
+  };
+}
+
+export function inferObjectiveTaskKind(objective: string): ModelRouterTaskKind {
+  const normalized = objective.trim().toLowerCase();
+  if (!normalized) {
+    return "planning";
+  }
+  if (
+    /\b(test|verify|review|validate|regression|audit|prove|smoke|check|qa|quality|release)\b/.test(normalized)
+  ) {
+    return "verification";
+  }
+  if (
+    /\b(research|investigate|compare|summari[sz]e|analy[sz]e|analysis|explore|gather|evaluate|benchmark|doc|docs)\b/.test(
+      normalized
+    )
+  ) {
+    return "research";
+  }
+  if (
+    /\b(build|implement|refactor|patch|fix|code|script|wire|integrat|ship|deploy|compile|container|docker|kubernetes|proxmox)\b/.test(
+      normalized
+    )
+  ) {
+    return "coding";
+  }
+  if (/\b(chat|reply|respond|message)\b/.test(normalized)) {
+    return "chat";
+  }
+  if (/\b(tool|command|workflow|automate|orchestrate|route|dispatch)\b/.test(normalized)) {
+    return "tool_use";
+  }
+  return "planning";
+}
+
+function inferObjectivePreferredTags(objective: string, taskKind: ModelRouterTaskKind) {
+  const normalized = objective.trim().toLowerCase();
+  const tags = new Set<string>([taskKind]);
+  if (/\b(frontier|deep|complex|high[- ]risk|cross[- ]system|architecture|presentation)\b/.test(normalized)) {
+    tags.add("frontier");
+  }
+  if (/\b(local|offline|on-device|ollama|mlx|llama)\b/.test(normalized)) {
+    tags.add("local");
+  }
+  if (/\b(gpu|metal|cuda|apple silicon|apple-silicon|nvidia|vram)\b/.test(normalized)) {
+    tags.add("gpu");
+  }
+  if (/\b(metal|apple silicon|apple-silicon|mlx)\b/.test(normalized)) {
+    tags.add("metal");
+    tags.add("apple-silicon");
+  }
+  if (/\b(cuda|nvidia|rtx|vllm)\b/.test(normalized)) {
+    tags.add("cuda");
+  }
+  if (/\b(train|training|fine[- ]?tune|finetune|quanti[sz]e|evolve)\b/.test(normalized)) {
+    tags.add("gpu");
+    tags.add("training");
+  }
+  if (/\b(hosted|cloud|remote|provider|api|internet|gemini|codex|cursor|copilot|chatgpt|openai)\b/.test(normalized)) {
+    tags.add("hosted");
+  }
+  if (taskKind === "research") {
+    tags.add("analysis");
+  }
+  if (taskKind === "coding") {
+    tags.add("implementer");
+  }
+  if (taskKind === "verification") {
+    tags.add("verify");
+  }
+  if (taskKind === "planning") {
+    tags.add("planner");
+  }
+  return [...tags];
+}
+
+function resolveBridgeAgentIdsForBackend(backend: ModelRouterBackendRecord) {
+  const metadata = isRecord(backend.metadata) ? backend.metadata : {};
+  const capabilities = isRecord(backend.capabilities) ? backend.capabilities : {};
+  return [
+    ...new Set(
+      [
+        readString(metadata.bridge_agent_id),
+        ...normalizeStringArray(metadata.bridge_agent_ids),
+        readString(capabilities.bridge_agent_id),
+        ...normalizeStringArray(capabilities.bridge_agent_ids),
+      ].filter((entry): entry is string => Boolean(entry))
+    ),
+  ];
+}
+
+export function routeObjectiveBackends(
+  storage: Storage,
+  input: {
+    objective: string;
+    explicit_agent_ids?: string[];
+    required_tags?: string[];
+    preferred_tags?: string[];
+    required_backend_ids?: string[];
+    quality_preference?: RouteQualityPreference;
+    fallback_workspace_root?: string;
+    fallback_worker_count?: number;
+    fallback_shell?: string;
+    bridge_margin?: number;
+  }
+) {
+  const taskKind = inferObjectiveTaskKind(input.objective);
+  const preferredTags = [
+    ...new Set([
+      ...inferObjectivePreferredTags(input.objective, taskKind),
+      ...normalizeStringArray(input.preferred_tags),
+    ]),
+  ];
+  const route = routeModelBackends(storage, {
+    task_kind: taskKind,
+    preferred_tags: preferredTags,
+    required_tags: input.required_tags,
+    required_backend_ids: input.required_backend_ids,
+    quality_preference: input.quality_preference ?? "balanced",
+    fallback_workspace_root: input.fallback_workspace_root,
+    fallback_worker_count: input.fallback_worker_count,
+    fallback_shell: input.fallback_shell,
+  });
+  const topScore = typeof route.ranked_backends[0]?.score === "number" ? route.ranked_backends[0].score : null;
+  const bridgeMargin =
+    typeof input.bridge_margin === "number" && Number.isFinite(input.bridge_margin) ? Math.max(0, input.bridge_margin) : 0.08;
+  const routedBridgeAgentIds = route.ranked_backends
+    .filter((entry) => topScore === null || entry.score >= topScore - bridgeMargin)
+    .flatMap((entry) => resolveBridgeAgentIdsForBackend(entry.backend));
+  const effectiveAgentIds = [
+    ...new Set([...(input.explicit_agent_ids ?? []), ...routedBridgeAgentIds].map((entry) => String(entry ?? "").trim()).filter(Boolean)),
+  ];
+  return {
+    task_kind: taskKind,
+    preferred_tags: preferredTags,
+    route,
+    routed_bridge_agent_ids: [...new Set(routedBridgeAgentIds)],
+    effective_agent_ids: effectiveAgentIds,
   };
 }
 
@@ -354,7 +730,11 @@ export async function modelRouter(storage: Storage, input: z.infer<typeof modelR
           model_id: input.backend!.model_id,
           endpoint: input.backend!.endpoint?.trim() || null,
           host_id: input.backend!.host_id?.trim() || null,
-          locality: input.backend!.locality === "remote" ? "remote" : input.backend!.host_id ? "remote" : "local",
+          locality: inferBackendLocality({
+            locality: input.backend!.locality ?? null,
+            host_id: input.backend!.host_id?.trim() || null,
+            endpoint: input.backend!.endpoint?.trim() || null,
+          }),
           context_window: input.backend!.context_window ?? 8192,
           throughput_tps: input.backend!.throughput_tps ?? null,
           latency_ms_p50: input.backend!.latency_ms_p50 ?? null,
@@ -389,7 +769,11 @@ export async function modelRouter(storage: Storage, input: z.infer<typeof modelR
                 model_id: input.backend?.model_id?.trim() || backend.model_id,
                 endpoint: input.backend?.endpoint?.trim() || backend.endpoint,
                 host_id: input.backend?.host_id?.trim() || backend.host_id,
-                locality: input.backend?.locality === "remote" ? "remote" : input.backend?.locality === "local" ? "local" : backend.locality,
+                locality: inferBackendLocality({
+                  locality: input.backend?.locality ?? backend.locality,
+                  host_id: input.backend?.host_id?.trim() || backend.host_id,
+                  endpoint: input.backend?.endpoint?.trim() || backend.endpoint,
+                }),
                 context_window: input.backend?.context_window ?? backend.context_window,
                 throughput_tps: input.backend?.throughput_tps ?? backend.throughput_tps,
                 latency_ms_p50: input.backend?.latency_ms_p50 ?? backend.latency_ms_p50,
@@ -401,6 +785,10 @@ export async function modelRouter(storage: Storage, input: z.infer<typeof modelR
                 capabilities: input.capabilities && isRecord(input.capabilities)
                   ? { ...backend.capabilities, ...input.capabilities }
                   : backend.capabilities,
+                metadata:
+                  input.backend?.metadata && isRecord(input.backend.metadata)
+                    ? { ...backend.metadata, ...input.backend.metadata }
+                    : backend.metadata,
                 heartbeat_at: new Date().toISOString(),
                 updated_at: new Date().toISOString(),
               })

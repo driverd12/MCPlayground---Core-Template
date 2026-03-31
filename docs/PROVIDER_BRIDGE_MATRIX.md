@@ -72,6 +72,9 @@ Codex install still uses the dedicated script:
 
 - reports which clients are really installable vs export-only vs remote-only
 - reports which external providers already exist as live outbound council agents
+- reports which outbound providers are runtime-eligible as bridge-backed `model.router` backends
+- gives `autonomy.bootstrap` the same bridge/backend truth so the control plane can seed hosted backends automatically
+- lets local-first councils stay primary while `autonomy.command`, `goal.execute`, and `plan.dispatch` add routed hosted agents only when the router says they are relevant
 - exports ready-to-import config snippets and a truthful ChatGPT remote manifest
 - installs the supported local JSON config paths for Cursor, Gemini CLI, and GitHub Copilot CLI
 - preserves `autonomy.ide_ingress` as the one canonical ingress lane

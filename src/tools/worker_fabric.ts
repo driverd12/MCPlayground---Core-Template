@@ -5,6 +5,7 @@ import {
   type WorkerFabricHostTelemetryRecord,
   type WorkerFabricStateRecord,
 } from "../storage.js";
+import { captureLocalHostProfile, deriveLocalExecutionBudget } from "../local_host_profile.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import type { ExecutionIsolationMode } from "../execution_isolation.js";
 
@@ -28,6 +29,7 @@ const workerFabricTelemetrySchema = z.object({
   cpu_utilization: z.number().min(0).max(1).optional(),
   ram_available_gb: z.number().min(0).max(1000000).optional(),
   ram_total_gb: z.number().min(0).max(1000000).optional(),
+  swap_used_gb: z.number().min(0).max(1000000).optional(),
   gpu_utilization: z.number().min(0).max(1).optional(),
   gpu_memory_available_gb: z.number().min(0).max(1000000).optional(),
   gpu_memory_total_gb: z.number().min(0).max(1000000).optional(),
@@ -116,11 +118,39 @@ export type TaskExecutionRouting = {
   allowed_host_ids: string[];
   preferred_host_tags: string[];
   required_host_tags: string[];
+  preferred_backend_ids: string[];
+  required_backend_ids: string[];
+  preferred_model_tags: string[];
+  required_model_tags: string[];
   isolation_mode: ExecutionIsolationMode;
+  task_kind: "planning" | "coding" | "research" | "verification" | "chat" | "tool_use" | null;
+  quality_preference: "speed" | "balanced" | "quality" | "cost" | null;
+  selected_backend_id: string | null;
+  selected_backend_provider: string | null;
+  selected_backend_locality: "local" | "remote" | null;
+  selected_host_id: string | null;
+  selected_worker_host_id: string | null;
+  routed_bridge_agent_ids: string[];
+  planned_backend_candidates: Array<{
+    backend_id: string;
+    provider: string | null;
+    host_id: string | null;
+    node_id: string | null;
+    title: string | null;
+    score: number | null;
+  }>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function normalizeStringArray(value: unknown): string[] {
@@ -128,6 +158,10 @@ function normalizeStringArray(value: unknown): string[] {
     return [];
   }
   return [...new Set(value.map((entry) => String(entry ?? "").trim()).filter(Boolean))];
+}
+
+function mergeUniqueStrings(...values: Array<string[] | undefined>) {
+  return [...new Set(values.flatMap((entry) => entry ?? []).map((entry) => entry.trim()).filter(Boolean))];
 }
 
 function normalizeTelemetry(input: Partial<WorkerFabricHostTelemetryRecord> | Record<string, unknown> | null | undefined) {
@@ -158,6 +192,7 @@ function normalizeTelemetry(input: Partial<WorkerFabricHostTelemetryRecord> | Re
     cpu_utilization: readRate(input?.cpu_utilization),
     ram_available_gb: readFloat(input?.ram_available_gb),
     ram_total_gb: readFloat(input?.ram_total_gb),
+    swap_used_gb: readFloat(input?.swap_used_gb),
     gpu_utilization: readRate(input?.gpu_utilization),
     gpu_memory_available_gb: readFloat(input?.gpu_memory_available_gb),
     gpu_memory_total_gb: readFloat(input?.gpu_memory_total_gb),
@@ -171,6 +206,16 @@ export function computeHostHealthScore(telemetry: WorkerFabricHostTelemetryRecor
   const cpuScore = telemetry.cpu_utilization === null ? 0.6 : 1 - telemetry.cpu_utilization;
   const gpuScore = telemetry.gpu_utilization === null ? 0.6 : 1 - telemetry.gpu_utilization;
   const queuePenalty = Math.min(0.4, telemetry.queue_depth * 0.03);
+  const memoryRatio =
+    telemetry.ram_available_gb === null || telemetry.ram_total_gb === null || telemetry.ram_total_gb <= 0
+      ? null
+      : Math.max(0, Math.min(1, telemetry.ram_available_gb / telemetry.ram_total_gb));
+  const gpuMemoryRatio =
+    telemetry.gpu_memory_available_gb === null ||
+    telemetry.gpu_memory_total_gb === null ||
+    telemetry.gpu_memory_total_gb <= 0
+      ? null
+      : Math.max(0, Math.min(1, telemetry.gpu_memory_available_gb / telemetry.gpu_memory_total_gb));
   const thermalPenalty =
     telemetry.thermal_pressure === "critical"
       ? 0.45
@@ -179,18 +224,34 @@ export function computeHostHealthScore(telemetry: WorkerFabricHostTelemetryRecor
         : telemetry.thermal_pressure === "fair"
           ? 0.1
           : 0;
+  const swapPenalty =
+    telemetry.swap_used_gb === null ? 0 : telemetry.swap_used_gb >= 8 ? 0.28 : telemetry.swap_used_gb >= 4 ? 0.12 : 0;
+  const cpuPenalty =
+    telemetry.cpu_utilization === null
+      ? 0
+      : telemetry.cpu_utilization >= 0.95
+        ? 0.2
+        : telemetry.cpu_utilization >= 0.85
+          ? 0.08
+          : 0;
+  const memoryPenalty =
+    memoryRatio === null ? 0 : memoryRatio < 0.1 ? 0.35 : memoryRatio < 0.2 ? 0.2 : memoryRatio < 0.3 ? 0.08 : 0;
+  const gpuMemoryPenalty =
+    gpuMemoryRatio === null
+      ? 0
+      : gpuMemoryRatio < 0.1
+        ? 0.3
+        : gpuMemoryRatio < 0.2
+          ? 0.16
+          : gpuMemoryRatio < 0.3
+            ? 0.06
+            : 0;
   const memoryScore =
-    telemetry.ram_available_gb === null || telemetry.ram_total_gb === null || telemetry.ram_total_gb <= 0
-      ? 0.65
-      : Math.max(0.05, Math.min(1, telemetry.ram_available_gb / telemetry.ram_total_gb));
+    memoryRatio === null ? 0.65 : Math.max(0.05, memoryRatio);
   const gpuMemoryScore =
-    telemetry.gpu_memory_available_gb === null ||
-    telemetry.gpu_memory_total_gb === null ||
-    telemetry.gpu_memory_total_gb <= 0
-      ? 0.65
-      : Math.max(0.05, Math.min(1, telemetry.gpu_memory_available_gb / telemetry.gpu_memory_total_gb));
+    gpuMemoryRatio === null ? 0.65 : Math.max(0.05, gpuMemoryRatio);
   const score = healthBase * 0.35 + cpuScore * 0.15 + gpuScore * 0.1 + memoryScore * 0.15 + gpuMemoryScore * 0.15 + (1 - queuePenalty) * 0.1;
-  return Math.max(0, Number((score - thermalPenalty).toFixed(4)));
+  return Math.max(0, Number((score - thermalPenalty - swapPenalty - cpuPenalty - memoryPenalty - gpuMemoryPenalty).toFixed(4)));
 }
 
 function normalizeHost(input: WorkerFabricHostRecord): WorkerFabricHostRecord {
@@ -207,6 +268,37 @@ function normalizeHost(input: WorkerFabricHostRecord): WorkerFabricHostRecord {
     telemetry: normalizeTelemetry(isRecord(input.telemetry) ? input.telemetry : input.telemetry ?? null),
     metadata: isRecord(input.metadata) ? input.metadata : {},
     updated_at: input.updated_at,
+  };
+}
+
+function readOptionalNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? Number(value) : null;
+}
+
+export function resolveHostCapacityProfile(host: Pick<WorkerFabricHostRecord, "capabilities" | "metadata">) {
+  const metadataProfile = isRecord(host.metadata?.local_execution_profile) ? host.metadata.local_execution_profile : {};
+  return {
+    recommended_worker_count:
+      readOptionalNumber((metadataProfile as Record<string, unknown>).safe_worker_count) ??
+      readOptionalNumber(host.capabilities?.safe_worker_count),
+    safe_max_queue_per_worker:
+      readOptionalNumber((metadataProfile as Record<string, unknown>).safe_max_queue_per_worker) ??
+      readOptionalNumber(host.capabilities?.safe_max_queue_per_worker),
+    max_local_model_concurrency:
+      readOptionalNumber((metadataProfile as Record<string, unknown>).max_local_model_concurrency) ??
+      readOptionalNumber(host.capabilities?.max_local_model_concurrency),
+    recommended_runtime_worker_max_active:
+      readOptionalNumber((metadataProfile as Record<string, unknown>).runtime_worker_max_active) ??
+      readOptionalNumber(host.capabilities?.recommended_runtime_worker_max_active),
+    recommended_runtime_worker_limit:
+      readOptionalNumber((metadataProfile as Record<string, unknown>).runtime_worker_limit) ??
+      readOptionalNumber(host.capabilities?.recommended_runtime_worker_limit),
+    recommended_tmux_worker_count:
+      readOptionalNumber((metadataProfile as Record<string, unknown>).tmux_recommended_worker_count) ??
+      readOptionalNumber(host.capabilities?.recommended_tmux_worker_count),
+    recommended_tmux_target_queue_per_worker:
+      readOptionalNumber((metadataProfile as Record<string, unknown>).tmux_target_queue_per_worker) ??
+      readOptionalNumber(host.capabilities?.recommended_tmux_target_queue_per_worker),
   };
 }
 
@@ -245,6 +337,120 @@ export function buildImplicitLocalWorkerFabric(input: {
   };
 }
 
+function resolveConfiguredLocalHostId(storage: Storage, hosts: WorkerFabricHostRecord[]) {
+  const configured = storage.getAutonomyMaintainState()?.local_host_id?.trim();
+  if (configured && hosts.some((host) => host.transport === "local" && host.host_id === configured)) {
+    return configured;
+  }
+  const localHosts = hosts.filter((host) => host.transport === "local");
+  if (localHosts.length === 1) {
+    return localHosts[0]!.host_id;
+  }
+  if (localHosts.some((host) => host.host_id === "local")) {
+    return "local";
+  }
+  return localHosts[0]?.host_id ?? null;
+}
+
+function overlayEffectiveLocalHost(host: WorkerFabricHostRecord, localHostId: string | null): WorkerFabricHostRecord {
+  if (host.transport !== "local" || !localHostId || host.host_id !== localHostId) {
+    return host;
+  }
+
+  const liveProfile = captureLocalHostProfile({
+    workspace_root: host.workspace_root,
+  });
+  const liveBudget = deriveLocalExecutionBudget(liveProfile, {
+    pending_tasks: host.telemetry.queue_depth,
+    fabric_queue_depth: host.telemetry.queue_depth,
+    active_runtime_workers: host.telemetry.active_tasks,
+  });
+  const existingProfile = isRecord(host.metadata?.local_execution_profile) ? host.metadata.local_execution_profile : {};
+  return normalizeHost({
+    ...host,
+    capabilities: {
+      ...host.capabilities,
+      locality: "local",
+      platform: liveProfile.platform,
+      arch: liveProfile.arch,
+      performance_cpu_count: liveProfile.performance_cpu_count,
+      efficiency_cpu_count: liveProfile.efficiency_cpu_count,
+      unified_memory_gb: liveProfile.memory_total_gb,
+      accelerator_kind: liveProfile.accelerator_kind,
+      gpu_vendor: liveProfile.gpu_vendor,
+      gpu_model: liveProfile.gpu_model,
+      gpu_api: liveProfile.gpu_api,
+      gpu_family: liveProfile.gpu_family,
+      gpu_core_count: liveProfile.gpu_core_count,
+      gpu_memory_total_gb: liveProfile.gpu_memory_total_gb,
+      gpu_memory_available_gb: liveProfile.gpu_memory_available_gb,
+      mlx_python: liveProfile.mlx_python,
+      mlx_available: liveProfile.mlx_available,
+      mlx_lm_available: liveProfile.mlx_lm_available,
+      safe_worker_count: liveProfile.safe_worker_count,
+      safe_max_queue_per_worker: liveProfile.safe_max_queue_per_worker,
+      max_local_model_concurrency: liveProfile.max_local_model_concurrency,
+      recommended_runtime_worker_max_active: liveBudget.runtime_worker_max_active,
+      recommended_runtime_worker_limit: liveBudget.runtime_worker_limit,
+      recommended_tmux_worker_count: liveBudget.tmux_recommended_worker_count,
+      recommended_tmux_target_queue_per_worker: liveBudget.tmux_target_queue_per_worker,
+      memory_free_percent: liveProfile.memory_free_percent,
+      full_gpu_access: liveProfile.full_gpu_access,
+    },
+    tags: mergeUniqueStrings(
+      host.tags,
+      [
+        "local",
+        liveProfile.platform,
+        liveProfile.arch,
+        liveProfile.arch === "arm64" ? "apple-silicon" : "x86",
+        ...(liveProfile.full_gpu_access
+          ? ["gpu", ...(liveProfile.gpu_api ? [liveProfile.gpu_api] : []), ...(liveProfile.unified_memory ? ["unified-memory"] : [])]
+          : []),
+        ...(liveProfile.mlx_available ? ["mlx"] : []),
+      ]
+    ),
+    telemetry: normalizeTelemetry({
+      ...host.telemetry,
+      heartbeat_at: liveProfile.generated_at,
+      health_state: liveProfile.health_state,
+      cpu_utilization: liveProfile.cpu_utilization,
+      ram_available_gb: liveProfile.memory_available_gb,
+      ram_total_gb: liveProfile.memory_total_gb,
+      swap_used_gb: liveProfile.swap_used_gb,
+      gpu_utilization: liveProfile.gpu_utilization,
+      gpu_memory_available_gb: liveProfile.gpu_memory_available_gb,
+      gpu_memory_total_gb: liveProfile.gpu_memory_total_gb,
+      disk_free_gb: liveProfile.disk_free_gb,
+      thermal_pressure: liveProfile.thermal_pressure,
+    }),
+    metadata: {
+      ...host.metadata,
+      local_execution_profile: {
+        ...existingProfile,
+        generated_at: liveProfile.generated_at,
+        safe_worker_count: liveProfile.safe_worker_count,
+        safe_max_queue_per_worker: liveProfile.safe_max_queue_per_worker,
+        max_local_model_concurrency: liveProfile.max_local_model_concurrency,
+        runtime_worker_max_active: liveBudget.runtime_worker_max_active,
+        runtime_worker_limit: liveBudget.runtime_worker_limit,
+        tmux_recommended_worker_count: liveBudget.tmux_recommended_worker_count,
+        tmux_target_queue_per_worker: liveBudget.tmux_target_queue_per_worker,
+        memory_free_percent: liveProfile.memory_free_percent,
+        swap_used_gb: liveProfile.swap_used_gb,
+        health_state: liveProfile.health_state,
+        accelerator_kind: liveProfile.accelerator_kind,
+        gpu_model: liveProfile.gpu_model,
+        gpu_api: liveProfile.gpu_api,
+        gpu_core_count: liveProfile.gpu_core_count,
+        mlx_python: liveProfile.mlx_python,
+        mlx_available: liveProfile.mlx_available,
+        mlx_lm_available: liveProfile.mlx_lm_available,
+      },
+    },
+  });
+}
+
 export function resolveEffectiveWorkerFabric(storage: Storage, input: {
   fallback_workspace_root: string;
   fallback_worker_count: number;
@@ -260,15 +466,17 @@ export function resolveEffectiveWorkerFabric(storage: Storage, input: {
   }
 
   const enabledHosts = persisted.hosts.map(normalizeHost).filter((host) => host.enabled);
+  const configuredLocalHostId = resolveConfiguredLocalHostId(storage, enabledHosts);
+  const effectiveHosts = enabledHosts.map((host) => overlayEffectiveLocalHost(host, configuredLocalHostId));
   const defaultHostId =
-    persisted.default_host_id && enabledHosts.some((host) => host.host_id === persisted.default_host_id)
+    persisted.default_host_id && effectiveHosts.some((host) => host.host_id === persisted.default_host_id)
       ? persisted.default_host_id
-      : enabledHosts[0]?.host_id ?? null;
+      : effectiveHosts[0]?.host_id ?? null;
 
   return {
     ...persisted,
     default_host_id: defaultHostId,
-    hosts: enabledHosts,
+    hosts: effectiveHosts,
   } satisfies WorkerFabricStateRecord;
 }
 
@@ -318,12 +526,70 @@ export function resolveTaskExecutionRouting(metadata: Record<string, unknown> | 
     .toLowerCase();
   const isolationMode: ExecutionIsolationMode =
     isolationRaw === "copy" || isolationRaw === "none" ? isolationRaw : "git_worktree";
+  const taskKindRaw = String((execution as Record<string, unknown>).task_kind ?? "").trim().toLowerCase();
+  const taskKind: TaskExecutionRouting["task_kind"] =
+    taskKindRaw === "planning" ||
+    taskKindRaw === "coding" ||
+    taskKindRaw === "research" ||
+    taskKindRaw === "verification" ||
+    taskKindRaw === "chat" ||
+    taskKindRaw === "tool_use"
+      ? taskKindRaw
+      : null;
+  const qualityPreferenceRaw = String((execution as Record<string, unknown>).quality_preference ?? "").trim().toLowerCase();
+  const qualityPreference: TaskExecutionRouting["quality_preference"] =
+    qualityPreferenceRaw === "speed" ||
+    qualityPreferenceRaw === "balanced" ||
+    qualityPreferenceRaw === "quality" ||
+    qualityPreferenceRaw === "cost"
+      ? qualityPreferenceRaw
+      : null;
+  const selectedHostId = readString((execution as Record<string, unknown>).selected_host_id);
+  const preferredHostIds = normalizeStringArray((execution as Record<string, unknown>).preferred_host_ids);
   return {
-    preferred_host_ids: normalizeStringArray((execution as Record<string, unknown>).preferred_host_ids),
+    preferred_host_ids: selectedHostId ? [...new Set([selectedHostId, ...preferredHostIds])] : preferredHostIds,
     allowed_host_ids: normalizeStringArray((execution as Record<string, unknown>).allowed_host_ids),
     preferred_host_tags: normalizeStringArray((execution as Record<string, unknown>).preferred_host_tags),
     required_host_tags: normalizeStringArray((execution as Record<string, unknown>).required_host_tags),
+    preferred_backend_ids: normalizeStringArray((execution as Record<string, unknown>).preferred_backend_ids),
+    required_backend_ids: normalizeStringArray((execution as Record<string, unknown>).required_backend_ids),
+    preferred_model_tags: normalizeStringArray((execution as Record<string, unknown>).preferred_model_tags),
+    required_model_tags: normalizeStringArray((execution as Record<string, unknown>).required_model_tags),
     isolation_mode: isolationMode,
+    task_kind: taskKind,
+    quality_preference: qualityPreference,
+    selected_backend_id: readString((execution as Record<string, unknown>).selected_backend_id),
+    selected_backend_provider: readString((execution as Record<string, unknown>).selected_backend_provider),
+    selected_backend_locality:
+      readString((execution as Record<string, unknown>).selected_backend_locality) === "local"
+        ? "local"
+        : readString((execution as Record<string, unknown>).selected_backend_locality) === "remote"
+          ? "remote"
+          : null,
+    selected_host_id: selectedHostId,
+    selected_worker_host_id: readString((execution as Record<string, unknown>).selected_worker_host_id),
+    routed_bridge_agent_ids: normalizeStringArray((execution as Record<string, unknown>).routed_bridge_agent_ids),
+    planned_backend_candidates: Array.isArray((execution as Record<string, unknown>).planned_backend_candidates)
+      ? ((execution as Record<string, unknown>).planned_backend_candidates as unknown[])
+          .map((entry: unknown) => {
+            if (!isRecord(entry)) {
+              return null;
+            }
+            const backendId = readString(entry.backend_id);
+            if (!backendId) {
+              return null;
+            }
+            return {
+              backend_id: backendId,
+              provider: readString(entry.provider),
+              host_id: readString(entry.host_id),
+              node_id: readString(entry.node_id),
+              title: readString(entry.title),
+              score: typeof entry.score === "number" && Number.isFinite(entry.score) ? Number(entry.score.toFixed(4)) : null,
+            };
+          })
+          .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+      : [],
   };
 }
 
@@ -413,6 +679,7 @@ export function workerFabric(storage: Storage, input: z.infer<typeof workerFabri
         fallback_shell: input.fallback_shell ?? "/bin/zsh",
       }),
       hosts_summary: state.hosts.map((host) => ({
+        ...resolveHostCapacityProfile(host),
         host_id: host.host_id,
         enabled: host.enabled,
         transport: host.transport,

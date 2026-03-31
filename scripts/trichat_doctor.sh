@@ -27,6 +27,7 @@ TRICHAT_HTTP_URL="${TRICHAT_MCP_URL:-http://127.0.0.1:8787/}"
 TRICHAT_HTTP_ORIGIN="${TRICHAT_MCP_ORIGIN:-http://127.0.0.1}"
 TRICHAT_STDIO_COMMAND="${TRICHAT_MCP_STDIO_COMMAND:-node}"
 TRICHAT_STDIO_ARGS="${TRICHAT_MCP_STDIO_ARGS:-dist/server.js}"
+MCP_TOOL_CALL_TIMEOUT_MS="${MCP_TOOL_CALL_TIMEOUT_MS:-15000}"
 
 resolve_transport() {
   local preferred="${TRICHAT_RING_LEADER_TRANSPORT:-}"
@@ -35,13 +36,10 @@ resolve_transport() {
     return 0
   fi
   if [[ -n "${MCP_HTTP_BEARER_TOKEN:-}" ]]; then
-    if node ./scripts/mcp_tool_call.mjs \
-      --tool health.storage \
-      --args '{}' \
-      --transport http \
-      --url "${TRICHAT_HTTP_URL}" \
-      --origin "${TRICHAT_HTTP_ORIGIN}" \
-      --cwd "${REPO_ROOT}" >/dev/null 2>&1; then
+    if curl -fsS \
+      -H "Authorization: Bearer ${MCP_HTTP_BEARER_TOKEN}" \
+      -H "Origin: ${TRICHAT_HTTP_ORIGIN}" \
+      "${TRICHAT_HTTP_URL%/}/health" >/dev/null 2>&1; then
       printf 'http\n'
       return 0
     fi
@@ -54,7 +52,7 @@ MCP_TRANSPORT="$(resolve_transport)"
 call_mcp() {
   local tool="$1"
   local args="${2:-\{\}}"
-  node ./scripts/mcp_tool_call.mjs \
+  MCP_TOOL_CALL_TIMEOUT_MS="${MCP_TOOL_CALL_TIMEOUT_MS}" node ./scripts/mcp_tool_call.mjs \
     --tool "${tool}" \
     --args "${args}" \
     --transport "${MCP_TRANSPORT}" \
@@ -113,10 +111,22 @@ import sys
 
 data = json.loads(sys.argv[1])
 runtime = data.get("runtime") or {}
+eval_health = data.get("eval_health") or {}
 if not runtime.get("running"):
     raise SystemExit("autonomy maintain runtime is not running")
 if runtime.get("last_error"):
     raise SystemExit(f"autonomy maintain runtime last_error: {runtime.get('last_error')}")
+if not eval_health.get("healthy"):
+    raise SystemExit(
+        "autonomy maintain eval health is not healthy: "
+        + json.dumps(
+            {
+                "due": (data.get("due") or {}).get("eval"),
+                "last_eval_score": eval_health.get("last_eval_score"),
+                "minimum_eval_score": eval_health.get("minimum_eval_score"),
+            }
+        )
+    )
 PY
 
 echo "[doctor] ring leader status:"

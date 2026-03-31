@@ -41,6 +41,18 @@ test("provider.bridge reports truthful client and outbound council coverage", as
     assert.equal(clients.get("gemini-cli")?.outbound_council_supported, true);
     assert.equal(clients.get("github-copilot-cli")?.outbound_council_supported, false);
     assert.equal(clients.get("chatgpt-developer-mode")?.install_mode, "remote-only");
+
+    const routerCandidates = new Map(status.router_backend_candidates.map((entry) => [entry.client_id, entry]));
+    assert.ok(routerCandidates.has("codex"));
+    assert.ok(routerCandidates.has("cursor"));
+    assert.ok(routerCandidates.has("gemini-cli"));
+    assert.equal(routerCandidates.get("codex")?.backend.metadata.bridge_agent_id, "codex");
+    assert.equal(typeof routerCandidates.get("gemini-cli")?.eligible, "boolean");
+    assert.ok(
+      status.eligible_router_backends.every((entry) =>
+        ["openai", "google", "cursor", "github-copilot", "custom"].includes(entry.provider)
+      )
+    );
   } finally {
     await session.client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

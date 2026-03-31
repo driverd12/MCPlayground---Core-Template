@@ -139,6 +139,15 @@ function readPositiveInt(value: unknown): number | null {
   return value;
 }
 
+function readTimestampMs(value: unknown): number | null {
+  const text = readString(value);
+  if (!text) {
+    return null;
+  }
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function dedupeStrings(values: string[] | undefined): string[] {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
@@ -784,6 +793,42 @@ export function summarizeAdaptiveSessionHealth(session: AgentSessionRecord): Ada
   const hasRecentFailureDebt = recentSessionSignals.effective_recent_failed > 0;
   const hasRecentStagnationDebt = recentSessionSignals.effective_recent_stagnation_signals > 0;
   const recentEvidenceDebt = recentSessionSignals.effective_recent_evidence_blocks;
+  const metadata = isRecord(session.metadata) ? session.metadata : {};
+  const lastTickOk = readBoolean(metadata.last_tick_ok) ?? false;
+  const lastTickAtMs = readTimestampMs(metadata.last_tick_at);
+  const lastFailedAtMs = readTimestampMs(profile.last_failed_at);
+  const lastCompletedAtMs = readTimestampMs(profile.last_completed_at);
+  const mildFailureDebtRecovered =
+    hasRecentFailureDebt &&
+    recentSessionSignals.effective_recent_failed <= 2 &&
+    !hasRecentStagnationDebt &&
+    recentEvidenceDebt === 0 &&
+    profile.total_claims >= 10 &&
+    profile.total_completed >= Math.max(8, profile.total_failed * 3) &&
+    recentSessionSignals.recent_completed >= Math.max(4, recentSessionSignals.effective_recent_failed * 2) &&
+    profile.current_task.task_id === null &&
+    lastFailedAtMs !== null &&
+    (
+      (lastTickOk && lastTickAtMs !== null && lastTickAtMs > lastFailedAtMs) ||
+      (lastCompletedAtMs !== null &&
+        lastCompletedAtMs > lastFailedAtMs &&
+        recentSessionSignals.recovery_streak >= 1)
+    );
+  const residualDebtRecovered =
+    (hasRecentFailureDebt || recentEvidenceDebt > 0) &&
+    recentSessionSignals.effective_recent_failed <= 3 &&
+    recentEvidenceDebt <= 2 &&
+    !hasRecentStagnationDebt &&
+    profile.current_task.task_id === null &&
+    profile.total_claims >= 12 &&
+    profile.total_completed >= Math.max(10, profile.total_failed * 3) &&
+    recentSessionSignals.recovery_streak >= Math.max(4, recentSessionSignals.effective_recent_failed + recentEvidenceDebt) &&
+    recentSessionSignals.recent_completed >=
+      Math.max(5, recentSessionSignals.effective_recent_failed + recentEvidenceDebt) &&
+    (
+      (lastTickOk && lastTickAtMs !== null && (lastFailedAtMs === null || lastTickAtMs > lastFailedAtMs)) ||
+      (lastCompletedAtMs !== null && (lastFailedAtMs === null || lastCompletedAtMs > lastFailedAtMs))
+    );
   const evidenceDebtRecovered =
     !hasRecentFailureDebt &&
     !hasRecentStagnationDebt &&
@@ -802,7 +847,11 @@ export function summarizeAdaptiveSessionHealth(session: AgentSessionRecord): Ada
     if (profile.consecutive_stagnation_signals >= 1) {
       reasons.push(`Suppressed after ${profile.consecutive_stagnation_signals} recent stagnation signal(s).`);
     }
-  } else if (hasRecentFailureDebt || hasRecentStagnationDebt || (recentEvidenceDebt > 0 && !evidenceDebtRecovered)) {
+  } else if (
+    (hasRecentFailureDebt && !mildFailureDebtRecovered && !residualDebtRecovered) ||
+    hasRecentStagnationDebt ||
+    (recentEvidenceDebt > 0 && !evidenceDebtRecovered && !residualDebtRecovered)
+  ) {
     adaptiveState = "degraded";
     if (hasRecentFailureDebt) {
       reasons.push(`${recentSessionSignals.effective_recent_failed} recent failed task signal(s) still need recovery.`);
@@ -820,7 +869,15 @@ export function summarizeAdaptiveSessionHealth(session: AgentSessionRecord): Ada
   } else {
     adaptiveState = "healthy";
     const recoveryStreak = recentSessionSignals.recovery_streak;
-    if (evidenceDebtRecovered) {
+    if (mildFailureDebtRecovered) {
+      reasons.push(
+        "Recent routing history is operationally recovered: mild recent failed-task debt remains in history, but strong bounded recovery has already resumed."
+      );
+    } else if (residualDebtRecovered) {
+      reasons.push(
+        "Recent routing history is operationally recovered: residual failure or evidence debt remains in history, but repeated successful bounded recovery has already re-established a healthy lane."
+      );
+    } else if (evidenceDebtRecovered) {
       reasons.push(
         `Recent routing history is stable and a recovery streak of ${recoveryStreak} completion(s) is outweighing ${recentEvidenceDebt} remaining evidence-quality signal(s).`
       );

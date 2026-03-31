@@ -124,7 +124,8 @@ Execution roadmap: [Bleeding-Edge Execution Roadmap](./docs/BLEEDING_EDGE_EXECUT
 Execution substrate additions now shipped in core:
 
 - `worker.fabric` for host registry, telemetry, and resource-aware lane routing
-- `model.router` for measured backend selection across local and remote model runtimes
+- `cluster.topology` for the durable lab plan: active Mac control plane plus planned future CPU-heavy and GPU-heavy nodes
+- `model.router` for measured backend selection across local and remote model runtimes, plus topology-backed future placement recommendations for planned hosts
 - `benchmark.*` and `eval.*` for isolated execution scoring and router-aware eval suites
 - `task.compile` for durable DAG-style plan compilation with owner/evidence/rollback contracts
 - `org.program` for versioned ring leader, director, SME, and leaf operating doctrine
@@ -133,6 +134,29 @@ Practical entrypoint:
 - use `playbook.run` to instantiate a GSD/autoresearch workflow and immediately enter `goal.execute`
 - let `agent.report_result` feed artifacts, experiment observations, evidence gates, and bounded `goal.autorun` continuation back into the kernel
 - use `kernel.summary` for one-shot operator state and `goal.autorun_daemon` for bounded unattended continuation
+
+## Operator Briefing
+
+The canonical live brief surface is `operator.brief`.
+
+- `task.compile` writes a durable `compile.brief` artifact for the active plan
+- `runtime.worker` writes a concrete handoff `session_brief.md` into the worker workspace
+- `office.snapshot` includes `operator_brief` so the office dashboard and GUI can consume the same canonical brief
+- `operator.brief` merges current objective, delegation contract, compile brief, runtime handoff brief, and execution backlog into one operator-facing payload
+
+Shell entrypoint:
+
+```bash
+npm run brief:current
+# compact JSON for scripts / dashboards
+./scripts/operator_brief.sh --json --compact
+```
+
+Raw MCP example:
+
+```bash
+node ./scripts/mcp_tool_call.mjs --tool operator.brief --args '{}' --transport http --url http://127.0.0.1:8787/ --origin http://127.0.0.1 --cwd .
+```
 
 ## Quick Start
 
@@ -267,6 +291,12 @@ Launch the animated office monitor directly:
 npm run trichat:office
 ```
 
+Launch the clickable local GUI control deck:
+
+```bash
+npm run trichat:office:gui
+```
+
 Start the tmux war room with dedicated windows for the office scene, briefing board, lane monitor, and worker queue:
 
 ```bash
@@ -308,7 +338,7 @@ Install the single-click macOS app launcher in `/Applications`:
 npm run trichat:app:install
 ```
 
-By default the app opens the tmux-backed Agent Office dashboard and generates its own built-in office mascot icon if you do not pass `--icon`.
+By default the app opens the built-in `/office/` GUI and keeps the tmux-backed Agent Office substrate available underneath it. If you do not pass `--icon`, it generates its own built-in office mascot icon.
 
 Keyboard controls inside the TUI:
 
@@ -386,11 +416,20 @@ Key variables:
 - `TRICHAT_GEMINI_MODE` select `auto`, `cli`, or `api`
 - `TRICHAT_GEMINI_MODEL` override Gemini API model (`gemini-2.0-flash` default)
 - `TRICHAT_IMPRINT_MODEL` / `TRICHAT_OLLAMA_URL` control the local imprint lane
+- `TRICHAT_LOCAL_INFERENCE_PROVIDER` selects `auto`, `ollama`, or `mlx` for the local bridge lane
+- `TRICHAT_MLX_PYTHON` / `TRICHAT_MLX_MODEL` / `TRICHAT_MLX_ENDPOINT` define the optional Metal-backed MLX lane
+- `TRICHAT_MLX_SERVER_ENABLED=1` enables a managed local `mlx_lm.server` launch agent; leave it `0` to keep MLX installed but not auto-served
 - `TRICHAT_BRIDGE_TIMEOUT_SECONDS` bound per-bridge request time
 - `TRICHAT_BRIDGE_MAX_RETRIES` / `TRICHAT_BRIDGE_RETRY_BASE_MS` control wrapper-level transient retry behavior
 - `GEMINI_API_KEY` or `GOOGLE_API_KEY` enable direct Gemini API fallback
 
 The runtime now quarantines non-SQLite/corrupted artifacts into `corrupt/` before recovery attempts so startup failures do not silently overwrite evidence.
+
+Local Metal setup:
+
+- `npm run mlx:setup` creates `.venv-mlx`, installs `mlx` + `mlx-lm`, and writes the repo-local MLX env vars into `.env`
+- the control plane now prefers the repo’s `.venv-mlx/bin/python` when probing MLX availability
+- local bridges can use the MLX chat-completions endpoint when `TRICHAT_LOCAL_INFERENCE_PROVIDER=mlx` or `auto` with a healthy MLX endpoint
 
 ## Core Tool Surface
 
@@ -439,6 +478,9 @@ npm run providers:install -- cursor gemini-cli github-copilot-cli
 
 - it reports which clients can really connect into this MCP runtime
 - it reports which providers are already available as live outbound council agents
+- it projects runtime-eligible outbound providers into bridge-backed `model.router` backend candidates
+- `autonomy.bootstrap` seeds those eligible bridge backends automatically without replacing the local default backend
+- `autonomy.command`, `goal.execute`, and `plan.dispatch` use router output to augment local-first councils with relevant hosted agents instead of treating provider bridges as a separate side path
 - it exports config bundles for Cursor, Gemini CLI, GitHub Copilot, and Codex
 - it preserves `autonomy.ide_ingress` as the one canonical operator/IDE ingress path
 

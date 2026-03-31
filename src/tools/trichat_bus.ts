@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -131,16 +132,95 @@ export type TriChatBusRuntimeOptions = {
 export class TriChatBusRuntime {
   private readonly socketPath: string;
   private server: net.Server | null = null;
+  private retryTimer: NodeJS.Timeout | null = null;
   private readonly clients = new Map<number, TriChatBusClient>();
   private nextClientId = 1;
   private running = false;
   private startedAt: string | null = null;
   private lastError: string | null = null;
+  private ownsSocketPath = false;
   private totalPublished = 0;
   private totalDelivered = 0;
 
   constructor(private readonly storage: Storage, options: TriChatBusRuntimeOptions) {
     this.socketPath = path.resolve(options.socket_path);
+  }
+
+  private probeSocketFileState(socketPath: string): "absent" | "active" | "stale" | "unknown" {
+    if (!fs.existsSync(socketPath)) {
+      return "absent";
+    }
+    const script = [
+      "import os, socket, sys",
+      "socket_path = sys.argv[1]",
+      "if not os.path.exists(socket_path):",
+      "    raise SystemExit(3)",
+      "client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)",
+      "client.settimeout(0.25)",
+      "try:",
+      "    client.connect(socket_path)",
+      "except FileNotFoundError:",
+      "    raise SystemExit(3)",
+      "except OSError as error:",
+      "    if getattr(error, 'errno', None) in {2, 61, 111}:",
+      "        raise SystemExit(2)",
+      "    raise SystemExit(1)",
+      "else:",
+      "    raise SystemExit(0)",
+      "finally:",
+      "    client.close()",
+    ].join("\n");
+    const result = spawnSync("python3", ["-c", script, socketPath], {
+      encoding: "utf8",
+      timeout: 1000,
+    });
+    if (result.status === 0) {
+      return "active";
+    }
+    if (result.status === 2 || result.status === 3) {
+      return "stale";
+    }
+    return "unknown";
+  }
+
+  private probeSocketPathState(): "absent" | "active" | "stale" | "unknown" {
+    return this.probeSocketFileState(this.socketPath);
+  }
+
+  private legacySocketCandidates() {
+    const candidates = new Set<string>();
+    const base = path.basename(this.socketPath);
+    if (base.endsWith(".sock")) {
+      candidates.add(path.join(path.dirname(this.socketPath), `${base.slice(0, -4)}.`));
+    }
+    return [...candidates];
+  }
+
+  private pruneLegacySocketArtifacts() {
+    for (const candidate of this.legacySocketCandidates()) {
+      const state = this.probeSocketFileState(candidate);
+      if (state === "stale") {
+        this.safeUnlinkSocketFile(candidate);
+      }
+    }
+  }
+
+  private scheduleStartRetry(delayMs = 1500) {
+    if (this.running || this.retryTimer) {
+      return;
+    }
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      try {
+        this.start();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.lastError = message;
+        console.error(`[trichat.bus] retry failed: ${message}`);
+        this.scheduleStartRetry(Math.min(10000, delayMs * 2));
+      }
+    }, delayMs);
+    this.retryTimer.unref?.();
   }
 
   initialize(options?: { auto_start?: boolean }) {
@@ -166,11 +246,43 @@ export class TriChatBusRuntime {
     }
 
     fs.mkdirSync(path.dirname(this.socketPath), { recursive: true });
-    this.safeUnlinkSocketPath();
+    this.pruneLegacySocketArtifacts();
+    const socketState = this.probeSocketPathState();
+    if (socketState === "active") {
+      this.lastError = null;
+      this.scheduleStartRetry();
+      return {
+        ...this.status(),
+        started: false,
+      };
+    }
+    if (socketState === "stale") {
+      this.safeUnlinkSocketPath();
+    }
 
     const server = net.createServer((socket) => this.handleConnection(socket));
+    server.on("listening", () => {
+      if (this.server !== server) {
+        return;
+      }
+      this.running = true;
+      this.ownsSocketPath = true;
+      this.startedAt = new Date().toISOString();
+      this.lastError = null;
+    });
     server.on("error", (error) => {
       const message = error instanceof Error ? error.message : String(error);
+      this.running = false;
+      this.ownsSocketPath = false;
+      if (this.server === server) {
+        this.server = null;
+      }
+      if (/EADDRINUSE/i.test(message)) {
+        this.lastError = null;
+        this.scheduleStartRetry();
+        console.warn(`[trichat.bus] socket busy; retrying bind on ${this.socketPath}`);
+        return;
+      }
       this.lastError = message;
       console.error(`[trichat.bus] server error: ${message}`);
     });
@@ -178,9 +290,10 @@ export class TriChatBusRuntime {
     server.unref?.();
 
     this.server = server;
-    this.running = true;
-    this.startedAt = new Date().toISOString();
+    this.running = false;
+    this.startedAt = null;
     this.lastError = null;
+    this.ownsSocketPath = false;
     return {
       ...this.status(),
       started: true,
@@ -189,6 +302,10 @@ export class TriChatBusRuntime {
 
   stop() {
     const wasRunning = this.running;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
     if (this.server) {
       try {
         this.server.close();
@@ -208,7 +325,10 @@ export class TriChatBusRuntime {
       }
     }
     this.clients.clear();
-    this.safeUnlinkSocketPath();
+    if (this.ownsSocketPath) {
+      this.safeUnlinkSocketPath();
+    }
+    this.ownsSocketPath = false;
     return {
       ...this.status(),
       stopped: wasRunning,
@@ -315,16 +435,20 @@ export class TriChatBusRuntime {
     });
   }
 
-  private safeUnlinkSocketPath() {
-    if (!fs.existsSync(this.socketPath)) {
+  private safeUnlinkSocketFile(socketPath: string) {
+    if (!fs.existsSync(socketPath)) {
       return;
     }
     try {
-      fs.unlinkSync(this.socketPath);
+      fs.unlinkSync(socketPath);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.lastError = `unable to unlink socket path: ${message}`;
     }
+  }
+
+  private safeUnlinkSocketPath() {
+    this.safeUnlinkSocketFile(this.socketPath);
   }
 
   private handleConnection(socket: net.Socket) {

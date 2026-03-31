@@ -50,6 +50,7 @@ const autoSnapshotRuntime: {
   config: AutoSnapshotConfig;
   started_at: string | null;
   last_tick_at: string | null;
+  last_success_at: string | null;
   last_error: string | null;
   tick_count: number;
   snapshots_created: number;
@@ -61,6 +62,7 @@ const autoSnapshotRuntime: {
   config: { ...DEFAULT_AUTO_SNAPSHOT_CONFIG },
   started_at: null,
   last_tick_at: null,
+  last_success_at: null,
   last_error: null,
   tick_count: 0,
   snapshots_created: 0,
@@ -575,6 +577,7 @@ function getAutoSnapshotStatus() {
     config: { ...autoSnapshotRuntime.config },
     started_at: autoSnapshotRuntime.started_at,
     last_tick_at: autoSnapshotRuntime.last_tick_at,
+    last_success_at: autoSnapshotRuntime.last_success_at,
     last_error: autoSnapshotRuntime.last_error,
     stats: {
       tick_count: autoSnapshotRuntime.tick_count,
@@ -582,6 +585,10 @@ function getAutoSnapshotStatus() {
       memories_promoted: autoSnapshotRuntime.memories_promoted,
     },
   };
+}
+
+export function getAutoSnapshotRuntimeStatus() {
+  return getAutoSnapshotStatus();
 }
 
 function resolveAutoSnapshotConfig(
@@ -608,6 +615,7 @@ function startAutoSnapshotDaemon(storage: Storage, options: ImprintRuntimeOption
   autoSnapshotRuntime.running = true;
   autoSnapshotRuntime.in_tick = false;
   autoSnapshotRuntime.started_at = new Date().toISOString();
+  autoSnapshotRuntime.last_success_at = null;
   autoSnapshotRuntime.last_error = null;
   autoSnapshotRuntime.timer = setInterval(() => {
     try {
@@ -667,6 +675,7 @@ function runAutoSnapshotTick(
       autoSnapshotRuntime.memories_promoted += 1;
     }
     autoSnapshotRuntime.last_tick_at = completedAt;
+    autoSnapshotRuntime.last_success_at = completedAt;
     autoSnapshotRuntime.last_error = null;
     return {
       completed_at: completedAt,

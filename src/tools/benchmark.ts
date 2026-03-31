@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { z } from "zod";
 import { Storage, type BenchmarkSuiteRecord, type ExperimentMetricDirection } from "../storage.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
@@ -56,6 +57,10 @@ export const benchmarkRunSchema = z.object({
   ...sourceSchema.shape,
 });
 
+function readBooleanFlag(value: unknown) {
+  return value === true;
+}
+
 function readNumberFromRegex(text: string, pattern: string): number | null {
   try {
     const match = new RegExp(pattern, "m").exec(text);
@@ -103,15 +108,66 @@ function mapSuiteProjectDirToHost(suiteProjectDir: string, hostWorkspaceRoot: st
   return relative && relative !== "." ? path.join(hostWorkspaceRoot, relative) : hostWorkspaceRoot;
 }
 
-function runBenchmarkCommand(input: {
+async function runBenchmarkCommand(input: {
   command: string;
   timeout_seconds: number;
 }) {
-  return spawnSync("/bin/sh", ["-lc", input.command], {
-    encoding: "utf8",
-    timeout: input.timeout_seconds * 1000,
-    maxBuffer: 4 * 1024 * 1024,
-    env: process.env,
+  return await new Promise<{
+    stdout: string;
+    stderr: string;
+    status: number | null;
+    signal: NodeJS.Signals | null;
+    error: Error | null;
+  }>((resolve) => {
+    const child = spawn("/bin/sh", ["-lc", input.command], {
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const maxBuffer = 4 * 1024 * 1024;
+    let stdout = "";
+    let stderr = "";
+    let processError: Error | null = null;
+    let finished = false;
+    const timeout = setTimeout(() => {
+      processError = new Error(`Benchmark command timed out after ${input.timeout_seconds}s`);
+      child.kill("SIGKILL");
+    }, input.timeout_seconds * 1000);
+    const finish = (status: number | null, signal: NodeJS.Signals | null) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      clearTimeout(timeout);
+      resolve({
+        stdout,
+        stderr,
+        status,
+        signal,
+        error: processError,
+      });
+    };
+    const appendChunk = (target: "stdout" | "stderr", chunk: Buffer | string) => {
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      if (target === "stdout") {
+        stdout = (stdout + text).slice(0, maxBuffer);
+        if (stdout.length >= maxBuffer) {
+          processError = new Error("Benchmark stdout exceeded maxBuffer");
+          child.kill("SIGKILL");
+        }
+        return;
+      }
+      stderr = (stderr + text).slice(0, maxBuffer);
+      if (stderr.length >= maxBuffer) {
+        processError = new Error("Benchmark stderr exceeded maxBuffer");
+        child.kill("SIGKILL");
+      }
+    };
+    child.stdout?.on("data", (chunk) => appendChunk("stdout", chunk));
+    child.stderr?.on("data", (chunk) => appendChunk("stderr", chunk));
+    child.on("error", (error) => {
+      processError = error instanceof Error ? error : new Error(String(error));
+    });
+    child.on("close", (status, signal) => finish(status, signal));
   });
 }
 
@@ -180,7 +236,7 @@ export async function benchmarkRun(storage: Storage, input: z.infer<typeof bench
     tool_name: "benchmark.run",
     mutation: input.mutation,
     payload: input,
-    execute: () => {
+    execute: async () => {
       const suitesState = loadBenchmarkSuites(storage);
       const suite = suitesState.suites.find((entry) => entry.suite_id === input.suite_id);
       if (!suite) {
@@ -256,13 +312,16 @@ export async function benchmarkRun(storage: Storage, input: z.infer<typeof bench
         source_agent: input.source_agent,
       }).experiment_run;
 
-      const caseResults = suite.cases.map((entry, index) => {
+      const cleanupWorkspaces = readBooleanFlag((suite.metadata ?? {}).cleanup_workspaces);
+      const caseResults = [];
+      for (const [index, entry] of suite.cases.entries()) {
         const hostProjectDir = mapSuiteProjectDirToHost(suite.project_dir, selectedSlot.workspace_root);
         const plan = buildIsolatedExecutionPlan({
           base_workspace: hostProjectDir,
           command: entry.command,
           task_id: `${suite.suite_id}-${entry.case_id}-${crypto.randomUUID().slice(0, 8)}`,
           isolation_mode: suite.isolation_mode,
+          cleanup_workspace: cleanupWorkspaces,
         });
         const command =
           selectedSlot.transport === "ssh"
@@ -272,7 +331,7 @@ export async function benchmarkRun(storage: Storage, input: z.infer<typeof bench
               })
             : plan.script;
         const started = Date.now();
-        const spawned = runBenchmarkCommand({
+        const spawned = await runBenchmarkCommand({
           command,
           timeout_seconds: entry.timeout_seconds,
         });
@@ -311,7 +370,7 @@ export async function benchmarkRun(storage: Storage, input: z.infer<typeof bench
           },
         });
 
-        return {
+        caseResults.push({
           case_id: entry.case_id,
           title: entry.title,
           ok,
@@ -324,8 +383,17 @@ export async function benchmarkRun(storage: Storage, input: z.infer<typeof bench
           workspace: plan.workspace,
           stdout_excerpt: stdout.slice(0, 1000),
           stderr_excerpt: stderr.slice(0, 1000),
-        };
-      });
+        });
+
+        if (
+          cleanupWorkspaces &&
+          selectedSlot.transport === "local" &&
+          plan.workspace !== plan.base_workspace &&
+          plan.workspace.includes(`${path.sep}.mcp-isolation${path.sep}`)
+        ) {
+          fs.rmSync(plan.workspace, { recursive: true, force: true });
+        }
+      }
 
       const aggregateMetric = resolveAggregateMetric(suite, caseResults);
       const requiredFailures = caseResults.filter((entry) => entry.required && !entry.ok);
@@ -420,4 +488,3 @@ export async function benchmarkRun(storage: Storage, input: z.infer<typeof bench
     },
   });
 }
-

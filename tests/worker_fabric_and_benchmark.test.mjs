@@ -273,6 +273,172 @@ test("benchmark.run isolated workspaces inherit repo toolchains needed for real 
   }
 });
 
+test("benchmark.run git_worktree isolation overlays dirty working tree changes", async () => {
+  const testId = `${Date.now()}-benchmark-dirty-overlay`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-benchmark-dirty-overlay-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  run("git init", tempDir);
+  run("git config user.email 'codex@example.com'", tempDir);
+  run("git config user.name 'Codex'", tempDir);
+  fs.writeFileSync(path.join(tempDir, "README.md"), "baseline\n", "utf8");
+  run("git add README.md", tempDir);
+  run("git commit -m 'baseline'", tempDir);
+  fs.writeFileSync(path.join(tempDir, "README.md"), "dirty-working-tree\n", "utf8");
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+  });
+
+  try {
+    const suite = await callTool(session.client, "benchmark.suite_upsert", {
+      mutation: nextMutation(testId, "benchmark.suite_upsert", () => mutationCounter++),
+      title: "Dirty overlay bench",
+      objective: "Verify git_worktree isolation sees current dirty workspace content",
+      project_dir: tempDir,
+      isolation_mode: "git_worktree",
+      aggregate_metric_name: "suite_success_rate",
+      aggregate_metric_direction: "maximize",
+      cases: [
+        {
+          case_id: "readme-overlay",
+          title: "Dirty README content is visible in isolated workspace",
+          command: "grep -q 'dirty-working-tree' README.md",
+        },
+      ],
+      tags: ["benchmark", "overlay", "isolation"],
+    });
+
+    const runResult = await callTool(session.client, "benchmark.run", {
+      mutation: nextMutation(testId, "benchmark.run", () => mutationCounter++),
+      suite_id: suite.suite.suite_id,
+      candidate_label: "dirty-overlay",
+    });
+
+    assert.equal(runResult.ok, true);
+    assert.equal(runResult.experiment_run.status, "completed");
+    assert.equal(runResult.case_results[0].ok, true);
+  } finally {
+    await session.client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("benchmark.run can clean isolated workspaces when suite metadata requests it", async () => {
+  const testId = `${Date.now()}-benchmark-cleanup`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-benchmark-cleanup-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  run("git init", tempDir);
+  run("git config user.email 'codex@example.com'", tempDir);
+  run("git config user.name 'Codex'", tempDir);
+  fs.writeFileSync(path.join(tempDir, "README.md"), "# cleanup\n", "utf8");
+  run("git add README.md", tempDir);
+  run("git commit -m 'baseline'", tempDir);
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+  });
+
+  try {
+    const suite = await callTool(session.client, "benchmark.suite_upsert", {
+      mutation: nextMutation(testId, "benchmark.suite_upsert", () => mutationCounter++),
+      title: "Cleanup bench",
+      objective: "Verify benchmark suites can remove isolated workspaces after the run",
+      project_dir: tempDir,
+      isolation_mode: "git_worktree",
+      aggregate_metric_name: "suite_success_rate",
+      aggregate_metric_direction: "maximize",
+      cases: [
+        {
+          case_id: "readme-check",
+          title: "README exists",
+          command: "test -f README.md",
+        },
+      ],
+      tags: ["benchmark", "cleanup", "isolation"],
+      metadata: {
+        cleanup_workspaces: true,
+      },
+    });
+
+    const runResult = await callTool(session.client, "benchmark.run", {
+      mutation: nextMutation(testId, "benchmark.run", () => mutationCounter++),
+      suite_id: suite.suite.suite_id,
+      candidate_label: "cleanup",
+    });
+
+    assert.equal(runResult.ok, true);
+    assert.equal(runResult.experiment_run.status, "completed");
+    assert.equal(fs.existsSync(runResult.case_results[0].workspace), false);
+  } finally {
+    await session.client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("benchmark.run isolated MCP smoke commands can self-heal missing dist outputs", async () => {
+  const testId = `${Date.now()}-benchmark-mcp-stdio`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-benchmark-mcp-stdio-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+    MCP_BACKGROUND_OWNER: "1",
+    TRICHAT_BUS_AUTOSTART: "1",
+    TRICHAT_RING_LEADER_AUTOSTART: "0",
+    MCP_AUTONOMY_BOOTSTRAP_ON_START: "0",
+    MCP_AUTONOMY_MAINTAIN_ON_START: "0",
+  });
+
+  try {
+    const suite = await callTool(session.client, "benchmark.suite_upsert", {
+      mutation: nextMutation(testId, "benchmark.suite_upsert", () => mutationCounter++),
+      title: "Repo stdio MCP bench",
+      objective: "Verify isolated repo workspaces can build or reuse dist before stdio MCP checks",
+      project_dir: REPO_ROOT,
+      isolation_mode: "git_worktree",
+      aggregate_metric_name: "suite_success_rate",
+      aggregate_metric_direction: "maximize",
+      cases: [
+        {
+          case_id: "storage-health",
+          title: "Storage health is reachable inside isolation",
+          command:
+            "([ -f dist/server.js ] || npm run build >/dev/null) && node ./scripts/mcp_tool_call.mjs --tool health.storage --args '{}' --transport stdio --stdio-command node --stdio-args 'dist/server.js' --cwd . >/dev/null",
+        },
+        {
+          case_id: "roster-health",
+          title: "TriChat roster is reachable inside isolation",
+          command:
+            "([ -f dist/server.js ] || npm run build >/dev/null) && node ./scripts/mcp_tool_call.mjs --tool trichat.roster --args '{}' --transport stdio --stdio-command node --stdio-args 'dist/server.js' --cwd . >/dev/null",
+        },
+      ],
+      tags: ["benchmark", "mcp", "stdio", "isolation"],
+    });
+
+    const runResult = await callTool(session.client, "benchmark.run", {
+      mutation: nextMutation(testId, "benchmark.run", () => mutationCounter++),
+      suite_id: suite.suite.suite_id,
+      candidate_label: "repo-mcp-stdio",
+    });
+
+    assert.equal(runResult.ok, true);
+    assert.equal(runResult.experiment_run.status, "completed");
+    assert.equal(runResult.case_results.every((entry) => entry.ok === true), true);
+    assert.ok(runResult.case_results.every((entry) => String(entry.workspace).includes(".mcp-isolation")));
+  } finally {
+    await session.client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function openClient(extraEnv) {
   const transport = new StdioClientTransport({
     command: "node",

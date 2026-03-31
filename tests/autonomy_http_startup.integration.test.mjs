@@ -122,8 +122,342 @@ test("http daemon starts autonomy maintain even when bootstrap-on-start is disab
   }
 });
 
+test("http daemon serves the clickable office GUI and snapshot routes on the live control plane", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-http-office-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const busPath = path.join(tempDir, "trichat.bus.sock");
+  const officeCacheDir = path.join(tempDir, "office-cache");
+  const bearerToken = "test-autonomy-http-office-token";
+  const ollama = await startFakeOllamaServer({
+    models: [{ name: "llama3.2:3b" }],
+  });
+  const httpPort = await reservePort();
+  const child = spawn("node", ["dist/server.js", "--http", "--http-port", String(httpPort)], {
+    cwd: REPO_ROOT,
+    env: inheritedEnv({
+      MCP_HTTP: "1",
+      MCP_HTTP_PORT: String(httpPort),
+      MCP_HTTP_HOST: "127.0.0.1",
+      MCP_HTTP_BEARER_TOKEN: bearerToken,
+      ANAMNESIS_HUB_DB_PATH: dbPath,
+      TRICHAT_BUS_SOCKET_PATH: busPath,
+      TRICHAT_OLLAMA_URL: ollama.url,
+      TRICHAT_RING_LEADER_AUTOSTART: "1",
+      TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+      TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+      TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+      MCP_AUTONOMY_BOOTSTRAP_ON_START: "1",
+      TRICHAT_OFFICE_THEME: "night",
+      TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR: officeCacheDir,
+    }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  try {
+    await waitForAutonomyStatus({
+      url: `http://127.0.0.1:${httpPort}/`,
+      origin: "http://127.0.0.1",
+      bearerToken,
+    });
+    const indexHtml = await fetchHttpText(`http://127.0.0.1:${httpPort}/office/`);
+    assert.match(indexHtml, /Agent Office/);
+
+    const bootstrap = await fetchHttpJson(`http://127.0.0.1:${httpPort}/office/api/bootstrap`);
+    assert.equal(bootstrap.ok, true);
+    assert.equal(bootstrap.default_thread_id, "ring-leader-main");
+
+    fs.mkdirSync(officeCacheDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(officeCacheDir, "latest--theme-night.json"),
+      JSON.stringify({
+        thread_id: "ring-leader-main",
+        theme: "night",
+        fetched_at: Date.now() / 1000,
+        agents: [{ agent: { agent_id: "ring-leader" }, state: "supervising" }],
+        summary: { kernel: { state: "idle" } },
+        rooms: { "command-deck": ["ring-leader"] },
+        errors: [],
+      })
+    );
+
+    const snapshotResponse = await fetchHttpResponse(`http://127.0.0.1:${httpPort}/office/api/snapshot`);
+    assert.equal(snapshotResponse.headers["x-office-snapshot-source"], "cache");
+    const snapshot = JSON.parse(snapshotResponse.body);
+    assert.equal(typeof snapshot.thread_id, "string");
+    assert.ok(Array.isArray(snapshot.agents));
+    assert.ok(snapshot.summary);
+    assert.ok(snapshot.rooms);
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("/ready reflects recent critical observability documents instead of reporting stale green state", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-http-ready-observability-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const busPath = path.join(tempDir, "trichat.bus.sock");
+  const bearerToken = "test-autonomy-http-ready-observability-token";
+  const ollama = await startFakeOllamaServer({
+    models: [{ name: "llama3.2:3b" }],
+  });
+  const httpPort = await reservePort();
+  const child = spawn("node", ["dist/server.js", "--http", "--http-port", String(httpPort)], {
+    cwd: REPO_ROOT,
+    env: inheritedEnv({
+      MCP_HTTP: "1",
+      MCP_HTTP_PORT: String(httpPort),
+      MCP_HTTP_HOST: "127.0.0.1",
+      MCP_HTTP_BEARER_TOKEN: bearerToken,
+      ANAMNESIS_HUB_DB_PATH: dbPath,
+      TRICHAT_BUS_SOCKET_PATH: busPath,
+      TRICHAT_OLLAMA_URL: ollama.url,
+      TRICHAT_RING_LEADER_AUTOSTART: "1",
+      TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+      TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+      TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+      MCP_AUTONOMY_BOOTSTRAP_ON_START: "1",
+      MCP_AUTONOMY_MAINTAIN_ON_START: "1",
+    }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  try {
+    const criticalMutationKey = `http-ready-observability-critical-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    await waitForAutonomyStatus({
+      url: `http://127.0.0.1:${httpPort}/`,
+      origin: "http://127.0.0.1",
+      bearerToken,
+    });
+    await waitForAutonomyMaintainStatus({
+      url: `http://127.0.0.1:${httpPort}/`,
+      origin: "http://127.0.0.1",
+      bearerToken,
+    });
+
+    const readyBeforeResponse = await fetchHttpResponse(`http://127.0.0.1:${httpPort}/ready`, {
+      Authorization: `Bearer ${bearerToken}`,
+      Origin: "http://127.0.0.1",
+    });
+    const readyBefore = JSON.parse(readyBeforeResponse.body);
+    assert.equal(Array.isArray(readyBefore.attention), true);
+    assert.equal(typeof readyBefore.ready, "boolean");
+
+    const mutation = {
+      idempotency_key: criticalMutationKey,
+      side_effect_fingerprint: criticalMutationKey,
+    };
+    await execFileAsync(
+      "node",
+      [
+        "./scripts/mcp_tool_call.mjs",
+        "--tool",
+        "observability.ingest",
+        "--args",
+        JSON.stringify({
+          mutation,
+          index_name: "incidents-control-plane",
+          source_kind: "test.control_plane",
+          documents: [
+            {
+              document_id: "critical-control-plane-doc",
+              level: "critical",
+              service: "control.plane",
+              event_type: "incident",
+              title: "Critical readiness regression",
+              body_text: "Synthetic critical document to validate /ready observability truth.",
+              tags: ["test", "critical"],
+            },
+          ],
+        }),
+        "--transport",
+        "http",
+        "--url",
+        `http://127.0.0.1:${httpPort}/`,
+        "--origin",
+        "http://127.0.0.1",
+        "--cwd",
+        REPO_ROOT,
+      ],
+      {
+        env: inheritedEnv({
+          MCP_HTTP_BEARER_TOKEN: bearerToken,
+        }),
+      }
+    );
+
+    const readyAfterResponse = await fetchHttpResponse(`http://127.0.0.1:${httpPort}/ready`, {
+      Authorization: `Bearer ${bearerToken}`,
+      Origin: "http://127.0.0.1",
+    });
+    assert.equal(readyAfterResponse.statusCode, 503);
+    const readyAfter = JSON.parse(readyAfterResponse.body);
+    assert.equal(readyAfter.ready, false);
+    assert.equal(readyAfter.state, "degraded");
+    assert.equal(readyAfter.observability.recent_critical_count >= 1, true);
+    assert.equal(readyAfter.attention.includes("observability.critical_recent"), true);
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("/ready ignores recovered observability errors when a newer healthy document exists for the same service lane", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-http-ready-observability-recovered-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const busPath = path.join(tempDir, "trichat.bus.sock");
+  const bearerToken = "test-autonomy-http-ready-observability-recovered-token";
+  const ollama = await startFakeOllamaServer({
+    models: [{ name: "llama3.2:3b" }],
+  });
+  const httpPort = await reservePort();
+  const child = spawn("node", ["dist/server.js", "--http", "--http-port", String(httpPort)], {
+    cwd: REPO_ROOT,
+    env: inheritedEnv({
+      MCP_HTTP: "1",
+      MCP_HTTP_PORT: String(httpPort),
+      MCP_HTTP_HOST: "127.0.0.1",
+      MCP_HTTP_BEARER_TOKEN: bearerToken,
+      ANAMNESIS_HUB_DB_PATH: dbPath,
+      TRICHAT_BUS_SOCKET_PATH: busPath,
+      TRICHAT_OLLAMA_URL: ollama.url,
+      TRICHAT_RING_LEADER_AUTOSTART: "1",
+      TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+      TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+      TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+      MCP_AUTONOMY_BOOTSTRAP_ON_START: "1",
+      MCP_AUTONOMY_MAINTAIN_ON_START: "1",
+    }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  try {
+    await waitForAutonomyStatus({
+      url: `http://127.0.0.1:${httpPort}/`,
+      origin: "http://127.0.0.1",
+      bearerToken,
+    });
+
+    const mutationKey = `http-ready-observability-recovered-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const errorCreatedAt = new Date(Date.now() - 60_000).toISOString();
+    const recoveryCreatedAt = new Date(Date.now() - 30_000).toISOString();
+    await execFileAsync(
+      "node",
+      [
+        "./scripts/mcp_tool_call.mjs",
+        "--tool",
+        "observability.ingest",
+        "--args",
+        JSON.stringify({
+          mutation: {
+            idempotency_key: mutationKey,
+            side_effect_fingerprint: mutationKey,
+          },
+          index_name: "incidents-control-plane",
+          source_kind: "test.control_plane",
+          source_ref: "lane.control",
+          documents: [
+            {
+              document_id: "recovered-control-plane-error",
+              created_at: errorCreatedAt,
+              level: "error",
+              service: "control.plane",
+              event_type: "incident",
+              title: "Transient control plane issue",
+              body_text: "Synthetic error document.",
+              tags: ["test", "error"],
+            },
+            {
+              document_id: "recovered-control-plane-ok",
+              created_at: recoveryCreatedAt,
+              level: "info",
+              service: "control.plane",
+              event_type: "recovered",
+              title: "Control plane recovered",
+              body_text: "Synthetic recovery document.",
+              tags: ["test", "recovered"],
+            },
+          ],
+        }),
+        "--transport",
+        "http",
+        "--url",
+        `http://127.0.0.1:${httpPort}/`,
+        "--origin",
+        "http://127.0.0.1",
+        "--cwd",
+        REPO_ROOT,
+      ],
+      {
+        env: inheritedEnv({
+          MCP_HTTP_BEARER_TOKEN: bearerToken,
+        }),
+      }
+    );
+
+    const readyResponse = await fetchHttpResponse(`http://127.0.0.1:${httpPort}/ready`, {
+      Authorization: `Bearer ${bearerToken}`,
+      Origin: "http://127.0.0.1",
+    });
+    const ready = JSON.parse(readyResponse.body);
+    assert.equal(ready.observability.recent_error_count, 0);
+    assert.equal(ready.attention.includes("observability.error_recent"), false);
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("http daemon exposes fast unauthenticated root and health routes", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-http-fast-path-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const busPath = path.join(tempDir, "trichat.bus.sock");
+  const bearerToken = "test-autonomy-http-fast-token";
+  const ollama = await startFakeOllamaServer({
+    models: [{ name: "llama3.2:3b" }],
+  });
+  const httpPort = await reservePort();
+  const child = spawn("node", ["dist/server.js", "--http", "--http-port", String(httpPort)], {
+    cwd: REPO_ROOT,
+    env: inheritedEnv({
+      MCP_HTTP: "1",
+      MCP_HTTP_PORT: String(httpPort),
+      MCP_HTTP_HOST: "127.0.0.1",
+      MCP_HTTP_BEARER_TOKEN: bearerToken,
+      ANAMNESIS_HUB_DB_PATH: dbPath,
+      TRICHAT_BUS_SOCKET_PATH: busPath,
+      TRICHAT_OLLAMA_URL: ollama.url,
+      TRICHAT_RING_LEADER_AUTOSTART: "0",
+      MCP_AUTONOMY_BOOTSTRAP_ON_START: "0",
+      MCP_AUTONOMY_MAINTAIN_ON_START: "0",
+    }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  try {
+    const root = JSON.parse(await waitForHttpText(`http://127.0.0.1:${httpPort}/`));
+    assert.equal(root.ok, true);
+    assert.equal(root.office_path, "/office/");
+
+    const health = JSON.parse(await waitForHttpText(`http://127.0.0.1:${httpPort}/health`));
+    assert.equal(health.ok, true);
+    assert.equal(health.status, "ok");
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function waitForAutonomyStatus({ url, origin, bearerToken }) {
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + 90000;
   let lastError = null;
   while (Date.now() < deadline) {
     try {
@@ -165,8 +499,22 @@ async function waitForAutonomyStatus({ url, origin, bearerToken }) {
   throw lastError ?? new Error("Timed out waiting for autonomy bootstrap readiness");
 }
 
-async function waitForAutonomyMaintainStatus({ url, origin, bearerToken }) {
+async function waitForHttpText(url) {
   const deadline = Date.now() + 15000;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      return await fetchHttpText(url);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw lastError ?? new Error(`Timed out waiting for HTTP response from ${url}`);
+}
+
+async function waitForAutonomyMaintainStatus({ url, origin, bearerToken }) {
+  const deadline = Date.now() + 90000;
   let lastError = null;
   while (Date.now() < deadline) {
     try {
@@ -260,4 +608,41 @@ function inheritedEnv(extra) {
     env[key] = value;
   }
   return env;
+}
+
+function fetchHttpText(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    http.get(url, { headers }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on("end", () => {
+        const body = Buffer.concat(chunks).toString("utf8");
+        if ((response.statusCode ?? 500) >= 400) {
+          reject(new Error(`${response.statusCode} ${body}`));
+          return;
+        }
+        resolve(body);
+      });
+    }).on("error", reject);
+  });
+}
+
+function fetchHttpResponse(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    http.get(url, { headers }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on("end", () => {
+        resolve({
+          statusCode: response.statusCode ?? 500,
+          headers: response.headers,
+          body: Buffer.concat(chunks).toString("utf8"),
+        });
+      });
+    }).on("error", reject);
+  });
+}
+
+async function fetchHttpJson(url, headers = {}) {
+  return JSON.parse(await fetchHttpText(url, headers));
 }

@@ -9,11 +9,13 @@ MCP_LABEL="com.mcplayground.mcp.server"
 AUTO_LABEL="com.mcplayground.imprint.autosnapshot"
 WORKER_LABEL="com.mcplayground.imprint.inboxworker"
 KEEPALIVE_LABEL="com.mcplayground.autonomy.keepalive"
+MLX_LABEL="com.mcplayground.mlx.server"
 
 MCP_PLIST="${LAUNCH_DIR}/${MCP_LABEL}.plist"
 AUTO_PLIST="${LAUNCH_DIR}/${AUTO_LABEL}.plist"
 WORKER_PLIST="${LAUNCH_DIR}/${WORKER_LABEL}.plist"
 KEEPALIVE_PLIST="${LAUNCH_DIR}/${KEEPALIVE_LABEL}.plist"
+MLX_PLIST="${LAUNCH_DIR}/${MLX_LABEL}.plist"
 
 "${REPO_ROOT}/scripts/imprint_auto_snapshot_ctl.sh" stop >/dev/null 2>&1 || true
 
@@ -41,4 +43,10 @@ if [[ -f "${KEEPALIVE_PLIST}" ]]; then
   rm -f "${KEEPALIVE_PLIST}"
 fi
 
-echo "{\"ok\":true,\"removed\":[\"${MCP_LABEL}\",\"${AUTO_LABEL}\",\"${WORKER_LABEL}\",\"${KEEPALIVE_LABEL}\"]}" >&2
+if [[ -f "${MLX_PLIST}" ]]; then
+  launchctl bootout "${DOMAIN}" "${MLX_PLIST}" >/dev/null 2>&1 || true
+  launchctl disable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
+  rm -f "${MLX_PLIST}"
+fi
+
+echo "{\"ok\":true,\"removed\":[\"${MCP_LABEL}\",\"${AUTO_LABEL}\",\"${WORKER_LABEL}\",\"${KEEPALIVE_LABEL}\",\"${MLX_LABEL}\"]}" >&2

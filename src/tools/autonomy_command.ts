@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 import { z } from "zod";
 import { type GoalRecord, type PlanRecord, Storage } from "../storage.js";
+import { routeObjectiveBackends } from "./model_router.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
+import { resolveSwarmProfile, summarizeMemoryPreflight, type SwarmProfileRecord } from "./swarm_profile.js";
 
 const recordSchema = z.record(z.unknown());
 
@@ -211,6 +213,51 @@ function resolvePlanFromExecution(storage: Storage, goal: GoalRecord, execution:
   return explicitPlanId ? storage.getPlanById(explicitPlanId) : null;
 }
 
+async function recordSwarmCheckpoint(
+  invokeTool: InvokeTool,
+  baseMutation: { idempotency_key: string; side_effect_fingerprint: string },
+  phase: string,
+  params: {
+    goal_id: string;
+    plan_id?: string | null;
+    producer_id: string;
+    source_client?: string;
+    source_model?: string;
+    source_agent?: string;
+    profile: SwarmProfileRecord;
+    objective: string;
+    memory_preflight: Record<string, unknown>;
+    details?: Record<string, unknown>;
+  }
+) {
+  return (await invokeTool("artifact.record", {
+    mutation: deriveMutation(baseMutation, `swarm-checkpoint.${phase}`),
+    artifact_type: "swarm.checkpoint",
+    producer_kind: "planner",
+    producer_id: params.producer_id,
+    goal_id: params.goal_id,
+    plan_id: params.plan_id ?? undefined,
+    trust_tier: "derived",
+    status: "active",
+    content_json: {
+      phase,
+      objective: params.objective,
+      profile: params.profile,
+      memory_preflight: params.memory_preflight,
+      ...(params.details ?? {}),
+    },
+    metadata: {
+      phase,
+      topology: params.profile.topology,
+      consensus_mode: params.profile.consensus_mode,
+      checkpoint_cadence: params.profile.checkpoint_policy.cadence,
+    },
+    source_client: params.source_client,
+    source_model: params.source_model,
+    source_agent: params.source_agent,
+  })) as Record<string, unknown>;
+}
+
 export async function autonomyCommand(
   storage: Storage,
   invokeTool: InvokeTool,
@@ -275,15 +322,58 @@ export async function autonomyCommand(
       const specialistAgentIds = dedupeStrings(specialistResolution.recommended_trichat_agent_ids);
       const supportAgentIds = dedupeStrings(specialistResolution.support_agent_ids);
       const bridgeReadySupportAgentIds = filterBridgeReadySupportAgents(providerBridgeStatus, supportAgentIds);
+      const localFirstAgentIds = dedupeStrings(providerBridgeStatus?.local_first_ide_agent_ids);
       const effectiveWorkstreams = dedupeWorkstreams(input.workstreams, specialistWorkstreams);
-      const effectiveTriChatAgentIds = mergeAgentIds(
+      const baseTriChatAgentIds = mergeAgentIds(
         input.trichat_agent_ids,
+        localFirstAgentIds,
         specialistAgentIds,
         bridgeReadySupportAgentIds
       );
       const matchedDomains = readObjectArray(specialistResolution.matched_domains)
         .map((entry) => readString(entry.domain_key))
         .filter((entry): entry is string => Boolean(entry));
+      const modelRouterSelection = routeObjectiveBackends(storage, {
+        objective: input.objective,
+        explicit_agent_ids: baseTriChatAgentIds,
+        preferred_tags: matchedDomains,
+        quality_preference: "balanced",
+        fallback_workspace_root: process.cwd(),
+        fallback_worker_count: 1,
+        fallback_shell: "/bin/zsh",
+      });
+      const effectiveTriChatAgentIds = modelRouterSelection.effective_agent_ids;
+      const swarmProfileResult = (await invokeTool("swarm.profile", {
+        objective: input.objective,
+        workstreams: effectiveWorkstreams.length > 0 ? effectiveWorkstreams : undefined,
+        matched_domains: matchedDomains,
+        routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
+        trichat_agent_ids: effectiveTriChatAgentIds,
+        risk_tier: input.risk_tier,
+        budget: input.budget,
+        ...source,
+      })) as Record<string, unknown>;
+      const swarmProfile = (isRecord(swarmProfileResult.profile) ? swarmProfileResult.profile : null) as SwarmProfileRecord | null;
+      const effectiveSwarmProfile =
+        swarmProfile ??
+        resolveSwarmProfile({
+          objective: input.objective,
+          workstreams: effectiveWorkstreams.length > 0 ? effectiveWorkstreams : undefined,
+          matched_domains: matchedDomains,
+          routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
+          trichat_agent_ids: effectiveTriChatAgentIds,
+          risk_tier: input.risk_tier,
+          budget: input.budget,
+          ...source,
+        });
+      const memoryPreflightResult = (await invokeTool("retrieval.hybrid", {
+        query: effectiveSwarmProfile.memory_preflight.query,
+        limit: effectiveSwarmProfile.memory_preflight.limit,
+        include_notes: true,
+        include_transcripts: true,
+        ...source,
+      })) as Record<string, unknown>;
+      const memoryPreflight = summarizeMemoryPreflight(memoryPreflightResult, effectiveSwarmProfile.memory_preflight.query);
 
       const createdGoal = (await invokeTool("goal.create", {
         mutation: deriveMutation(input.mutation, "goal-create"),
@@ -308,14 +398,33 @@ export async function autonomyCommand(
           matched_specialist_domains: matchedDomains,
           specialist_agent_ids: specialistAgentIds,
           support_agent_ids: bridgeReadySupportAgentIds,
+          model_router_task_kind: modelRouterSelection.task_kind,
+          model_router_preferred_tags: modelRouterSelection.preferred_tags,
+          model_router_backend_id: modelRouterSelection.route.selected_backend?.backend_id ?? null,
+          routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
+          swarm_profile: effectiveSwarmProfile,
+          memory_preflight: memoryPreflight,
           ...(input.metadata ?? {}),
         },
         ...source,
       })) as { goal: GoalRecord };
 
       const goalId = createdGoal.goal.goal_id;
+      const intakeCheckpoint = await recordSwarmCheckpoint(invokeTool, input.mutation, "intake", {
+        goal_id: goalId,
+        producer_id: "autonomy.command",
+        profile: effectiveSwarmProfile,
+        objective: input.objective,
+        memory_preflight: memoryPreflight,
+        details: {
+          matched_specialist_domains: matchedDomains,
+          routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
+        },
+        ...source,
+      });
       let compileResult: Record<string, unknown> | null = null;
       let compiledPlanId: string | null = null;
+      let compileCheckpoint: Record<string, unknown> | null = null;
 
       if (input.compile_objective) {
         compileResult = (await invokeTool("task.compile", {
@@ -333,11 +442,18 @@ export async function autonomyCommand(
             matched_specialist_domains: matchedDomains,
             specialist_agent_ids: specialistAgentIds,
             support_agent_ids: bridgeReadySupportAgentIds,
+            model_router_task_kind: modelRouterSelection.task_kind,
+            model_router_preferred_tags: modelRouterSelection.preferred_tags,
+            model_router_backend_id: modelRouterSelection.route.selected_backend?.backend_id ?? null,
+            routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
+            swarm_profile: effectiveSwarmProfile,
+            memory_preflight: memoryPreflight,
             ...(input.metadata ?? {}),
           },
           ...source,
         })) as Record<string, unknown>;
         compiledPlanId = isRecord(compileResult.plan) ? readString(compileResult.plan.plan_id) : null;
+        compileCheckpoint = isRecord(compileResult.checkpoint_artifact) ? compileResult.checkpoint_artifact : null;
       }
 
       const execution = (await invokeTool("goal.execute", {
@@ -365,6 +481,19 @@ export async function autonomyCommand(
 
       const goalAfter = storage.getGoalById(goalId) ?? createdGoal.goal;
       const planAfter = resolvePlanFromExecution(storage, goalAfter, execution, compiledPlanId);
+      const executionCheckpoint = await recordSwarmCheckpoint(invokeTool, input.mutation, "execution-dispatch", {
+        goal_id: goalId,
+        plan_id: planAfter?.plan_id ?? compiledPlanId,
+        producer_id: "goal.execute",
+        profile: effectiveSwarmProfile,
+        objective: input.objective,
+        memory_preflight: memoryPreflight,
+        details: {
+          execution_ok: readBoolean(execution.ok),
+          executed: readBoolean(execution.executed),
+        },
+        ...source,
+      });
 
       const daemonStatus = (await invokeTool("goal.autorun_daemon", { action: "status" })) as Record<string, unknown>;
       let daemonResult: Record<string, unknown> = daemonStatus;
@@ -419,6 +548,8 @@ export async function autonomyCommand(
           matched_specialist_domains: matchedDomains,
           specialist_agent_ids: specialistAgentIds,
           support_agent_ids: bridgeReadySupportAgentIds,
+          model_router_backend_id: modelRouterSelection.route.selected_backend?.backend_id ?? null,
+          routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
           dry_run: input.dry_run ?? false,
         },
         ...source,
@@ -433,6 +564,14 @@ export async function autonomyCommand(
         bootstrap: bootstrapResult,
         specialists: specialistResolution,
         provider_bridge: providerBridgeStatus,
+        model_router: modelRouterSelection,
+        swarm: {
+          profile: effectiveSwarmProfile,
+          memory_preflight: memoryPreflight,
+          checkpoints: [intakeCheckpoint, compileCheckpoint, executionCheckpoint].filter(
+            (entry): entry is Record<string, unknown> => Boolean(entry)
+          ),
+        },
         compile: compileResult,
         execution,
         goal_autorun_daemon: {

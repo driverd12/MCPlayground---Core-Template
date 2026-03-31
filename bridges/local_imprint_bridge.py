@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TriChat adapter bridge for local Ollama-backed imprint agent."""
+"""TriChat adapter bridge for local inference-backed imprint agent."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from bridge_common import (
 LOG_PREFIX = "local_imprint_bridge"
 BRIDGE_NAME = "local-imprint-bridge"
 DEFAULT_MODEL = "llama3.2:3b"
+DEFAULT_MLX_MODEL = "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit"
 
 DEFAULT_AGENT_PROFILE = {
     "role": "local specialist",
@@ -136,17 +137,18 @@ AGENT_PROFILES = {
 def main() -> int:
     payload = read_payload(LOG_PREFIX)
     context = build_context(payload, "local-imprint")
+    provider = resolve_local_provider()
 
     if context.op == "ping":
-        emit_pong(context, bridge=BRIDGE_NAME, meta={"provider": "ollama"})
+        emit_pong(context, bridge=BRIDGE_NAME, meta={"provider": provider})
         return 0
 
     if is_dry_run():
-        emit_response(context, build_dry_run_content(context), bridge=BRIDGE_NAME, meta={"provider": "ollama", "mode": "dry-run"})
+        emit_response(context, build_dry_run_content(context), bridge=BRIDGE_NAME, meta={"provider": provider, "mode": "dry-run"})
         return 0
 
     try:
-        result = run_ollama(context)
+        result = run_inference(context, provider)
     except RuntimeError as error:
         print(f"[{LOG_PREFIX}] {compact(str(error), limit=600)}", file=sys.stderr)
         return 2
@@ -167,26 +169,144 @@ def main() -> int:
     return 0
 
 
+def resolve_local_provider() -> str:
+    requested = str(os.environ.get("TRICHAT_LOCAL_INFERENCE_PROVIDER") or "auto").strip().lower()
+    if requested in {"ollama", "mlx"}:
+        return requested
+    if requested not in {"", "auto"}:
+        return "ollama"
+    if mlx_endpoint_healthy():
+        return "mlx"
+    return "ollama"
+
+
+def mlx_endpoint_healthy() -> bool:
+    endpoint = str(os.environ.get("TRICHAT_MLX_ENDPOINT") or "").strip().rstrip("/")
+    if not endpoint:
+        return False
+    try:
+        post_json_request  # keep import use explicit
+        from urllib.request import Request, urlopen
+        request = Request(f"{endpoint}/health", method="GET")
+        with urlopen(request, timeout=3.0) as response:  # noqa: S310 - local trusted endpoint
+            return int(getattr(response, "status", 0) or 0) == 200
+    except Exception:
+        return False
+
+
+def run_inference(context: BridgeContext, provider: str):
+    if provider == "mlx":
+        try:
+            return run_mlx(context)
+        except RuntimeError:
+            if str(os.environ.get("TRICHAT_LOCAL_INFERENCE_PROVIDER") or "").strip().lower() == "mlx":
+                raise
+    return run_ollama(context)
+
+
 def run_ollama(context: BridgeContext):
     model = resolve_model(context.agent_id)
     base_url = str(os.environ.get("TRICHAT_OLLAMA_URL") or "http://127.0.0.1:11434").rstrip("/")
     timeout_seconds = env_float("TRICHAT_BRIDGE_TIMEOUT_SECONDS", 90.0, minimum=10.0, maximum=600.0)
-    body = {
-        "model": model,
-        "prompt": build_local_prompt(context),
-        "stream": False,
-        "options": {
-            "temperature": 0.2,
-        },
-    }
     return post_json_request(
         url=f"{base_url}/api/generate",
-        body=body,
+        body=build_ollama_body(context, model),
         headers=None,
         timeout_seconds=timeout_seconds,
         log_prefix=LOG_PREFIX,
         provider=f"ollama:{model}",
         response_extractor=parse_ollama_response,
+        mode="http",
+    )
+
+
+def proposal_response_schema() -> dict[str, object]:
+    delegation_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "delegate_agent_id": {"type": ["string", "null"]},
+            "task_objective": {"type": ["string", "null"]},
+            "success_criteria": {"type": "array", "items": {"type": "string"}},
+            "evidence_requirements": {"type": "array", "items": {"type": "string"}},
+            "rollback_notes": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": [
+            "delegate_agent_id",
+            "task_objective",
+            "success_criteria",
+            "evidence_requirements",
+            "rollback_notes",
+        ],
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "strategy": {"type": "string"},
+            "commands": {"type": "array", "items": {"type": "string"}},
+            "confidence": {"type": "number"},
+            "mentorship_note": {"type": "string"},
+            "delegate_agent_id": {"type": ["string", "null"]},
+            "task_objective": {"type": ["string", "null"]},
+            "success_criteria": {"type": "array", "items": {"type": "string"}},
+            "evidence_requirements": {"type": "array", "items": {"type": "string"}},
+            "rollback_notes": {"type": "array", "items": {"type": "string"}},
+            "delegations": {"type": "array", "items": delegation_schema},
+        },
+        "required": [
+            "strategy",
+            "commands",
+            "confidence",
+            "mentorship_note",
+            "delegate_agent_id",
+            "task_objective",
+            "success_criteria",
+            "evidence_requirements",
+            "rollback_notes",
+            "delegations",
+        ],
+    }
+
+
+def build_ollama_body(context: BridgeContext, model: str) -> dict[str, object]:
+    keep_alive = str(os.environ.get("TRICHAT_OLLAMA_KEEP_ALIVE") or "10m").strip() or "10m"
+    body: dict[str, object] = {
+        "model": model,
+        "prompt": build_local_prompt(context),
+        "stream": False,
+        "keep_alive": keep_alive,
+        "options": {
+            "temperature": 0.2,
+        },
+    }
+    if context.response_mode != "plain":
+        body["format"] = proposal_response_schema()
+    return body
+
+
+def run_mlx(context: BridgeContext):
+    model = resolve_mlx_model(context.agent_id)
+    base_url = str(os.environ.get("TRICHAT_MLX_ENDPOINT") or "http://127.0.0.1:8788").rstrip("/")
+    timeout_seconds = env_float("TRICHAT_BRIDGE_TIMEOUT_SECONDS", 90.0, minimum=10.0, maximum=600.0)
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a local workspace specialist. Follow the prompt exactly and stay concise."},
+            {"role": "user", "content": build_local_prompt(context)},
+        ],
+        "stream": False,
+        "temperature": 0.2,
+        "max_tokens": 600,
+    }
+    return post_json_request(
+        url=f"{base_url}/v1/chat/completions",
+        body=body,
+        headers=None,
+        timeout_seconds=timeout_seconds,
+        log_prefix=LOG_PREFIX,
+        provider=f"mlx:{model}",
+        response_extractor=parse_mlx_response,
         mode="http",
     )
 
@@ -219,6 +339,23 @@ def resolve_model(agent_id: str) -> str:
         if model:
             return model
     return DEFAULT_MODEL
+
+
+def resolve_mlx_model(agent_id: str) -> str:
+    normalized = str(agent_id or "").strip().upper().replace("-", "_")
+    env_keys: list[str] = []
+    if normalized:
+        env_keys.append(f"TRICHAT_{normalized}_MLX_MODEL")
+    env_keys.extend(["TRICHAT_MLX_MODEL", "TRICHAT_SPECIALIST_MLX_MODEL"])
+    seen: set[str] = set()
+    for key in env_keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        model = str(os.environ.get(key) or "").strip()
+        if model:
+            return model
+    return DEFAULT_MLX_MODEL
 
 
 def build_local_prompt(context: BridgeContext) -> str:
@@ -325,6 +462,22 @@ def parse_ollama_response(raw: str) -> str:
         text = parsed.get("response")
         if isinstance(text, str):
             return text.strip()
+    return raw.strip()
+
+
+def parse_mlx_response(raw: str) -> str:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw.strip()
+    if isinstance(parsed, dict):
+        choices = parsed.get("choices")
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, str):
+                    return content.strip()
     return raw.strip()
 
 

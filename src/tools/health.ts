@@ -18,6 +18,7 @@ export function healthStorage(storage: Storage) {
   const dbPath = storage.getDatabasePath();
   const counts = storage.getTableCounts();
   const stats = fs.existsSync(dbPath) ? fs.statSync(dbPath) : null;
+  const backups = storage.getStorageBackupStatus({ recent_limit: 6 });
   return {
     ok: true,
     db_path: dbPath,
@@ -25,6 +26,7 @@ export function healthStorage(storage: Storage) {
     db_size_bytes: stats ? stats.size : 0,
     schema_version: storage.getSchemaVersion(),
     table_counts: counts,
+    backups,
   };
 }
 

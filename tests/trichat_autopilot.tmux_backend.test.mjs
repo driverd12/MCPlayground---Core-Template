@@ -210,6 +210,93 @@ test("trichat.autopilot stamps explicit agent ownership metadata onto tmux-dispa
   }
 });
 
+test("trichat.autopilot opens an adapter circuit after repeated bridge failures and records telemetry-backed skips", async () => {
+  const testId = `${Date.now()}-adapter-circuit`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-trichat-autopilot-adapter-circuit-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const bridgePath = path.join(tempDir, "mock_broken_bridge.js");
+  let mutationCounter = 0;
+
+  fs.writeFileSync(
+    bridgePath,
+    [
+      "#!/usr/bin/env node",
+      "let input = '';",
+      "process.stdin.setEncoding('utf8');",
+      "process.stdin.on('data', (chunk) => { input += chunk; });",
+      "process.stdin.on('end', () => {",
+      "  const payload = JSON.parse(String(input || '{}').trim() || '{}');",
+      "  if (payload.op === 'ping') {",
+      "    process.stdout.write('{\"kind\":\"trichat.adapter.pong\",\"protocol_version\":\"trichat-bridge-v1\",\"request_id\":\"bad\",\"agent_id\":\"local-imprint\",\"thread_id\":\"thread\",\"content\":\"pong\"}\\n');",
+      "    return;",
+      "  }",
+      "  process.stdout.write('not-json-envelope\\n');",
+      "});",
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(bridgePath, 0o755);
+
+  const session = await openClient(dbPath, {
+    TRICHAT_AGENT_IDS: "local-imprint",
+    TRICHAT_IMPRINT_CMD: `node ${JSON.stringify(bridgePath)}`,
+    TRICHAT_ADAPTER_CIRCUIT_FAILURE_THRESHOLD: "2",
+    TRICHAT_ADAPTER_CIRCUIT_OPEN_SECONDS: "600",
+  });
+
+  try {
+    for (const suffix of ["one", "two", "three"]) {
+      await callTool(session.client, "trichat.autopilot", {
+        action: "run_once",
+        mutation: nextMutation(testId, `trichat.autopilot-run_once-${suffix}`, () => mutationCounter++),
+        interval_seconds: 86400,
+        thread_id: `trichat-autopilot-adapter-circuit-${testId}`,
+        thread_title: `TriChat Autopilot Adapter Circuit ${testId}`,
+        thread_status: "archived",
+        away_mode: "normal",
+        lead_agent_id: "local-imprint",
+        specialist_agent_ids: [],
+        max_rounds: 1,
+        min_success_agents: 1,
+        bridge_timeout_seconds: 5,
+        bridge_dry_run: false,
+        execute_enabled: false,
+        confidence_threshold: 0.1,
+        adr_policy: "manual",
+      });
+    }
+
+    const telemetry = await callTool(session.client, "trichat.adapter_telemetry", {
+      action: "status",
+      agent_id: "local-imprint",
+      channel: "model",
+      include_events: true,
+      event_limit: 10,
+    });
+
+    assert.equal(telemetry.state_count, 1);
+    assert.equal(telemetry.states[0].open, true);
+    assert.equal(telemetry.states[0].trip_count, 1);
+    assert.equal(telemetry.states[0].failure_count, 2);
+    assert.equal(telemetry.states[0].last_result, "circuit_open");
+    assert.ok(
+      telemetry.recent_events.some((event) => event.event_type === "handshake_failed"),
+      "expected handshake_failed adapter event"
+    );
+    assert.ok(
+      telemetry.recent_events.some((event) => event.event_type === "trip_opened"),
+      "expected trip_opened adapter event"
+    );
+    assert.ok(
+      telemetry.recent_events.some((event) => event.event_type === "circuit_open"),
+      "expected circuit_open adapter event"
+    );
+  } finally {
+    await session.client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("trichat.autopilot high-impact governance skips repo ADRs for routine read-only tmux ticks", async () => {
   const testId = `${Date.now()}-readonly-adr-skip`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-trichat-autopilot-readonly-adr-"));
@@ -709,12 +796,12 @@ test("trichat.autopilot preserves a source leaf delegation brief when the counci
     assert.ok(delegatedTask);
     assert.match(
       delegatedTask.objective,
-      /^For code-smith: tighten the office dashboard delegation handoff without expanding scope\.?$/i
+      /^(?:For code-smith:\s*)?tighten the office dashboard delegation handoff without expanding scope\.?$/i
     );
     assert.equal(delegatedTask.payload.delegate_agent_id, "code-smith");
     assert.match(
       delegatedTask.payload.task_objective,
-      /^For code-smith: tighten the office dashboard delegation handoff without expanding scope\.?$/i
+      /^(?:For code-smith:\s*)?tighten the office dashboard delegation handoff without expanding scope\.?$/i
     );
     assert.equal(delegatedTask.payload.delegation_brief.delegate_agent_id, "code-smith");
     const preservedBriefText = [

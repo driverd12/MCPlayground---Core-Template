@@ -70,6 +70,23 @@ type ProviderBridgeClientStatus = {
   notes: string[];
 };
 
+type ProviderBridgeRouterBackendCandidate = {
+  client_id: ProviderBridgeClientId;
+  eligible: boolean;
+  reason: string | null;
+  backend: {
+    backend_id: string;
+    provider: "openai" | "google" | "cursor" | "github-copilot" | "custom";
+    model_id: string;
+    endpoint: string | null;
+    host_id: string | null;
+    locality: "remote";
+    tags: string[];
+    capabilities: Record<string, unknown>;
+    metadata: Record<string, unknown>;
+  };
+};
+
 type ProviderBridgeTransportConfig = {
   mode: "http" | "stdio";
   url: string;
@@ -78,6 +95,23 @@ type ProviderBridgeTransportConfig = {
   command: string;
   args: string[];
   db_path: string;
+};
+
+type ProviderBridgeSnapshot = {
+  canonical_ingress_tool: "autonomy.ide_ingress";
+  local_first_ide_agent_ids: string[];
+  workspace_root: string;
+  server_name: string;
+  transport: "http" | "stdio";
+  outbound_council_agents: Array<{
+    client_id: ProviderBridgeClientId;
+    agent_id: string | null;
+    bridge_ready: boolean;
+    runtime_ready: boolean;
+  }>;
+  router_backend_candidates: ProviderBridgeRouterBackendCandidate[];
+  eligible_router_backends: ProviderBridgeRouterBackendCandidate["backend"][];
+  clients: ProviderBridgeClientStatus[];
 };
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -144,12 +178,21 @@ function readStringArray(value: unknown) {
   return [...new Set(value.map((entry) => String(entry ?? "").trim()).filter(Boolean))];
 }
 
+function readEnvString(name: string) {
+  const value = String(process.env[name] ?? "").trim();
+  return value.length > 0 ? value : null;
+}
+
 function resolveLocalFirstAgents() {
   const envAgents = String(process.env.TRICHAT_IDE_LOCAL_FIRST_AGENT_IDS ?? "")
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
   return envAgents.length > 0 ? [...new Set(envAgents)] : defaultLocalFirstAgents.slice();
+}
+
+function hasGeminiApiAccess() {
+  return Boolean(readEnvString("GEMINI_API_KEY") || readEnvString("GOOGLE_API_KEY"));
 }
 
 function resolveTransportConfig(
@@ -188,6 +231,177 @@ function resolveClientConfigPaths(workspaceRoot: string) {
     copilotCli: path.join(home, ".copilot", "mcp-config.json"),
     gemini: path.join(home, ".gemini", "settings.json"),
     vscode: path.join(workspaceRoot, ".vscode", "mcp.json"),
+  };
+}
+
+function inferTaskKindsForBridgeAgent(agentId: string | null) {
+  switch (agentId) {
+    case "codex":
+      return ["planning", "coding", "verification", "tool_use"];
+    case "cursor":
+      return ["coding", "verification", "tool_use"];
+    case "gemini":
+      return ["research", "planning", "chat"];
+    default:
+      return ["planning", "chat"];
+  }
+}
+
+function inferTagsForBridgeAgent(agentId: string | null, clientId: ProviderBridgeClientId) {
+  const tags = new Set<string>(["remote", "hosted", "bridge", clientId]);
+  if (agentId === "codex") {
+    tags.add("frontier");
+    tags.add("planning");
+    tags.add("coding");
+    tags.add("verification");
+  } else if (agentId === "cursor") {
+    tags.add("coding");
+    tags.add("implementer");
+  } else if (agentId === "gemini") {
+    tags.add("frontier");
+    tags.add("research");
+    tags.add("analysis");
+    tags.add("planning");
+  }
+  return [...tags];
+}
+
+function resolveBridgeBackendProvider(clientId: ProviderBridgeClientId) {
+  switch (clientId) {
+    case "codex":
+    case "chatgpt-developer-mode":
+      return "openai" as const;
+    case "gemini-cli":
+      return "google" as const;
+    case "cursor":
+      return "cursor" as const;
+    case "github-copilot-cli":
+    case "github-copilot-vscode":
+      return "github-copilot" as const;
+    default:
+      return "custom" as const;
+  }
+}
+
+function resolveBridgeModelId(clientId: ProviderBridgeClientId) {
+  switch (clientId) {
+    case "codex":
+      return readEnvString("TRICHAT_CODEX_MODEL") ?? "codex";
+    case "cursor":
+      return readEnvString("TRICHAT_CURSOR_MODEL") ?? "cursor-agent";
+    case "gemini-cli":
+      return readEnvString("TRICHAT_GEMINI_MODEL") ?? (hasGeminiApiAccess() ? "gemini-2.0-flash" : "gemini-cli");
+    case "github-copilot-cli":
+    case "github-copilot-vscode":
+      return "copilot";
+    case "chatgpt-developer-mode":
+      return readEnvString("TRICHAT_OPENAI_MODEL") ?? "chatgpt-developer-mode";
+    default:
+      return clientId;
+  }
+}
+
+function isRuntimeReadyClient(status: ProviderBridgeClientStatus) {
+  if (!status.outbound_council_supported || !status.outbound_bridge_ready || !status.outbound_agent_id) {
+    return false;
+  }
+  if (status.client_id === "gemini-cli") {
+    return status.binary_present || hasGeminiApiAccess();
+  }
+  return status.binary_present;
+}
+
+function buildRouterBackendCandidates(statuses: ProviderBridgeClientStatus[]): ProviderBridgeRouterBackendCandidate[] {
+  return statuses
+    .filter((status) => status.outbound_council_supported && status.outbound_agent_id)
+    .map((status) => {
+      const runtimeReady = isRuntimeReadyClient(status);
+      const reason =
+        runtimeReady
+          ? null
+          : status.client_id === "gemini-cli" && status.outbound_bridge_ready
+            ? "missing gemini CLI binary and API key"
+            : !status.outbound_bridge_ready
+              ? "bridge adapter is not ready"
+              : "required client runtime is missing";
+      const agent = status.outbound_agent_id ? getTriChatAgent(status.outbound_agent_id) : null;
+      const taskKinds = inferTaskKindsForBridgeAgent(status.outbound_agent_id);
+      return {
+        client_id: status.client_id,
+        eligible: runtimeReady,
+        reason,
+        backend: {
+          backend_id: `bridge-${status.client_id}`,
+          provider: resolveBridgeBackendProvider(status.client_id),
+          model_id: resolveBridgeModelId(status.client_id),
+          endpoint: null,
+          host_id: null,
+          locality: "remote",
+          tags: inferTagsForBridgeAgent(status.outbound_agent_id, status.client_id),
+          capabilities: {
+            task_kinds: taskKinds,
+            capability_tier:
+              status.outbound_agent_id === "codex" || status.outbound_agent_id === "gemini" ? "frontier" : "enhanced",
+            bridge_agent_id: status.outbound_agent_id,
+            bridge_client_id: status.client_id,
+            role_lane: agent?.role_lane ?? null,
+            coordination_tier: agent?.coordination_tier ?? null,
+          },
+          metadata: {
+            seeded_from: "provider.bridge",
+            bridge_agent_id: status.outbound_agent_id,
+            bridge_client_id: status.client_id,
+            runtime_ready: runtimeReady,
+            installed: status.installed,
+            config_present: status.config_present,
+            binary_present: status.binary_present,
+            requires_internet_for_model: status.requires_internet_for_model,
+          },
+        },
+      } satisfies ProviderBridgeRouterBackendCandidate;
+    });
+}
+
+export function resolveProviderBridgeSnapshot(input: {
+  workspace_root?: string;
+  transport?: "auto" | "http" | "stdio";
+  http_url?: string;
+  http_origin?: string;
+  stdio_command?: string;
+  stdio_args?: string[];
+  db_path?: string;
+  server_name?: string;
+} = {}): ProviderBridgeSnapshot {
+  const workspaceRoot = input.workspace_root?.trim() || repoRoot;
+  const transport = resolveTransportConfig({
+    transport: input.transport ?? "auto",
+    http_url: input.http_url,
+    http_origin: input.http_origin,
+    stdio_command: input.stdio_command,
+    stdio_args: input.stdio_args,
+    db_path: input.db_path,
+    workspace_root: workspaceRoot,
+  });
+  const serverName = input.server_name?.trim() || "mcplayground";
+  const clients = buildClientStatuses(workspaceRoot, transport, serverName);
+  const routerBackendCandidates = buildRouterBackendCandidates(clients);
+  return {
+    canonical_ingress_tool: "autonomy.ide_ingress",
+    local_first_ide_agent_ids: resolveLocalFirstAgents(),
+    workspace_root: workspaceRoot,
+    server_name: serverName,
+    transport: transport.mode,
+    outbound_council_agents: clients
+      .filter((entry) => entry.outbound_council_supported)
+      .map((entry) => ({
+        client_id: entry.client_id,
+        agent_id: entry.outbound_agent_id,
+        bridge_ready: entry.outbound_bridge_ready,
+        runtime_ready: isRuntimeReadyClient(entry),
+      })),
+    router_backend_candidates: routerBackendCandidates,
+    eligible_router_backends: routerBackendCandidates.filter((entry) => entry.eligible).map((entry) => entry.backend),
+    clients,
   };
 }
 
@@ -606,28 +820,35 @@ export async function providerBridge(
   input: z.infer<typeof providerBridgeSchema>
 ) {
   const execute = async () => {
-    const workspaceRoot = input.workspace_root?.trim() || repoRoot;
+    const snapshot = resolveProviderBridgeSnapshot({
+      workspace_root: input.workspace_root,
+      transport: input.transport,
+      http_url: input.http_url,
+      http_origin: input.http_origin,
+      stdio_command: input.stdio_command,
+      stdio_args: input.stdio_args,
+      db_path: input.db_path,
+      server_name: input.server_name,
+    });
+    const workspaceRoot = snapshot.workspace_root;
     const transport = resolveTransportConfig(input);
-    const serverName = input.server_name.trim();
+    const serverName = snapshot.server_name;
     const clients = selectClients(input.clients);
-    const status = buildClientStatuses(workspaceRoot, transport, serverName);
+    const status = snapshot.clients;
     const selectedStatus = status.filter((entry) => clients.includes(entry.client_id));
+    const selectedRouterBackends = snapshot.router_backend_candidates.filter((entry) => clients.includes(entry.client_id));
 
     if (input.action === "status") {
       return {
         ok: true,
-        canonical_ingress_tool: "autonomy.ide_ingress",
-        local_first_ide_agent_ids: resolveLocalFirstAgents(),
-        workspace_root: workspaceRoot,
-        server_name: serverName,
-        transport: transport.mode,
-        outbound_council_agents: status
-          .filter((entry) => entry.outbound_council_supported)
-          .map((entry) => ({
-            client_id: entry.client_id,
-            agent_id: entry.outbound_agent_id,
-            bridge_ready: entry.outbound_bridge_ready,
-          })),
+        canonical_ingress_tool: snapshot.canonical_ingress_tool,
+        local_first_ide_agent_ids: snapshot.local_first_ide_agent_ids,
+        workspace_root: snapshot.workspace_root,
+        server_name: snapshot.server_name,
+        transport: snapshot.transport,
+        outbound_council_agents: snapshot.outbound_council_agents,
+        router_backend_candidates: selectedRouterBackends,
+        eligible_router_backends: selectedRouterBackends.filter((entry) => entry.eligible).map((entry) => entry.backend),
         clients: selectedStatus,
       };
     }
@@ -649,11 +870,12 @@ export async function providerBridge(
       );
       return {
         ok: true,
-        canonical_ingress_tool: "autonomy.ide_ingress",
-        local_first_ide_agent_ids: resolveLocalFirstAgents(),
+        canonical_ingress_tool: snapshot.canonical_ingress_tool,
+        local_first_ide_agent_ids: snapshot.local_first_ide_agent_ids,
         server_name: serverName,
         transport: transport.mode,
         bundle,
+        router_backend_candidates: selectedRouterBackends,
         clients: selectedStatus,
       };
     }
@@ -717,11 +939,12 @@ export async function providerBridge(
     );
     return {
       ok: true,
-      canonical_ingress_tool: "autonomy.ide_ingress",
-      local_first_ide_agent_ids: resolveLocalFirstAgents(),
+      canonical_ingress_tool: snapshot.canonical_ingress_tool,
+      local_first_ide_agent_ids: snapshot.local_first_ide_agent_ids,
       server_name: serverName,
       transport: transport.mode,
       installs,
+      router_backend_candidates: selectedRouterBackends,
       clients: postInstallStatus,
     };
   };

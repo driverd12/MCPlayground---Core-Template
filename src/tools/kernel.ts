@@ -2,15 +2,18 @@ import { z } from "zod";
 import {
   type AutonomyMaintainStateRecord,
   type AgentSessionRecord,
+  type ClusterTopologyStateRecord,
   type EvalSuiteRecord,
   type EvalSuitesStateRecord,
   type GoalRecord,
   type ModelRouterBackendRecord,
   type ModelRouterStateRecord,
+  type ObservabilityDocumentRecord,
   type OrgProgramRoleRecord,
   type OrgProgramsStateRecord,
   type PlanRecord,
   type PlanStepRecord,
+  type ReactionEngineStateRecord,
   type TaskSummaryRecord,
   type WorkerFabricHostRecord,
   type WorkerFabricStateRecord,
@@ -18,8 +21,17 @@ import {
 } from "../storage.js";
 import { getAdaptiveWorkerProfile, summarizeAdaptiveSessionHealth, summarizeAdaptiveWorkerProfile } from "./agent_session.js";
 import { buildAgentLearningOverview } from "./agent_learning.js";
-import { getAutonomyMaintainRuntimeStatus } from "./autonomy_maintain.js";
+import { buildEvalHealth, computeEvalDependencyFingerprint, getAutonomyMaintainRuntimeStatus } from "./autonomy_maintain.js";
+import { getAutoSnapshotRuntimeStatus } from "./imprint.js";
+import { isBenignObservabilityDocument } from "./observability.js";
+import { getReactionEngineRuntimeStatus } from "./reaction_engine.js";
+import { summarizeLiveRuntimeWorkers } from "./runtime_worker.js";
+import { getAutoSquishRuntimeStatus } from "./transcript.js";
+import { getTriChatAutoRetentionRuntimeStatus, getTriChatTurnWatchdogRuntimeStatus } from "./trichat.js";
+import { summarizeClusterTopologyState } from "./cluster_topology.js";
+import { routeModelBackends } from "./model_router.js";
 import { evaluatePlanStepReadiness, getPlanStepApprovalGateKind } from "./plan.js";
+import { computeHostHealthScore, resolveEffectiveWorkerFabric, resolveHostCapacityProfile } from "./worker_fabric.js";
 
 const goalStatusSchema = z.enum([
   "draft",
@@ -119,6 +131,18 @@ type HostFabricSummary = {
     queue_depth: number;
     active_tasks: number;
     heartbeat_at: string | null;
+    cpu_utilization: number | null;
+    ram_available_gb: number | null;
+    ram_total_gb: number | null;
+    swap_used_gb: number | null;
+    thermal_pressure: WorkerFabricHostRecord["telemetry"]["thermal_pressure"];
+    recommended_worker_count: number | null;
+    safe_max_queue_per_worker: number | null;
+    max_local_model_concurrency: number | null;
+    recommended_runtime_worker_max_active: number | null;
+    recommended_runtime_worker_limit: number | null;
+    recommended_tmux_worker_count: number | null;
+    recommended_tmux_target_queue_per_worker: number | null;
     tags: string[];
   }>;
 };
@@ -131,6 +155,21 @@ type ModelRouterSummary = {
   enabled_backend_count: number;
   provider_counts: Record<string, number>;
   locality_counts: Record<"local" | "remote", number>;
+  routing_outlook: Array<{
+    task_kind: "planning" | "coding" | "research" | "verification";
+    preferred_tags: string[];
+    selected_backend_id: string | null;
+    selected_provider: ModelRouterBackendRecord["provider"] | null;
+    selected_host_id: string | null;
+    selected_locality: ModelRouterBackendRecord["locality"] | null;
+    selected_score: number | null;
+    planned_backend_count: number;
+    top_planned_backend_id: string | null;
+    top_planned_provider: string | null;
+    top_planned_node_id: string | null;
+    top_planned_node_title: string | null;
+    top_planned_score: number | null;
+  }>;
   backends: Array<{
     backend_id: string;
     provider: ModelRouterBackendRecord["provider"];
@@ -144,9 +183,36 @@ type ModelRouterSummary = {
     success_rate: number | null;
     win_rate: number | null;
     heartbeat_at: string | null;
+    probe_healthy: boolean | null;
+    probe_model_known: boolean | null;
+    probe_model_loaded: boolean | null;
+    probe_generated_at: string | null;
+    probe_service_latency_ms: number | null;
+    probe_benchmark_latency_ms: number | null;
+    probe_resident_model_count: number | null;
+    probe_resident_vram_gb: number | null;
+    probe_resident_expires_at: string | null;
+    probe_error: string | null;
     tags: string[];
   }>;
 };
+
+function routingOutlookPreferredTags(taskKind: "planning" | "coding" | "research" | "verification") {
+  switch (taskKind) {
+    case "planning":
+      return ["planning", "planner", "control-plane"];
+    case "coding":
+      return ["coding", "implementer", "gpu"];
+    case "research":
+      return ["research", "analysis", "gpu"];
+    case "verification":
+      return ["verification", "verify", "control-plane"];
+    default:
+      return [taskKind];
+  }
+}
+
+type ClusterTopologySummary = ReturnType<typeof summarizeClusterTopologyState>;
 
 type EvalSummary = {
   enabled: boolean;
@@ -164,12 +230,39 @@ type EvalSummary = {
   }>;
 };
 
+type ObservabilitySummary = {
+  document_count: number;
+  latest_document_at: string | null;
+  recent_error_count: number;
+  recent_critical_count: number;
+  index_name_counts: Array<{
+    index_name: string;
+    count: number;
+  }>;
+  source_kind_counts: Array<{
+    source_kind: string;
+    count: number;
+  }>;
+  service_counts: Array<{
+    service: string | null;
+    count: number;
+  }>;
+  host_counts: Array<{
+    host_id: string | null;
+    count: number;
+  }>;
+  recent_documents: ObservabilityDocumentRecord[];
+};
+
 type OrgProgramSummary = {
   enabled: boolean;
   role_count: number;
   active_role_count: number;
   version_count: number;
   active_version_count: number;
+  candidate_version_count: number;
+  optimized_role_count: number;
+  last_optimizer_run_at: string | null;
   status_counts: Record<"candidate" | "active" | "archived", number>;
   roles: Array<{
     role_id: string;
@@ -177,7 +270,58 @@ type OrgProgramSummary = {
     lane: string | null;
     version_count: number;
     active_version_id: string | null;
+    candidate_version_count: number;
+    last_optimizer_run_at: string | null;
+    last_optimizer_improvement: number | null;
   }>;
+};
+
+type WorkflowExportSummary = {
+  bundle_count: number;
+  metrics_count: number;
+  argo_contract_count: number;
+  latest_bundle: {
+    artifact_id: string;
+    created_at: string;
+    goal_id: string | null;
+    plan_id: string | null;
+    uri: string | null;
+    export_id: string | null;
+    step_count: number;
+    task_count: number;
+    run_count: number;
+    bundle_sha256: string | null;
+  } | null;
+  latest_metrics: {
+    artifact_id: string;
+    created_at: string;
+    uri: string | null;
+    export_id: string | null;
+    line_count: number;
+  } | null;
+  latest_argo_contract: {
+    artifact_id: string;
+    created_at: string;
+    uri: string | null;
+    export_id: string | null;
+    contract_mode: string | null;
+  } | null;
+};
+
+type RuntimeWorkerSummary = {
+  session_count: number;
+  active_count: number;
+  counts: Record<"launching" | "running" | "idle" | "completed" | "failed" | "stopped", number>;
+  runtime_counts: Record<string, number>;
+  latest_session: {
+    session_id: string;
+    runtime_id: string;
+    status: string;
+    task_id: string | null;
+    worktree_path: string;
+    updated_at: string;
+    last_error: string | null;
+  } | null;
 };
 
 type AutonomyMaintainSummary = {
@@ -197,8 +341,61 @@ type AutonomyMaintainSummary = {
   last_eval_run_at: string | null;
   last_eval_score: number | null;
   eval_due: boolean;
+  eval_health: {
+    suite_id: string;
+    minimum_eval_score: number;
+    below_threshold: boolean;
+    never_run: boolean;
+    healthy: boolean;
+  };
+  current_attention: string[];
   last_actions: string[];
   last_attention: string[];
+  last_error: string | null;
+  degraded_subsystem_count: number;
+  running_subsystem_count: number;
+  subsystems: Record<
+    "transcript_auto_squish" | "imprint_auto_snapshot" | "trichat_auto_retention" | "trichat_turn_watchdog",
+    {
+      enabled: boolean;
+      running: boolean;
+      stale: boolean;
+      interval_seconds: number;
+      last_tick_at: string | null;
+      last_success_at: string | null;
+      last_error: string | null;
+      backlog_count: number;
+      oldest_backlog_age_seconds: number | null;
+      last_result: "healthy" | "idle" | "stopped" | "error";
+    }
+  >;
+  runtime: {
+    running: boolean;
+    in_tick: boolean;
+    started_at: string | null;
+    last_tick_at: string | null;
+    last_error: string | null;
+    tick_count: number;
+    config: Record<string, unknown>;
+  };
+};
+
+type ReactionEngineSummary = {
+  enabled: boolean;
+  interval_seconds: number;
+  dedupe_window_seconds: number;
+  channels: string[];
+  last_run_at: string | null;
+  last_run_age_seconds: number | null;
+  stale: boolean;
+  last_sent_at: string | null;
+  last_sent_count: number;
+  recent_notifications: Array<{
+    key: string;
+    title: string;
+    level: "info" | "warn" | "critical";
+    sent_at: string;
+  }>;
   last_error: string | null;
   runtime: {
     running: boolean;
@@ -207,7 +404,36 @@ type AutonomyMaintainSummary = {
     last_tick_at: string | null;
     last_error: string | null;
     tick_count: number;
+    config: Record<string, unknown>;
   };
+};
+
+type SwarmCoordinationSummary = {
+  active_profile_count: number;
+  checkpoint_artifact_count: number;
+  topology_counts: Record<"hierarchical" | "mesh" | "ring" | "star" | "adaptive", number>;
+  consensus_counts: Record<"majority" | "weighted" | "escalating", number>;
+  active_profiles: Array<{
+    goal_id: string;
+    title: string;
+    plan_id: string | null;
+    topology: string | null;
+    consensus_mode: string | null;
+    queen_mode: string | null;
+    execution_mode: string | null;
+    checkpoint_cadence: string | null;
+    checkpoint_count: number;
+    last_checkpoint_at: string | null;
+    memory_match_count: number;
+  }>;
+  recent_checkpoints: Array<{
+    artifact_id: string;
+    goal_id: string | null;
+    plan_id: string | null;
+    created_at: string;
+    phase: string | null;
+    topology: string | null;
+  }>;
 };
 
 function countByStatus<T extends { status: string }>(records: T[]) {
@@ -255,6 +481,178 @@ function resolveGoalPlan(storage: Storage, goal: GoalRecord): PlanRecord | null 
       .find((plan) => !isTerminalPlanStatus(plan.status)) ??
     null
   );
+}
+
+function summarizeSwarmCoordination(storage: Storage, openGoals: GoalRecord[]): SwarmCoordinationSummary {
+  const checkpoints = storage.listArtifacts({
+    artifact_type: "swarm.checkpoint",
+    limit: 50,
+  });
+  const activeProfiles = openGoals
+    .map((goal) => {
+      const plan = resolveGoalPlan(storage, goal);
+      const profile =
+        (isRecord(plan?.metadata?.swarm_profile) ? plan?.metadata?.swarm_profile : null) ??
+        (isRecord(goal.metadata?.swarm_profile) ? goal.metadata?.swarm_profile : null);
+      if (!isRecord(profile)) {
+        return null;
+      }
+      const memoryPreflight =
+        (isRecord(plan?.metadata?.memory_preflight) ? plan?.metadata?.memory_preflight : null) ??
+        (isRecord(goal.metadata?.memory_preflight) ? goal.metadata?.memory_preflight : null);
+      const relatedCheckpoints = checkpoints.filter(
+        (artifact) => artifact.goal_id === goal.goal_id || (plan && artifact.plan_id === plan.plan_id)
+      );
+      const lastCheckpointAt =
+        relatedCheckpoints
+          .map((artifact) => artifact.created_at)
+          .sort((left, right) => right.localeCompare(left))[0] ?? null;
+      return {
+        goal_id: goal.goal_id,
+        title: goal.title,
+        plan_id: plan?.plan_id ?? null,
+        topology: readString(profile.topology),
+        consensus_mode: readString(profile.consensus_mode),
+        queen_mode: readString(profile.queen_mode),
+        execution_mode: readString(profile.execution_mode),
+        checkpoint_cadence: readString(isRecord(profile.checkpoint_policy) ? profile.checkpoint_policy.cadence : null),
+        checkpoint_count: relatedCheckpoints.length,
+        last_checkpoint_at: lastCheckpointAt,
+        memory_match_count:
+          typeof memoryPreflight?.match_count === "number" && Number.isFinite(memoryPreflight.match_count)
+            ? Math.max(0, Math.round(memoryPreflight.match_count))
+            : 0,
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+  const topologyCounts = activeProfiles.reduce<SwarmCoordinationSummary["topology_counts"]>(
+    (acc, entry) => {
+      if (entry.topology === "hierarchical" || entry.topology === "mesh" || entry.topology === "ring" || entry.topology === "star" || entry.topology === "adaptive") {
+        acc[entry.topology] += 1;
+      }
+      return acc;
+    },
+    {
+      hierarchical: 0,
+      mesh: 0,
+      ring: 0,
+      star: 0,
+      adaptive: 0,
+    }
+  );
+  const consensusCounts = activeProfiles.reduce<SwarmCoordinationSummary["consensus_counts"]>(
+    (acc, entry) => {
+      if (entry.consensus_mode === "majority" || entry.consensus_mode === "weighted" || entry.consensus_mode === "escalating") {
+        acc[entry.consensus_mode] += 1;
+      }
+      return acc;
+    },
+    {
+      majority: 0,
+      weighted: 0,
+      escalating: 0,
+    }
+  );
+  return {
+    active_profile_count: activeProfiles.length,
+    checkpoint_artifact_count: checkpoints.length,
+    topology_counts: topologyCounts,
+    consensus_counts: consensusCounts,
+    active_profiles: activeProfiles,
+    recent_checkpoints: checkpoints.slice(0, 8).map((artifact) => {
+      const content = isRecord(artifact.content_json) ? artifact.content_json : {};
+      const profile = isRecord(content.profile) ? content.profile : {};
+      return {
+        artifact_id: artifact.artifact_id,
+        goal_id: artifact.goal_id,
+        plan_id: artifact.plan_id,
+        created_at: artifact.created_at,
+        phase: readString(content.phase),
+        topology: readString(profile.topology),
+      };
+    }),
+  };
+}
+
+function summarizeWorkflowExports(storage: Storage): WorkflowExportSummary {
+  const bundles = storage.listArtifacts({
+    artifact_type: "workflow.bundle",
+    limit: 25,
+  });
+  const metrics = storage.listArtifacts({
+    artifact_type: "workflow.metrics_jsonl",
+    limit: 25,
+  });
+  const argoContracts = storage.listArtifacts({
+    artifact_type: "workflow.argo_contract",
+    limit: 25,
+  });
+  const latestBundle = bundles[0] ?? null;
+  const latestMetrics = metrics[0] ?? null;
+  const latestArgoContract = argoContracts[0] ?? null;
+  const latestBundleJson = isRecord(latestBundle?.content_json) ? latestBundle?.content_json : {};
+  const latestMetricsJson = isRecord(latestMetrics?.content_json) ? latestMetrics?.content_json : {};
+  const latestArgoJson = isRecord(latestArgoContract?.content_json) ? latestArgoContract?.content_json : {};
+
+  return {
+    bundle_count: bundles.length,
+    metrics_count: metrics.length,
+    argo_contract_count: argoContracts.length,
+    latest_bundle: latestBundle
+      ? {
+          artifact_id: latestBundle.artifact_id,
+          created_at: latestBundle.created_at,
+          goal_id: latestBundle.goal_id,
+          plan_id: latestBundle.plan_id,
+          uri: latestBundle.uri,
+          export_id: readString(latestBundle.metadata?.export_id),
+          step_count: typeof latestBundleJson.step_count === "number" ? Math.max(0, Math.round(latestBundleJson.step_count)) : 0,
+          task_count: typeof latestBundleJson.task_count === "number" ? Math.max(0, Math.round(latestBundleJson.task_count)) : 0,
+          run_count: typeof latestBundleJson.run_count === "number" ? Math.max(0, Math.round(latestBundleJson.run_count)) : 0,
+          bundle_sha256: readString(latestBundleJson.bundle_sha256) ?? latestBundle.hash,
+        }
+      : null,
+    latest_metrics: latestMetrics
+      ? {
+          artifact_id: latestMetrics.artifact_id,
+          created_at: latestMetrics.created_at,
+          uri: latestMetrics.uri,
+          export_id: readString(latestMetrics.metadata?.export_id),
+          line_count: typeof latestMetricsJson.line_count === "number" ? Math.max(0, Math.round(latestMetricsJson.line_count)) : 0,
+        }
+      : null,
+    latest_argo_contract: latestArgoContract
+      ? {
+          artifact_id: latestArgoContract.artifact_id,
+          created_at: latestArgoContract.created_at,
+          uri: latestArgoContract.uri,
+          export_id: readString(latestArgoContract.metadata?.export_id),
+          contract_mode: readString(latestArgoJson.contract_mode),
+        }
+      : null,
+  };
+}
+
+function summarizeRuntimeWorkers(storage: Storage): RuntimeWorkerSummary {
+  const live = summarizeLiveRuntimeWorkers(storage, 100);
+  const latest = live.summary.latest_session;
+  return {
+    session_count: live.summary.session_count,
+    active_count: live.summary.active_count,
+    counts: live.summary.counts,
+    runtime_counts: live.summary.runtime_counts,
+    latest_session: latest
+      ? {
+          session_id: latest.session_id,
+          runtime_id: latest.runtime_id,
+          status: latest.status,
+          task_id: latest.task_id,
+          worktree_path: latest.worktree_path,
+          updated_at: latest.updated_at,
+          last_error: latest.last_error,
+        }
+      : null,
+  };
 }
 
 function summarizeGoalExecution(plan: PlanRecord | null, steps: PlanStepRecord[]): GoalExecutionSnapshot {
@@ -534,9 +932,16 @@ function summarizeAdaptiveSession(session: AgentSessionRecord): AdaptiveSessionS
   };
 }
 
-function summarizeWorkerFabric(storage: Storage): HostFabricSummary {
-  const state = storage.getWorkerFabricState();
-  if (!state) {
+function summarizeWorkerFabric(storage: Storage, state?: WorkerFabricStateRecord): HostFabricSummary {
+  const persistedState = storage.getWorkerFabricState();
+  const effectiveState =
+    state ??
+    resolveEffectiveWorkerFabric(storage, {
+      fallback_workspace_root: process.cwd(),
+      fallback_worker_count: 1,
+      fallback_shell: "/bin/zsh",
+    });
+  if (!persistedState && effectiveState.hosts.length === 0) {
     return {
       enabled: false,
       strategy: null,
@@ -558,7 +963,7 @@ function summarizeWorkerFabric(storage: Storage): HostFabricSummary {
     };
   }
 
-  const hosts = [...state.hosts].sort((left, right) => left.host_id.localeCompare(right.host_id));
+  const hosts = [...effectiveState.hosts].sort((left, right) => left.host_id.localeCompare(right.host_id));
   const enabledHosts = hosts.filter((host) => host.enabled);
   const healthCounts = hosts.reduce<Record<"healthy" | "degraded" | "offline", number>>(
     (acc, host) => {
@@ -583,9 +988,9 @@ function summarizeWorkerFabric(storage: Storage): HostFabricSummary {
   );
 
   return {
-    enabled: state.enabled,
-    strategy: state.strategy,
-    default_host_id: state.default_host_id,
+    enabled: effectiveState.enabled,
+    strategy: effectiveState.strategy,
+    default_host_id: effectiveState.default_host_id,
     host_count: hosts.length,
     enabled_host_count: enabledHosts.length,
     worker_count: hosts.reduce((sum, host) => sum + host.worker_count, 0),
@@ -593,21 +998,53 @@ function summarizeWorkerFabric(storage: Storage): HostFabricSummary {
     health_counts: healthCounts,
     transport_counts: transportCounts,
     hosts: hosts.map((host) => ({
+      ...resolveHostCapacityProfile(host),
       host_id: host.host_id,
       transport: host.transport,
       enabled: host.enabled,
       worker_count: host.worker_count,
       health_state: host.telemetry.health_state,
-      health_score: host.telemetry.health_state === "offline" ? 0 : host.telemetry.health_state === "degraded" ? 0.55 : 1,
+      health_score: computeHostHealthScore(host.telemetry),
       queue_depth: host.telemetry.queue_depth,
       active_tasks: host.telemetry.active_tasks,
       heartbeat_at: host.telemetry.heartbeat_at,
+      cpu_utilization: host.telemetry.cpu_utilization,
+      ram_available_gb: host.telemetry.ram_available_gb,
+      ram_total_gb: host.telemetry.ram_total_gb,
+      swap_used_gb: host.telemetry.swap_used_gb,
+      thermal_pressure: host.telemetry.thermal_pressure,
       tags: host.tags,
     })),
   };
 }
 
-function summarizeModelRouter(storage: Storage): ModelRouterSummary {
+function summarizeModelRouter(storage: Storage, options?: { effective_worker_fabric?: WorkerFabricStateRecord }): ModelRouterSummary {
+  const routingTaskKinds = ["planning", "coding", "research", "verification"] as const;
+  const routingOutlook = routingTaskKinds.map((taskKind) => {
+    const preferredTags = routingOutlookPreferredTags(taskKind);
+    const route = routeModelBackends(storage, {
+      task_kind: taskKind,
+      preferred_tags: preferredTags,
+      effective_worker_fabric: options?.effective_worker_fabric,
+    });
+    const topPlanned = route.planned_backends[0] ?? null;
+    return {
+      task_kind: taskKind,
+      preferred_tags: preferredTags,
+      selected_backend_id: route.selected_backend?.backend_id ?? null,
+      selected_provider: route.selected_backend?.provider ?? null,
+      selected_host_id: route.selected_backend?.host_id ?? null,
+      selected_locality: route.selected_backend?.locality ?? null,
+      selected_score: typeof route.ranked_backends[0]?.score === "number" ? route.ranked_backends[0].score : null,
+      planned_backend_count: route.planned_backends.length,
+      top_planned_backend_id: topPlanned?.backend_id ?? null,
+      top_planned_provider: topPlanned?.provider ?? null,
+      top_planned_node_id: topPlanned?.node_id ?? null,
+      top_planned_node_title: topPlanned?.title ?? null,
+      top_planned_score: typeof topPlanned?.score === "number" ? topPlanned.score : null,
+    };
+  });
+
   const state = storage.getModelRouterState();
   if (!state) {
     return {
@@ -621,6 +1058,7 @@ function summarizeModelRouter(storage: Storage): ModelRouterSummary {
         local: 0,
         remote: 0,
       },
+      routing_outlook: routingOutlook,
       backends: [],
     };
   }
@@ -649,6 +1087,7 @@ function summarizeModelRouter(storage: Storage): ModelRouterSummary {
     enabled_backend_count: backends.filter((backend) => backend.enabled).length,
     provider_counts: providerCounts,
     locality_counts: localityCounts,
+    routing_outlook: routingOutlook,
     backends: backends.map((backend) => ({
       backend_id: backend.backend_id,
       provider: backend.provider,
@@ -662,9 +1101,53 @@ function summarizeModelRouter(storage: Storage): ModelRouterSummary {
       success_rate: backend.success_rate,
       win_rate: backend.win_rate,
       heartbeat_at: backend.heartbeat_at,
+      probe_healthy:
+        typeof backend.capabilities?.probe_healthy === "boolean" ? Boolean(backend.capabilities.probe_healthy) : null,
+      probe_model_known:
+        typeof backend.capabilities?.probe_model_known === "boolean" ? Boolean(backend.capabilities.probe_model_known) : null,
+      probe_model_loaded:
+        typeof backend.capabilities?.probe_model_loaded === "boolean" ? Boolean(backend.capabilities.probe_model_loaded) : null,
+      probe_generated_at:
+        typeof backend.capabilities?.probe_generated_at === "string" ? String(backend.capabilities.probe_generated_at) : null,
+      probe_service_latency_ms:
+        typeof backend.capabilities?.probe_service_latency_ms === "number"
+          ? Number(backend.capabilities.probe_service_latency_ms)
+          : null,
+      probe_benchmark_latency_ms:
+        typeof backend.capabilities?.probe_benchmark_latency_ms === "number"
+          ? Number(backend.capabilities.probe_benchmark_latency_ms)
+          : null,
+      probe_resident_model_count:
+        typeof backend.capabilities?.probe_resident_model_count === "number"
+          ? Number(backend.capabilities.probe_resident_model_count)
+          : null,
+      probe_resident_vram_gb:
+        typeof backend.capabilities?.probe_resident_vram_gb === "number"
+          ? Number(backend.capabilities.probe_resident_vram_gb)
+          : null,
+      probe_resident_expires_at:
+        typeof backend.capabilities?.probe_resident_expires_at === "string"
+          ? String(backend.capabilities.probe_resident_expires_at)
+          : null,
+      probe_error:
+        typeof backend.capabilities?.probe_error === "string" && String(backend.capabilities.probe_error).trim().length > 0
+          ? String(backend.capabilities.probe_error)
+          : null,
       tags: backend.tags,
     })),
   };
+}
+
+function summarizeClusterTopology(storage: Storage): ClusterTopologySummary {
+  const state: ClusterTopologyStateRecord | null = storage.getClusterTopologyState();
+  return summarizeClusterTopologyState(
+    state ?? {
+      enabled: false,
+      default_node_id: null,
+      nodes: [],
+      updated_at: new Date().toISOString(),
+    }
+  );
 }
 
 function summarizeEvalSuites(storage: Storage): EvalSummary {
@@ -712,6 +1195,37 @@ function summarizeEvalSuites(storage: Storage): EvalSummary {
   };
 }
 
+function summarizeObservability(storage: Storage): ObservabilitySummary {
+  const summary = storage.summarizeObservabilityDocuments({});
+  const recentWindow = new Date(Date.now() - 15 * 60_000).toISOString();
+  const recentCritical = storage.listObservabilityDocuments({
+    since: recentWindow,
+    levels: ["critical"],
+    limit: 10,
+  });
+  const recentErrors = storage.listObservabilityDocuments({
+    since: recentWindow,
+    levels: ["error"],
+    limit: 20,
+  });
+  const actionableRecentCritical = recentCritical.filter((entry) => !isBenignObservabilityDocument(entry));
+  const actionableRecentErrors = recentErrors.filter((entry) => !isBenignObservabilityDocument(entry));
+  return {
+    document_count: summary.count,
+    latest_document_at: summary.latest_created_at,
+    recent_error_count: actionableRecentErrors.length,
+    recent_critical_count: actionableRecentCritical.length,
+    index_name_counts: summary.index_name_counts.slice(0, 6),
+    source_kind_counts: summary.source_kind_counts.slice(0, 6),
+    service_counts: summary.service_counts.slice(0, 6),
+    host_counts: summary.host_counts.slice(0, 6),
+    recent_documents: storage.listObservabilityDocuments({
+      since: recentWindow,
+      limit: 6,
+    }),
+  };
+}
+
 function summarizeOrgPrograms(storage: Storage): OrgProgramSummary {
   const state: OrgProgramsStateRecord | null = storage.getOrgProgramsState();
   if (!state) {
@@ -721,6 +1235,9 @@ function summarizeOrgPrograms(storage: Storage): OrgProgramSummary {
       active_role_count: 0,
       version_count: 0,
       active_version_count: 0,
+      candidate_version_count: 0,
+      optimized_role_count: 0,
+      last_optimizer_run_at: null,
       status_counts: {
         candidate: 0,
         active: 0,
@@ -745,6 +1262,17 @@ function summarizeOrgPrograms(storage: Storage): OrgProgramSummary {
     }
   );
 
+  const optimizerRunAts = roles
+    .map((role) => {
+      const optimizer = role.metadata.optimizer && typeof role.metadata.optimizer === "object"
+        ? (role.metadata.optimizer as Record<string, unknown>)
+        : null;
+      const lastRunAt = typeof optimizer?.last_run_at === "string" ? optimizer.last_run_at : null;
+      return lastRunAt;
+    })
+    .filter((entry): entry is string => Boolean(entry))
+    .sort((left, right) => right.localeCompare(left));
+
   return {
     enabled: state.enabled,
     role_count: roles.length,
@@ -754,26 +1282,157 @@ function summarizeOrgPrograms(storage: Storage): OrgProgramSummary {
       (sum, role) => sum + role.versions.filter((version) => version.status === "active").length,
       0
     ),
+    candidate_version_count: roles.reduce(
+      (sum, role) => sum + role.versions.filter((version) => version.status === "candidate").length,
+      0
+    ),
+    optimized_role_count: roles.filter((role) => {
+      const optimizer = role.metadata.optimizer && typeof role.metadata.optimizer === "object"
+        ? (role.metadata.optimizer as Record<string, unknown>)
+        : null;
+      return typeof optimizer?.last_run_at === "string" && optimizer.last_run_at.length > 0;
+    }).length,
+    last_optimizer_run_at: optimizerRunAts[0] ?? null,
     status_counts: statusCounts,
     roles: roles.map((role) => ({
+      last_optimizer_run_at:
+        role.metadata.optimizer && typeof role.metadata.optimizer === "object" && typeof (role.metadata.optimizer as Record<string, unknown>).last_run_at === "string"
+          ? String((role.metadata.optimizer as Record<string, unknown>).last_run_at)
+          : null,
+      last_optimizer_improvement:
+        role.metadata.optimizer && typeof role.metadata.optimizer === "object" && typeof (role.metadata.optimizer as Record<string, unknown>).last_improvement === "number"
+          ? Number((role.metadata.optimizer as Record<string, unknown>).last_improvement)
+          : null,
       role_id: role.role_id,
       title: role.title,
       lane: role.lane,
       version_count: role.versions.length,
       active_version_id: role.active_version_id,
+      candidate_version_count: role.versions.filter((version) => version.status === "candidate").length,
     })),
   };
 }
 
-function summarizeAutonomyMaintain(state: AutonomyMaintainStateRecord | null): AutonomyMaintainSummary {
-  const runtime = getAutonomyMaintainRuntimeStatus();
+function summarizeMaintenanceSubsystem(params: {
+  enabled: boolean;
+  interval_seconds: number;
+  runtime: Record<string, unknown>;
+  backlog_count?: number;
+  oldest_backlog_timestamp?: string | null;
+}) {
+  const running = params.runtime.running === true;
+  const lastTickAt = typeof params.runtime.last_tick_at === "string" && params.runtime.last_tick_at.trim()
+    ? params.runtime.last_tick_at
+    : null;
+  const lastSuccessAt =
+    typeof params.runtime.last_success_at === "string" && params.runtime.last_success_at.trim()
+      ? params.runtime.last_success_at
+      : null;
+  const lastError =
+    typeof params.runtime.last_error === "string" && params.runtime.last_error.trim()
+      ? params.runtime.last_error
+      : null;
+  const startedAt =
+    typeof params.runtime.started_at === "string" && params.runtime.started_at.trim()
+      ? params.runtime.started_at
+      : null;
+  const startedAgeSeconds = ageSeconds(startedAt) ?? Number.POSITIVE_INFINITY;
+  const startupGraceActive =
+    running === true && !lastTickAt && startedAgeSeconds <= Math.max(params.interval_seconds * 2, 120);
+  const lastTickAgeSeconds = ageSeconds(lastTickAt) ?? Number.POSITIVE_INFINITY;
+  const stale =
+    params.enabled &&
+    startupGraceActive !== true &&
+    lastTickAgeSeconds > Math.max(params.interval_seconds * 2, 120);
+  const oldestBacklogAgeSeconds =
+    params.backlog_count && params.backlog_count > 0
+      ? ageSeconds(params.oldest_backlog_timestamp ?? null)
+      : null;
+  return {
+    enabled: params.enabled,
+    running,
+    stale,
+    interval_seconds: params.interval_seconds,
+    last_tick_at: lastTickAt,
+    last_success_at: lastSuccessAt,
+    last_error: lastError,
+    backlog_count: Math.max(0, Math.round(params.backlog_count ?? 0)),
+    oldest_backlog_age_seconds: oldestBacklogAgeSeconds,
+    last_result: lastError ? "error" : running ? (stale ? "idle" : "healthy") : "stopped",
+  } as const;
+}
+
+export function summarizeAutonomyMaintain(state: AutonomyMaintainStateRecord | null, storage: Storage): AutonomyMaintainSummary {
+  const localRuntime = getAutonomyMaintainRuntimeStatus();
+  const transcriptState = storage.getTranscriptAutoSquishState();
+  const transcriptBacklog = storage.listTranscriptRunsWithPending(200);
+  const transcriptOldest = transcriptBacklog.reduce<string | null>((oldest, run) => {
+    if (!run.oldest_timestamp) {
+      return oldest;
+    }
+    if (!oldest) {
+      return run.oldest_timestamp;
+    }
+    return Date.parse(run.oldest_timestamp) < Date.parse(oldest) ? run.oldest_timestamp : oldest;
+  }, null);
+  const imprintState = storage.getImprintAutoSnapshotState();
+  const retentionState = storage.getTriChatAutoRetentionState();
+  const watchdogState = storage.getTriChatTurnWatchdogState();
+  const staleTurns = storage.listStaleRunningTriChatTurns({
+    stale_before_iso: new Date(Date.now() - (watchdogState?.stale_after_seconds ?? 180) * 1000).toISOString(),
+    limit: watchdogState?.batch_limit ?? 200,
+  });
+  const subsystems = {
+    transcript_auto_squish: summarizeMaintenanceSubsystem({
+      enabled: transcriptState?.enabled ?? false,
+      interval_seconds: transcriptState?.interval_seconds ?? 60,
+      runtime: getAutoSquishRuntimeStatus(),
+      backlog_count: transcriptBacklog.reduce((sum, run) => sum + Math.max(0, run.unsquished_count), 0),
+      oldest_backlog_timestamp: transcriptOldest,
+    }),
+    imprint_auto_snapshot: summarizeMaintenanceSubsystem({
+      enabled: imprintState?.enabled ?? false,
+      interval_seconds: imprintState?.interval_seconds ?? 900,
+      runtime: getAutoSnapshotRuntimeStatus(),
+    }),
+    trichat_auto_retention: summarizeMaintenanceSubsystem({
+      enabled: retentionState?.enabled ?? false,
+      interval_seconds: retentionState?.interval_seconds ?? 600,
+      runtime: getTriChatAutoRetentionRuntimeStatus(),
+    }),
+    trichat_turn_watchdog: summarizeMaintenanceSubsystem({
+      enabled: watchdogState?.enabled ?? false,
+      interval_seconds: watchdogState?.interval_seconds ?? 30,
+      runtime: getTriChatTurnWatchdogRuntimeStatus(),
+      backlog_count: staleTurns.length,
+      oldest_backlog_timestamp: staleTurns[0]?.updated_at ?? null,
+    }),
+  } as const;
+  const degradedSubsystemCount = Object.values(subsystems).filter(
+    (subsystem) => subsystem.enabled && (subsystem.running !== true || subsystem.stale || Boolean(subsystem.last_error))
+  ).length;
+  const runningSubsystemCount = Object.values(subsystems).filter(
+    (subsystem) => subsystem.enabled && subsystem.running === true
+  ).length;
+  const inferredRuntimeRunning =
+    localRuntime.running === true ||
+    (state?.enabled === true &&
+      !localRuntime.last_error &&
+      (ageSeconds(state.last_run_at) ?? Number.POSITIVE_INFINITY) <= Math.max(state.interval_seconds * 3, 300));
+  const runtime = {
+    ...localRuntime,
+    local_running: localRuntime.running,
+    inferred_running: localRuntime.running !== true && inferredRuntimeRunning,
+    running: inferredRuntimeRunning,
+    last_tick_at: localRuntime.last_tick_at || state?.last_run_at || null,
+  };
   if (!state) {
     return {
-      enabled: false,
+      enabled: runtime.running === true,
       interval_seconds: 120,
       learning_review_interval_seconds: 300,
       eval_interval_seconds: 21600,
-      last_run_at: null,
+      last_run_at: runtime.last_tick_at,
       last_run_age_seconds: null,
       stale: true,
       last_bootstrap_ready_at: null,
@@ -785,15 +1444,71 @@ function summarizeAutonomyMaintain(state: AutonomyMaintainStateRecord | null): A
       last_eval_run_at: null,
       last_eval_score: null,
       eval_due: true,
+      eval_health: {
+        suite_id: "autonomy.control-plane",
+        minimum_eval_score: 75,
+        below_threshold: true,
+        never_run: true,
+        healthy: false,
+      },
+      current_attention: ["autonomy.maintain.never_started", "eval.autonomy.control-plane.never_run"],
       last_actions: [],
       last_attention: [],
       last_error: null,
+      degraded_subsystem_count: degradedSubsystemCount,
+      running_subsystem_count: runningSubsystemCount,
+      subsystems,
       runtime,
     };
   }
   const lastRunAgeSeconds = ageSeconds(state.last_run_at);
-  const lastEvalAgeSeconds = ageSeconds(state.last_eval_run_at);
-  const stale = lastRunAgeSeconds === null ? true : lastRunAgeSeconds > Math.max(state.interval_seconds * 3, 300);
+  const evalHealth = buildEvalHealth(state, {
+    run_eval_if_due: runtime.config.run_eval_if_due ?? state.run_eval_if_due ?? true,
+    eval_interval_seconds: Number(runtime.config.eval_interval_seconds ?? state.eval_interval_seconds ?? 21600),
+    eval_suite_id: String(runtime.config.eval_suite_id ?? state.eval_suite_id ?? "autonomy.control-plane"),
+    minimum_eval_score: Number(runtime.config.minimum_eval_score ?? state.minimum_eval_score ?? 75),
+    current_dependency_fingerprint: computeEvalDependencyFingerprint(
+      storage,
+      String(runtime.config.eval_suite_id ?? state.eval_suite_id ?? "autonomy.control-plane")
+    ),
+  });
+  const startupGraceActive =
+    runtime.running === true &&
+    !runtime.last_tick_at &&
+    ((ageSeconds(runtime.started_at) ?? Number.POSITIVE_INFINITY) <= Math.max(state.interval_seconds * 2, 120));
+  const stale =
+    startupGraceActive !== true &&
+    (lastRunAgeSeconds === null ? true : lastRunAgeSeconds > Math.max(state.interval_seconds * 3, 300));
+  const currentAttention: string[] = [];
+  if (!runtime.running) {
+    currentAttention.push("autonomy.maintain.not_running");
+  } else if (stale) {
+    currentAttention.push("autonomy.maintain.stale");
+  }
+  if (state.last_error) {
+    currentAttention.push("autonomy.maintain.error");
+  }
+  if (evalHealth.below_threshold) {
+    currentAttention.push(`eval.${evalHealth.suite_id}.below_threshold`);
+  } else if (evalHealth.due_by_dependency_drift) {
+    currentAttention.push(`eval.${evalHealth.suite_id}.definition_changed`);
+  } else if (evalHealth.due_by_age) {
+    currentAttention.push(`eval.${evalHealth.suite_id}.overdue`);
+  }
+  for (const [subsystemKey, subsystem] of Object.entries(subsystems)) {
+    if (!subsystem.enabled) {
+      continue;
+    }
+    if (subsystem.running !== true) {
+      currentAttention.push(`${subsystemKey}.not_running`);
+    }
+    if (subsystem.stale) {
+      currentAttention.push(`${subsystemKey}.stale`);
+    }
+    if (subsystem.last_error) {
+      currentAttention.push(`${subsystemKey}.error`);
+    }
+  }
   return {
     enabled: state.enabled,
     interval_seconds: state.interval_seconds,
@@ -810,9 +1525,61 @@ function summarizeAutonomyMaintain(state: AutonomyMaintainStateRecord | null): A
     last_learning_active_agent_count: state.last_learning_active_agent_count,
     last_eval_run_at: state.last_eval_run_at,
     last_eval_score: state.last_eval_score,
-    eval_due: lastEvalAgeSeconds === null ? true : lastEvalAgeSeconds > state.eval_interval_seconds,
+    eval_due: evalHealth.due,
+    eval_health: {
+      suite_id: evalHealth.suite_id,
+      minimum_eval_score: evalHealth.minimum_eval_score,
+      below_threshold: evalHealth.below_threshold,
+      never_run: evalHealth.never_run,
+      healthy: evalHealth.healthy,
+    },
+    current_attention: [...new Set(currentAttention)],
     last_actions: state.last_actions,
     last_attention: state.last_attention,
+    last_error: state.last_error,
+    degraded_subsystem_count: degradedSubsystemCount,
+    running_subsystem_count: runningSubsystemCount,
+    subsystems,
+    runtime,
+  };
+}
+
+function summarizeReactionEngine(state: ReactionEngineStateRecord | null): ReactionEngineSummary {
+  const runtime = getReactionEngineRuntimeStatus();
+  if (!state) {
+    return {
+      enabled: false,
+      interval_seconds: 120,
+      dedupe_window_seconds: 1800,
+      channels: ["desktop"],
+      last_run_at: null,
+      last_run_age_seconds: null,
+      stale: true,
+      last_sent_at: null,
+      last_sent_count: 0,
+      recent_notifications: [],
+      last_error: null,
+      runtime,
+    };
+  }
+  const lastRunAgeSeconds = ageSeconds(state.last_run_at);
+  const startupGraceActive =
+    runtime.running === true &&
+    !runtime.last_tick_at &&
+    ((ageSeconds(runtime.started_at) ?? Number.POSITIVE_INFINITY) <= Math.max(state.interval_seconds * 2, 120));
+  return {
+    enabled: state.enabled,
+    interval_seconds: state.interval_seconds,
+    dedupe_window_seconds: state.dedupe_window_seconds,
+    channels: state.channels,
+    last_run_at: state.last_run_at,
+    last_run_age_seconds: lastRunAgeSeconds,
+    stale:
+      startupGraceActive !== true &&
+      (lastRunAgeSeconds === null ? true : lastRunAgeSeconds > Math.max(state.interval_seconds * 3, 300)),
+    last_sent_at: state.last_sent_at,
+    last_sent_count: state.last_sent_count,
+    recent_notifications: state.recent_notifications,
     last_error: state.last_error,
     runtime,
   };
@@ -831,14 +1598,16 @@ function deriveKernelState(params: {
   active_session_count: number;
   autonomy_maintain_enabled: boolean;
   autonomy_maintain_running: boolean;
+  autonomy_eval_due: boolean;
+  autonomy_eval_healthy: boolean;
 }) {
   if (params.failed_goal_count > 0 || params.failed_task_count > 0 || params.failed_experiment_count > 0) {
     return "degraded";
   }
   if (
     params.autonomy_maintain_enabled &&
-    !params.autonomy_maintain_running &&
-    (params.ready_step_count > 0 || params.pending_task_count > 0)
+    (!params.autonomy_maintain_running || params.autonomy_eval_due || !params.autonomy_eval_healthy) &&
+    (params.ready_step_count > 0 || params.pending_task_count > 0 || params.active_session_count > 0)
   ) {
     return "degraded";
   }
@@ -879,10 +1648,25 @@ function taskFailuresRecoveredByActiveSessions(
     }
     const profile = getAdaptiveWorkerProfile(session);
     const recoveredAtMs = profile.last_completed_at ? Date.parse(profile.last_completed_at) : Number.NaN;
-    if (Number.isNaN(recoveredAtMs) || recoveredAtMs <= failedAtMs) {
-      return false;
-    }
-    return adaptive.performance.low.recovery_streak >= Math.max(4, Math.min(8, profile.total_failed * 2));
+    const metadata = isRecord(session.metadata) ? session.metadata : null;
+    const lastTickOk = metadata?.last_tick_ok === true;
+    const lastTickAt = readString(metadata?.last_tick_at);
+    const tickRecoveredAtMs = lastTickOk && lastTickAt ? Date.parse(lastTickAt) : Number.NaN;
+    const recentLow = adaptive.performance.low;
+    const recoveredByCompletion =
+      !Number.isNaN(recoveredAtMs) &&
+      recoveredAtMs > failedAtMs &&
+      (
+        recentLow.recovery_streak >= Math.max(4, Math.min(8, profile.total_failed * 2)) ||
+        (recentLow.effective_recent_failed <= 2 &&
+          recentLow.recent_completed >= Math.max(4, recentLow.effective_recent_failed * 2) &&
+          recentLow.recovery_streak >= 1)
+      );
+    const recoveredByOperationalTick =
+      !Number.isNaN(tickRecoveredAtMs) &&
+      tickRecoveredAtMs > failedAtMs &&
+      profile.current_task.task_id === null;
+    return recoveredByCompletion || recoveredByOperationalTick;
   });
 }
 
@@ -914,11 +1698,24 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   const recentArtifacts = storage.listArtifacts({
     limit: artifactLimit,
   });
-  const workerFabricSummary = summarizeWorkerFabric(storage);
-  const modelRouterSummary = summarizeModelRouter(storage);
+  const effectiveWorkerFabric = resolveEffectiveWorkerFabric(storage, {
+    fallback_workspace_root: process.cwd(),
+    fallback_worker_count: 1,
+    fallback_shell: "/bin/zsh",
+  });
+  const workerFabricSummary = summarizeWorkerFabric(storage, effectiveWorkerFabric);
+  const clusterTopologySummary = summarizeClusterTopology(storage);
+  const modelRouterSummary = summarizeModelRouter(storage, {
+    effective_worker_fabric: effectiveWorkerFabric,
+  });
   const evalSummary = summarizeEvalSuites(storage);
+  const observabilitySummary = summarizeObservability(storage);
   const orgProgramSummary = summarizeOrgPrograms(storage);
-  const autonomyMaintainSummary = summarizeAutonomyMaintain(storage.getAutonomyMaintainState());
+  const autonomyMaintainSummary = summarizeAutonomyMaintain(storage.getAutonomyMaintainState(), storage);
+  const reactionEngineSummary = summarizeReactionEngine(storage.getReactionEngineState());
+  const swarmSummary = summarizeSwarmCoordination(storage, openGoals);
+  const workflowExportSummary = summarizeWorkflowExports(storage);
+  const runtimeWorkerSummary = summarizeRuntimeWorkers(storage);
   const goalSummaries = openGoals.map((goal) => {
     const plan = resolveGoalPlan(storage, goal);
     const steps = plan ? storage.listPlanSteps(plan.plan_id) : [];
@@ -1016,6 +1813,8 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     active_session_count: activeSessions.length,
     autonomy_maintain_enabled: autonomyMaintainSummary.enabled,
     autonomy_maintain_running: autonomyMaintainSummary.runtime.running,
+    autonomy_eval_due: autonomyMaintainSummary.eval_due,
+    autonomy_eval_healthy: autonomyMaintainSummary.eval_health.healthy,
   });
 
   const attention: string[] = [];
@@ -1053,14 +1852,11 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     .filter((agentId) => !activeLearningAgents.has(agentId))
     .sort((left, right) => left.localeCompare(right));
   const activeSessionLearningCoverageCount = activeSessionAgentIds.length - uncoveredActiveSessionAgents.length;
-  if ((taskSummary.counts.failed ?? 0) > 0 && taskSummary.last_failed) {
-    attention.push(
-      taskFailuresRecovered
-        ? `Recovered failed task remains in history: ${taskSummary.last_failed.task_id}`
-        : staleTaskFailures
-          ? `Stale failed task remains in history: ${taskSummary.last_failed.task_id}`
-        : `Failed task detected: ${taskSummary.last_failed.task_id}`
-    );
+  if ((taskSummary.counts.failed ?? 0) > 0 && taskSummary.last_failed && !staleTaskFailures) {
+    attention.push(`Failed task detected: ${taskSummary.last_failed.task_id}`);
+  }
+  if ((taskSummary.expired_running_count ?? 0) > 0) {
+    attention.push(`Expired running task leases detected: ${taskSummary.expired_running_count}.`);
   }
   if (totals.blocked_approval_count > 0) {
     attention.push(
@@ -1117,6 +1913,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   }
   if (
     adaptiveSessionCounts.healthy === 0 &&
+    adaptiveSessionCounts.unproven === 0 &&
     activeSessions.length > 0 &&
     ((taskSummary.counts.pending ?? 0) > 0 || totals.ready_step_count > 0)
   ) {
@@ -1136,8 +1933,19 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     attention.push("No worker fabric hosts are configured yet.");
   } else if (workerFabricSummary.enabled_host_count === 0) {
     attention.push("Worker fabric hosts exist, but none are enabled.");
+  } else if (
+    workerFabricSummary.health_counts.healthy === 0 &&
+    workerFabricSummary.health_counts.degraded > 0 &&
+    workerFabricSummary.host_count > 0
+  ) {
+    attention.push("All enabled worker fabric hosts are degraded; dispatch will proceed conservatively.");
   } else if (workerFabricSummary.health_counts.healthy === 0 && workerFabricSummary.host_count > 0) {
     attention.push("Worker fabric has no healthy hosts available.");
+  }
+  if (clusterTopologySummary.node_count === 0) {
+    attention.push("No cluster topology is recorded yet.");
+  } else if (clusterTopologySummary.active_node_count === 0) {
+    attention.push("Cluster topology exists, but no nodes are marked active.");
   }
   if (modelRouterSummary.backend_count === 0) {
     attention.push("No model router backends are configured yet.");
@@ -1152,19 +1960,47 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   } else if (orgProgramSummary.active_version_count === 0) {
     attention.push("Org-program roles exist, but none have an active version yet.");
   }
+  if (openGoals.length > 0 && swarmSummary.active_profile_count === 0) {
+    attention.push("Open goals exist, but none have a persisted swarm topology profile yet.");
+  }
   if (!autonomyMaintainSummary.enabled) {
     attention.push("Background autonomy maintenance has not persisted an enabled state yet.");
   } else if (!autonomyMaintainSummary.runtime.running) {
     attention.push("Background autonomy maintenance is enabled in storage, but the live daemon loop is not running.");
   } else if (autonomyMaintainSummary.stale) {
     attention.push("Background autonomy maintenance is stale and may no longer be refreshing readiness automatically.");
-  } else if (autonomyMaintainSummary.eval_due) {
-    attention.push("Background autonomy maintenance is ready for its next eval health refresh.");
+  } else if (autonomyMaintainSummary.eval_due || !autonomyMaintainSummary.eval_health.healthy) {
+    attention.push("Background autonomy maintenance eval health is not production-ready.");
   }
-  if (autonomyMaintainSummary.last_attention.length > 0) {
+  if (observabilitySummary.recent_critical_count > 0) {
     attention.push(
-      `Background autonomy maintenance last reported attention: ${autonomyMaintainSummary.last_attention.slice(0, 3).join(", ")}.`
+      `Observability captured ${observabilitySummary.recent_critical_count} critical document(s) in the last 15 minutes.`
     );
+  }
+  if (autonomyMaintainSummary.current_attention.length > 0) {
+    attention.push(
+      `Background autonomy maintenance currently needs attention: ${autonomyMaintainSummary.current_attention.slice(0, 3).join(", ")}.`
+    );
+  }
+  const degradedMaintenanceSubsystems = Object.entries(autonomyMaintainSummary.subsystems)
+    .filter(([, subsystem]) => subsystem.enabled && (subsystem.running !== true || subsystem.stale || Boolean(subsystem.last_error)))
+    .map(([key]) => key);
+  if (degradedMaintenanceSubsystems.length > 0) {
+    attention.push(
+      `Maintenance subsystems need attention: ${degradedMaintenanceSubsystems
+        .slice(0, 4)
+        .join(", ")}${degradedMaintenanceSubsystems.length > 4 ? ", ..." : ""}.`
+    );
+  }
+  if (!reactionEngineSummary.enabled) {
+    attention.push("Reaction engine notifications are not enabled yet.");
+  } else if (!reactionEngineSummary.runtime.running) {
+    attention.push("Reaction engine is enabled in storage, but the live notifier loop is not running.");
+  } else if (reactionEngineSummary.stale) {
+    attention.push("Reaction engine is stale and may no longer surface human-attention alerts.");
+  }
+  if (runtimeWorkerSummary.counts.failed > 0) {
+    attention.push("One or more runtime workers failed recently.");
   }
   if (attention.length === 0 && state === "active") {
     attention.push("Kernel is progressing normally.");
@@ -1180,6 +2016,8 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     overview: {
       goal_counts: goalCounts,
       task_counts: taskSummary.counts,
+      failed_task_count: staleTaskFailures ? 0 : taskSummary.counts.failed ?? 0,
+      expired_running_task_count: taskSummary.expired_running_count ?? 0,
       experiment_counts: experimentCounts,
       active_session_count: activeSessions.length,
       adaptive_session_counts: adaptiveSessionCounts,
@@ -1197,10 +2035,23 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
         worker_count: workerFabricSummary.worker_count,
         active_worker_count: workerFabricSummary.active_worker_count,
       },
+      cluster_topology: {
+        node_count: clusterTopologySummary.node_count,
+        active_node_count: clusterTopologySummary.active_node_count,
+        planned_node_count: clusterTopologySummary.planned_node_count,
+        provisioning_node_count: clusterTopologySummary.provisioning_node_count,
+        syncable_worker_host_count: clusterTopologySummary.syncable_worker_host_count,
+        class_counts: clusterTopologySummary.class_counts,
+      },
       model_router: {
         backend_count: modelRouterSummary.backend_count,
         enabled_backend_count: modelRouterSummary.enabled_backend_count,
         provider_counts: modelRouterSummary.provider_counts,
+        routed_task_kind_count: modelRouterSummary.routing_outlook.length,
+        planned_backend_count: modelRouterSummary.routing_outlook.reduce(
+          (sum, entry) => sum + entry.planned_backend_count,
+          0
+        ),
       },
       eval_suites: {
         suite_count: evalSummary.suite_count,
@@ -1213,6 +2064,13 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
         active_role_count: orgProgramSummary.active_role_count,
         version_count: orgProgramSummary.version_count,
         active_version_count: orgProgramSummary.active_version_count,
+        candidate_version_count: orgProgramSummary.candidate_version_count,
+        optimized_role_count: orgProgramSummary.optimized_role_count,
+      },
+      swarm: {
+        active_profile_count: swarmSummary.active_profile_count,
+        checkpoint_artifact_count: swarmSummary.checkpoint_artifact_count,
+        topology_counts: swarmSummary.topology_counts,
       },
       autonomy_maintain: {
         enabled: autonomyMaintainSummary.enabled,
@@ -1222,6 +2080,32 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
         last_eval_score: autonomyMaintainSummary.last_eval_score,
         runtime_running: autonomyMaintainSummary.runtime.running,
         runtime_last_error: autonomyMaintainSummary.runtime.last_error,
+        degraded_subsystem_count: autonomyMaintainSummary.degraded_subsystem_count,
+        running_subsystem_count: autonomyMaintainSummary.running_subsystem_count,
+      },
+      reaction_engine: {
+        enabled: reactionEngineSummary.enabled,
+        stale: reactionEngineSummary.stale,
+        last_run_age_seconds: reactionEngineSummary.last_run_age_seconds,
+        runtime_running: reactionEngineSummary.runtime.running,
+        last_sent_count: reactionEngineSummary.last_sent_count,
+        runtime_last_error: reactionEngineSummary.runtime.last_error,
+      },
+      workflow_exports: {
+        bundle_count: workflowExportSummary.bundle_count,
+        metrics_count: workflowExportSummary.metrics_count,
+        argo_contract_count: workflowExportSummary.argo_contract_count,
+        latest_export_at:
+          workflowExportSummary.latest_bundle?.created_at ??
+          workflowExportSummary.latest_metrics?.created_at ??
+          workflowExportSummary.latest_argo_contract?.created_at ??
+          null,
+      },
+      runtime_workers: {
+        session_count: runtimeWorkerSummary.session_count,
+        active_count: runtimeWorkerSummary.active_count,
+        failed_count: runtimeWorkerSummary.counts.failed,
+        runtime_counts: runtimeWorkerSummary.runtime_counts,
       },
       ready_step_count: totals.ready_step_count,
       running_step_count: totals.running_step_count,
@@ -1243,10 +2127,16 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     active_sessions: activeSessions,
     adaptive_sessions: adaptiveSessions,
     worker_fabric: workerFabricSummary,
+    cluster_topology: clusterTopologySummary,
     model_router: modelRouterSummary,
     evals: evalSummary,
+    observability: observabilitySummary,
     org_programs: orgProgramSummary,
+    swarm: swarmSummary,
     autonomy_maintain: autonomyMaintainSummary,
+    reaction_engine: reactionEngineSummary,
+    workflow_exports: workflowExportSummary,
+    runtime_workers: runtimeWorkerSummary,
     learning: {
       ...learningOverview,
       active_session_coverage: {

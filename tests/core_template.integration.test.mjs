@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import Database from "better-sqlite3";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,7 +16,7 @@ test("server starts with default agentic workflow hooks and exposes core + TriCh
   const dbPath = path.join(tempDir, "hub.sqlite");
   let mutationCounter = 0;
 
-  const { client } = await openClient(dbPath, {});
+  const { client } = await openClient(dbPath, { MCP_NOTIFIER_DRY_RUN: "1" });
   try {
     const tools = await listTools(client);
     const names = new Set(tools.map((tool) => tool.name));
@@ -34,7 +35,12 @@ test("server starts with default agentic workflow hooks and exposes core + TriCh
     assert.equal(names.has("event.publish"), true);
     assert.equal(names.has("event.tail"), true);
     assert.equal(names.has("event.summary"), true);
+    assert.equal(names.has("observability.ingest"), true);
+    assert.equal(names.has("observability.search"), true);
+    assert.equal(names.has("observability.dashboard"), true);
+    assert.equal(names.has("observability.ship"), true);
     assert.equal(names.has("kernel.summary"), true);
+    assert.equal(names.has("operator.brief"), true);
     assert.equal(names.has("artifact.record"), true);
     assert.equal(names.has("artifact.get"), true);
     assert.equal(names.has("artifact.list"), true);
@@ -77,6 +83,9 @@ test("server starts with default agentic workflow hooks and exposes core + TriCh
     assert.equal(names.has("autonomy.maintain"), true);
     assert.equal(names.has("autonomy.command"), true);
     assert.equal(names.has("specialist.catalog"), true);
+    assert.equal(names.has("swarm.profile"), true);
+    assert.equal(names.has("workflow.export"), true);
+    assert.equal(names.has("runtime.worker"), true);
 
     assert.equal(names.has("trichat.thread_open"), true);
     assert.equal(names.has("trichat.tmux_controller"), true);
@@ -1571,6 +1580,237 @@ test("goal.autorun executes eligible goals and skips running-worker or human-gat
   }
 });
 
+test("goal.autorun cools down unchanged human-gated goals during broad scans but still allows explicit inspection", async () => {
+  const testId = `${Date.now()}-goal-autorun-cooldown-human-gate`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-autorun-cooldown-human-gate-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const humanGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create.human", () => mutationCounter++),
+      title: "Autorun cooldown human gate goal",
+      objective: "Keep broad autorun scans from thrashing on unchanged human gates",
+      status: "active",
+      acceptance_criteria: ["Broad scans cool down unchanged human-gated goals."],
+    });
+
+    const humanPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create.human", () => mutationCounter++),
+      goal_id: humanGoal.goal.goal_id,
+      title: "Human approval plan",
+      summary: "Block on one human step",
+      selected: true,
+      steps: [
+        {
+          step_id: "needs-human",
+          seq: 1,
+          title: "Await approval",
+          step_kind: "handoff",
+          executor_kind: "human",
+          input: {
+            approval_summary: "Human approval required before continuing.",
+          },
+        },
+      ],
+    });
+
+    await callTool(client, "plan.dispatch", {
+      mutation: nextMutation(testId, "plan.dispatch.human", () => mutationCounter++),
+      plan_id: humanPlan.plan.plan_id,
+    });
+
+    const firstAutorun = await callTool(client, "goal.autorun", {
+      mutation: nextMutation(testId, "goal.autorun.first", () => mutationCounter++),
+      limit: 10,
+      max_passes: 4,
+    });
+    assert.equal(firstAutorun.scanned_count, 1);
+    assert.equal(firstAutorun.skipped_count, 1);
+    assert.equal(firstAutorun.results[0].reason, "human_gate");
+    assert.equal(typeof firstAutorun.results[0].autorun_cooldown_until, "string");
+
+    const cooledGoal = await callTool(client, "goal.get", {
+      goal_id: humanGoal.goal.goal_id,
+    });
+    assert.equal(typeof cooledGoal.goal.metadata.autorun_cooldown.until_at, "string");
+    assert.equal(cooledGoal.goal.metadata.autorun_cooldown.reason, "human_gate");
+
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+
+    const broadScan = await callTool(client, "goal.autorun", {
+      mutation: nextMutation(testId, "goal.autorun.second", () => mutationCounter++),
+      limit: 10,
+      max_passes: 4,
+    });
+    assert.equal(broadScan.scanned_count, 0);
+    assert.equal(broadScan.results.length, 0);
+
+    const explicitScan = await callTool(client, "goal.autorun", {
+      mutation: nextMutation(testId, "goal.autorun.explicit", () => mutationCounter++),
+      goal_id: humanGoal.goal.goal_id,
+      max_passes: 4,
+    });
+    assert.equal(explicitScan.scanned_count, 1);
+    assert.equal(explicitScan.skipped_count, 1);
+    assert.equal(explicitScan.results[0].reason, "human_gate");
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("goal.autorun auto-archives stale ephemeral idle goals during broad scans", async () => {
+  const testId = `${Date.now()}-goal-autorun-auto-archive`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-autorun-auto-archive-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const archivedGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create.ephemeral", () => mutationCounter++),
+      title: "Demo",
+      objective: "Archive stale demo goals after they remain idle.",
+      status: "active",
+      acceptance_criteria: ["Broad autorun scans retire stale ephemeral demo goals."],
+      tags: ["demo", "smoke"],
+      metadata: {
+        auto_archive_when_idle: true,
+        auto_archive_after_seconds: 0,
+      },
+    });
+
+    const archivedPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create.ephemeral", () => mutationCounter++),
+      goal_id: archivedGoal.goal.goal_id,
+      title: "Idle demo plan",
+      summary: "Block on a human step so the goal stays idle.",
+      selected: true,
+      steps: [
+        {
+          step_id: "needs-human",
+          seq: 1,
+          title: "Await approval",
+          step_kind: "handoff",
+          executor_kind: "human",
+          input: {
+            approval_summary: "Human approval required before continuing.",
+          },
+        },
+      ],
+    });
+
+    await callTool(client, "plan.dispatch", {
+      mutation: nextMutation(testId, "plan.dispatch.ephemeral", () => mutationCounter++),
+      plan_id: archivedPlan.plan.plan_id,
+    });
+
+    const autorun = await callTool(client, "goal.autorun", {
+      mutation: nextMutation(testId, "goal.autorun.archive", () => mutationCounter++),
+      limit: 10,
+      max_passes: 4,
+    });
+
+    assert.equal(autorun.scanned_count, 1);
+    assert.equal(autorun.executed_count, 0);
+    assert.equal(autorun.compacted_count, 1);
+    assert.equal(autorun.progress_count, 1);
+    assert.equal(autorun.results[0].action, "archived");
+    assert.equal(autorun.results[0].reason, "stale_idle_ephemeral_goal");
+
+    const fetchedGoal = await callTool(client, "goal.get", {
+      goal_id: archivedGoal.goal.goal_id,
+    });
+    assert.equal(fetchedGoal.goal.status, "archived");
+    assert.equal(fetchedGoal.goal.result_summary, "Goal auto-archived after remaining idle beyond its retention window.");
+    assert.equal(fetchedGoal.goal.metadata.archived_reason, "stale_idle_ephemeral_goal");
+
+    const fetchedPlan = await callTool(client, "plan.get", {
+      plan_id: archivedPlan.plan.plan_id,
+    });
+    assert.equal(fetchedPlan.plan.status, "archived");
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("goal.hygiene archives stale idle ephemeral goals even when broad autorun is cooling them down", async () => {
+  const testId = `${Date.now()}-goal-hygiene-auto-archive`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-hygiene-auto-archive-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const archivedGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create.ephemeral", () => mutationCounter++),
+      title: "Demo",
+      objective: "Archive stale demo goals after they remain idle.",
+      status: "active",
+      acceptance_criteria: ["Background goal hygiene retires stale ephemeral demo goals."],
+      tags: ["demo", "smoke"],
+      metadata: {
+        auto_archive_when_idle: true,
+        auto_archive_after_seconds: 1,
+      },
+    });
+
+    const archivedPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create.ephemeral", () => mutationCounter++),
+      goal_id: archivedGoal.goal.goal_id,
+      title: "Idle demo plan",
+      summary: "Block on a human step so the goal stays idle.",
+      selected: true,
+      steps: [
+        {
+          step_id: "needs-human",
+          seq: 1,
+          title: "Await approval",
+          step_kind: "handoff",
+          executor_kind: "human",
+          input: {
+            approval_summary: "Human approval required before continuing.",
+          },
+        },
+      ],
+    });
+
+    await callTool(client, "plan.dispatch", {
+      mutation: nextMutation(testId, "plan.dispatch.ephemeral", () => mutationCounter++),
+      plan_id: archivedPlan.plan.plan_id,
+    });
+
+    await delay(1100);
+
+    await callTool(client, "goal.autorun", {
+      mutation: nextMutation(testId, "goal.autorun.cooldown", () => mutationCounter++),
+      limit: 10,
+      max_passes: 4,
+    });
+
+    const hygiene = await callTool(client, "goal.hygiene", {
+      mutation: nextMutation(testId, "goal.hygiene", () => mutationCounter++),
+      limit: 10,
+    });
+
+    assert.equal(hygiene.scanned_count, 1);
+    assert.equal(hygiene.archived_count, 1);
+    assert.equal(hygiene.results[0].action, "archived");
+    assert.equal(hygiene.results[0].reason, "stale_idle_ephemeral_goal");
+
+    const fetchedGoal = await callTool(client, "goal.get", {
+      goal_id: archivedGoal.goal.goal_id,
+    });
+    assert.equal(fetchedGoal.goal.status, "archived");
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("goal.autorun_daemon can run once and manage persisted daemon lifecycle", async () => {
   const testId = `${Date.now()}-goal-autorun-daemon`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-autorun-daemon-test-"));
@@ -1625,6 +1865,103 @@ test("goal.autorun_daemon can run once and manage persisted daemon lifecycle", a
     });
     assert.equal(stopped.running, false);
     assert.equal(stopped.persisted.enabled, false);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("goal.autorun_daemon treats empty scans as idle observations instead of stalled background failures", async () => {
+  const testId = `${Date.now()}-goal-autorun-daemon-idle`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-goal-autorun-daemon-idle-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    for (let index = 0; index < 3; index += 1) {
+      const tick = await callTool(client, "goal.autorun_daemon", {
+        action: "run_once",
+        mutation: nextMutation(testId, `goal.autorun_daemon.run_once.${index}`, () => mutationCounter++),
+        limit: 5,
+        max_passes: 4,
+      });
+      assert.equal(tick.tick.skipped, false);
+      assert.equal(tick.tick.tick.scanned_count, 0);
+      assert.equal(tick.status.no_progress_count, 0);
+      assert.ok(tick.status.last_idle_at);
+    }
+
+    const stalledSummary = await callTool(client, "event.summary", {
+      event_types: ["goal.autorun_stalled"],
+    });
+    assert.equal(stalledSummary.count, 0);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("task.recover_expired requeues abandoned running tasks whose leases have expired", async () => {
+  const testId = `${Date.now()}-task-recover-expired`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-task-recover-expired-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const createdTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create", () => mutationCounter++),
+      objective: "Recover this abandoned running task.",
+      project_dir: tempDir,
+      priority: 50,
+    });
+
+    const claimedTask = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim", () => mutationCounter++),
+      worker_id: "worker-1",
+      task_id: createdTask.task.task_id,
+      lease_seconds: 15,
+    });
+    assert.equal(claimedTask.claimed, true);
+
+    const db = new Database(dbPath);
+    try {
+      const expiredAt = new Date(Date.now() - 1000).toISOString();
+      db.prepare(`UPDATE task_leases SET lease_expires_at = ?, updated_at = ? WHERE task_id = ?`).run(
+        expiredAt,
+        expiredAt,
+        createdTask.task.task_id
+      );
+    } finally {
+      db.close();
+    }
+
+    const beforeSummary = await callTool(client, "task.summary", {
+      running_limit: 10,
+    });
+    assert.equal(beforeSummary.expired_running_count, 1);
+
+    const recovered = await callTool(client, "task.recover_expired", {
+      mutation: nextMutation(testId, "task.recover_expired", () => mutationCounter++),
+      limit: 10,
+    });
+    assert.equal(recovered.scanned_count, 1);
+    assert.equal(recovered.recovered_count, 1);
+    assert.equal(recovered.failed_count, 0);
+    assert.equal(recovered.results[0].action, "requeued");
+
+    const pendingTasks = await callTool(client, "task.list", {
+      status: "pending",
+      limit: 20,
+    });
+    assert.ok(pendingTasks.tasks.some((task) => task.task_id === createdTask.task.task_id));
+
+    const timeline = await callTool(client, "task.timeline", {
+      task_id: createdTask.task.task_id,
+      limit: 20,
+    });
+    assert.ok(timeline.events.some((event) => event.event_type === "lease_expired_requeued"));
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -1880,8 +2217,11 @@ test("kernel.summary reports execution substrate summaries from durable host, ro
     assert.equal(summary.model_router.backend_count, 2);
     assert.equal(summary.model_router.enabled_backend_count, 2);
     assert.equal(summary.model_router.default_backend_id, "local-backend");
+    assert.equal(summary.model_router.routing_outlook.length, 4);
+    assert.ok(summary.model_router.routing_outlook.some((entry) => entry.task_kind === "research" && entry.selected_backend_id !== null));
     assert.equal(summary.overview.model_router.backend_count, 2);
     assert.equal(summary.overview.model_router.enabled_backend_count, 2);
+    assert.equal(summary.overview.model_router.routed_task_kind_count, 4);
     assert.equal(summary.evals.suite_count, 1);
     assert.equal(summary.evals.total_case_count, 2);
     assert.equal(summary.evals.benchmark_case_count, 1);
@@ -2574,13 +2914,26 @@ test("adaptive worker health recovers after a completion streak while stale fail
     assert.equal(recoveredSessionSummary.adaptive_state, "healthy");
     assert.ok(kernelSummary.overview.adaptive_session_counts.healthy >= 1);
     assert.equal(kernelSummary.state, "active");
-    assert.ok(
-      kernelSummary.attention.some((entry) => /(stale|recovered) failed task remains in history/i.test(entry))
+    assert.equal(
+      kernelSummary.attention.some((entry) => /(stale|recovered) failed task remains in history/i.test(entry)),
+      false
     );
     assert.equal(
       kernelSummary.attention.some((entry) => /adaptive routing marks .* degraded/i.test(entry)),
       false
     );
+
+    const reaction = await callTool(client, "reaction.engine", {
+      action: "run_once",
+      mutation: nextMutation(testId, "reaction.engine.run_once", () => mutationCounter++),
+      channels: ["desktop"],
+      source_client: "core-template-test",
+    });
+    assert.equal(reaction.ok, true);
+    if (reaction.tick.alert) {
+      assert.equal(reaction.tick.alert.message.includes("failed task(s) need triage"), false);
+      assert.equal(reaction.tick.alert.message.includes("Recovered failed task remains in history"), false);
+    }
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -2796,6 +3149,208 @@ test("adaptive session health counts recent failure pressure once across complex
   }
 });
 
+test("adaptive session health treats a mature autonomous session as recovered after a successful tick following one recent failure", async () => {
+  const testId = `${Date.now()}-adaptive-operational-recovery`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-adaptive-operational-recovery-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open.operational-recovery", () => mutationCounter++),
+      session_id: "adaptive-operational-recovery-session",
+      agent_id: "ring-leader",
+      client_kind: "trichat-autopilot",
+      display_name: "Adaptive operational recovery session",
+      workspace_root: REPO_ROOT,
+      transport_kind: "daemon",
+      status: "active",
+      capabilities: {
+        capability_tier: "high",
+        planning: true,
+      },
+    });
+
+    for (let index = 0; index < 12; index += 1) {
+      const completedTask = await callTool(client, "task.create", {
+        mutation: nextMutation(testId, `task.create.operational-recovery.completed.${index}`, () => mutationCounter++),
+        objective: `Complete bounded adaptive warmup ${index + 1}`,
+        project_dir: REPO_ROOT,
+        priority: 4,
+        tags: ["adaptive-routing", "operational-recovery", "completed"],
+      });
+      await callTool(client, "agent.claim_next", {
+        mutation: nextMutation(testId, `agent.claim_next.operational-recovery.completed.${index}`, () => mutationCounter++),
+        session_id: "adaptive-operational-recovery-session",
+        task_id: completedTask.task.task_id,
+      });
+      await callTool(client, "agent.report_result", {
+        mutation: nextMutation(testId, `agent.report_result.operational-recovery.completed.${index}`, () => mutationCounter++),
+        session_id: "adaptive-operational-recovery-session",
+        task_id: completedTask.task.task_id,
+        outcome: "completed",
+        summary: `Completed adaptive warmup ${index + 1}`,
+        result: {
+          completed: true,
+        },
+      });
+    }
+
+    const failedTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.operational-recovery.failed", () => mutationCounter++),
+      objective: "Capture one bounded adaptive failure before an autonomous recovery tick",
+      project_dir: REPO_ROOT,
+      priority: 5,
+      tags: ["adaptive-routing", "operational-recovery", "failed"],
+    });
+    await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.operational-recovery.failed", () => mutationCounter++),
+      session_id: "adaptive-operational-recovery-session",
+      task_id: failedTask.task.task_id,
+    });
+    await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.operational-recovery.failed", () => mutationCounter++),
+      session_id: "adaptive-operational-recovery-session",
+      task_id: failedTask.task.task_id,
+      outcome: "failed",
+      error: "bounded failure",
+      summary: "Bounded failure before autonomous recovery tick",
+      result: {
+        failed: true,
+      },
+    });
+
+    await callTool(client, "agent.session_heartbeat", {
+      mutation: nextMutation(testId, "agent.session_heartbeat.operational-recovery", () => mutationCounter++),
+      session_id: "adaptive-operational-recovery-session",
+      status: "active",
+      metadata: {
+        last_tick_ok: true,
+        last_tick_at: new Date(Date.now() + 15_000).toISOString(),
+        current_task_id: null,
+      },
+    });
+
+    const kernelSummary = await callTool(client, "kernel.summary", {
+      session_limit: 10,
+      goal_limit: 5,
+      event_limit: 20,
+      task_running_limit: 10,
+    });
+    const recoveredSessionSummary = kernelSummary.adaptive_sessions.find(
+      (session) => session.session_id === "adaptive-operational-recovery-session"
+    );
+    assert.ok(recoveredSessionSummary);
+    assert.equal(recoveredSessionSummary.adaptive_state, "healthy");
+    assert.ok(
+      recoveredSessionSummary.adaptive_reasons.some((entry) => /operationally recovered/i.test(entry))
+    );
+    assert.equal(
+      kernelSummary.attention.some((entry) => /adaptive routing marks .* degraded/i.test(entry)),
+      false
+    );
+    assert.match(kernelSummary.state, /^(active|idle)$/);
+    assert.equal(
+      kernelSummary.attention.some((entry) => /Recovered failed task remains in history/i.test(entry)),
+      false
+    );
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("adaptive session health treats a mature autonomous session as recovered after a successful tick following mild recent failure debt", async () => {
+  const testId = `${Date.now()}-adaptive-operational-recovery-debt`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-adaptive-operational-recovery-debt-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open.operational-recovery-debt", () => mutationCounter++),
+      session_id: "adaptive-operational-recovery-debt-session",
+      agent_id: "ring-leader",
+      client_kind: "trichat-autopilot",
+      display_name: "Adaptive operational recovery debt session",
+      workspace_root: REPO_ROOT,
+      transport_kind: "daemon",
+      status: "active",
+      capabilities: {
+        capability_tier: "high",
+        planning: true,
+      },
+    });
+
+    const reportTask = async (label, outcome) => {
+      const createdTask = await callTool(client, "task.create", {
+        mutation: nextMutation(testId, `task.create.operational-recovery-debt.${label}`, () => mutationCounter++),
+        objective: `Adaptive debt ${label}`,
+        project_dir: REPO_ROOT,
+        priority: 4,
+        tags: ["adaptive-routing", "operational-recovery-debt"],
+      });
+      await callTool(client, "agent.claim_next", {
+        mutation: nextMutation(testId, `agent.claim_next.operational-recovery-debt.${label}`, () => mutationCounter++),
+        session_id: "adaptive-operational-recovery-debt-session",
+        task_id: createdTask.task.task_id,
+      });
+      await callTool(client, "agent.report_result", {
+        mutation: nextMutation(testId, `agent.report_result.operational-recovery-debt.${label}`, () => mutationCounter++),
+        session_id: "adaptive-operational-recovery-debt-session",
+        task_id: createdTask.task.task_id,
+        outcome,
+        error: outcome === "failed" ? "bounded failure" : undefined,
+        summary: `${label} ${outcome}`,
+        result: {
+          outcome,
+        },
+      });
+    };
+
+    for (let index = 0; index < 8; index += 1) {
+      await reportTask(`warmup-${index + 1}`, "completed");
+    }
+    await reportTask("failure-one", "failed");
+    await reportTask("recovery-one", "completed");
+    await reportTask("failure-two", "failed");
+    await callTool(client, "agent.session_heartbeat", {
+      mutation: nextMutation(testId, "agent.session_heartbeat.operational-recovery-debt", () => mutationCounter++),
+      session_id: "adaptive-operational-recovery-debt-session",
+      status: "active",
+      metadata: {
+        last_tick_ok: true,
+        last_tick_at: new Date(Date.now() + 15_000).toISOString(),
+        current_task_id: null,
+      },
+    });
+
+    const kernelSummary = await callTool(client, "kernel.summary", {
+      session_limit: 10,
+      goal_limit: 5,
+      event_limit: 20,
+      task_running_limit: 10,
+    });
+    const recoveredSessionSummary = kernelSummary.adaptive_sessions.find(
+      (session) => session.session_id === "adaptive-operational-recovery-debt-session"
+    );
+    assert.ok(recoveredSessionSummary);
+    assert.equal(recoveredSessionSummary.adaptive_state, "healthy");
+    assert.ok(
+      recoveredSessionSummary.adaptive_reasons.some((entry) => /operationally recovered/i.test(entry))
+    );
+    assert.equal(
+      kernelSummary.attention.some((entry) => /Recovered failed task remains in history/i.test(entry)),
+      false
+    );
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("plan.dispatch injects adaptive assignment guidance into worker tasks", async () => {
   const testId = `${Date.now()}-dispatch-adaptive-assignment`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-dispatch-adaptive-assignment-test-"));
@@ -2989,6 +3544,153 @@ test("plan.dispatch injects adaptive assignment guidance into worker tasks", asy
     });
     assert.equal(steadyClaim.claimed, true);
     assert.equal(steadyClaim.task.task_id, dispatched.results[0].task_id);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("plan.dispatch materializes a concrete task execution plan from model router and worker fabric state", async () => {
+  const testId = `${Date.now()}-dispatch-task-execution`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-dispatch-task-execution-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    await callTool(client, "cluster.topology", {
+      action: "ensure_lab",
+      mutation: nextMutation(testId, "cluster.topology.ensure_lab", () => mutationCounter++),
+      local_host_id: "local",
+      workspace_root: REPO_ROOT,
+    });
+
+    await callTool(client, "worker.fabric", {
+      action: "configure",
+      mutation: nextMutation(testId, "worker.fabric.configure", () => mutationCounter++),
+      enabled: true,
+      strategy: "prefer_capacity",
+      default_host_id: "pve1",
+    });
+    await callTool(client, "worker.fabric", {
+      action: "upsert_host",
+      mutation: nextMutation(testId, "worker.fabric.upsert.remote", () => mutationCounter++),
+      host: {
+        host_id: "pve1",
+        transport: "ssh",
+        ssh_destination: "root@10.0.0.50",
+        workspace_root: "/srv/agentic/MCPlayground---Core-Template",
+        worker_count: 2,
+        tags: ["remote", "gpu", "research"],
+        capabilities: {
+          gpu_memory_gb: 80,
+          ram_gb: 256,
+        },
+        telemetry: {
+          health_state: "healthy",
+          queue_depth: 0,
+          active_tasks: 0,
+        },
+      },
+    });
+
+    await callTool(client, "model.router", {
+      action: "configure",
+      mutation: nextMutation(testId, "model.router.configure", () => mutationCounter++),
+      enabled: true,
+      strategy: "prefer_quality",
+      default_backend_id: "local-backend",
+    });
+    await callTool(client, "model.router", {
+      action: "upsert_backend",
+      mutation: nextMutation(testId, "model.router.upsert.local", () => mutationCounter++),
+      backend: {
+        backend_id: "local-backend",
+        provider: "ollama",
+        model_id: "llama3.2:3b",
+        host_id: "local",
+        locality: "local",
+        context_window: 8192,
+        success_rate: 0.72,
+        win_rate: 0.68,
+        tags: ["local", "ollama", "planning"],
+        capabilities: {
+          task_kinds: ["planning", "chat"],
+        },
+      },
+    });
+    await callTool(client, "model.router", {
+      action: "upsert_backend",
+      mutation: nextMutation(testId, "model.router.upsert.remote", () => mutationCounter++),
+      backend: {
+        backend_id: "research-remote",
+        provider: "vllm",
+        model_id: "research-frontier",
+        host_id: "pve1",
+        locality: "remote",
+        context_window: 65536,
+        throughput_tps: 250,
+        latency_ms_p50: 180,
+        success_rate: 0.96,
+        win_rate: 0.94,
+        tags: ["remote", "gpu", "research", "analysis", "coding"],
+        capabilities: {
+          task_kinds: ["research", "coding", "verification"],
+        },
+      },
+    });
+
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Hybrid execution planning goal",
+      objective: "Research hybrid local versus hosted execution strategy and choose the strongest backend placement.",
+      status: "active",
+      autonomy_mode: "execute_bounded",
+      acceptance_criteria: ["Dispatch records the concrete backend and host placement plan."],
+    });
+
+    const createdPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      title: "Hybrid execution plan",
+      summary: "Dispatch a research step and persist the concrete execution plan.",
+      selected: true,
+      steps: [
+        {
+          step_id: "hybrid-worker",
+          seq: 1,
+          title: "Dispatch the hybrid research lane",
+          step_kind: "analysis",
+          executor_kind: "worker",
+          input: {
+            objective: "Research and compare local versus hosted model-routing strategy for the next lab expansion.",
+            project_dir: REPO_ROOT,
+            priority: 7,
+            tags: ["research", "hybrid-routing"],
+            metadata: {
+              task_execution: {
+                preferred_model_tags: ["research", "gpu"],
+              },
+            },
+          },
+        },
+      ],
+    });
+
+    const dispatched = await callTool(client, "plan.dispatch", {
+      mutation: nextMutation(testId, "plan.dispatch", () => mutationCounter++),
+      plan_id: createdPlan.plan.plan_id,
+    });
+    assert.equal(dispatched.dispatched_count, 1);
+    const taskExecution = dispatched.results[0].task.task.metadata.task_execution;
+    assert.equal(taskExecution.selected_backend_id, "research-remote");
+    assert.equal(taskExecution.selected_host_id, "pve1");
+    assert.equal(taskExecution.selected_worker_host_id, "pve1");
+    assert.ok(taskExecution.preferred_host_ids.includes("pve1"));
+    assert.ok(taskExecution.preferred_backend_ids.includes("research-remote"));
+    assert.equal(taskExecution.task_kind, "research");
+    assert.equal(taskExecution.quality_preference, "balanced");
+    assert.ok(taskExecution.planned_backend_candidates.some((entry) => entry.node_id === "gpu-5090"));
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

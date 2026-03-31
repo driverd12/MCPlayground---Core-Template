@@ -1,14 +1,17 @@
 import crypto from "node:crypto";
-import os from "node:os";
 import { spawnSync } from "node:child_process";
+import path from "node:path";
 import { z } from "zod";
 import { Storage } from "../storage.js";
+import { captureLocalHostProfile, deriveLocalExecutionBudget } from "../local_host_profile.js";
 import { getTriChatAgentCatalog } from "../trichat_roster.js";
 import { benchmarkSuiteList, benchmarkSuiteUpsert } from "./benchmark.js";
+import { clusterTopology, summarizeClusterTopologyState } from "./cluster_topology.js";
 import { evalSuiteList, evalSuiteUpsert } from "./eval.js";
 import { modelRouter } from "./model_router.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { getEffectiveOrgProgram, orgProgram } from "./org_program.js";
+import { resolveProviderBridgeSnapshot } from "./provider_bridge.js";
 import { trichatAutopilotControl } from "./trichat.js";
 import { workerFabric } from "./worker_fabric.js";
 
@@ -28,13 +31,14 @@ const telemetryOverrideSchema = z.object({
   cpu_utilization: z.number().min(0).max(1).optional(),
   ram_available_gb: z.number().min(0).max(1000000).optional(),
   ram_total_gb: z.number().min(0).max(1000000).optional(),
+  swap_used_gb: z.number().min(0).max(1000000).optional(),
   disk_free_gb: z.number().min(0).max(1000000).optional(),
   thermal_pressure: z.enum(["nominal", "fair", "serious", "critical"]).optional(),
 });
 
 const backendOverrideSchema = z.object({
   backend_id: z.string().min(1),
-  provider: z.enum(["ollama", "mlx", "llama.cpp", "vllm", "openai", "custom"]),
+  provider: z.enum(["ollama", "mlx", "llama.cpp", "vllm", "openai", "google", "cursor", "anthropic", "github-copilot", "custom"]),
   model_id: z.string().min(1),
   endpoint: z.string().min(1).optional(),
   host_id: z.string().min(1).optional(),
@@ -47,6 +51,7 @@ const backendOverrideSchema = z.object({
 export const autonomyBootstrapSchema = z
   .object({
     action: z.enum(["status", "ensure"]).default("status"),
+    fast: z.boolean().optional(),
     mutation: mutationSchema.optional(),
     local_host_id: z.string().min(1).default("local"),
     probe_ollama_url: z.string().optional(),
@@ -55,6 +60,7 @@ export const autonomyBootstrapSchema = z
     seed_org_programs: z.boolean().optional(),
     seed_benchmark_suite: z.boolean().optional(),
     seed_eval_suite: z.boolean().optional(),
+    seed_cluster_topology: z.boolean().optional(),
     telemetry_override: telemetryOverrideSchema.optional(),
     host_capabilities_override: recordSchema.optional(),
     host_tags_override: z.array(z.string().min(1)).optional(),
@@ -71,12 +77,24 @@ export const autonomyBootstrapSchema = z
     }
   });
 
+let autonomyBootstrapQueue: Promise<unknown> = Promise.resolve();
+
+function serializeAutonomyBootstrap<T>(work: () => Promise<T>): Promise<T> {
+  const task = autonomyBootstrapQueue.catch(() => undefined).then(work);
+  autonomyBootstrapQueue = task.catch(() => undefined);
+  return task;
+}
+
 type InvokeTool = (toolName: string, input: Record<string, unknown>) => Promise<unknown>;
 type BackendCandidate = z.infer<typeof backendOverrideSchema>;
 
 const DEFAULT_BENCHMARK_SUITE_ID = "autonomy.smoke.local";
 const DEFAULT_EVAL_SUITE_ID = "autonomy.control-plane";
 const HEARTBEAT_FRESHNESS_MS = 10 * 60 * 1000;
+const DEFAULT_ISOLATED_STDIO_HEALTH_COMMAND =
+  "([ -f dist/server.js ] || npm run build >/dev/null) && node ./scripts/mcp_tool_call.mjs --tool health.storage --args '{}' --transport stdio --stdio-command node --stdio-args 'dist/server.js' --cwd . >/dev/null";
+const DEFAULT_ISOLATED_STDIO_ROSTER_COMMAND =
+  "([ -f dist/server.js ] || npm run build >/dev/null) && node ./scripts/mcp_tool_call.mjs --tool trichat.roster --args '{}' --transport stdio --stdio-command node --stdio-args 'dist/server.js' --cwd . >/dev/null";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -99,6 +117,11 @@ function boolFromEnv(name: string, fallback: boolean) {
 function intFromEnv(name: string, fallback: number) {
   const raw = Number.parseInt(String(process.env[name] ?? "").trim(), 10);
   return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
+function optionalIntFromEnv(name: string) {
+  const raw = Number.parseInt(String(process.env[name] ?? "").trim(), 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : null;
 }
 
 function deriveMutation(base: { idempotency_key: string; side_effect_fingerprint: string }, label: string) {
@@ -124,45 +147,6 @@ function sanitizeId(value: string) {
 function commandSucceeds(command: string, args: string[] = []) {
   const result = spawnSync(command, args, { encoding: "utf8" });
   return result.status === 0;
-}
-
-function readDiskFreeGb(targetDir: string) {
-  const result = spawnSync("df", ["-Pk", targetDir], { encoding: "utf8" });
-  if (result.status !== 0) {
-    return undefined;
-  }
-  const lines = String(result.stdout || "")
-    .trim()
-    .split(/\n+/);
-  if (lines.length < 2) {
-    return undefined;
-  }
-  const columns = lines[1].trim().split(/\s+/);
-  const availableKb = Number.parseInt(columns[3] ?? "", 10);
-  if (!Number.isFinite(availableKb) || availableKb < 0) {
-    return undefined;
-  }
-  return Number((availableKb / 1024 / 1024).toFixed(4));
-}
-
-function detectThermalPressure() {
-  const result = spawnSync("/bin/sh", ["-lc", "pmset -g therm 2>/dev/null"], { encoding: "utf8" });
-  if (result.status !== 0) {
-    return undefined;
-  }
-  const text = String(result.stdout || "");
-  const match = /CPU_Speed_Limit\s*=\s*(\d+)/i.exec(text) || /Scheduler_Limit\s*=\s*(\d+)/i.exec(text);
-  if (!match) {
-    return undefined;
-  }
-  const speedLimit = Number.parseInt(match[1], 10);
-  if (!Number.isFinite(speedLimit)) {
-    return undefined;
-  }
-  if (speedLimit >= 100) return "nominal";
-  if (speedLimit >= 80) return "fair";
-  if (speedLimit >= 50) return "serious";
-  return "critical";
 }
 
 function isFreshIsoTimestamp(value: unknown) {
@@ -196,56 +180,106 @@ function getTmuxTelemetry(storage: Storage) {
   };
 }
 
+function resolveSafeTmuxWorkerCount() {
+  const profile = captureLocalHostProfile({ workspace_root: process.cwd() });
+  const requested = optionalIntFromEnv("TRICHAT_RING_LEADER_TMUX_WORKER_COUNT");
+  const target = requested === null ? profile.safe_worker_count : Math.min(requested, profile.safe_worker_count);
+  return Math.max(1, Math.min(12, target));
+}
+
+function resolveSafeTmuxMaxQueuePerWorker() {
+  const profile = captureLocalHostProfile({ workspace_root: process.cwd() });
+  const requested = optionalIntFromEnv("TRICHAT_RING_LEADER_TMUX_MAX_QUEUE_PER_WORKER");
+  const target =
+    requested === null ? profile.safe_max_queue_per_worker : Math.min(requested, profile.safe_max_queue_per_worker);
+  return Math.max(1, Math.min(200, target));
+}
+
 function detectLocalHost(storage: Storage, input: z.infer<typeof autonomyBootstrapSchema>) {
-  const cpus = os.cpus();
-  const load = os.loadavg()[0] || 0;
   const tmux = getTmuxTelemetry(storage);
+  const profile = captureLocalHostProfile({
+    workspace_root: process.cwd(),
+    degraded_signal: tmux.degraded,
+  });
+  const budget = deriveLocalExecutionBudget(profile, {
+    pending_tasks: tmux.queue_depth,
+    tmux_queue_depth: tmux.queue_depth,
+    active_runtime_workers: tmux.active_tasks,
+  });
   const override = input.telemetry_override ?? {};
   const tags = [
     "local",
-    process.platform,
-    process.arch,
-    process.platform === "darwin" ? "macos" : "unix",
-    process.arch === "arm64" ? "apple-silicon" : "x86",
+    profile.platform,
+    profile.arch,
+    profile.platform === "darwin" ? "macos" : "unix",
+    profile.arch === "arm64" ? "apple-silicon" : "x86",
   ];
   if (commandSucceeds("tmux", ["-V"])) tags.push("tmux");
   if (commandSucceeds("ollama", ["--version"])) tags.push("ollama");
+  if (profile.full_gpu_access) {
+    tags.push("gpu", "unified-memory");
+  }
   return {
     host: {
       host_id: input.local_host_id,
       enabled: true,
       transport: "local" as const,
       workspace_root: process.cwd(),
-      worker_count: intFromEnv("TRICHAT_RING_LEADER_TMUX_WORKER_COUNT", 4),
+      worker_count: resolveSafeTmuxWorkerCount(),
       shell: process.env.SHELL || "/bin/zsh",
       capabilities: {
         locality: "local",
-        platform: process.platform,
-        arch: process.arch,
-        cpu_count: cpus.length,
+        platform: profile.platform,
+        arch: profile.arch,
+        cpu_count: profile.cpu_count,
+        performance_cpu_count: profile.performance_cpu_count,
+        efficiency_cpu_count: profile.efficiency_cpu_count,
+        unified_memory_gb: profile.memory_total_gb,
+        safe_worker_count: profile.safe_worker_count,
+        safe_max_queue_per_worker: profile.safe_max_queue_per_worker,
+        max_local_model_concurrency: profile.max_local_model_concurrency,
+        recommended_runtime_worker_max_active: budget.runtime_worker_max_active,
+        recommended_runtime_worker_limit: budget.runtime_worker_limit,
+        recommended_tmux_worker_count: budget.tmux_recommended_worker_count,
+        recommended_tmux_target_queue_per_worker: budget.tmux_target_queue_per_worker,
+        memory_free_percent: profile.memory_free_percent,
         tmux_available: commandSucceeds("tmux", ["-V"]),
         ollama_available: commandSucceeds("ollama", ["--version"]),
-        full_gpu_access: process.platform === "darwin" && process.arch === "arm64",
+        full_gpu_access: profile.full_gpu_access,
         ...(isRecord(input.host_capabilities_override) ? input.host_capabilities_override : {}),
       },
       tags: [...new Set([...(input.host_tags_override ?? []), ...tags])],
       telemetry: {
         heartbeat_at: new Date().toISOString(),
-        health_state: override.health_state ?? (tmux.degraded ? "degraded" : "healthy"),
+        health_state: override.health_state ?? profile.health_state,
         queue_depth: override.queue_depth ?? tmux.queue_depth,
         active_tasks: override.active_tasks ?? tmux.active_tasks,
         latency_ms: override.latency_ms,
-        cpu_utilization: override.cpu_utilization ?? (cpus.length > 0 ? Math.max(0, Math.min(1, load / cpus.length)) : undefined),
-        ram_available_gb: override.ram_available_gb ?? Number((os.freemem() / 1024 / 1024 / 1024).toFixed(4)),
-        ram_total_gb: override.ram_total_gb ?? Number((os.totalmem() / 1024 / 1024 / 1024).toFixed(4)),
-        disk_free_gb: override.disk_free_gb ?? readDiskFreeGb(process.cwd()),
-        thermal_pressure: override.thermal_pressure ?? detectThermalPressure(),
+        cpu_utilization: override.cpu_utilization ?? profile.cpu_utilization,
+        ram_available_gb: override.ram_available_gb ?? profile.memory_available_gb,
+        ram_total_gb: override.ram_total_gb ?? profile.memory_total_gb,
+        swap_used_gb: profile.swap_used_gb,
+        disk_free_gb: override.disk_free_gb ?? profile.disk_free_gb ?? undefined,
+        thermal_pressure: override.thermal_pressure ?? profile.thermal_pressure,
       },
       metadata: {
         bootstrap_source: "autonomy.bootstrap",
+        local_execution_profile: {
+          generated_at: profile.generated_at,
+          safe_worker_count: profile.safe_worker_count,
+          safe_max_queue_per_worker: profile.safe_max_queue_per_worker,
+          max_local_model_concurrency: profile.max_local_model_concurrency,
+          runtime_worker_max_active: budget.runtime_worker_max_active,
+          runtime_worker_limit: budget.runtime_worker_limit,
+          tmux_recommended_worker_count: budget.tmux_recommended_worker_count,
+          tmux_target_queue_per_worker: budget.tmux_target_queue_per_worker,
+          memory_free_percent: profile.memory_free_percent,
+          swap_used_gb: profile.swap_used_gb,
+        },
       },
     },
     detection_tags: [...new Set([...(input.host_tags_override ?? []), ...tags])],
+    profile,
   };
 }
 
@@ -272,7 +306,10 @@ async function fetchJsonWithTimeout(url: string, init: RequestInit = {}, timeout
   }
 }
 
-async function detectBackends(input: z.infer<typeof autonomyBootstrapSchema>): Promise<BackendCandidate[]> {
+async function detectBackends(
+  input: z.infer<typeof autonomyBootstrapSchema>,
+  localProfile?: ReturnType<typeof captureLocalHostProfile>
+): Promise<BackendCandidate[]> {
   if (Array.isArray(input.backend_overrides) && input.backend_overrides.length > 0) {
     return input.backend_overrides;
   }
@@ -301,29 +338,87 @@ async function detectBackends(input: z.infer<typeof autonomyBootstrapSchema>): P
       endpoint: ollamaUrl,
       host_id: locality === "local" ? input.local_host_id : undefined,
       locality,
-      tags: [...new Set([locality, "ollama", ...(preferredOllamaModel && modelName === preferredOllamaModel ? ["primary"] : [])])],
+      tags: [
+        ...new Set([
+          locality,
+          "ollama",
+          ...(locality === "local" && localProfile?.full_gpu_access
+            ? [
+                "gpu",
+                ...(localProfile.gpu_api ? [localProfile.gpu_api] : []),
+                ...(localProfile.accelerator_kind === "apple-metal" ? ["apple-silicon", "unified-memory"] : []),
+              ]
+            : []),
+          ...(preferredOllamaModel && modelName === preferredOllamaModel ? ["primary"] : []),
+        ]),
+      ],
       capabilities: {
         task_kinds: ["planning", "coding", "research", "verification", "chat", "tool_use"],
+        recommended_parallel_requests:
+          locality === "local" ? localProfile?.max_local_model_concurrency ?? 1 : 1,
+        full_gpu_access: locality === "local" ? localProfile?.full_gpu_access ?? false : false,
+        unified_memory_gb: locality === "local" ? localProfile?.memory_total_gb ?? null : null,
+        accelerator_kind: locality === "local" ? localProfile?.accelerator_kind ?? null : null,
+        gpu_model: locality === "local" ? localProfile?.gpu_model ?? null : null,
+        gpu_api: locality === "local" ? localProfile?.gpu_api ?? null : null,
       },
       metadata: {
         bootstrap_source: "autonomy.bootstrap",
+        local_execution_profile:
+          locality === "local" && localProfile
+            ? {
+                safe_worker_count: localProfile.safe_worker_count,
+                max_local_model_concurrency: localProfile.max_local_model_concurrency,
+                memory_free_percent: localProfile.memory_free_percent,
+                swap_used_gb: localProfile.swap_used_gb,
+              }
+            : undefined,
       },
     });
   }
   const mlxModel = String(process.env.TRICHAT_MLX_MODEL || "").trim();
-  if (mlxModel && commandSucceeds("python3", ["-c", "import mlx"])) {
+  const mlxEndpoint = String(process.env.TRICHAT_MLX_ENDPOINT || "").trim().replace(/\/+$/, "");
+  const mlxHealth = mlxEndpoint ? await fetchJsonWithTimeout(`${mlxEndpoint}/health`, {}, 3000) : null;
+  if (mlxModel && localProfile?.mlx_available && mlxEndpoint && mlxHealth) {
     discovered.push({
       backend_id: `mlx-${sanitizeId(mlxModel)}`,
       provider: "mlx",
       model_id: mlxModel,
+      endpoint: mlxEndpoint,
       host_id: input.local_host_id,
       locality: "local",
-      tags: ["local", "mlx"],
+      tags: [
+        "local",
+        "mlx",
+        "gpu",
+        ...(localProfile.gpu_api ? [localProfile.gpu_api] : []),
+        ...(localProfile.accelerator_kind === "apple-metal" ? ["apple-silicon", "unified-memory"] : []),
+      ],
       capabilities: {
-        task_kinds: ["planning", "coding", "research", "verification"],
+        task_kinds: ["planning", "coding", "research", "verification", "chat", "tool_use"],
+        recommended_parallel_requests: localProfile.max_local_model_concurrency,
+        full_gpu_access: localProfile.full_gpu_access,
+        unified_memory_gb: localProfile.memory_total_gb,
+        accelerator_kind: localProfile.accelerator_kind,
+        gpu_model: localProfile.gpu_model,
+        gpu_api: localProfile.gpu_api,
+        mlx_python: localProfile.mlx_python,
+        mlx_available: localProfile.mlx_available,
+        mlx_lm_available: localProfile.mlx_lm_available,
+        fine_tuning_supported: localProfile.mlx_lm_available,
       },
       metadata: {
         bootstrap_source: "autonomy.bootstrap",
+        local_execution_profile: {
+          safe_worker_count: localProfile.safe_worker_count,
+          max_local_model_concurrency: localProfile.max_local_model_concurrency,
+          memory_free_percent: localProfile.memory_free_percent,
+          swap_used_gb: localProfile.swap_used_gb,
+          gpu_model: localProfile.gpu_model,
+          gpu_api: localProfile.gpu_api,
+          mlx_python: localProfile.mlx_python,
+          mlx_endpoint: mlxEndpoint,
+        },
       },
     });
   }
@@ -353,10 +448,32 @@ async function detectBackends(input: z.infer<typeof autonomyBootstrapSchema>): P
       },
     });
   }
-  return discovered;
+  if (boolFromEnv("TRICHAT_PROVIDER_BRIDGE_ROUTER_ENABLED", true)) {
+    const bridgeSnapshot = resolveProviderBridgeSnapshot({
+      workspace_root: process.cwd(),
+      transport: "auto",
+    });
+    for (const backend of bridgeSnapshot.eligible_router_backends) {
+      discovered.push({
+        backend_id: backend.backend_id,
+        provider: backend.provider,
+        model_id: backend.model_id,
+        endpoint: backend.endpoint ?? undefined,
+        host_id: backend.host_id ?? undefined,
+        locality: backend.locality,
+        tags: backend.tags,
+        capabilities: backend.capabilities,
+        metadata: backend.metadata,
+      });
+    }
+  }
+  return discovered.filter(
+    (entry, index, items) => items.findIndex((candidate) => candidate.backend_id === entry.backend_id) === index
+  );
 }
 
 function buildDesiredAutopilotConfig() {
+  const localProfile = captureLocalHostProfile({ workspace_root: process.cwd() });
   const leadAgentId = String(process.env.TRICHAT_RING_LEADER_AGENT_ID || "ring-leader").trim().toLowerCase();
   const configuredSpecialists = normalizeStringArray(String(process.env.TRICHAT_RING_LEADER_SPECIALIST_AGENT_IDS || "").split(","));
   const fallbackSpecialists = getTriChatAgentCatalog()
@@ -388,14 +505,57 @@ function buildDesiredAutopilotConfig() {
     execute_enabled: boolFromEnv("TRICHAT_RING_LEADER_EXECUTE_ENABLED", true),
     execute_backend: executeBackendRaw === "direct" || executeBackendRaw === "tmux" ? executeBackendRaw : "auto",
     tmux_session_name: String(process.env.TRICHAT_RING_LEADER_TMUX_SESSION_NAME || "ring-leader-autopilot").trim(),
-    tmux_worker_count: intFromEnv("TRICHAT_RING_LEADER_TMUX_WORKER_COUNT", 4),
-    tmux_max_queue_per_worker: intFromEnv("TRICHAT_RING_LEADER_TMUX_MAX_QUEUE_PER_WORKER", 8),
+    tmux_worker_count: resolveSafeTmuxWorkerCount(),
+    tmux_max_queue_per_worker: resolveSafeTmuxMaxQueuePerWorker(),
     tmux_auto_scale_workers: boolFromEnv("TRICHAT_RING_LEADER_TMUX_AUTO_SCALE_WORKERS", true),
     tmux_sync_after_dispatch: boolFromEnv("TRICHAT_RING_LEADER_TMUX_SYNC_AFTER_DISPATCH", true),
     confidence_threshold: Number.parseFloat(String(process.env.TRICHAT_RING_LEADER_CONFIDENCE_THRESHOLD || "0.45")),
     max_consecutive_errors: intFromEnv("TRICHAT_RING_LEADER_MAX_CONSECUTIVE_ERRORS", 3),
     adr_policy: adrPolicyRaw === "every_success" || adrPolicyRaw === "manual" ? adrPolicyRaw : "high_impact",
   } as const;
+}
+
+function selectPrimaryLocalBackend<T extends { provider?: string | null; locality?: string | null; host_id?: string | null }>(
+  backends: T[],
+  localHostId: string
+) {
+  const preferredProviderOrder = ["ollama", "mlx", "llama.cpp", "vllm"];
+  const localCandidates = backends.filter(
+    (entry) => String(entry.locality || "") === "local" || String(entry.host_id || "") === localHostId
+  );
+  if (localCandidates.length === 0) {
+    return backends[0] ?? null;
+  }
+  for (const provider of preferredProviderOrder) {
+    const match = localCandidates.find((entry) => String(entry.provider || "") === provider);
+    if (match) {
+      return match;
+    }
+  }
+  return localCandidates[0] ?? null;
+}
+
+function selectPrimaryBootstrapBackend(
+  backends: BackendCandidate[],
+  existingRouter: ReturnType<Storage["getModelRouterState"]>,
+  localHostId: string
+) {
+  const detectedPrimary = selectPrimaryLocalBackend(backends, localHostId);
+  const detectedIsLocal = Boolean(
+    detectedPrimary &&
+      (String(detectedPrimary.locality || "") === "local" || String(detectedPrimary.host_id || "") === localHostId)
+  );
+  if (detectedIsLocal) {
+    return detectedPrimary;
+  }
+  const persistedLocalDefault =
+    existingRouter?.backends.find(
+      (entry) =>
+        entry.enabled !== false &&
+        entry.backend_id === existingRouter.default_backend_id &&
+        (String(entry.locality || "") === "local" || String(entry.host_id || "") === localHostId)
+    ) ?? null;
+  return persistedLocalDefault ?? detectedPrimary;
 }
 
 function buildDelegationContract(tier: string) {
@@ -418,6 +578,162 @@ function buildEvaluationStandard(lane: string, tier: string) {
   return "Success requires bounded scope, concrete next actions, evidence quality, and rollback awareness.";
 }
 
+function buildDefaultAutonomySmokeBenchmarkSuite(projectDir: string) {
+  return {
+    suite_id: DEFAULT_BENCHMARK_SUITE_ID,
+    title: "Autonomy smoke benchmark",
+    objective: "Verify the local-first agent stack can still build and answer core MCP health queries inside isolated execution.",
+    project_dir: path.resolve(projectDir),
+    isolation_mode: "git_worktree" as const,
+    aggregate_metric_name: "suite_success_rate",
+    aggregate_metric_direction: "maximize" as const,
+    cases: [
+      {
+        case_id: "build",
+        title: "TypeScript build stays green",
+        command: "npm run build",
+      },
+      {
+        case_id: "storage-health",
+        title: "Isolated stdio storage health stays reachable",
+        command: DEFAULT_ISOLATED_STDIO_HEALTH_COMMAND,
+      },
+      {
+        case_id: "roster-health",
+        title: "Isolated stdio tri-chat roster stays reachable",
+        command: DEFAULT_ISOLATED_STDIO_ROSTER_COMMAND,
+      },
+    ],
+    tags: ["autonomy", "smoke", "bootstrap"],
+    metadata: {
+      bootstrap_source: "autonomy.bootstrap",
+      cleanup_workspaces: true,
+    },
+  };
+}
+
+function buildDefaultAutonomyControlPlaneEvalSuite(primaryBackend: {
+  backend_id?: string | null | undefined;
+  tags?: string[] | null | undefined;
+}) {
+  const backendId = String(primaryBackend.backend_id ?? "").trim();
+  const preferredTags = normalizeStringArray(primaryBackend.tags).filter((tag) =>
+    ["local", "ollama", "mlx", "llama.cpp", "vllm", "gpu", "primary"].includes(tag)
+  );
+  return {
+    suite_id: DEFAULT_EVAL_SUITE_ID,
+    title: "Autonomy control-plane eval",
+    objective: "Keep the self-starting worker fabric, router, and benchmark substrate honest.",
+    aggregate_metric_name: "suite_success_rate",
+    aggregate_metric_direction: "maximize" as const,
+    cases: [
+      {
+        case_id: "autonomy-benchmark-smoke",
+        title: "Autonomy smoke benchmark stays green",
+        kind: "benchmark_suite" as const,
+        benchmark_suite_id: DEFAULT_BENCHMARK_SUITE_ID,
+        required: true,
+        weight: 1,
+      },
+      {
+        case_id: "router-primary-planning",
+        title: "Planning routes to the current primary local backend",
+        kind: "router_case" as const,
+        task_kind: "planning" as const,
+        context_tokens: 4000,
+        latency_budget_ms: 2000,
+        expected_backend_id: backendId,
+        expected_backend_tags: [],
+        preferred_tags: preferredTags,
+        required: true,
+        weight: 1,
+      },
+    ],
+    tags: ["autonomy", "control-plane", "bootstrap"],
+    metadata: {
+      bootstrap_source: "autonomy.bootstrap",
+      primary_backend_id: backendId,
+      preferred_router_tags: preferredTags,
+    },
+  };
+}
+
+function defaultAutonomySmokeBenchmarkSuiteNeedsReconcile(existing: any, projectDir: string) {
+  if (!existing) {
+    return true;
+  }
+  const expected = buildDefaultAutonomySmokeBenchmarkSuite(projectDir);
+  if (String(existing.title ?? "") !== expected.title) return true;
+  if (String(existing.objective ?? "") !== expected.objective) return true;
+  if (path.resolve(String(existing.project_dir ?? "")) !== expected.project_dir) return true;
+  if (String(existing.isolation_mode ?? "git_worktree") !== expected.isolation_mode) return true;
+  if (String(existing.aggregate_metric_name ?? "suite_success_rate") !== expected.aggregate_metric_name) return true;
+  if (String(existing.aggregate_metric_direction ?? "maximize") !== expected.aggregate_metric_direction) return true;
+  const existingTags = normalizeStringArray(existing.tags);
+  const expectedTags = normalizeStringArray(expected.tags);
+  if (existingTags.join("|") !== expectedTags.join("|")) return true;
+  if (Boolean(existing.metadata?.cleanup_workspaces) !== Boolean(expected.metadata?.cleanup_workspaces)) return true;
+  const existingCases = Array.isArray(existing.cases) ? existing.cases : [];
+  if (existingCases.length !== expected.cases.length) return true;
+  return expected.cases.some((expectedCase, index) => {
+    const currentCase = existingCases[index] ?? {};
+    return (
+      String(currentCase.case_id ?? "") !== expectedCase.case_id ||
+      String(currentCase.title ?? "") !== expectedCase.title ||
+      String(currentCase.command ?? "") !== expectedCase.command
+    );
+  });
+}
+
+function defaultAutonomyControlPlaneEvalSuiteNeedsReconcile(
+  existing: any,
+  primaryBackend: { backend_id?: string | null | undefined; tags?: string[] | null | undefined }
+) {
+  if (!existing) {
+    return true;
+  }
+  const expected = buildDefaultAutonomyControlPlaneEvalSuite(primaryBackend);
+  if (String(existing.title ?? "") !== expected.title) return true;
+  if (String(existing.objective ?? "") !== expected.objective) return true;
+  if (String(existing.aggregate_metric_name ?? "suite_success_rate") !== expected.aggregate_metric_name) return true;
+  if (String(existing.aggregate_metric_direction ?? "maximize") !== expected.aggregate_metric_direction) return true;
+  const existingTags = normalizeStringArray(existing.tags);
+  const expectedTags = normalizeStringArray(expected.tags);
+  if (existingTags.join("|") !== expectedTags.join("|")) return true;
+  if (String(existing.metadata?.primary_backend_id ?? "") !== String(expected.metadata.primary_backend_id ?? "")) return true;
+  const existingCases = Array.isArray(existing.cases) ? existing.cases : [];
+  if (existingCases.length !== expected.cases.length) return true;
+  return expected.cases.some((expectedCase, index) => {
+    const currentCase = existingCases[index] ?? {};
+    return (
+      String(currentCase.case_id ?? "") !== expectedCase.case_id ||
+      String(currentCase.title ?? "") !== expectedCase.title ||
+      String(currentCase.kind ?? "") !== expectedCase.kind ||
+      String(currentCase.benchmark_suite_id ?? "") !== String((expectedCase as any).benchmark_suite_id ?? "") ||
+      String(currentCase.expected_backend_id ?? "") !== String((expectedCase as any).expected_backend_id ?? "") ||
+      normalizeStringArray(currentCase.expected_backend_tags).join("|") !==
+        normalizeStringArray((expectedCase as any).expected_backend_tags).join("|") ||
+      normalizeStringArray(currentCase.preferred_tags).join("|") !==
+        normalizeStringArray((expectedCase as any).preferred_tags).join("|")
+    );
+  });
+}
+
+function resolvePrimaryLocalBackend(
+  localBackends: Array<{ backend_id?: string | null | undefined; tags?: string[] | null | undefined }>,
+  defaultBackendId: string | null | undefined
+) {
+  const normalizedDefault = String(defaultBackendId ?? "").trim();
+  if (normalizedDefault) {
+    const defaultMatch = localBackends.find((entry) => String(entry.backend_id ?? "").trim() === normalizedDefault);
+    if (defaultMatch) {
+      return defaultMatch;
+    }
+  }
+  const taggedPrimary = localBackends.find((entry) => normalizeStringArray(entry.tags).some((tag) => tag.toLowerCase() === "primary"));
+  return taggedPrimary ?? localBackends[0] ?? null;
+}
+
 async function inspectBootstrapState(
   storage: Storage,
   invokeTool: InvokeTool,
@@ -425,14 +741,23 @@ async function inspectBootstrapState(
   backendCandidates?: BackendCandidate[]
 ) {
   const persistedFabric = storage.getWorkerFabricState();
+  const persistedClusterTopology = storage.getClusterTopologyState();
   const persistedHosts = Array.isArray(persistedFabric?.hosts) ? persistedFabric!.hosts : [];
   const persistedLocalHost = persistedHosts.find((entry) => entry.host_id === input.local_host_id) ?? null;
+  const clusterTopologySummary = summarizeClusterTopologyState(
+    persistedClusterTopology ?? {
+      enabled: false,
+      default_node_id: null,
+      nodes: [],
+      updated_at: new Date().toISOString(),
+    }
+  );
 
   const effectiveFabricStatus = (await Promise.resolve(
     workerFabric(storage, {
       action: "status",
       fallback_workspace_root: process.cwd(),
-      fallback_worker_count: intFromEnv("TRICHAT_RING_LEADER_TMUX_WORKER_COUNT", 4),
+      fallback_worker_count: resolveSafeTmuxWorkerCount(),
       fallback_shell: process.env.SHELL || "/bin/zsh",
     })
   )) as any;
@@ -455,12 +780,17 @@ async function inspectBootstrapState(
   const evalState = evalSuiteList(storage, {});
   const benchmarkSuiteIds = benchmarkState.suites.map((entry) => entry.suite_id);
   const evalSuiteIds = evalState.suites.map((entry) => entry.suite_id);
+  const existingBenchmarkSuite = benchmarkState.suites.find((entry) => entry.suite_id === DEFAULT_BENCHMARK_SUITE_ID);
+  const existingEvalSuite = evalState.suites.find((entry) => entry.suite_id === DEFAULT_EVAL_SUITE_ID);
+  const localPrimaryBackend = resolvePrimaryLocalBackend(localBackends, persistedRouter?.default_backend_id);
 
   const autopilotStatus = (await Promise.resolve(
     trichatAutopilotControl(storage, invokeTool, { action: "status" } as any)
   )) as Record<string, unknown>;
   const desiredAutopilot = buildDesiredAutopilotConfig();
   const actualConfig = isRecord(autopilotStatus.config) ? autopilotStatus.config : {};
+  const persistedAutopilot = storage.getTriChatAutopilotState();
+  const enforceAutopilotConfig = boolFromEnv("TRICHAT_RING_LEADER_ENFORCE_STARTUP_CONFIG", false);
   const configDrift = [
     String(actualConfig.lead_agent_id || "") !== desiredAutopilot.lead_agent_id ? "lead_agent_id" : null,
     String(actualConfig.thread_id || "") !== desiredAutopilot.thread_id ? "thread_id" : null,
@@ -473,8 +803,11 @@ async function inspectBootstrapState(
   const repairsNeeded: string[] = [];
   if (!persistedFabric?.enabled || !persistedLocalHost) {
     repairsNeeded.push("worker.fabric.local_host_missing");
-  } else if (!isFreshIsoTimestamp(persistedLocalHost.telemetry?.heartbeat_at)) {
+  } else if (!isFreshIsoTimestamp(effectiveLocalHost?.telemetry?.heartbeat_at ?? persistedLocalHost.telemetry?.heartbeat_at)) {
     repairsNeeded.push("worker.fabric.local_host_stale");
+  }
+  if (!persistedClusterTopology?.enabled || clusterTopologySummary.node_count === 0) {
+    repairsNeeded.push("cluster.topology.missing");
   }
   if (!persistedRouter?.enabled || localBackends.length === 0) {
     repairsNeeded.push("model.router.local_backend_missing");
@@ -486,15 +819,19 @@ async function inspectBootstrapState(
   }
   if (!benchmarkSuiteIds.includes(DEFAULT_BENCHMARK_SUITE_ID)) {
     repairsNeeded.push("benchmark.suite.missing_default");
+  } else if (defaultAutonomySmokeBenchmarkSuiteNeedsReconcile(existingBenchmarkSuite, process.cwd())) {
+    repairsNeeded.push("benchmark.suite.default_drift");
   }
   if (!evalSuiteIds.includes(DEFAULT_EVAL_SUITE_ID)) {
     repairsNeeded.push("eval.suite.missing_default");
+  } else if (localPrimaryBackend && defaultAutonomyControlPlaneEvalSuiteNeedsReconcile(existingEvalSuite, localPrimaryBackend)) {
+    repairsNeeded.push("eval.suite.default_drift");
   }
   const shouldAutostart = input.autostart_ring_leader ?? boolFromEnv("TRICHAT_RING_LEADER_AUTOSTART", true);
   if (shouldAutostart && !autopilotStatus.running) {
     repairsNeeded.push("trichat.autopilot.not_running");
   }
-  if (shouldAutostart && configDrift.length > 0) {
+  if (shouldAutostart && enforceAutopilotConfig && !persistedAutopilot && configDrift.length > 0) {
     repairsNeeded.push("trichat.autopilot.config_drift");
   }
 
@@ -503,11 +840,23 @@ async function inspectBootstrapState(
     worker_fabric: {
       enabled: Boolean(persistedFabric?.enabled),
       host_present: Boolean(persistedLocalHost),
-      host_fresh: Boolean(persistedLocalHost && isFreshIsoTimestamp(persistedLocalHost.telemetry?.heartbeat_at)),
+      host_fresh: Boolean(
+        (effectiveLocalHost ?? persistedLocalHost) &&
+        isFreshIsoTimestamp((effectiveLocalHost ?? persistedLocalHost)?.telemetry?.heartbeat_at)
+      ),
       default_host_id: persistedFabric?.default_host_id ?? null,
       host_ids: persistedHosts.map((entry) => entry.host_id),
-      telemetry: persistedLocalHost?.telemetry ?? null,
+      telemetry: effectiveLocalHost?.telemetry ?? persistedLocalHost?.telemetry ?? null,
+      persisted_local_telemetry: persistedLocalHost?.telemetry ?? null,
       effective_local_telemetry: effectiveLocalHost?.telemetry ?? null,
+    },
+    cluster_topology: {
+      ready: Boolean(persistedClusterTopology?.enabled) && clusterTopologySummary.node_count > 0,
+      default_node_id: clusterTopologySummary.default_node_id,
+      node_count: clusterTopologySummary.node_count,
+      active_node_count: clusterTopologySummary.active_node_count,
+      planned_node_count: clusterTopologySummary.planned_node_count,
+      syncable_worker_host_count: clusterTopologySummary.syncable_worker_host_count,
     },
     model_router: {
       enabled: Boolean(persistedRouter?.enabled),
@@ -524,10 +873,17 @@ async function inspectBootstrapState(
     },
     benchmark_suites: {
       ready: benchmarkSuiteIds.includes(DEFAULT_BENCHMARK_SUITE_ID),
+      default_suite_drift:
+        benchmarkSuiteIds.includes(DEFAULT_BENCHMARK_SUITE_ID) &&
+        defaultAutonomySmokeBenchmarkSuiteNeedsReconcile(existingBenchmarkSuite, process.cwd()),
       suite_ids: benchmarkSuiteIds,
     },
     eval_suites: {
       ready: evalSuiteIds.includes(DEFAULT_EVAL_SUITE_ID),
+      default_suite_drift:
+        evalSuiteIds.includes(DEFAULT_EVAL_SUITE_ID) &&
+        Boolean(localPrimaryBackend) &&
+        defaultAutonomyControlPlaneEvalSuiteNeedsReconcile(existingEvalSuite, localPrimaryBackend!),
       suite_ids: evalSuiteIds,
     },
     ring_leader: {
@@ -550,22 +906,171 @@ async function inspectBootstrapState(
   };
 }
 
+function inspectBootstrapStateFast(
+  storage: Storage,
+  input: z.infer<typeof autonomyBootstrapSchema>
+) {
+  const persistedFabric = storage.getWorkerFabricState();
+  const persistedClusterTopology = storage.getClusterTopologyState();
+  const persistedHosts = Array.isArray(persistedFabric?.hosts) ? persistedFabric.hosts : [];
+  const persistedLocalHost = persistedHosts.find((entry) => entry.host_id === input.local_host_id) ?? null;
+  const clusterTopologySummary = summarizeClusterTopologyState(
+    persistedClusterTopology ?? {
+      enabled: false,
+      default_node_id: null,
+      nodes: [],
+      updated_at: new Date().toISOString(),
+    }
+  );
+  const persistedRouter = storage.getModelRouterState();
+  const persistedBackends = Array.isArray(persistedRouter?.backends) ? persistedRouter.backends : [];
+  const localBackends = persistedBackends.filter(
+    (entry) => String(entry.host_id || "") === input.local_host_id || String(entry.locality || "") === "local"
+  );
+  const requiredRoleIds = getTriChatAgentCatalog()
+    .filter((agent) => agent.enabled !== false)
+    .map((agent) => agent.agent_id);
+  const missingRoleIds = requiredRoleIds.filter((roleId) => !getEffectiveOrgProgram(storage, roleId));
+  const benchmarkState = benchmarkSuiteList(storage, {});
+  const evalState = evalSuiteList(storage, {});
+  const benchmarkSuiteIds = benchmarkState.suites.map((entry) => entry.suite_id);
+  const evalSuiteIds = evalState.suites.map((entry) => entry.suite_id);
+  const existingBenchmarkSuite = benchmarkState.suites.find((entry) => entry.suite_id === DEFAULT_BENCHMARK_SUITE_ID);
+  const existingEvalSuite = evalState.suites.find((entry) => entry.suite_id === DEFAULT_EVAL_SUITE_ID);
+  const localPrimaryBackend = resolvePrimaryLocalBackend(localBackends, persistedRouter?.default_backend_id);
+  const persistedAutopilot = storage.getTriChatAutopilotState();
+  const desiredAutopilot = buildDesiredAutopilotConfig();
+  const repairsNeeded: string[] = [];
+
+  if (!persistedFabric?.enabled || !persistedLocalHost) {
+    repairsNeeded.push("worker.fabric.local_host_missing");
+  } else if (!isFreshIsoTimestamp(persistedLocalHost.telemetry?.heartbeat_at)) {
+    repairsNeeded.push("worker.fabric.local_host_stale");
+  }
+  if (!persistedClusterTopology?.enabled || clusterTopologySummary.node_count === 0) {
+    repairsNeeded.push("cluster.topology.missing");
+  }
+  if (!persistedRouter?.enabled || localBackends.length === 0) {
+    repairsNeeded.push("model.router.local_backend_missing");
+  } else if (!localBackends.some((entry) => isFreshIsoTimestamp(entry.heartbeat_at))) {
+    repairsNeeded.push("model.router.local_backend_stale");
+  }
+  if (missingRoleIds.length > 0) {
+    repairsNeeded.push("org.program.missing_roles");
+  }
+  if (!benchmarkSuiteIds.includes(DEFAULT_BENCHMARK_SUITE_ID)) {
+    repairsNeeded.push("benchmark.suite.missing_default");
+  } else if (defaultAutonomySmokeBenchmarkSuiteNeedsReconcile(existingBenchmarkSuite, process.cwd())) {
+    repairsNeeded.push("benchmark.suite.default_drift");
+  }
+  if (!evalSuiteIds.includes(DEFAULT_EVAL_SUITE_ID)) {
+    repairsNeeded.push("eval.suite.missing_default");
+  } else if (localPrimaryBackend && defaultAutonomyControlPlaneEvalSuiteNeedsReconcile(existingEvalSuite, localPrimaryBackend)) {
+    repairsNeeded.push("eval.suite.default_drift");
+  }
+  if ((input.autostart_ring_leader ?? boolFromEnv("TRICHAT_RING_LEADER_AUTOSTART", true)) && persistedAutopilot?.enabled !== true) {
+    repairsNeeded.push("trichat.autopilot.not_running");
+  }
+
+  return {
+    local_host_id: input.local_host_id,
+    worker_fabric: {
+      enabled: Boolean(persistedFabric?.enabled),
+      host_present: Boolean(persistedLocalHost),
+      host_fresh: Boolean(persistedLocalHost && isFreshIsoTimestamp(persistedLocalHost.telemetry?.heartbeat_at)),
+      default_host_id: persistedFabric?.default_host_id ?? null,
+      host_ids: persistedHosts.map((entry) => entry.host_id),
+      telemetry: persistedLocalHost?.telemetry ?? null,
+      persisted_local_telemetry: persistedLocalHost?.telemetry ?? null,
+      effective_local_telemetry: persistedLocalHost?.telemetry ?? null,
+    },
+    cluster_topology: {
+      ready: Boolean(persistedClusterTopology?.enabled) && clusterTopologySummary.node_count > 0,
+      default_node_id: clusterTopologySummary.default_node_id,
+      node_count: clusterTopologySummary.node_count,
+      active_node_count: clusterTopologySummary.active_node_count,
+      planned_node_count: clusterTopologySummary.planned_node_count,
+      syncable_worker_host_count: clusterTopologySummary.syncable_worker_host_count,
+    },
+    model_router: {
+      enabled: Boolean(persistedRouter?.enabled),
+      backend_present: localBackends.length > 0,
+      backend_fresh: localBackends.some((entry) => isFreshIsoTimestamp(entry.heartbeat_at)),
+      default_backend_id: persistedRouter?.default_backend_id ?? null,
+      backend_ids: persistedBackends.map((entry) => entry.backend_id),
+      local_backend_ids: localBackends.map((entry) => entry.backend_id),
+    },
+    org_programs: {
+      ready: missingRoleIds.length === 0,
+      required_role_ids: requiredRoleIds,
+      missing_role_ids: missingRoleIds,
+    },
+    benchmark_suites: {
+      ready: benchmarkSuiteIds.includes(DEFAULT_BENCHMARK_SUITE_ID),
+      default_suite_drift:
+        benchmarkSuiteIds.includes(DEFAULT_BENCHMARK_SUITE_ID) &&
+        defaultAutonomySmokeBenchmarkSuiteNeedsReconcile(existingBenchmarkSuite, process.cwd()),
+      suite_ids: benchmarkSuiteIds,
+    },
+    eval_suites: {
+      ready: evalSuiteIds.includes(DEFAULT_EVAL_SUITE_ID),
+      default_suite_drift:
+        evalSuiteIds.includes(DEFAULT_EVAL_SUITE_ID) &&
+        Boolean(localPrimaryBackend) &&
+        defaultAutonomyControlPlaneEvalSuiteNeedsReconcile(existingEvalSuite, localPrimaryBackend),
+      suite_ids: evalSuiteIds,
+    },
+    ring_leader: {
+      running: persistedAutopilot?.enabled === true,
+      lead_agent_id: desiredAutopilot.lead_agent_id,
+      thread_id: desiredAutopilot.thread_id,
+      config_drift: [],
+    },
+    detections: {
+      host_tags: detectLocalHost(storage, input).detection_tags,
+      backends: [],
+    },
+    repairs_needed: repairsNeeded,
+    self_start_ready: repairsNeeded.length === 0,
+    fast: true,
+  };
+}
+
 export async function autonomyBootstrap(storage: Storage, invokeTool: InvokeTool, input: z.infer<typeof autonomyBootstrapSchema>) {
-  const detectedBackends = await detectBackends(input);
+  if (input.action === "status" && input.fast === true) {
+    return inspectBootstrapStateFast(storage, input);
+  }
+  const statusLocalHost = detectLocalHost(storage, input);
+  const detectedBackends = await detectBackends(input, statusLocalHost.profile);
   if (input.action === "status") {
     return inspectBootstrapState(storage, invokeTool, input, detectedBackends);
   }
 
-  return runIdempotentMutation({
-    storage,
-    tool_name: "autonomy.bootstrap",
-    mutation: input.mutation!,
-    payload: input,
-    execute: async () => {
-      const actions: string[] = [];
-      const localHost = detectLocalHost(storage, input);
-      const desiredAutopilot = buildDesiredAutopilotConfig();
-      const shouldAutostart = input.autostart_ring_leader ?? boolFromEnv("TRICHAT_RING_LEADER_AUTOSTART", true);
+  return serializeAutonomyBootstrap(() =>
+    runIdempotentMutation({
+      storage,
+      tool_name: "autonomy.bootstrap",
+      mutation: input.mutation!,
+      payload: input,
+      execute: async () => {
+        const actions: string[] = [];
+        const localHost = detectLocalHost(storage, input);
+        const ensuredBackends = await detectBackends(input, localHost.profile);
+        const desiredAutopilot = buildDesiredAutopilotConfig();
+        const shouldAutostart = input.autostart_ring_leader ?? boolFromEnv("TRICHAT_RING_LEADER_AUTOSTART", true);
+
+      if (input.seed_cluster_topology !== false) {
+        await clusterTopology(storage, {
+          action: "ensure_lab",
+          mutation: deriveMutation(input.mutation!, "autonomy.cluster.topology.ensure_lab"),
+          local_host_id: input.local_host_id,
+          workspace_root: process.cwd(),
+          source_client: "autonomy.bootstrap",
+          source_agent: input.source_agent,
+          source_model: input.source_model,
+        });
+        actions.push("cluster.topology.ensure_lab");
+      }
 
       const persistedFabric = storage.getWorkerFabricState();
       if (!persistedFabric?.enabled || persistedFabric.default_host_id !== input.local_host_id) {
@@ -591,23 +1096,27 @@ export async function autonomyBootstrap(storage: Storage, invokeTool: InvokeTool
       });
       actions.push("worker.fabric.upsert_host");
 
-      if (detectedBackends.length > 0) {
+      if (input.seed_cluster_topology !== false) {
+        await clusterTopology(storage, {
+          action: "sync_worker_fabric",
+          mutation: deriveMutation(input.mutation!, "autonomy.cluster.topology.sync_worker_fabric"),
+          local_host_id: input.local_host_id,
+          fallback_shell: process.env.SHELL || "/bin/zsh",
+          fallback_worker_count: resolveSafeTmuxWorkerCount(),
+          source_client: "autonomy.bootstrap",
+          source_agent: input.source_agent,
+          source_model: input.source_model,
+        });
+        actions.push("cluster.topology.sync_worker_fabric");
+      }
+
+      if (ensuredBackends.length > 0) {
         const routerStatus = storage.getModelRouterState();
-        const primaryBackend = detectedBackends[0];
-        if (!routerStatus?.enabled || routerStatus.default_backend_id !== primaryBackend.backend_id) {
-          await modelRouter(storage, {
-            action: "configure",
-            mutation: deriveMutation(input.mutation!, "autonomy.model.router.configure"),
-            enabled: true,
-            strategy: "prefer_quality",
-            default_backend_id: primaryBackend.backend_id,
-            source_client: "autonomy.bootstrap",
-            source_agent: input.source_agent,
-            source_model: input.source_model,
-          });
-          actions.push("model.router.configure");
+        const primaryBackend = selectPrimaryBootstrapBackend(ensuredBackends, routerStatus, input.local_host_id);
+        if (!primaryBackend) {
+          throw new Error("autonomy.bootstrap could not determine a primary backend");
         }
-        for (const backend of detectedBackends) {
+        for (const backend of ensuredBackends) {
           await modelRouter(storage, {
             action: "upsert_backend",
             mutation: deriveMutation(input.mutation!, `autonomy.model.router.${backend.backend_id}`),
@@ -624,6 +1133,20 @@ export async function autonomyBootstrap(storage: Storage, invokeTool: InvokeTool
             source_model: input.source_model,
           });
           actions.push(`model.router.upsert_backend:${backend.backend_id}`);
+        }
+        const routerAfterUpserts = storage.getModelRouterState();
+        if (!routerAfterUpserts?.enabled || routerAfterUpserts.default_backend_id !== primaryBackend.backend_id) {
+          await modelRouter(storage, {
+            action: "configure",
+            mutation: deriveMutation(input.mutation!, "autonomy.model.router.configure"),
+            enabled: true,
+            strategy: "prefer_quality",
+            default_backend_id: primaryBackend.backend_id,
+            source_client: "autonomy.bootstrap",
+            source_agent: input.source_agent,
+            source_model: input.source_model,
+          });
+          actions.push("model.router.configure");
         }
       }
 
@@ -666,39 +1189,21 @@ export async function autonomyBootstrap(storage: Storage, invokeTool: InvokeTool
 
       if (input.seed_benchmark_suite !== false) {
         const suites = benchmarkSuiteList(storage, {});
-        if (!suites.suites.some((entry) => entry.suite_id === DEFAULT_BENCHMARK_SUITE_ID)) {
+        const existingSuite = suites.suites.find((entry) => entry.suite_id === DEFAULT_BENCHMARK_SUITE_ID);
+        if (defaultAutonomySmokeBenchmarkSuiteNeedsReconcile(existingSuite, process.cwd())) {
+          const suite = buildDefaultAutonomySmokeBenchmarkSuite(process.cwd());
           await benchmarkSuiteUpsert(storage, {
             mutation: deriveMutation(input.mutation!, "autonomy.benchmark.suite"),
-            suite_id: DEFAULT_BENCHMARK_SUITE_ID,
-            title: "Autonomy smoke benchmark",
-            objective: "Verify the local-first agent stack can still build and answer core MCP health queries inside isolated execution.",
-            project_dir: process.cwd(),
-            isolation_mode: "git_worktree",
-            aggregate_metric_name: "suite_success_rate",
-            aggregate_metric_direction: "maximize",
-            cases: [
-              {
-                case_id: "build",
-                title: "TypeScript build stays green",
-                command: "npm run build",
-              },
-              {
-                case_id: "storage-health",
-                title: "Isolated stdio storage health stays reachable",
-                command:
-                  "node ./scripts/mcp_tool_call.mjs --tool health.storage --args '{}' --transport stdio --stdio-command node --stdio-args 'dist/server.js' --cwd . >/dev/null",
-              },
-              {
-                case_id: "roster-health",
-                title: "Isolated stdio tri-chat roster stays reachable",
-                command:
-                  "node ./scripts/mcp_tool_call.mjs --tool trichat.roster --args '{}' --transport stdio --stdio-command node --stdio-args 'dist/server.js' --cwd . >/dev/null",
-              },
-            ],
-            tags: ["autonomy", "smoke", "bootstrap"],
-            metadata: {
-              bootstrap_source: "autonomy.bootstrap",
-            },
+            suite_id: suite.suite_id,
+            title: suite.title,
+            objective: suite.objective,
+            project_dir: suite.project_dir,
+            isolation_mode: suite.isolation_mode,
+            aggregate_metric_name: suite.aggregate_metric_name,
+            aggregate_metric_direction: suite.aggregate_metric_direction,
+            cases: suite.cases,
+            tags: suite.tags,
+            metadata: suite.metadata,
             source_client: "autonomy.bootstrap",
             source_agent: input.source_agent,
             source_model: input.source_model,
@@ -709,43 +1214,23 @@ export async function autonomyBootstrap(storage: Storage, invokeTool: InvokeTool
 
       if (input.seed_eval_suite !== false && availableLocalBackends.length > 0) {
         const evalSuites = evalSuiteList(storage, {});
-        if (!evalSuites.suites.some((entry) => entry.suite_id === DEFAULT_EVAL_SUITE_ID)) {
-          const primaryBackend = availableLocalBackends[0];
+        const primaryBackend = selectPrimaryLocalBackend(availableLocalBackends, input.local_host_id);
+        if (!primaryBackend) {
+          throw new Error("autonomy.bootstrap could not determine an eval backend");
+        }
+        const existingEvalSuite = evalSuites.suites.find((entry) => entry.suite_id === DEFAULT_EVAL_SUITE_ID);
+        if (defaultAutonomyControlPlaneEvalSuiteNeedsReconcile(existingEvalSuite, primaryBackend)) {
+          const suite = buildDefaultAutonomyControlPlaneEvalSuite(primaryBackend);
           await evalSuiteUpsert(storage, {
             mutation: deriveMutation(input.mutation!, "autonomy.eval.suite"),
-            suite_id: DEFAULT_EVAL_SUITE_ID,
-            title: "Autonomy control-plane eval",
-            objective: "Keep the self-starting worker fabric, router, and benchmark substrate honest.",
-            aggregate_metric_name: "suite_success_rate",
-            aggregate_metric_direction: "maximize",
-            cases: [
-              {
-                case_id: "autonomy-benchmark-smoke",
-                title: "Autonomy smoke benchmark stays green",
-                kind: "benchmark_suite",
-                benchmark_suite_id: DEFAULT_BENCHMARK_SUITE_ID,
-                required: true,
-                weight: 1,
-              },
-              {
-                case_id: "router-primary-planning",
-                title: "Planning routes to the current primary local backend",
-                kind: "router_case",
-                task_kind: "planning",
-                context_tokens: 4000,
-                latency_budget_ms: 2000,
-                expected_backend_id: primaryBackend.backend_id,
-                expected_backend_tags: primaryBackend.tags ?? [],
-                preferred_tags: primaryBackend.tags ?? [],
-                required: true,
-                weight: 1,
-              },
-            ],
-            tags: ["autonomy", "control-plane", "bootstrap"],
-            metadata: {
-              bootstrap_source: "autonomy.bootstrap",
-              primary_backend_id: primaryBackend.backend_id,
-            },
+            suite_id: suite.suite_id,
+            title: suite.title,
+            objective: suite.objective,
+            aggregate_metric_name: suite.aggregate_metric_name,
+            aggregate_metric_direction: suite.aggregate_metric_direction,
+            cases: suite.cases,
+            tags: suite.tags,
+            metadata: suite.metadata,
             source_client: "autonomy.bootstrap",
             source_agent: input.source_agent,
             source_model: input.source_model,
@@ -758,30 +1243,39 @@ export async function autonomyBootstrap(storage: Storage, invokeTool: InvokeTool
         trichatAutopilotControl(storage, invokeTool, { action: "status" } as any)
       )) as Record<string, unknown>;
       const currentConfig = isRecord(autopilotStatus.config) ? autopilotStatus.config : {};
+      const persistedAutopilot = storage.getTriChatAutopilotState();
+      const enforceAutopilotConfig = boolFromEnv("TRICHAT_RING_LEADER_ENFORCE_STARTUP_CONFIG", false);
+      const startConfig =
+        persistedAutopilot && isRecord(currentConfig)
+          ? currentConfig
+          : desiredAutopilot;
       const autopilotNeedsSync =
         shouldAutostart &&
         availableLocalBackends.length > 0 &&
         (!autopilotStatus.running ||
-          String(currentConfig.thread_id || "") !== desiredAutopilot.thread_id ||
-          String(currentConfig.lead_agent_id || "") !== desiredAutopilot.lead_agent_id ||
-          JSON.stringify(normalizeStringArray(currentConfig.specialist_agent_ids)) !==
-            JSON.stringify(desiredAutopilot.specialist_agent_ids));
+          (!persistedAutopilot &&
+            enforceAutopilotConfig &&
+            (String(currentConfig.thread_id || "") !== desiredAutopilot.thread_id ||
+              String(currentConfig.lead_agent_id || "") !== desiredAutopilot.lead_agent_id ||
+              JSON.stringify(normalizeStringArray(currentConfig.specialist_agent_ids)) !==
+                JSON.stringify(desiredAutopilot.specialist_agent_ids))));
       if (autopilotNeedsSync) {
         await trichatAutopilotControl(storage, invokeTool, {
           action: "start",
           mutation: deriveMutation(input.mutation!, "autonomy.trichat.autopilot.start"),
           run_immediately: input.run_immediately ?? false,
-          ...desiredAutopilot,
+          ...startConfig,
         } as any);
         actions.push("trichat.autopilot.start");
       }
 
-      const status = await inspectBootstrapState(storage, invokeTool, input, detectedBackends);
-      return {
-        ok: status.self_start_ready,
-        actions,
-        status,
-      };
-    },
-  });
+        const status = await inspectBootstrapState(storage, invokeTool, input, detectedBackends);
+        return {
+          ok: status.self_start_ready,
+          actions,
+          status,
+        };
+      },
+    })
+  );
 }

@@ -126,6 +126,7 @@ const autoSquishRuntime: {
   in_tick: boolean;
   started_at: string | null;
   last_tick_at: string | null;
+  last_success_at: string | null;
   last_error: string | null;
   tick_count: number;
   total_runs_processed: number;
@@ -138,6 +139,7 @@ const autoSquishRuntime: {
   in_tick: false,
   started_at: null,
   last_tick_at: null,
+  last_success_at: null,
   last_error: null,
   tick_count: 0,
   total_runs_processed: 0,
@@ -353,6 +355,7 @@ function getAutoSquishStatus() {
     config: { ...autoSquishRuntime.config },
     started_at: autoSquishRuntime.started_at,
     last_tick_at: autoSquishRuntime.last_tick_at,
+    last_success_at: autoSquishRuntime.last_success_at,
     last_error: autoSquishRuntime.last_error,
     stats: {
       tick_count: autoSquishRuntime.tick_count,
@@ -361,6 +364,10 @@ function getAutoSquishStatus() {
       total_memories_created: autoSquishRuntime.total_memories_created,
     },
   };
+}
+
+export function getAutoSquishRuntimeStatus() {
+  return getAutoSquishStatus();
 }
 
 function resolveAutoSquishConfig(
@@ -382,6 +389,7 @@ function startAutoSquishDaemon(storage: Storage) {
   autoSquishRuntime.running = true;
   autoSquishRuntime.in_tick = false;
   autoSquishRuntime.started_at = new Date().toISOString();
+  autoSquishRuntime.last_success_at = null;
   autoSquishRuntime.last_error = null;
   autoSquishRuntime.timer = setInterval(() => {
     try {
@@ -465,6 +473,7 @@ function runAutoSquishTick(storage: Storage, config: AutoSquishConfig): AutoSqui
     autoSquishRuntime.total_lines_squished += linesSquished;
     autoSquishRuntime.total_memories_created += memoriesCreated;
     autoSquishRuntime.last_tick_at = completedAt;
+    autoSquishRuntime.last_success_at = completedAt;
     autoSquishRuntime.last_error = runErrors.length
       ? `${runErrors.length} run(s) failed: ${runErrors[0]}`
       : null;

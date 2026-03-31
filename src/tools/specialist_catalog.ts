@@ -117,6 +117,28 @@ function defaultSystemPrompt(input: {
   ].join(" ");
 }
 
+function defaultPreferredHostTags(domainKey: string) {
+  switch (normalizeDomainKey(domainKey)) {
+    case "docker":
+      return ["container", "server", "local", "ollama"];
+    case "dns":
+    case "dhcp":
+    case "firewall":
+      return ["infra", "server", "local"];
+    case "web-server":
+      return ["web", "server", "local"];
+    case "kubernetes":
+      return ["container", "orchestration", "server", "local"];
+    case "proxmox":
+      return ["virtualization", "server", "local"];
+    default:
+      if (/\b(gpu|cuda|llm|model|training)\b/.test(domainKey)) {
+        return ["gpu", "server", "local"];
+      }
+      return ["server", "local"];
+  }
+}
+
 function buildDefaultSpecialists(): DomainSpecialistRecord[] {
   const now = new Date().toISOString();
   const raw = [
@@ -126,7 +148,7 @@ function buildDefaultSpecialists(): DomainSpecialistRecord[] {
       description: "Expert on Docker, Compose, container builds, container runtime behavior, and image hygiene.",
       lane: "implementer",
       keywords: ["docker", "docker compose", "compose.yaml", "container", "containers", "image build"],
-      preferred_host_tags: ["local", "ollama"],
+      preferred_host_tags: defaultPreferredHostTags("docker"),
     },
     {
       domain_key: "dns",
@@ -134,7 +156,7 @@ function buildDefaultSpecialists(): DomainSpecialistRecord[] {
       description: "Expert on DNS servers, zones, records, resolvers, Bind, Unbound, and name resolution.",
       lane: "analyst",
       keywords: ["dns", "bind", "named", "unbound", "resolver", "zone file", "record", "cname", "mx"],
-      preferred_host_tags: ["local"],
+      preferred_host_tags: defaultPreferredHostTags("dns"),
     },
     {
       domain_key: "dhcp",
@@ -142,7 +164,7 @@ function buildDefaultSpecialists(): DomainSpecialistRecord[] {
       description: "Expert on DHCP scopes, leases, reservations, relay, and IP assignment workflows.",
       lane: "implementer",
       keywords: ["dhcp", "dhcpd", "lease", "reservation", "relay", "scope", "ip assignment"],
-      preferred_host_tags: ["local"],
+      preferred_host_tags: defaultPreferredHostTags("dhcp"),
     },
     {
       domain_key: "firewall",
@@ -150,7 +172,7 @@ function buildDefaultSpecialists(): DomainSpecialistRecord[] {
       description: "Expert on firewall rules, NAT, packet filtering, nftables, iptables, pf, and segmentation.",
       lane: "verifier",
       keywords: ["firewall", "iptables", "nftables", "ufw", "pf", "nat", "acl", "packet filter"],
-      preferred_host_tags: ["local"],
+      preferred_host_tags: defaultPreferredHostTags("firewall"),
     },
     {
       domain_key: "web-server",
@@ -158,7 +180,7 @@ function buildDefaultSpecialists(): DomainSpecialistRecord[] {
       description: "Expert on Nginx, Apache, Caddy, reverse proxying, TLS termination, and virtual hosts.",
       lane: "implementer",
       keywords: ["nginx", "apache", "caddy", "reverse proxy", "virtual host", "tls", "web server"],
-      preferred_host_tags: ["local"],
+      preferred_host_tags: defaultPreferredHostTags("web-server"),
     },
     {
       domain_key: "kubernetes",
@@ -166,7 +188,7 @@ function buildDefaultSpecialists(): DomainSpecialistRecord[] {
       description: "Expert on Kubernetes, Helm, manifests, service exposure, and container orchestration.",
       lane: "implementer",
       keywords: ["kubernetes", "k8s", "helm", "kubectl", "deployment", "service mesh", "ingress"],
-      preferred_host_tags: ["local"],
+      preferred_host_tags: defaultPreferredHostTags("kubernetes"),
     },
     {
       domain_key: "proxmox",
@@ -174,7 +196,7 @@ function buildDefaultSpecialists(): DomainSpecialistRecord[] {
       description: "Expert on Proxmox VE, LXC, QEMU VMs, storage pools, and host virtualization workflows.",
       lane: "implementer",
       keywords: ["proxmox", "pve", "lxc", "qemu", "vm", "virtual machine", "cluster node"],
-      preferred_host_tags: ["local"],
+      preferred_host_tags: defaultPreferredHostTags("proxmox"),
     },
   ];
   return raw.map((entry) => {
@@ -247,6 +269,10 @@ export function getDomainSpecialistAgentDefinition(storage: Storage, agentId: st
   if (!specialist) {
     return null;
   }
+  return mapSpecialistToAgentDefinition(specialist);
+}
+
+function mapSpecialistToAgentDefinition(specialist: DomainSpecialistRecord): TriChatAgentDefinition {
   return {
     agent_id: specialist.agent_id,
     display_name: specialist.title,
@@ -269,8 +295,7 @@ export function getDomainSpecialistAgentDefinition(storage: Storage, agentId: st
 export function listDomainSpecialistAgentDefinitions(storage: Storage): TriChatAgentDefinition[] {
   return getEffectiveRegistry(storage).specialists
     .filter((entry) => entry.status === "active")
-    .map((entry) => getDomainSpecialistAgentDefinition(storage, entry.agent_id))
-    .filter((entry): entry is TriChatAgentDefinition => Boolean(entry));
+    .map((entry) => mapSpecialistToAgentDefinition(entry));
 }
 
 function countLearningEntries(storage: Storage, agentId: string) {
@@ -402,7 +427,7 @@ function buildGenericSpecialist(domainKey: string): DomainSpecialistRecord {
       paths: [],
     },
     routing_hints: {
-      preferred_host_tags: ["local"],
+      preferred_host_tags: defaultPreferredHostTags(domainKey),
       required_host_tags: [],
       preferred_agent_ids: [agentId, parentAgentId],
       support_agent_ids: DEFAULT_SUPPORT_AGENT_IDS.slice(),

@@ -4,6 +4,9 @@ import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { ensureWorkspaceFingerprint } from "./workspace_fingerprint.js";
 
 const taskStatusSchema = z.enum(["pending", "running", "completed", "failed", "cancelled"]);
+const isolationModeSchema = z.enum(["git_worktree", "copy", "none"]);
+const routeTaskKindSchema = z.enum(["planning", "coding", "research", "verification", "chat", "tool_use"]);
+const qualityPreferenceSchema = z.enum(["speed", "balanced", "quality", "cost"]);
 const sourceSchema = z.object({
   source: z.string().optional(),
   source_client: z.string().optional(),
@@ -20,6 +23,39 @@ export const taskRoutingSchema = z.object({
   preferred_capabilities: z.array(z.string().min(1)).optional(),
 });
 
+const taskExecutionCandidateSchema = z.object({
+  backend_id: z.string().min(1),
+  provider: z.string().min(1).optional(),
+  host_id: z.string().min(1).optional(),
+  node_id: z.string().min(1).optional(),
+  title: z.string().min(1).optional(),
+  score: z.number().optional(),
+});
+
+export const taskExecutionSchema = z.object({
+  preferred_host_ids: z.array(z.string().min(1)).optional(),
+  allowed_host_ids: z.array(z.string().min(1)).optional(),
+  preferred_host_tags: z.array(z.string().min(1)).optional(),
+  required_host_tags: z.array(z.string().min(1)).optional(),
+  preferred_backend_ids: z.array(z.string().min(1)).optional(),
+  required_backend_ids: z.array(z.string().min(1)).optional(),
+  preferred_model_tags: z.array(z.string().min(1)).optional(),
+  required_model_tags: z.array(z.string().min(1)).optional(),
+  isolation_mode: isolationModeSchema.optional(),
+  task_kind: routeTaskKindSchema.optional(),
+  quality_preference: qualityPreferenceSchema.optional(),
+  selected_backend_id: z.string().min(1).optional(),
+  selected_backend_provider: z.string().min(1).optional(),
+  selected_backend_locality: z.enum(["local", "remote"]).optional(),
+  selected_host_id: z.string().min(1).optional(),
+  selected_worker_host_id: z.string().min(1).optional(),
+  routed_bridge_agent_ids: z.array(z.string().min(1)).optional(),
+  planned_backend_candidates: z.array(taskExecutionCandidateSchema).optional(),
+  runtime_id: z.enum(["codex", "shell"]).optional(),
+  runtime_strategy: z.enum(["tmux_worktree"]).optional(),
+  runtime_command: z.string().min(1).optional(),
+});
+
 export const taskCreateSchema = z.object({
   mutation: mutationSchema,
   task_id: z.string().min(1).max(200).optional(),
@@ -27,6 +63,7 @@ export const taskCreateSchema = z.object({
   project_dir: z.string().min(1).optional(),
   payload: z.record(z.unknown()).optional(),
   routing: taskRoutingSchema.optional(),
+  task_execution: taskExecutionSchema.optional(),
   priority: z.number().int().min(0).max(100).optional(),
   max_attempts: z.number().int().min(1).max(20).optional(),
   available_at: z.string().optional(),
@@ -86,6 +123,12 @@ export const taskRetrySchema = z.object({
   delay_seconds: z.number().int().min(0).max(86400).optional(),
   reason: z.string().optional(),
   force: z.boolean().optional(),
+});
+
+export const taskRecoverExpiredSchema = z.object({
+  mutation: mutationSchema,
+  limit: z.number().int().min(1).max(500).optional(),
+  ...sourceSchema.shape,
 });
 
 export const taskAutoRetrySchema = z
@@ -208,8 +251,17 @@ export async function taskCreate(storage: Storage, input: z.infer<typeof taskCre
     mutation: input.mutation,
     payload: input,
     execute: () => {
+      const normalizedTaskExecution = normalizeTaskExecutionMetadata({
+        ...(isRecord(input.metadata?.task_execution) ? input.metadata.task_execution : {}),
+        ...(input.task_execution ?? {}),
+      });
       const metadata: Record<string, unknown> = {
         ...(input.metadata ?? {}),
+        ...(normalizedTaskExecution
+          ? {
+              task_execution: normalizedTaskExecution,
+            }
+          : {}),
         ...(input.routing
           ? {
               task_routing: {
@@ -288,6 +340,82 @@ function normalizeTaskProfile(value: unknown): TaskExecutionProfile | null {
     complexity,
     requires_agent_session: value.requires_agent_session !== false,
     signals: normalizeStringArray(value.signals),
+  };
+}
+
+function normalizeTaskExecutionMetadata(value: unknown) {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const isolationRaw = readString(value.isolation_mode);
+  const isolation_mode =
+    isolationRaw === "copy" || isolationRaw === "none" || isolationRaw === "git_worktree"
+      ? isolationRaw
+      : "git_worktree";
+  const selected_backend_locality = readString(value.selected_backend_locality);
+  const task_kind = readString(value.task_kind);
+  const quality_preference = readString(value.quality_preference);
+  const runtime_id = readString(value.runtime_id);
+  const runtime_strategy = readString(value.runtime_strategy);
+  const planned_backend_candidates = Array.isArray(value.planned_backend_candidates)
+    ? value.planned_backend_candidates
+        .map((entry) => {
+          if (!isRecord(entry)) {
+            return null;
+          }
+          const backend_id = readString(entry.backend_id);
+          if (!backend_id) {
+            return null;
+          }
+          return {
+            backend_id,
+            provider: readString(entry.provider) ?? null,
+            host_id: readString(entry.host_id) ?? null,
+            node_id: readString(entry.node_id) ?? null,
+            title: readString(entry.title) ?? null,
+            score: typeof entry.score === "number" && Number.isFinite(entry.score) ? Number(entry.score.toFixed(4)) : null,
+          };
+        })
+        .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+    : [];
+
+  return {
+    preferred_host_ids: normalizeStringArray(value.preferred_host_ids),
+    allowed_host_ids: normalizeStringArray(value.allowed_host_ids),
+    preferred_host_tags: normalizeStringArray(value.preferred_host_tags),
+    required_host_tags: normalizeStringArray(value.required_host_tags),
+    preferred_backend_ids: normalizeStringArray(value.preferred_backend_ids),
+    required_backend_ids: normalizeStringArray(value.required_backend_ids),
+    preferred_model_tags: normalizeStringArray(value.preferred_model_tags),
+    required_model_tags: normalizeStringArray(value.required_model_tags),
+    isolation_mode,
+    task_kind:
+      task_kind === "planning" ||
+      task_kind === "coding" ||
+      task_kind === "research" ||
+      task_kind === "verification" ||
+      task_kind === "chat" ||
+      task_kind === "tool_use"
+        ? task_kind
+        : null,
+    quality_preference:
+      quality_preference === "speed" ||
+      quality_preference === "balanced" ||
+      quality_preference === "quality" ||
+      quality_preference === "cost"
+        ? quality_preference
+        : null,
+    selected_backend_id: readString(value.selected_backend_id),
+    selected_backend_provider: readString(value.selected_backend_provider),
+    selected_backend_locality:
+      selected_backend_locality === "local" || selected_backend_locality === "remote" ? selected_backend_locality : null,
+    selected_host_id: readString(value.selected_host_id),
+    selected_worker_host_id: readString(value.selected_worker_host_id),
+    routed_bridge_agent_ids: normalizeStringArray(value.routed_bridge_agent_ids),
+    planned_backend_candidates,
+    runtime_id: runtime_id === "codex" || runtime_id === "shell" ? runtime_id : null,
+    runtime_strategy: runtime_strategy === "tmux_worktree" ? runtime_strategy : null,
+    runtime_command: readString(value.runtime_command),
   };
 }
 
@@ -646,6 +774,24 @@ export async function taskRetry(storage: Storage, input: z.infer<typeof taskRetr
         reason: input.reason,
         force: input.force,
       }),
+  });
+}
+
+export async function taskRecoverExpired(storage: Storage, input: z.infer<typeof taskRecoverExpiredSchema>) {
+  return runIdempotentMutation({
+    storage,
+    tool_name: "task.recover_expired",
+    mutation: input.mutation,
+    payload: input,
+    execute: () => {
+      const result = storage.recoverExpiredRunningTasks({
+        limit: input.limit,
+      });
+      return {
+        ok: true,
+        ...result,
+      };
+    },
   });
 }
 
