@@ -474,7 +474,7 @@ button:hover,
   gap: 10px;
 }
 
-input,
+input:not([type="checkbox"]),
 select,
 textarea {
   width: 100%;
@@ -494,6 +494,20 @@ textarea {
   gap: 8px;
   align-items: center;
   color: var(--muted);
+  width: fit-content;
+}
+
+.checkbox input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.checkbox span {
+  display: inline-block;
 }
 
 .events-list {
