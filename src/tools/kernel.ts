@@ -1,5 +1,12 @@
 import { z } from "zod";
 import {
+  evaluateFeatureFlag,
+  listToolCatalogEntries,
+  summarizeFeatureFlags,
+  summarizePermissionProfiles,
+  summarizeToolCatalog,
+} from "../control_plane.js";
+import {
   type AutonomyMaintainStateRecord,
   type AgentSessionRecord,
   type ClusterTopologyStateRecord,
@@ -14,11 +21,14 @@ import {
   type PlanRecord,
   type PlanStepRecord,
   type ReactionEngineStateRecord,
+  type TaskRecord,
   type TaskSummaryRecord,
   type WorkerFabricHostRecord,
   type WorkerFabricStateRecord,
   Storage,
 } from "../storage.js";
+import { resolveSessionPermissionProfileId, resolveTaskPermissionProfileId } from "../control_plane_runtime.js";
+import { summarizeWarmCacheRuntime } from "../warm_cache_runtime.js";
 import { getAdaptiveWorkerProfile, summarizeAdaptiveSessionHealth, summarizeAdaptiveWorkerProfile } from "./agent_session.js";
 import { buildAgentLearningOverview } from "./agent_learning.js";
 import { buildEvalHealth, computeEvalDependencyFingerprint, getAutonomyMaintainRuntimeStatus } from "./autonomy_maintain.js";
@@ -1691,6 +1701,29 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     active_only: true,
     limit: sessionLimit,
   });
+  const featureFlagState = storage.getFeatureFlagState();
+  const permissionProfilesState = storage.getPermissionProfilesState();
+  const warmCacheState = storage.getWarmCacheState();
+  const pendingTasksForProfiles = storage.listTasks({ status: "pending", limit: 50 });
+  const runningTasksForProfiles = taskSummary.running
+    .map((task) => storage.getTaskById(task.task_id))
+    .filter((task): task is TaskRecord => task !== null);
+  const budgetLedgerSummary = storage.summarizeBudgetLedger({ recent_limit: 12 });
+  const permissionProfilesSummary = summarizePermissionProfiles({
+    state: permissionProfilesState,
+    session_profile_ids: activeSessions.map((session) => resolveSessionPermissionProfileId(storage, session)),
+    task_profile_ids: [...runningTasksForProfiles, ...pendingTasksForProfiles].map((task) => resolveTaskPermissionProfileId(storage, task)),
+  });
+  const toolCatalogSummary = evaluateFeatureFlag(featureFlagState, "operator.tool_discovery").enabled
+    ? summarizeToolCatalog(listToolCatalogEntries())
+    : null;
+  const featureFlagsSummary = evaluateFeatureFlag(featureFlagState, "operator.rollout_plane").enabled
+    ? summarizeFeatureFlags(featureFlagState)
+    : null;
+  const warmCacheRuntime = summarizeWarmCacheRuntime();
+  const warmCacheAgeSeconds = warmCacheState.last_run_at
+    ? Math.max(0, (Date.now() - Date.parse(warmCacheState.last_run_at)) / 1000)
+    : Number.POSITIVE_INFINITY;
   const adaptiveSessions = activeSessions.map((session) => summarizeAdaptiveSession(session));
   const experiments = storage.listExperiments({
     limit: experimentLimit,
@@ -2025,6 +2058,17 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   if (providerBridgeDisconnectedCount > 0) {
     attention.push(`Provider bridges report ${providerBridgeDisconnectedCount} disconnected client session(s).`);
   }
+  if (warmCacheState.enabled && (!Number.isFinite(warmCacheAgeSeconds) || warmCacheAgeSeconds > Math.max(60, warmCacheState.interval_seconds * 2))) {
+    attention.push("Warm-cache prefetch lane is stale and default operator surfaces may be serving cold reads.");
+  }
+  if (budgetLedgerSummary.projected_cost_usd > 0 && budgetLedgerSummary.actual_cost_usd > budgetLedgerSummary.projected_cost_usd * 1.1) {
+    attention.push(
+      `Actual cost (${budgetLedgerSummary.actual_cost_usd.toFixed(4)} USD) is running above projected cost (${budgetLedgerSummary.projected_cost_usd.toFixed(4)} USD).`
+    );
+  }
+  if (featureFlagsSummary && featureFlagsSummary.disabled_count > 0) {
+    attention.push(`${featureFlagsSummary.disabled_count} feature flag(s) are currently rolled out disabled.`);
+  }
   if (attention.length === 0 && state === "active") {
     attention.push("Kernel is progressing normally.");
   }
@@ -2137,6 +2181,26 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
         disconnected_count: providerBridgeDisconnectedCount,
         unavailable_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "unavailable").length,
       },
+      tool_catalog: toolCatalogSummary,
+      permission_profiles: {
+        default_profile: permissionProfilesSummary.default_profile,
+        session_counts: permissionProfilesSummary.session_counts,
+        task_counts: permissionProfilesSummary.task_counts,
+      },
+      budget_ledger: {
+        total_entries: budgetLedgerSummary.total_entries,
+        projected_cost_usd: budgetLedgerSummary.projected_cost_usd,
+        actual_cost_usd: budgetLedgerSummary.actual_cost_usd,
+        tokens_total: budgetLedgerSummary.tokens_total,
+      },
+      warm_cache: {
+        enabled: warmCacheState.enabled,
+        startup_prefetch: warmCacheState.startup_prefetch,
+        last_run_at: warmCacheState.last_run_at,
+        age_seconds: Number.isFinite(warmCacheAgeSeconds) ? Number(warmCacheAgeSeconds.toFixed(2)) : null,
+        entry_count: warmCacheRuntime.entry_count,
+      },
+      feature_flags: featureFlagsSummary,
       ready_step_count: totals.ready_step_count,
       running_step_count: totals.running_step_count,
       blocked_approval_count: totals.blocked_approval_count,
@@ -2167,6 +2231,17 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     reaction_engine: reactionEngineSummary,
     workflow_exports: workflowExportSummary,
     runtime_workers: runtimeWorkerSummary,
+    tool_catalog: toolCatalogSummary,
+    permission_profiles: permissionProfilesSummary,
+    budget_ledger: budgetLedgerSummary,
+    warm_cache: {
+      state: warmCacheState,
+      runtime: warmCacheRuntime,
+      stale:
+        warmCacheState.enabled &&
+        (!Number.isFinite(warmCacheAgeSeconds) || warmCacheAgeSeconds > Math.max(60, warmCacheState.interval_seconds * 2)),
+    },
+    feature_flags: featureFlagsSummary,
     provider_bridge: {
       generated_at: providerBridgeDiagnostics.generated_at,
       cached: providerBridgeDiagnostics.cached,

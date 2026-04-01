@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { z } from "zod";
 import { type GoalRecord, type PlanRecord, Storage } from "../storage.js";
+import { mergeDeclaredPermissionProfile } from "../control_plane_runtime.js";
 import { routeObjectiveBackends } from "./model_router.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { resolveSwarmProfile, summarizeMemoryPreflight, type SwarmProfileRecord } from "./swarm_profile.js";
@@ -49,6 +50,7 @@ export const autonomyCommandBaseSchema = z.object({
   metadata: recordSchema.optional(),
   owner: recordSchema.optional(),
   budget: recordSchema.optional(),
+  permission_profile: z.enum(["read_only", "bounded_execute", "network_enabled", "high_risk"]).optional(),
   target_entity_type: z.string().min(1).optional(),
   target_entity_id: z.string().min(1).optional(),
   compile_objective: z.boolean().default(true),
@@ -274,6 +276,7 @@ export async function autonomyCommand(
         source_model: input.source_model,
         source_agent: input.source_agent ?? "ring-leader",
       };
+      const intakeMetadata = mergeDeclaredPermissionProfile(input.metadata ?? {}, input.permission_profile);
       const title = input.title?.trim() || deriveTitle(input.objective);
       const acceptanceCriteria = input.acceptance_criteria?.length
         ? dedupeStrings(input.acceptance_criteria)
@@ -390,6 +393,7 @@ export async function autonomyCommand(
         constraints: dedupeStrings(input.constraints),
         assumptions: dedupeStrings(input.assumptions),
         budget: input.budget,
+        permission_profile: input.permission_profile,
         owner: input.owner,
         tags: [...new Set(["autonomy", "command", ...(input.tags ?? [])])],
         metadata: {
@@ -404,7 +408,7 @@ export async function autonomyCommand(
           routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
           swarm_profile: effectiveSwarmProfile,
           memory_preflight: memoryPreflight,
-          ...(input.metadata ?? {}),
+          ...intakeMetadata,
         },
         ...source,
       })) as { goal: GoalRecord };
@@ -448,7 +452,7 @@ export async function autonomyCommand(
             routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
             swarm_profile: effectiveSwarmProfile,
             memory_preflight: memoryPreflight,
-            ...(input.metadata ?? {}),
+            ...intakeMetadata,
           },
           ...source,
         })) as Record<string, unknown>;

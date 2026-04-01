@@ -1269,6 +1269,16 @@ export async function autonomyBootstrap(storage: Storage, invokeTool: InvokeTool
         actions.push("trichat.autopilot.start");
       }
 
+      const warmCacheState = storage.getWarmCacheState();
+      if (warmCacheState.enabled) {
+        await invokeTool("warm.cache", {
+          action: "run_once",
+          mutation: deriveMutation(input.mutation!, "autonomy.warm.cache"),
+          thread_id: warmCacheState.thread_id,
+        });
+        actions.push("warm.cache");
+      }
+
         const status = await inspectBootstrapState(storage, invokeTool, input, detectedBackends);
         return {
           ok: status.self_start_ready,

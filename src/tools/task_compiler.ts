@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { z } from "zod";
 import { Storage, type GoalRecord, type GoalRiskTier, type OrgProgramVersionRecord } from "../storage.js";
+import { mergeDeclaredPermissionProfile } from "../control_plane_runtime.js";
 import { retrievalHybrid } from "./knowledge.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { deriveOrgProgramSignals, getEffectiveOrgProgram } from "./org_program.js";
@@ -642,14 +643,15 @@ export async function taskCompile(storage: Storage, input: z.infer<typeof taskCo
             confidence: 0.8,
             success_criteria: successCriteria,
             rollback: rollbackNotes,
-            metadata: {
+            budget: goal.budget,
+            metadata: mergeDeclaredPermissionProfile({
               compiler: "task.compile",
               objective: input.objective,
               swarm_profile: preview.swarm_profile,
               checkpoint_policy: preview.swarm_profile.checkpoint_policy,
               memory_preflight: preview.memory_preflight,
               ...(input.metadata ?? {}),
-            },
+            }, typeof goal.metadata.permission_profile === "string" ? goal.metadata.permission_profile : null),
             steps: preview.steps,
             source_client: input.source_client,
             source_model: input.source_model,

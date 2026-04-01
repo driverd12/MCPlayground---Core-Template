@@ -509,6 +509,11 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const kernelMaintain = asDict(kernel.autonomy_maintain);
   const kernelReaction = asDict(kernel.reaction_engine);
   const kernelObservability = asDict(kernel.observability);
+  const kernelToolCatalog = asDict(kernel.tool_catalog);
+  const kernelPermissionProfiles = asDict(kernel.permission_profiles);
+  const kernelBudgetLedger = asDict(kernel.budget_ledger);
+  const kernelWarmCache = asDict(kernel.warm_cache);
+  const kernelFeatureFlags = asDict(kernel.feature_flags);
   const defaultHostId = String(kernelWorkerFabric.default_host_id ?? "local").trim() || "local";
   const localHost = asDict(
     asList(kernelWorkerFabric.hosts).find((entry) => String(asDict(entry).host_id ?? "").trim() === defaultHostId)
@@ -669,6 +674,15 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         bundle_count: parseAnyInt(asDict(kernel.workflow_exports).bundle_count),
         metrics_count: parseAnyInt(asDict(kernel.workflow_exports).metrics_count),
         argo_contract_count: parseAnyInt(asDict(kernel.workflow_exports).argo_contract_count),
+      },
+      control_plane: {
+        tool_catalog_count: parseAnyInt(kernelToolCatalog.total_count),
+        permission_default_profile: String(kernelPermissionProfiles.default_profile ?? "n/a"),
+        projected_cost_usd: parseAnyFloat(kernelBudgetLedger.projected_cost_usd),
+        actual_cost_usd: parseAnyFloat(kernelBudgetLedger.actual_cost_usd),
+        warm_cache_enabled: Boolean(asDict(kernelWarmCache.state).enabled || kernelWarmCache.enabled),
+        warm_cache_stale: Boolean(kernelWarmCache.stale),
+        disabled_feature_flags: parseAnyInt(kernelFeatureFlags.disabled_count),
       },
     },
     current: {

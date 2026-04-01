@@ -10,6 +10,7 @@ import {
   type TaskRecord,
   Storage,
 } from "../storage.js";
+import { resolvePermissionProfileChain } from "../control_plane_runtime.js";
 import { kernelSummary } from "./kernel.js";
 
 export const operatorBriefSchema = z.object({
@@ -351,6 +352,55 @@ function summarizeKernel(kernel: ReturnType<typeof kernelSummary> | null) {
   };
 }
 
+function summarizeControlPlane(
+  storage: Storage,
+  kernel: ReturnType<typeof kernelSummary> | null,
+  params: {
+    goal: GoalRecord | null;
+    plan: PlanRecord | null;
+    step: PlanStepRecord | null;
+    task: TaskRecord | null;
+    session: AgentSessionRecord | null;
+  }
+) {
+  const permission = resolvePermissionProfileChain(storage, {
+    goal_id: params.goal?.goal_id,
+    plan_id: params.plan?.plan_id,
+    step_id: params.step?.step_id,
+    task_id: params.task?.task_id,
+    session_id: params.session?.session_id,
+  });
+  const budgetLedgerRecord: Record<string, unknown> = isRecord(kernel?.budget_ledger) ? kernel!.budget_ledger : {};
+  const warmCacheRecord: Record<string, unknown> = isRecord(kernel?.warm_cache) ? kernel!.warm_cache : {};
+  const featureFlagsRecord: Record<string, unknown> = isRecord(kernel?.feature_flags) ? kernel!.feature_flags : {};
+  const budgetLedger = {
+    total_entries: Number(budgetLedgerRecord.total_entries ?? 0),
+    projected_cost_usd: Number(budgetLedgerRecord.projected_cost_usd ?? 0),
+    actual_cost_usd: Number(budgetLedgerRecord.actual_cost_usd ?? 0),
+    tokens_total: Number(budgetLedgerRecord.tokens_total ?? 0),
+  };
+  const warmCacheState = isRecord(warmCacheRecord.state) ? warmCacheRecord.state : null;
+  const warmCache = {
+    enabled: typeof warmCacheState?.enabled === "boolean"
+      ? warmCacheState.enabled
+      : typeof warmCacheRecord.enabled === "boolean"
+        ? warmCacheRecord.enabled
+        : null,
+    stale: typeof warmCacheRecord.stale === "boolean" ? warmCacheRecord.stale : null,
+  };
+  const featureFlags = {
+    disabled_count: Number(featureFlagsRecord.disabled_count ?? 0),
+    total_count: Number(featureFlagsRecord.total_count ?? 0),
+  };
+  return {
+    permission_profile: permission.resolved_profile_id,
+    permission_chain: permission.chain,
+    budget_ledger: budgetLedger,
+    warm_cache: warmCache,
+    feature_flags: featureFlags,
+  };
+}
+
 export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBriefSchema>) {
   const threadId = input.thread_id?.trim() || null;
   const sessions = storage.listAgentSessions({ limit: 50 });
@@ -376,6 +426,13 @@ export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBr
   const executionBacklog = readStringArray(ringLeaderSession?.metadata.last_execution_task_ids);
   const runningTasks = storage.listTasks({ status: "running", limit: 25 });
   const pendingTasks = storage.listTasks({ status: "pending", limit: 25 });
+  const controlPlaneSummary = summarizeControlPlane(storage, kernel, {
+    goal,
+    plan,
+    step,
+    task,
+    session: ringLeaderSession,
+  });
 
   const briefMarkdown = [
     "# Operator Brief",
@@ -401,6 +458,12 @@ export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBr
     `- spawn_path: ${ringLeaderSession ? "ring-leader" : "n/a"}${delegationBrief.delegate_agent_id ? ` -> ${delegationBrief.delegate_agent_id}` : ""}`,
     `- delegate: ${delegationBrief.delegate_agent_id ?? "none"}`,
     `- bounded_objective: ${delegationBrief.task_objective ?? "none"}`,
+    "",
+    "Control plane",
+    `- permission_profile: ${controlPlaneSummary.permission_profile}`,
+    `- budget: projected=${Number(controlPlaneSummary.budget_ledger.projected_cost_usd ?? 0).toFixed(4)} actual=${Number(controlPlaneSummary.budget_ledger.actual_cost_usd ?? 0).toFixed(4)} tokens=${controlPlaneSummary.budget_ledger.tokens_total}`,
+    `- warm_cache: ${controlPlaneSummary.warm_cache.enabled ? (controlPlaneSummary.warm_cache.stale ? "stale" : "warm") : "disabled"}`,
+    `- disabled_feature_flags: ${controlPlaneSummary.feature_flags.disabled_count}/${controlPlaneSummary.feature_flags.total_count}`,
     "",
     renderBulletSection("Success criteria", delegationBrief.success_criteria),
     "",
@@ -451,6 +514,7 @@ export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBr
     execution_backlog: executionBacklog,
     kernel: input.compact ? null : kernel,
     kernel_summary: summarizeKernel(kernel),
+    control_plane_summary: controlPlaneSummary,
     brief_markdown: briefMarkdown,
     source: "operator.brief",
   };

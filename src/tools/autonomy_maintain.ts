@@ -2487,6 +2487,21 @@ async function executeAutonomyMaintainPass(
     }
   }
 
+  const warmCacheState = storage.getWarmCacheState();
+  const warmCacheAgeSeconds = isoAgeSeconds(warmCacheState.last_run_at ?? null);
+  if (warmCacheState.enabled && (warmCacheAgeSeconds === Number.POSITIVE_INFINITY || warmCacheAgeSeconds >= warmCacheState.interval_seconds)) {
+    try {
+      await invokeTool("warm.cache", {
+        action: "run_once",
+        mutation: deriveMutation(input.mutation!, "warm-cache"),
+        thread_id: warmCacheState.thread_id,
+      });
+      actions.push("warm.cache");
+    } catch (error) {
+      attention.push(`warm.cache.failed:${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   const nextState = storage.setAutonomyMaintainState({
     enabled: true,
     local_host_id: input.local_host_id,

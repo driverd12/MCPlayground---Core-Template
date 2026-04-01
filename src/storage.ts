@@ -2,6 +2,17 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import {
+  getDefaultFeatureFlagState,
+  getDefaultPermissionProfilesState,
+  getDefaultWarmCacheState,
+  normalizeFeatureFlagState,
+  normalizePermissionProfilesState,
+  normalizeWarmCacheState,
+  type FeatureFlagStateRecord,
+  type PermissionProfilesStateRecord,
+  type WarmCacheStateRecord,
+} from "./control_plane.js";
 
 const SQLITE_HEADER = Buffer.from("SQLite format 3\u0000", "utf8");
 
@@ -429,6 +440,49 @@ export type TaskRecord = {
   last_error: string | null;
   result: Record<string, unknown> | null;
   lease: TaskLeaseRecord | null;
+};
+
+export type BudgetLedgerEntryRecord = {
+  entry_id: string;
+  created_at: string;
+  ledger_kind: "projection" | "actual" | "adjustment";
+  entity_type: string | null;
+  entity_id: string | null;
+  run_id: string | null;
+  task_id: string | null;
+  goal_id: string | null;
+  plan_id: string | null;
+  session_id: string | null;
+  provider: string | null;
+  model_id: string | null;
+  tokens_input: number | null;
+  tokens_output: number | null;
+  tokens_total: number | null;
+  projected_cost_usd: number | null;
+  actual_cost_usd: number | null;
+  currency: string;
+  notes: string | null;
+  metadata: Record<string, unknown>;
+  source_client: string | null;
+  source_model: string | null;
+  source_agent: string | null;
+};
+
+export type BudgetLedgerSummaryRecord = {
+  total_entries: number;
+  projection_count: number;
+  actual_count: number;
+  adjustment_count: number;
+  projected_cost_usd: number;
+  actual_cost_usd: number;
+  tokens_input: number;
+  tokens_output: number;
+  tokens_total: number;
+  provider_counts: Array<{ provider: string | null; count: number; projected_cost_usd: number; actual_cost_usd: number }>;
+  model_counts: Array<{ model_id: string | null; count: number; projected_cost_usd: number; actual_cost_usd: number }>;
+  entity_type_counts: Array<{ entity_type: string | null; count: number }>;
+  latest_entry_at: string | null;
+  recent_entries: BudgetLedgerEntryRecord[];
 };
 
 export type TaskLeaseRecord = {
@@ -11046,6 +11100,402 @@ export class Storage {
     return { incident, events };
   }
 
+  getPermissionProfilesState(): PermissionProfilesStateRecord {
+    const row = this.db
+      .prepare(
+        `SELECT config_json, updated_at
+         FROM daemon_configs
+         WHERE daemon_key = ?`
+      )
+      .get("session.permission_profiles") as Record<string, unknown> | undefined;
+
+    if (!row) {
+      return getDefaultPermissionProfilesState();
+    }
+    return normalizePermissionProfilesState(parseJsonObject(row.config_json), String(row.updated_at ?? "") || null);
+  }
+
+  setPermissionProfilesState(params: {
+    default_profile?: string;
+    profiles?: unknown[];
+  }): PermissionProfilesStateRecord {
+    const now = new Date().toISOString();
+    const existing = this.getPermissionProfilesState();
+    const normalized = normalizePermissionProfilesState(
+      {
+        default_profile: params.default_profile ?? existing.default_profile,
+        profiles: params.profiles ?? existing.profiles,
+      },
+      now
+    );
+    this.db
+      .prepare(
+        `INSERT INTO daemon_configs (daemon_key, enabled, config_json, updated_at)
+         VALUES (?, 1, ?, ?)
+         ON CONFLICT(daemon_key) DO UPDATE SET
+           enabled = excluded.enabled,
+           config_json = excluded.config_json,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        "session.permission_profiles",
+        stableStringify({
+          default_profile: normalized.default_profile,
+          profiles: normalized.profiles,
+        }),
+        now
+      );
+    return {
+      ...normalized,
+      updated_at: now,
+      source: "persisted",
+    };
+  }
+
+  getFeatureFlagState(): FeatureFlagStateRecord {
+    const row = this.db
+      .prepare(
+        `SELECT config_json, updated_at
+         FROM daemon_configs
+         WHERE daemon_key = ?`
+      )
+      .get("feature.flags") as Record<string, unknown> | undefined;
+
+    if (!row) {
+      return getDefaultFeatureFlagState();
+    }
+    return normalizeFeatureFlagState(parseJsonObject(row.config_json), String(row.updated_at ?? "") || null);
+  }
+
+  setFeatureFlagState(params: {
+    flags?: unknown[];
+  }): FeatureFlagStateRecord {
+    const now = new Date().toISOString();
+    const existing = this.getFeatureFlagState();
+    const normalized = normalizeFeatureFlagState(
+      {
+        flags: params.flags ?? existing.flags,
+      },
+      now
+    );
+    this.db
+      .prepare(
+        `INSERT INTO daemon_configs (daemon_key, enabled, config_json, updated_at)
+         VALUES (?, 1, ?, ?)
+         ON CONFLICT(daemon_key) DO UPDATE SET
+           enabled = excluded.enabled,
+           config_json = excluded.config_json,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        "feature.flags",
+        stableStringify({
+          flags: normalized.flags,
+        }),
+        now
+      );
+    return {
+      ...normalized,
+      updated_at: now,
+      source: "persisted",
+    };
+  }
+
+  getWarmCacheState(): WarmCacheStateRecord {
+    const row = this.db
+      .prepare(
+        `SELECT enabled, config_json, updated_at
+         FROM daemon_configs
+         WHERE daemon_key = ?`
+      )
+      .get("warm.cache") as Record<string, unknown> | undefined;
+
+    if (!row) {
+      return getDefaultWarmCacheState();
+    }
+    return normalizeWarmCacheState(
+      {
+        ...parseJsonObject(row.config_json),
+        enabled: Number(row.enabled ?? 0) === 1,
+      },
+      String(row.updated_at ?? "") || null
+    );
+  }
+
+  setWarmCacheState(params: {
+    enabled?: boolean;
+    startup_prefetch?: boolean;
+    interval_seconds?: number;
+    ttl_seconds?: number;
+    thread_id?: string;
+    last_run_at?: string | null;
+    last_error?: string | null;
+    last_duration_ms?: number | null;
+    run_count?: number;
+    warmed_targets?: string[];
+  }): WarmCacheStateRecord {
+    const now = new Date().toISOString();
+    const existing = this.getWarmCacheState();
+    const normalized = normalizeWarmCacheState(
+      {
+        enabled: params.enabled ?? existing.enabled,
+        startup_prefetch: params.startup_prefetch ?? existing.startup_prefetch,
+        interval_seconds: params.interval_seconds ?? existing.interval_seconds,
+        ttl_seconds: params.ttl_seconds ?? existing.ttl_seconds,
+        thread_id: params.thread_id ?? existing.thread_id,
+        last_run_at: params.last_run_at === undefined ? existing.last_run_at : params.last_run_at,
+        last_error: params.last_error === undefined ? existing.last_error : params.last_error,
+        last_duration_ms: params.last_duration_ms === undefined ? existing.last_duration_ms : params.last_duration_ms,
+        run_count: params.run_count ?? existing.run_count,
+        warmed_targets: params.warmed_targets ?? existing.warmed_targets,
+      },
+      now
+    );
+    this.db
+      .prepare(
+        `INSERT INTO daemon_configs (daemon_key, enabled, config_json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(daemon_key) DO UPDATE SET
+           enabled = excluded.enabled,
+           config_json = excluded.config_json,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        "warm.cache",
+        normalized.enabled ? 1 : 0,
+        stableStringify({
+          startup_prefetch: normalized.startup_prefetch,
+          interval_seconds: normalized.interval_seconds,
+          ttl_seconds: normalized.ttl_seconds,
+          thread_id: normalized.thread_id,
+          last_run_at: normalized.last_run_at,
+          last_error: normalized.last_error,
+          last_duration_ms: normalized.last_duration_ms,
+          run_count: normalized.run_count,
+          warmed_targets: normalized.warmed_targets,
+        }),
+        now
+      );
+    return {
+      ...normalized,
+      updated_at: now,
+      source: "persisted",
+    };
+  }
+
+  appendBudgetLedgerEntry(params: {
+    entry_id?: string;
+    created_at?: string;
+    ledger_kind: "projection" | "actual" | "adjustment";
+    entity_type?: string | null;
+    entity_id?: string | null;
+    run_id?: string | null;
+    task_id?: string | null;
+    goal_id?: string | null;
+    plan_id?: string | null;
+    session_id?: string | null;
+    provider?: string | null;
+    model_id?: string | null;
+    tokens_input?: number | null;
+    tokens_output?: number | null;
+    tokens_total?: number | null;
+    projected_cost_usd?: number | null;
+    actual_cost_usd?: number | null;
+    currency?: string | null;
+    notes?: string | null;
+    metadata?: Record<string, unknown>;
+    source_client?: string | null;
+    source_model?: string | null;
+    source_agent?: string | null;
+  }): BudgetLedgerEntryRecord {
+    const entryId = params.entry_id?.trim() || crypto.randomUUID();
+    const createdAt = normalizeIsoTimestamp(params.created_at, new Date().toISOString());
+    const normalizeCount = (value: number | null | undefined) =>
+      typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : null;
+    const normalizeCost = (value: number | null | undefined) =>
+      typeof value === "number" && Number.isFinite(value) ? Number(value.toFixed(6)) : null;
+    const tokensInput = normalizeCount(params.tokens_input);
+    const tokensOutput = normalizeCount(params.tokens_output);
+    const tokensTotal = normalizeCount(params.tokens_total) ?? (tokensInput !== null || tokensOutput !== null ? (tokensInput ?? 0) + (tokensOutput ?? 0) : null);
+    this.db
+      .prepare(
+        `INSERT INTO budget_ledger_entries (
+           entry_id, created_at, ledger_kind, entity_type, entity_id, run_id, task_id, goal_id, plan_id, session_id,
+           provider, model_id, tokens_input, tokens_output, tokens_total, projected_cost_usd, actual_cost_usd,
+           currency, notes, metadata_json, source_client, source_model, source_agent
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        entryId,
+        createdAt,
+        params.ledger_kind,
+        params.entity_type?.trim() || null,
+        params.entity_id?.trim() || null,
+        params.run_id?.trim() || null,
+        params.task_id?.trim() || null,
+        params.goal_id?.trim() || null,
+        params.plan_id?.trim() || null,
+        params.session_id?.trim() || null,
+        params.provider?.trim() || null,
+        params.model_id?.trim() || null,
+        tokensInput,
+        tokensOutput,
+        tokensTotal,
+        normalizeCost(params.projected_cost_usd),
+        normalizeCost(params.actual_cost_usd),
+        params.currency?.trim().toUpperCase() || "USD",
+        params.notes?.trim() || null,
+        stableStringify(params.metadata ?? {}),
+        params.source_client ?? null,
+        params.source_model ?? null,
+        params.source_agent ?? null
+      );
+    const row = this.db
+      .prepare(
+        `SELECT entry_id, created_at, ledger_kind, entity_type, entity_id, run_id, task_id, goal_id, plan_id, session_id,
+                provider, model_id, tokens_input, tokens_output, tokens_total, projected_cost_usd, actual_cost_usd,
+                currency, notes, metadata_json, source_client, source_model, source_agent
+         FROM budget_ledger_entries
+         WHERE entry_id = ?`
+      )
+      .get(entryId) as Record<string, unknown> | undefined;
+    if (!row) {
+      throw new Error(`Failed to read budget ledger entry after insert: ${entryId}`);
+    }
+    return mapBudgetLedgerRow(row);
+  }
+
+  listBudgetLedgerEntries(params: {
+    ledger_kind?: "projection" | "actual" | "adjustment";
+    run_id?: string;
+    task_id?: string;
+    provider?: string;
+    model_id?: string;
+    entity_type?: string;
+    entity_id?: string;
+    since?: string;
+    limit: number;
+  }): BudgetLedgerEntryRecord[] {
+    const { whereSql, values } = buildBudgetLedgerWhereClause(params);
+    const limit = Math.max(1, Math.min(500, params.limit));
+    const rows = this.db
+      .prepare(
+        `SELECT entry_id, created_at, ledger_kind, entity_type, entity_id, run_id, task_id, goal_id, plan_id, session_id,
+                provider, model_id, tokens_input, tokens_output, tokens_total, projected_cost_usd, actual_cost_usd,
+                currency, notes, metadata_json, source_client, source_model, source_agent
+         FROM budget_ledger_entries
+         ${whereSql}
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(...values, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => mapBudgetLedgerRow(row));
+  }
+
+  summarizeBudgetLedger(params: {
+    ledger_kind?: "projection" | "actual" | "adjustment";
+    run_id?: string;
+    task_id?: string;
+    provider?: string;
+    model_id?: string;
+    entity_type?: string;
+    entity_id?: string;
+    since?: string;
+    recent_limit?: number;
+  }): BudgetLedgerSummaryRecord {
+    const { whereSql, values } = buildBudgetLedgerWhereClause(params);
+    const totalsRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS total_entries,
+                SUM(CASE WHEN ledger_kind = 'projection' THEN 1 ELSE 0 END) AS projection_count,
+                SUM(CASE WHEN ledger_kind = 'actual' THEN 1 ELSE 0 END) AS actual_count,
+                SUM(CASE WHEN ledger_kind = 'adjustment' THEN 1 ELSE 0 END) AS adjustment_count,
+                SUM(COALESCE(projected_cost_usd, 0)) AS projected_cost_usd,
+                SUM(COALESCE(actual_cost_usd, 0)) AS actual_cost_usd,
+                SUM(COALESCE(tokens_input, 0)) AS tokens_input,
+                SUM(COALESCE(tokens_output, 0)) AS tokens_output,
+                SUM(COALESCE(tokens_total, 0)) AS tokens_total,
+                MAX(created_at) AS latest_entry_at
+         FROM budget_ledger_entries
+         ${whereSql}`
+      )
+      .get(...values) as Record<string, unknown>;
+
+    const providerRows = this.db
+      .prepare(
+        `SELECT provider,
+                COUNT(*) AS count,
+                SUM(COALESCE(projected_cost_usd, 0)) AS projected_cost_usd,
+                SUM(COALESCE(actual_cost_usd, 0)) AS actual_cost_usd
+         FROM budget_ledger_entries
+         ${whereSql}
+         GROUP BY provider
+         ORDER BY count DESC, provider ASC
+         LIMIT 20`
+      )
+      .all(...values) as Array<Record<string, unknown>>;
+
+    const modelRows = this.db
+      .prepare(
+        `SELECT model_id,
+                COUNT(*) AS count,
+                SUM(COALESCE(projected_cost_usd, 0)) AS projected_cost_usd,
+                SUM(COALESCE(actual_cost_usd, 0)) AS actual_cost_usd
+         FROM budget_ledger_entries
+         ${whereSql}
+         GROUP BY model_id
+         ORDER BY count DESC, model_id ASC
+         LIMIT 20`
+      )
+      .all(...values) as Array<Record<string, unknown>>;
+
+    const entityRows = this.db
+      .prepare(
+        `SELECT entity_type, COUNT(*) AS count
+         FROM budget_ledger_entries
+         ${whereSql}
+         GROUP BY entity_type
+         ORDER BY count DESC, entity_type ASC
+         LIMIT 20`
+      )
+      .all(...values) as Array<Record<string, unknown>>;
+
+    const recentEntries = this.listBudgetLedgerEntries({
+      ...params,
+      limit: params.recent_limit ?? 10,
+    });
+
+    return {
+      total_entries: Number(totalsRow.total_entries ?? 0),
+      projection_count: Number(totalsRow.projection_count ?? 0),
+      actual_count: Number(totalsRow.actual_count ?? 0),
+      adjustment_count: Number(totalsRow.adjustment_count ?? 0),
+      projected_cost_usd: Number(Number(totalsRow.projected_cost_usd ?? 0).toFixed(6)),
+      actual_cost_usd: Number(Number(totalsRow.actual_cost_usd ?? 0).toFixed(6)),
+      tokens_input: Number(totalsRow.tokens_input ?? 0),
+      tokens_output: Number(totalsRow.tokens_output ?? 0),
+      tokens_total: Number(totalsRow.tokens_total ?? 0),
+      provider_counts: providerRows.map((row) => ({
+        provider: asNullableString(row.provider),
+        count: Number(row.count ?? 0),
+        projected_cost_usd: Number(Number(row.projected_cost_usd ?? 0).toFixed(6)),
+        actual_cost_usd: Number(Number(row.actual_cost_usd ?? 0).toFixed(6)),
+      })),
+      model_counts: modelRows.map((row) => ({
+        model_id: asNullableString(row.model_id),
+        count: Number(row.count ?? 0),
+        projected_cost_usd: Number(Number(row.projected_cost_usd ?? 0).toFixed(6)),
+        actual_cost_usd: Number(Number(row.actual_cost_usd ?? 0).toFixed(6)),
+      })),
+      entity_type_counts: entityRows.map((row) => ({
+        entity_type: asNullableString(row.entity_type),
+        count: Number(row.count ?? 0),
+      })),
+      latest_entry_at: asNullableString(totalsRow.latest_entry_at),
+      recent_entries: recentEntries,
+    };
+  }
+
   insertAdr(params: {
     id: string;
     title: string;
@@ -11075,6 +11525,7 @@ export class Storage {
       "incident_events",
       "runtime_events",
       "observability_documents",
+      "budget_ledger_entries",
       "schema_migrations",
       "daemon_configs",
       "imprint_profiles",
@@ -11184,6 +11635,7 @@ export class Storage {
     this.applyRuntimeEventBusMigration();
     this.applyRuntimeWorkerSessionSchemaMigration();
     this.applyObservabilitySchemaMigration();
+    this.applyBudgetLedgerSchemaMigration();
   }
 
   private applyCoreSchemaMigration(): void {
@@ -11357,6 +11809,43 @@ export class Storage {
         updated_at TEXT NOT NULL
       );
     `);
+  }
+
+  private applyBudgetLedgerSchemaMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS budget_ledger_entries (
+        entry_id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        ledger_kind TEXT NOT NULL,
+        entity_type TEXT,
+        entity_id TEXT,
+        run_id TEXT,
+        task_id TEXT,
+        goal_id TEXT,
+        plan_id TEXT,
+        session_id TEXT,
+        provider TEXT,
+        model_id TEXT,
+        tokens_input INTEGER,
+        tokens_output INTEGER,
+        tokens_total INTEGER,
+        projected_cost_usd REAL,
+        actual_cost_usd REAL,
+        currency TEXT NOT NULL DEFAULT 'USD',
+        notes TEXT,
+        metadata_json TEXT NOT NULL,
+        source_client TEXT,
+        source_model TEXT,
+        source_agent TEXT
+      );
+    `);
+
+    this.ensureIndex("idx_budget_ledger_created", "budget_ledger_entries", "created_at DESC");
+    this.ensureIndex("idx_budget_ledger_task", "budget_ledger_entries", "task_id, created_at DESC");
+    this.ensureIndex("idx_budget_ledger_run", "budget_ledger_entries", "run_id, created_at DESC");
+    this.ensureIndex("idx_budget_ledger_provider", "budget_ledger_entries", "provider, created_at DESC");
+    this.ensureIndex("idx_budget_ledger_model", "budget_ledger_entries", "model_id, created_at DESC");
+    this.ensureIndex("idx_budget_ledger_entity", "budget_ledger_entries", "entity_type, entity_id, created_at DESC");
   }
 
   private applyImprintSchemaMigration(): void {
@@ -12549,6 +13038,93 @@ function mapObservabilityDocumentRow(row: Record<string, unknown>): Observabilit
     body_text: String(row.body_text ?? ""),
     attributes: parseJsonObject(row.attributes_json),
     tags: safeParseJsonArray(row.tags_json),
+  };
+}
+
+function buildBudgetLedgerWhereClause(params: {
+  ledger_kind?: "projection" | "actual" | "adjustment";
+  run_id?: string;
+  task_id?: string;
+  provider?: string;
+  model_id?: string;
+  entity_type?: string;
+  entity_id?: string;
+  since?: string;
+}) {
+  const whereClauses: string[] = [];
+  const values: unknown[] = [];
+  if (params.ledger_kind) {
+    whereClauses.push("ledger_kind = ?");
+    values.push(params.ledger_kind);
+  }
+  const runId = params.run_id?.trim();
+  if (runId) {
+    whereClauses.push("run_id = ?");
+    values.push(runId);
+  }
+  const taskId = params.task_id?.trim();
+  if (taskId) {
+    whereClauses.push("task_id = ?");
+    values.push(taskId);
+  }
+  const provider = params.provider?.trim();
+  if (provider) {
+    whereClauses.push("provider = ?");
+    values.push(provider);
+  }
+  const modelId = params.model_id?.trim();
+  if (modelId) {
+    whereClauses.push("model_id = ?");
+    values.push(modelId);
+  }
+  const entityType = params.entity_type?.trim();
+  if (entityType) {
+    whereClauses.push("entity_type = ?");
+    values.push(entityType);
+  }
+  const entityId = params.entity_id?.trim();
+  if (entityId) {
+    whereClauses.push("entity_id = ?");
+    values.push(entityId);
+  }
+  const since = params.since?.trim();
+  if (since) {
+    whereClauses.push("created_at >= ?");
+    values.push(since);
+  }
+  return {
+    whereSql: whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "",
+    values,
+  };
+}
+
+function mapBudgetLedgerRow(row: Record<string, unknown>): BudgetLedgerEntryRecord {
+  const ledgerKind = String(row.ledger_kind ?? "");
+  return {
+    entry_id: String(row.entry_id ?? ""),
+    created_at: String(row.created_at ?? ""),
+    ledger_kind:
+      ledgerKind === "projection" || ledgerKind === "actual" || ledgerKind === "adjustment" ? ledgerKind : "actual",
+    entity_type: asNullableString(row.entity_type),
+    entity_id: asNullableString(row.entity_id),
+    run_id: asNullableString(row.run_id),
+    task_id: asNullableString(row.task_id),
+    goal_id: asNullableString(row.goal_id),
+    plan_id: asNullableString(row.plan_id),
+    session_id: asNullableString(row.session_id),
+    provider: asNullableString(row.provider),
+    model_id: asNullableString(row.model_id),
+    tokens_input: asNullableNumber(row.tokens_input),
+    tokens_output: asNullableNumber(row.tokens_output),
+    tokens_total: asNullableNumber(row.tokens_total),
+    projected_cost_usd: asNullableNumber(row.projected_cost_usd),
+    actual_cost_usd: asNullableNumber(row.actual_cost_usd),
+    currency: String(row.currency ?? "USD"),
+    notes: asNullableString(row.notes),
+    metadata: parseJsonObject(row.metadata_json),
+    source_client: asNullableString(row.source_client),
+    source_model: asNullableString(row.source_model),
+    source_agent: asNullableString(row.source_agent),
   };
 }
 

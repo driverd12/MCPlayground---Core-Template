@@ -1,8 +1,15 @@
 import { z } from "zod";
 import { Storage, type AgentSessionRecord, type PlanRecord, type PlanStepRecord, type TaskRecord } from "../storage.js";
+import {
+  mergeDeclaredPermissionProfile,
+  recordBudgetLedgerUsage,
+  resolveSessionPermissionProfileId,
+  taskPermissionProfileIsEligible,
+} from "../control_plane_runtime.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { deriveExperimentObservation, judgeExperimentRunWithStorage } from "./experiment.js";
 import { type TaskExecutionProfile, resolveTaskExecutionProfile } from "./task.js";
+import { budgetUsageSchema } from "./control_plane_admin.js";
 
 const agentSessionStatusSchema = z.enum(["active", "idle", "busy", "expired", "closed", "failed"]);
 
@@ -25,6 +32,7 @@ export const agentSessionOpenSchema = z.object({
   owner_id: z.string().min(1).optional(),
   lease_seconds: z.number().int().min(15).max(86400).optional(),
   status: agentSessionStatusSchema.optional(),
+  permission_profile: z.enum(["read_only", "bounded_execute", "network_enabled", "high_risk"]).optional(),
   capabilities: recordSchema.optional(),
   tags: z.array(z.string().min(1)).optional(),
   metadata: recordSchema.optional(),
@@ -49,6 +57,7 @@ export const agentSessionHeartbeatSchema = z.object({
   lease_seconds: z.number().int().min(15).max(86400).optional(),
   status: agentSessionStatusSchema.optional(),
   owner_id: z.string().min(1).optional(),
+  permission_profile: z.enum(["read_only", "bounded_execute", "network_enabled", "high_risk"]).optional(),
   capabilities: recordSchema.optional(),
   metadata: recordSchema.optional(),
 });
@@ -102,6 +111,7 @@ export const agentReportResultSchema = z
     observed_metric: z.number().finite().optional(),
     observed_metrics: recordSchema.optional(),
     experiment_verdict: z.enum(["accepted", "rejected", "inconclusive", "crash"]).optional(),
+    usage: budgetUsageSchema.optional(),
     next_session_status: agentSessionStatusSchema.optional(),
     metadata: recordSchema.optional(),
     ...sourceSchema.shape,
@@ -179,6 +189,8 @@ type TaskRoutingEvaluation = {
   routing: TaskRoutingRule;
   task_profile: TaskExecutionProfile;
   session_capability_tier: "low" | "medium" | "high";
+  session_permission_profile_id: string;
+  task_permission_profile_id: string;
   adaptive_score_adjustment: number;
   session_performance: AdaptiveSessionPerformanceSummary;
 };
@@ -1535,13 +1547,14 @@ function evaluateAutopilotQueueDiscipline(
   };
 }
 
-function evaluateTaskRouting(session: AgentSessionRecord, task: TaskRecord): TaskRoutingEvaluation {
+function evaluateTaskRouting(storage: Storage, session: AgentSessionRecord, task: TaskRecord): TaskRoutingEvaluation {
   const routing = resolveTaskRouting(task);
   const blockers: string[] = [];
   const matchedPreferences: string[] = [];
   let score = 0;
   const taskProfile = resolveTaskExecutionProfile(task);
   const sessionCapabilityTier = resolveSessionCapabilityTier(session);
+  const permissionEligibility = taskPermissionProfileIsEligible(storage, session, task);
 
   const agentId = session.agent_id.trim().toLowerCase();
   const clientKind = readString(session.client_kind)?.toLowerCase() ?? null;
@@ -1575,6 +1588,15 @@ function evaluateTaskRouting(session: AgentSessionRecord, task: TaskRecord): Tas
   } else if (routing.required_capabilities.length > 0) {
     matchedPreferences.push(`required_capabilities:${routing.required_capabilities.join(",")}`);
     score += routing.required_capabilities.length * 12;
+  }
+
+  if (!permissionEligibility.allowed) {
+    blockers.push(
+      `permission_profile_insufficient:${permissionEligibility.session_profile_id}->${permissionEligibility.task_profile_id}`
+    );
+  } else {
+    matchedPreferences.push(`permission_profile:${permissionEligibility.task_profile_id}`);
+    score += 8;
   }
 
   if (routing.preferred_agent_ids.some((value) => value.toLowerCase() === agentId)) {
@@ -1631,6 +1653,8 @@ function evaluateTaskRouting(session: AgentSessionRecord, task: TaskRecord): Tas
     routing,
     task_profile: taskProfile,
     session_capability_tier: sessionCapabilityTier,
+    session_permission_profile_id: permissionEligibility.session_profile_id,
+    task_permission_profile_id: permissionEligibility.task_profile_id,
     adaptive_score_adjustment: adaptiveSignal.adjustment,
     session_performance: adaptiveSignal.summary,
   };
@@ -1697,7 +1721,7 @@ function selectTaskCandidate(
         scanned: 1,
       };
     }
-    const routing = evaluateTaskRouting(session, task);
+    const routing = evaluateTaskRouting(storage, session, task);
     if (!routing.eligible) {
       return {
         reason: `routing-ineligible:${routing.blockers.join("|")}`,
@@ -1724,7 +1748,7 @@ function selectTaskCandidate(
       if (!claimability.claimable) {
         return null;
       }
-      const routing = evaluateTaskRouting(session, task);
+      const routing = evaluateTaskRouting(storage, session, task);
       if (!routing.eligible) {
         return null;
       }
@@ -1757,6 +1781,15 @@ export async function openAgentSession(storage: Storage, input: z.infer<typeof a
     mutation: input.mutation,
     payload: input,
     execute: () => {
+      const capabilities = {
+        ...(input.capabilities ?? {}),
+        ...(input.permission_profile
+          ? {
+              permission_profile: input.permission_profile,
+            }
+          : {}),
+      };
+      const metadata = mergeDeclaredPermissionProfile(input.metadata ?? {}, input.permission_profile);
       const opened = storage.upsertAgentSession({
         session_id: input.session_id,
         agent_id: input.agent_id,
@@ -1767,9 +1800,9 @@ export async function openAgentSession(storage: Storage, input: z.infer<typeof a
         owner_id: input.owner_id,
         lease_seconds: input.lease_seconds,
         status: input.status,
-        capabilities: input.capabilities,
+        capabilities,
         tags: input.tags,
-        metadata: input.metadata,
+        metadata,
         source_client: input.source_client,
         source_model: input.source_model,
         source_agent: input.source_agent,
@@ -1845,8 +1878,15 @@ export async function heartbeatAgentSession(storage: Storage, input: z.infer<typ
         lease_seconds: input.lease_seconds,
         status: input.status,
         owner_id: input.owner_id,
-        capabilities: input.capabilities,
-        metadata: input.metadata,
+        capabilities: {
+          ...(input.capabilities ?? {}),
+          ...(input.permission_profile
+            ? {
+                permission_profile: input.permission_profile,
+              }
+            : {}),
+        },
+        metadata: mergeDeclaredPermissionProfile(input.metadata ?? {}, input.permission_profile),
       }),
   });
 }
@@ -1912,7 +1952,7 @@ export function agentWorklist(storage: Storage, input: z.infer<typeof agentWorkl
 
   for (const task of pendingTasks) {
     const claimability = isTaskClaimableNow(task, nowIso);
-    const routing = evaluateTaskRouting(session, task);
+    const routing = evaluateTaskRouting(storage, session, task);
     if (claimability.claimable && routing.eligible) {
       eligible.push({
         task,
@@ -1956,6 +1996,8 @@ export function agentWorklist(storage: Storage, input: z.infer<typeof agentWorkl
       routing: entry.routing.routing,
       task_profile: entry.routing.task_profile,
       session_capability_tier: entry.routing.session_capability_tier,
+      session_permission_profile_id: entry.routing.session_permission_profile_id,
+      task_permission_profile_id: entry.routing.task_permission_profile_id,
       session_performance: entry.routing.session_performance,
       task: entry.task,
     })),
@@ -1971,6 +2013,8 @@ export function agentWorklist(storage: Storage, input: z.infer<typeof agentWorkl
           routing: entry.routing.routing,
           task_profile: entry.routing.task_profile,
           session_capability_tier: entry.routing.session_capability_tier,
+          session_permission_profile_id: entry.routing.session_permission_profile_id,
+          task_permission_profile_id: entry.routing.task_permission_profile_id,
           session_performance: entry.routing.session_performance,
           task: entry.task,
         }))
@@ -2332,6 +2376,20 @@ export async function agentReportResult(
       if (!task) {
         throw new Error(`Task missing after agent report: ${input.task_id}`);
       }
+      recordBudgetLedgerUsage(storage, {
+        ledger_kind: input.outcome === "completed" ? "actual" : "adjustment",
+        usage: input.usage,
+        usage_sources: [input.result, input.metadata],
+        entity_type: "task",
+        entity_id: task.task_id,
+        task_id: task.task_id,
+        run_id: input.run_id,
+        session_id: session.session_id,
+        notes: input.summary ?? input.error ?? `Agent reported ${input.outcome}`,
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: session.agent_id,
+      });
       const taskProfile = resolveTaskExecutionProfile(task);
 
       const planContext = resolveTaskPlanContext(storage, task);

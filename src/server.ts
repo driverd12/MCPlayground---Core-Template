@@ -10,6 +10,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema, Tool } from "@modelconte
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { Storage, type GoalRecord, type PlanRecord, type PlanStepRecord } from "./storage.js";
+import { listToolCatalogEntries, registerToolCatalogEntry } from "./control_plane.js";
+import { mergeDeclaredPermissionProfile } from "./control_plane_runtime.js";
 import {
   agentClaimNext,
   agentClaimNextSchema,
@@ -244,12 +246,22 @@ import { notifierSend, notifierSendSchema } from "./tools/notifier.js";
 import { officeSnapshot, officeSnapshotSchema } from "./tools/office_snapshot.js";
 import { operatorBrief, operatorBriefSchema } from "./tools/operator_brief.js";
 import {
+  budgetLedgerControl,
+  budgetLedgerSchema,
+  featureFlagControl,
+  featureFlagSchema,
+  permissionProfileControl,
+  permissionProfileSchema,
+} from "./tools/control_plane_admin.js";
+import { toolSearch, toolSearchSchema } from "./tools/tool_search.js";
+import {
   getReactionEngineRuntimeStatus,
   initializeReactionEngineDaemon,
   reactionEngineControl,
   reactionEngineSchema,
 } from "./tools/reaction_engine.js";
 import { matchDomainSpecialists, specialistCatalog, specialistCatalogSchema } from "./tools/specialist_catalog.js";
+import { initializeWarmCacheLane, warmCacheControl, warmCacheSchema } from "./tools/warm_cache.js";
 import {
   trichatChaos,
   trichatChaosSchema,
@@ -444,6 +456,7 @@ function registerTool(name: string, description: string, schema: z.ZodTypeAny, h
     inputSchema: zodToJsonSchema(schema, { $refStrategy: "none" }) as Tool["inputSchema"],
   };
   toolRegistry.set(name, { schema, tool, handler });
+  registerToolCatalogEntry(tool);
 }
 
 async function invokeRegisteredTool(name: string, args: unknown) {
@@ -1181,6 +1194,21 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
             const rawInput = isRecord(step.input) ? step.input : {};
             const payload = isRecord(rawInput.payload) ? rawInput.payload : {};
             const rawMetadata = isRecord(rawInput.metadata) ? rawInput.metadata : {};
+            const inheritedPermissionProfile =
+              readString(rawInput.permission_profile) ??
+              readString(rawMetadata.permission_profile) ??
+              readString(step.metadata.permission_profile) ??
+              readString(plan.metadata.permission_profile) ??
+              readString(goal?.metadata.permission_profile) ??
+              undefined;
+            const inheritedBudget =
+              isRecord(rawInput.budget)
+                ? rawInput.budget
+                : isRecord(rawMetadata.budget)
+                  ? rawMetadata.budget
+                  : Object.keys(plan.budget ?? {}).length > 0
+                    ? plan.budget
+                    : goal?.budget;
             const taskExecutionPlan = planDispatchTaskExecution(storage, {
               objective: readString(rawInput.objective) ?? step.title,
               project_dir: readString(rawInput.project_dir) ?? ".",
@@ -1219,6 +1247,8 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               },
               routing,
               task_execution: taskExecutionPlan.task_execution,
+              budget: inheritedBudget,
+              permission_profile: inheritedPermissionProfile,
               priority: readInteger(rawInput.priority),
               max_attempts: readInteger(rawInput.max_attempts),
               available_at: readString(rawInput.available_at),
@@ -1227,7 +1257,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               source_model: input.source_model,
               source_agent: input.source_agent,
               tags: readStringArray(rawInput.tags) ?? ["plan.dispatch", executorKind],
-              metadata: {
+              metadata: mergeDeclaredPermissionProfile({
                 ...rawMetadata,
                 adaptive_assignment: adaptiveAssignment,
                 task_execution: taskExecutionPlan.task_execution,
@@ -1238,7 +1268,7 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
                   goal_id: plan.goal_id,
                   executor_kind: executorKind,
                 },
-              },
+              }, inheritedPermissionProfile),
             });
             const taskId = extractTaskId(taskResult);
             const updated = storage.updatePlanStep({
@@ -3012,6 +3042,41 @@ registerTool(
   (input) => simulateWorkflow(input)
 );
 
+registerTool(
+  "tool.search",
+  "Search registered MCP tools by name, description, tags, or capability area using the live tool registry.",
+  toolSearchSchema,
+  (input) => toolSearch(input, listToolCatalogEntries)
+);
+
+registerTool(
+  "permission.profile",
+  "Manage durable session permission profiles and resolve effective inheritance across goals, plans, tasks, and sessions.",
+  permissionProfileSchema,
+  (input) => permissionProfileControl(storage, input)
+);
+
+registerTool(
+  "budget.ledger",
+  "Record, list, and summarize append-only projected and actual provider/model/run/task budget usage.",
+  budgetLedgerSchema,
+  (input) => budgetLedgerControl(storage, input)
+);
+
+registerTool(
+  "warm.cache",
+  "Manage the startup prefetch and warm-cache lane for default control-plane summaries.",
+  warmCacheSchema,
+  (input) => warmCacheControl(storage, input)
+);
+
+registerTool(
+  "feature.flag",
+  "Manage and evaluate durable feature-flag rollout state for autonomy, provider, and operator surfaces.",
+  featureFlagSchema,
+  (input) => featureFlagControl(storage, input)
+);
+
 registerTool("health.tools", "Check tool registry health.", healthToolsSchema, () =>
   healthTools(Array.from(toolRegistry.keys()))
 );
@@ -3075,6 +3140,7 @@ initializeImprintAutoSnapshotDaemon(storage, {
   server_version: SERVER_VERSION,
   get_tool_names: () => Array.from(toolRegistry.keys()),
 });
+initializeWarmCacheLane(storage);
 if (backgroundOwnerEnabled) {
   initializeGoalAutorunDaemon(storage, invokeRegisteredTool);
   initializeAutonomyMaintainDaemon(storage, invokeRegisteredTool);

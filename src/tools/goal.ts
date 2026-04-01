@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { z } from "zod";
 import { type GoalRecord, type PlanRecord, type PlanStepRecord, Storage } from "../storage.js";
+import { mergeDeclaredPermissionProfile } from "../control_plane_runtime.js";
 import { summarizeAdaptiveSessionHealth } from "./agent_session.js";
 import { routeObjectiveBackends } from "./model_router.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
@@ -50,6 +51,7 @@ export const goalCreateSchema = z
     constraints: z.array(z.string().min(1)).optional(),
     assumptions: z.array(z.string().min(1)).optional(),
     budget: z.record(z.unknown()).optional(),
+    permission_profile: z.enum(["read_only", "bounded_execute", "network_enabled", "high_risk"]).optional(),
     owner: z.record(z.unknown()).optional(),
     tags: z.array(z.string().min(1)).optional(),
     metadata: z.record(z.unknown()).optional(),
@@ -1774,7 +1776,7 @@ export async function goalCreate(storage: Storage, input: z.infer<typeof goalCre
         budget: input.budget,
         owner: input.owner,
         tags: input.tags,
-        metadata: input.metadata,
+        metadata: mergeDeclaredPermissionProfile(input.metadata ?? {}, input.permission_profile),
         source_client: input.source_client,
         source_model: input.source_model,
         source_agent: input.source_agent,

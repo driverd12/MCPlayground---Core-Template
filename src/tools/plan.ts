@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { Storage, type PlanStepRecord } from "../storage.js";
+import { mergeDeclaredPermissionProfile } from "../control_plane_runtime.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 
 const planStatusSchema = z.enum([
@@ -69,6 +70,7 @@ export const planCreateSchema = z
     success_criteria: z.array(z.string().min(1)).optional(),
     rollback: z.array(z.string().min(1)).optional(),
     budget: z.record(z.unknown()).optional(),
+    permission_profile: z.enum(["read_only", "bounded_execute", "network_enabled", "high_risk"]).optional(),
     metadata: z.record(z.unknown()).optional(),
     steps: z.array(planStepCreateSchema).min(1),
     ...sourceSchema.shape,
@@ -148,6 +150,7 @@ export const planUpdateSchema = z
     success_criteria: z.array(z.string().min(1)).optional(),
     rollback: z.array(z.string().min(1)).optional(),
     budget: z.record(z.unknown()).optional(),
+    permission_profile: z.enum(["read_only", "bounded_execute", "network_enabled", "high_risk"]).optional(),
     metadata: z.record(z.unknown()).optional(),
     ...sourceSchema.shape,
   })
@@ -308,7 +311,7 @@ export async function planCreate(storage: Storage, input: z.infer<typeof planCre
         success_criteria: input.success_criteria,
         rollback: input.rollback,
         budget: input.budget,
-        metadata: input.metadata,
+        metadata: mergeDeclaredPermissionProfile(input.metadata ?? {}, input.permission_profile),
         steps: input.steps,
         source_client: input.source_client,
         source_model: input.source_model,
@@ -406,7 +409,7 @@ export async function planUpdate(storage: Storage, input: z.infer<typeof planUpd
         success_criteria: input.success_criteria,
         rollback: input.rollback,
         budget: input.budget,
-        metadata: input.metadata,
+        metadata: mergeDeclaredPermissionProfile(input.metadata ?? {}, input.permission_profile),
         source_client: input.source_client,
         source_model: input.source_model,
         source_agent: input.source_agent,

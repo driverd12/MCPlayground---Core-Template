@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { Storage, type TaskRecord } from "../storage.js";
+import { buildBudgetUsageFromBudget, mergeDeclaredPermissionProfile, recordBudgetLedgerUsage } from "../control_plane_runtime.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { ensureWorkspaceFingerprint } from "./workspace_fingerprint.js";
+import { budgetUsageSchema } from "./control_plane_admin.js";
 
 const taskStatusSchema = z.enum(["pending", "running", "completed", "failed", "cancelled"]);
 const isolationModeSchema = z.enum(["git_worktree", "copy", "none"]);
@@ -62,6 +64,8 @@ export const taskCreateSchema = z.object({
   objective: z.string().min(1),
   project_dir: z.string().min(1).optional(),
   payload: z.record(z.unknown()).optional(),
+  budget: z.record(z.unknown()).optional(),
+  permission_profile: z.enum(["read_only", "bounded_execute", "network_enabled", "high_risk"]).optional(),
   routing: taskRoutingSchema.optional(),
   task_execution: taskExecutionSchema.optional(),
   priority: z.number().int().min(0).max(100).optional(),
@@ -106,6 +110,7 @@ export const taskCompleteSchema = z.object({
   worker_id: z.string().min(1),
   result: z.record(z.unknown()).optional(),
   summary: z.string().optional(),
+  usage: budgetUsageSchema.optional(),
 });
 
 export const taskFailSchema = z.object({
@@ -115,6 +120,7 @@ export const taskFailSchema = z.object({
   error: z.string().min(1),
   result: z.record(z.unknown()).optional(),
   summary: z.string().optional(),
+  usage: budgetUsageSchema.optional(),
 });
 
 export const taskRetrySchema = z.object({
@@ -255,8 +261,16 @@ export async function taskCreate(storage: Storage, input: z.infer<typeof taskCre
         ...(isRecord(input.metadata?.task_execution) ? input.metadata.task_execution : {}),
         ...(input.task_execution ?? {}),
       });
-      const metadata: Record<string, unknown> = {
+      const initialMetadata: Record<string, unknown> = {
         ...(input.metadata ?? {}),
+        ...(input.budget
+          ? {
+              budget: input.budget,
+            }
+          : {}),
+      };
+      const metadata: Record<string, unknown> = mergeDeclaredPermissionProfile(initialMetadata, input.permission_profile);
+      Object.assign(metadata, {
         ...(normalizedTaskExecution
           ? {
               task_execution: normalizedTaskExecution,
@@ -274,7 +288,7 @@ export async function taskCreate(storage: Storage, input: z.infer<typeof taskCre
               },
             }
           : {}),
-      };
+      });
       metadata.task_profile = resolveTaskExecutionProfile({
         objective: input.objective,
         project_dir: input.project_dir ?? ".",
@@ -297,6 +311,34 @@ export async function taskCreate(storage: Storage, input: z.infer<typeof taskCre
         tags: input.tags,
         metadata,
       });
+      const modelRouter = isRecord(metadata.model_router) ? metadata.model_router : {};
+      const route = isRecord(modelRouter.route) ? modelRouter.route : {};
+      const selectedBackend = isRecord(route.selected_backend) ? route.selected_backend : {};
+      const projectionUsage = buildBudgetUsageFromBudget({
+        budget: input.budget ?? (isRecord(metadata.budget) ? metadata.budget : null),
+        metadata,
+        provider: readString(selectedBackend.provider) ?? normalizedTaskExecution?.selected_backend_provider ?? null,
+        model_id: readString(selectedBackend.model_id) ?? normalizedTaskExecution?.selected_backend_id ?? null,
+        notes: "Task budget projection",
+      });
+      if (projectionUsage) {
+        recordBudgetLedgerUsage(storage, {
+          ledger_kind: "projection",
+          usage: projectionUsage,
+          entity_type: "task",
+          entity_id: task.task.task_id,
+          task_id: task.task.task_id,
+          provider: projectionUsage.provider,
+          model_id: projectionUsage.model_id,
+          metadata: {
+            task_objective: task.task.objective,
+            permission_profile: metadata.permission_profile ?? null,
+          },
+          source_client: input.source_client,
+          source_model: input.source_model,
+          source_agent: input.source_agent,
+        });
+      }
       ensureWorkspaceFingerprint(storage, input.project_dir ?? ".", {
         source: "task.create",
       });
@@ -734,13 +776,24 @@ export async function taskComplete(storage: Storage, input: z.infer<typeof taskC
     tool_name: "task.complete",
     mutation: input.mutation,
     payload: input,
-    execute: () =>
-      storage.completeTask({
+    execute: () => {
+      const completed = storage.completeTask({
         task_id: input.task_id,
         worker_id: input.worker_id,
         result: input.result,
         summary: input.summary,
-      }),
+      });
+      recordBudgetLedgerUsage(storage, {
+        ledger_kind: "actual",
+        usage: input.usage,
+        usage_sources: [input.result],
+        entity_type: "task",
+        entity_id: input.task_id,
+        task_id: input.task_id,
+        notes: input.summary ?? "Task completed",
+      });
+      return completed;
+    },
   });
 }
 
@@ -750,14 +803,25 @@ export async function taskFail(storage: Storage, input: z.infer<typeof taskFailS
     tool_name: "task.fail",
     mutation: input.mutation,
     payload: input,
-    execute: () =>
-      storage.failTask({
+    execute: () => {
+      const failed = storage.failTask({
         task_id: input.task_id,
         worker_id: input.worker_id,
         error: input.error,
         result: input.result,
         summary: input.summary,
-      }),
+      });
+      recordBudgetLedgerUsage(storage, {
+        ledger_kind: "actual",
+        usage: input.usage,
+        usage_sources: [input.result],
+        entity_type: "task",
+        entity_id: input.task_id,
+        task_id: input.task_id,
+        notes: input.summary ?? input.error,
+      });
+      return failed;
+    },
   });
 }
 

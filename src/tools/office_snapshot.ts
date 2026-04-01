@@ -18,6 +18,7 @@ import { getReactionEngineRuntimeStatus } from "./reaction_engine.js";
 import { summarizeLiveRuntimeWorkers } from "./runtime_worker.js";
 import { taskList, taskSummary } from "./task.js";
 import { trichatAdapterTelemetry, trichatSummary, trichatWorkboard } from "./trichat.js";
+import { readWarmCacheEntry } from "../warm_cache_runtime.js";
 
 const recordSchema = z.record(z.unknown());
 type TaskListPayload = ReturnType<typeof taskList>;
@@ -58,6 +59,30 @@ export const officeSnapshotSchema = z.object({
   include_runtime_workers: z.boolean().default(true),
   metadata: recordSchema.optional(),
 });
+
+const OFFICE_SNAPSHOT_DEFAULT_THREAD_ID = "ring-leader-main";
+
+export function officeSnapshotWarmCacheKey(threadId: string) {
+  return `office.snapshot:${threadId}`;
+}
+
+function isDefaultOfficeSnapshotRequest(input: z.infer<typeof officeSnapshotSchema>) {
+  return (
+    (input.thread_id?.trim() || OFFICE_SNAPSHOT_DEFAULT_THREAD_ID) !== "" &&
+    input.turn_limit === 12 &&
+    input.task_limit === 24 &&
+    input.session_limit === 50 &&
+    input.event_limit === 24 &&
+    input.learning_limit === 120 &&
+    input.runtime_worker_limit === 20 &&
+    input.include_kernel === true &&
+    input.include_learning === true &&
+    input.include_bus === true &&
+    input.include_adapter === true &&
+    input.include_runtime_workers === true &&
+    input.metadata === undefined
+  );
+}
 
 function normalizeAgentId(value: unknown) {
   return String(value ?? "")
@@ -230,7 +255,7 @@ function buildKernelPayload(storage: Storage, summary: TaskSummaryPayload, sessi
   });
 }
 
-export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSnapshotSchema>) {
+export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof officeSnapshotSchema>) {
   const threadId = input.thread_id?.trim() || "ring-leader-main";
   const errors: string[] = [];
   const safe = <T>(label: string, fallback: T, read: () => T) => {
@@ -488,5 +513,34 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
     operator_brief: operatorBriefPayload,
     provider_bridge: providerBridge,
     source: "office.snapshot",
+  };
+}
+
+export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSnapshotSchema>) {
+  const threadId = input.thread_id?.trim() || OFFICE_SNAPSHOT_DEFAULT_THREAD_ID;
+  const warmCacheState = storage.getWarmCacheState();
+  if (isDefaultOfficeSnapshotRequest(input)) {
+    const cached = readWarmCacheEntry(officeSnapshotWarmCacheKey(threadId), warmCacheState.ttl_seconds * 1000);
+    if (cached && cached.payload && typeof cached.payload === "object" && !Array.isArray(cached.payload)) {
+      return {
+        ...(cached.payload as Record<string, unknown>),
+        cache: {
+          hit: true,
+          key: cached.key,
+          warmed_at: cached.warmed_at,
+          duration_ms: cached.duration_ms,
+        },
+      };
+    }
+  }
+
+  return {
+    ...computeOfficeSnapshot(storage, input),
+    cache: {
+      hit: false,
+      key: null,
+      warmed_at: null,
+      duration_ms: null,
+    },
   };
 }

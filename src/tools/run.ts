@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 import { z } from "zod";
 import { Storage } from "../storage.js";
+import { recordBudgetLedgerUsage } from "../control_plane_runtime.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
+import { budgetUsageSchema } from "./control_plane_admin.js";
 
 const sourceSchema = z.object({
   source_client: z.string().optional(),
@@ -15,6 +17,7 @@ export const runBeginSchema = z.object({
   status: z.string().default("in_progress"),
   summary: z.string().min(1),
   details: z.record(z.unknown()).optional(),
+  usage: budgetUsageSchema.optional(),
   source_client: z.string().optional(),
   source_model: z.string().optional(),
   source_agent: z.string().optional(),
@@ -27,6 +30,7 @@ export const runStepSchema = z.object({
   status: z.enum(["pending", "in_progress", "completed", "failed", "skipped"]),
   summary: z.string().min(1),
   details: z.record(z.unknown()).optional(),
+  usage: budgetUsageSchema.optional(),
   ...sourceSchema.shape,
 });
 
@@ -37,6 +41,7 @@ export const runEndSchema = z.object({
   status: z.enum(["succeeded", "failed", "aborted"]),
   summary: z.string().min(1),
   details: z.record(z.unknown()).optional(),
+  usage: budgetUsageSchema.optional(),
   ...sourceSchema.shape,
 });
 
@@ -60,6 +65,18 @@ export async function runBegin(storage: Storage, input: z.infer<typeof runBeginS
         status: input.status,
         summary: input.summary,
         details: input.details,
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      });
+      recordBudgetLedgerUsage(storage, {
+        ledger_kind: "projection",
+        usage: input.usage,
+        usage_sources: [input.details],
+        entity_type: "run",
+        entity_id: runId,
+        run_id: runId,
+        notes: input.summary,
         source_client: input.source_client,
         source_model: input.source_model,
         source_agent: input.source_agent,
@@ -91,6 +108,17 @@ export async function runStep(storage: Storage, input: z.infer<typeof runStepSch
         source_model: input.source_model,
         source_agent: input.source_agent,
       });
+      recordBudgetLedgerUsage(storage, {
+        usage: input.usage,
+        usage_sources: [input.details],
+        entity_type: "run",
+        entity_id: input.run_id,
+        run_id: input.run_id,
+        notes: input.summary,
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      });
       return {
         run_id: input.run_id,
         event_id: event.id,
@@ -115,6 +143,18 @@ export async function runEnd(storage: Storage, input: z.infer<typeof runEndSchem
         status: input.status,
         summary: input.summary,
         details: input.details,
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      });
+      recordBudgetLedgerUsage(storage, {
+        ledger_kind: "actual",
+        usage: input.usage,
+        usage_sources: [input.details],
+        entity_type: "run",
+        entity_id: input.run_id,
+        run_id: input.run_id,
+        notes: input.summary,
         source_client: input.source_client,
         source_model: input.source_model,
         source_agent: input.source_agent,
