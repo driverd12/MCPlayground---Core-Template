@@ -36,9 +36,9 @@ Override with explicit `trichat_agent_ids` only when you intentionally want a di
 | Client / Provider | Connects into MCP | Ring leader can query outward | Local-only transport possible | Notes |
 | --- | --- | --- | --- | --- |
 | Codex | Yes | Yes | Yes for MCP, no for frontier model inference | Inbound via Codex MCP config; outward via `bridges/codex_bridge.py` |
-| Cursor | Yes | Yes | Yes for MCP, no for cloud model inference | Inbound via `~/.cursor/mcp.json`; outward via `bridges/cursor_bridge.py` |
-| Gemini CLI | Yes | Yes | Yes for MCP transport, no for Gemini model inference | Inbound via `~/.gemini/settings.json`; outward via `bridges/gemini_bridge.py` |
-| GitHub Copilot CLI | Yes | No | Yes for MCP transport, no for Copilot model inference | Inbound via `~/.copilot/mcp-config.json`; no truthful outbound council bridge in this repo yet |
+| Cursor | Yes | Yes | Yes for MCP, no for cloud model inference | Inbound via both `~/.cursor/mcp.json` and workspace-local `.cursor/mcp.json`; outward via `bridges/cursor_bridge.py` |
+| Gemini CLI | Yes | Yes | Yes for MCP transport, no for Gemini model inference | Inbound via `~/.gemini/settings.json`; standalone `gemini` CLI binary; outward via `bridges/gemini_bridge.py` |
+| GitHub Copilot CLI | Yes | No | Yes for MCP transport, no for Copilot model inference | Inbound via `~/.copilot/mcp-config.json`; current official standalone CLI is `copilot`; no truthful outbound council bridge in this repo yet |
 | GitHub Copilot Agent Mode / VS Code | Exportable | No | Yes for MCP transport, no for Copilot model inference | Export workspace `.vscode/mcp.json`; keep this honest as an editor-client integration |
 | ChatGPT Developer Mode | Remote-only | No | No | Requires a remote MCP server path and internet connectivity; export manifest only |
 
@@ -76,7 +76,7 @@ Codex install still uses the dedicated script:
 - gives `autonomy.bootstrap` the same bridge/backend truth so the control plane can seed hosted backends automatically
 - lets local-first councils stay primary while `autonomy.command`, `goal.execute`, and `plan.dispatch` add routed hosted agents only when the router says they are relevant
 - exports ready-to-import config snippets and a truthful ChatGPT remote manifest
-- installs the supported local JSON config paths for Cursor, Gemini CLI, and GitHub Copilot CLI
+- installs the supported local JSON config paths for Cursor, Gemini CLI, and GitHub Copilot CLI, including workspace-local `.cursor/mcp.json`
 - preserves `autonomy.ide_ingress` as the one canonical ingress lane
 
 ## Source References

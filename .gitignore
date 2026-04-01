@@ -21,3 +21,4 @@ data/exports/
 coverage/
 __pycache__/
 .vscode/mcp.json
+.cursor/mcp.json

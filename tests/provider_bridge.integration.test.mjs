@@ -107,6 +107,10 @@ test("provider.bridge export_bundle and install create real client config artifa
 
     const cursorConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".cursor", "mcp.json"), "utf8"));
     assert.ok(cursorConfig.mcpServers?.mcplayground?.url);
+    const cursorWorkspaceConfig = JSON.parse(
+      fs.readFileSync(path.join(workspaceRoot, ".cursor", "mcp.json"), "utf8")
+    );
+    assert.ok(cursorWorkspaceConfig.mcpServers?.mcplayground?.url);
 
     const geminiConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".gemini", "settings.json"), "utf8"));
     assert.ok(geminiConfig.mcpServers?.mcplayground?.url);

@@ -149,6 +149,13 @@ function commandSucceeds(command: string, args: string[]) {
   return result.status === 0;
 }
 
+function hasCopilotCliBinary() {
+  return (
+    commandExists("copilot") ||
+    (commandExists("gh") && commandSucceeds("gh", ["copilot", "--help"]))
+  );
+}
+
 function readJsonFile(filePath: string) {
   if (!fs.existsSync(filePath)) {
     return {};
@@ -228,6 +235,7 @@ function resolveClientConfigPaths(workspaceRoot: string) {
   return {
     codex: path.join(home, ".codex", "config.toml"),
     cursor: path.join(home, ".cursor", "mcp.json"),
+    cursorWorkspace: path.join(workspaceRoot, ".cursor", "mcp.json"),
     copilotCli: path.join(home, ".copilot", "mcp-config.json"),
     gemini: path.join(home, ".gemini", "settings.json"),
     vscode: path.join(workspaceRoot, ".vscode", "mcp.json"),
@@ -514,10 +522,12 @@ function buildClientStatuses(
     ],
     cursor: [
       "Cursor can connect to the shared HTTP daemon or launch the server via stdio.",
+      "For reliability, this repo installs both ~/.cursor/mcp.json and workspace-local .cursor/mcp.json.",
       "Outbound council consultation is available through bridges/cursor_bridge.py.",
     ],
     "github-copilot-cli": [
       "Inbound MCP config is exportable/installable through ~/.copilot/mcp-config.json.",
+      "The current official CLI installs as `copilot`; older `gh copilot` extension installs are still detected.",
       "There is no truthful local outbound council bridge for Copilot in this repo yet.",
     ],
     "github-copilot-vscode": [
@@ -557,9 +567,11 @@ function buildClientStatuses(
       display_name: "Cursor",
       install_mode: "json-config",
       config_path: configPaths.cursor,
-      installed: jsonServerInstalled(configPaths.cursor, serverName),
+      installed:
+        jsonServerInstalled(configPaths.cursor, serverName) ||
+        jsonServerInstalled(configPaths.cursorWorkspace, serverName),
       binary_present: commandExists("cursor") || fs.existsSync("/Applications/Cursor.app"),
-      config_present: fs.existsSync(configPaths.cursor),
+      config_present: fs.existsSync(configPaths.cursor) || fs.existsSync(configPaths.cursorWorkspace),
       supported_transports: ["http", "stdio"],
       preferred_transport: transport.mode,
       inbound_mcp_supported: true,
@@ -575,7 +587,7 @@ function buildClientStatuses(
       install_mode: "json-config",
       config_path: configPaths.copilotCli,
       installed: jsonServerInstalled(configPaths.copilotCli, serverName),
-      binary_present: commandExists("gh") && commandSucceeds("gh", ["copilot", "--help"]),
+      binary_present: hasCopilotCliBinary(),
       config_present: fs.existsSync(configPaths.copilotCli),
       supported_transports: ["http", "stdio"],
       preferred_transport: transport.mode,
@@ -714,6 +726,13 @@ function writeBundle(
       },
     });
     snippets.cursor = filePath;
+    const workspaceFilePath = path.join(outputDir, "cursor-workspace-mcp.json");
+    writeJsonFile(workspaceFilePath, {
+      mcpServers: {
+        [serverName]: cursorGeminiEntry,
+      },
+    });
+    snippets["cursor-workspace"] = workspaceFilePath;
   }
   if (selectedClients.includes("gemini-cli")) {
     const filePath = path.join(outputDir, "gemini-settings.json");
@@ -893,9 +912,11 @@ export async function providerBridge(
       }
       if (client === "cursor") {
         mergeJsonServer(configPaths.cursor, serverName, buildCursorOrGeminiEntry(transport, serverName, true));
+        mergeJsonServer(configPaths.cursorWorkspace, serverName, buildCursorOrGeminiEntry(transport, serverName, true));
         installs.push({
           client_id: client,
           config_path: configPaths.cursor,
+          workspace_config_path: configPaths.cursorWorkspace,
           transport_used: transport.mode,
         });
         continue;

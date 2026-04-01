@@ -482,6 +482,7 @@ npm run providers:install -- cursor gemini-cli github-copilot-cli
 - `autonomy.bootstrap` seeds those eligible bridge backends automatically without replacing the local default backend
 - `autonomy.command`, `goal.execute`, and `plan.dispatch` use router output to augment local-first councils with relevant hosted agents instead of treating provider bridges as a separate side path
 - it exports config bundles for Cursor, Gemini CLI, GitHub Copilot, and Codex
+- it installs both global and workspace-local Cursor MCP config for better editor reliability
 - it preserves `autonomy.ide_ingress` as the one canonical operator/IDE ingress path
 
 Fast STDIO connection example:
