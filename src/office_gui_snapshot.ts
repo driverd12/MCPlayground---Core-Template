@@ -193,7 +193,7 @@ function buildProviderSignals(raw: Record<string, unknown>) {
     "github-copilot-cli": ["github-copilot"],
     "github-copilot-vscode": ["github-copilot"],
   };
-  const signals = new Map<string, { state: string; activity: string; detail: string; location: string }>();
+  const signals = new Map<string, { state: string; activity: string; detail: string; location: string; priority: number }>();
   for (const entryRaw of diagnostics) {
     const entry = asDict(entryRaw);
     const clientId = String(entry.client_id ?? "").trim();
@@ -205,7 +205,7 @@ function buildProviderSignals(raw: Record<string, unknown>) {
       continue;
     }
     let signal:
-      | { state: string; activity: string; detail: string; location: string }
+      | { state: string; activity: string; detail: string; location: string; priority: number }
       | null = null;
     if (status === "connected") {
       signal = {
@@ -213,6 +213,7 @@ function buildProviderSignals(raw: Record<string, unknown>) {
         activity: `${displayName} bridge connected`,
         detail,
         location: "ops",
+        priority: 4,
       };
     } else if (status === "configured") {
       signal = {
@@ -220,6 +221,7 @@ function buildProviderSignals(raw: Record<string, unknown>) {
         activity: `${displayName} bridge configured`,
         detail,
         location: "sofa",
+        priority: 3,
       };
     } else if (status === "disconnected") {
       signal = {
@@ -227,6 +229,7 @@ function buildProviderSignals(raw: Record<string, unknown>) {
         activity: `${displayName} bridge disconnected`,
         detail,
         location: "ops",
+        priority: 2,
       };
     } else if (status === "unavailable") {
       signal = {
@@ -234,16 +237,30 @@ function buildProviderSignals(raw: Record<string, unknown>) {
         activity: `${displayName} bridge unavailable`,
         detail,
         location: "ops",
+        priority: 1,
       };
     }
     if (!signal) {
       continue;
     }
     for (const agentId of mappedAgentIds) {
-      signals.set(agentId, signal);
+      const current = signals.get(agentId);
+      if (!current || signal.priority >= current.priority) {
+        signals.set(agentId, signal);
+      }
     }
   }
-  return signals;
+  return new Map(
+    [...signals.entries()].map(([agentId, signal]) => [
+      agentId,
+      {
+        state: signal.state,
+        activity: signal.activity,
+        detail: signal.detail,
+        location: signal.location,
+      },
+    ])
+  );
 }
 
 function buildTaskSignals(

@@ -141,3 +141,78 @@ test("office gui snapshot surfaces control-plane rollup signals", () => {
   assert.equal(snapshot.summary.control_plane.warm_cache_stale, false);
   assert.equal(snapshot.summary.control_plane.disabled_feature_flags, 2);
 });
+
+test("office gui snapshot prefers a connected Copilot bridge over an unavailable export-only Copilot entry", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    {
+      roster: {
+        active_agent_ids: ["github-copilot"],
+        agents: [
+          {
+            agent_id: "github-copilot",
+            display_name: "GitHub Copilot",
+            coordination_tier: "support",
+            role_lane: "implementer",
+          },
+        ],
+      },
+      workboard: {},
+      tmux: {},
+      task_summary: { counts: {} },
+      task_running: {},
+      task_pending: {},
+      agent_sessions: { sessions: [] },
+      adapter: {},
+      bus_tail: {},
+      trichat_summary: {},
+      learning: {},
+      autopilot: {},
+      runtime_workers: { summary: {}, sessions: [] },
+      kernel: {
+        overview: {},
+        worker_fabric: { hosts: [] },
+        model_router: { backends: [] },
+        runtime_workers: {},
+        autonomy_maintain: {},
+        reaction_engine: {},
+        observability: {},
+        swarm: {},
+        workflow_exports: {},
+      },
+      autonomy_maintain: {
+        state: {},
+        runtime: {},
+        due: {},
+      },
+      provider_bridge: {
+        diagnostics: {
+          generated_at: "2026-04-01T23:05:00.000Z",
+          cached: true,
+          diagnostics: [
+            {
+              client_id: "github-copilot-cli",
+              display_name: "GitHub Copilot CLI",
+              office_agent_id: "github-copilot",
+              status: "connected",
+              detail: "Copilot CLI login metadata present",
+            },
+            {
+              client_id: "github-copilot-vscode",
+              display_name: "GitHub Copilot Agent Mode (VS Code)",
+              office_agent_id: "github-copilot",
+              status: "unavailable",
+              detail: "Bridge is not configured for this client on this host.",
+            },
+          ],
+        },
+      },
+    },
+    { theme: "dark" }
+  );
+
+  const copilot = snapshot.agents.find((entry) => entry.agent.agent_id === "github-copilot");
+  assert.ok(copilot);
+  assert.equal(copilot.state, "ready");
+  assert.equal(copilot.evidence_source, "provider_bridge");
+  assert.match(copilot.activity, /bridge connected/i);
+});
