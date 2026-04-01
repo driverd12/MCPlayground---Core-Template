@@ -24,6 +24,7 @@ import { buildAgentLearningOverview } from "./agent_learning.js";
 import { buildEvalHealth, computeEvalDependencyFingerprint, getAutonomyMaintainRuntimeStatus } from "./autonomy_maintain.js";
 import { getAutoSnapshotRuntimeStatus } from "./imprint.js";
 import { isBenignObservabilityDocument } from "./observability.js";
+import { resolveProviderBridgeDiagnostics } from "./provider_bridge.js";
 import { getReactionEngineRuntimeStatus } from "./reaction_engine.js";
 import { summarizeLiveRuntimeWorkers } from "./runtime_worker.js";
 import { getAutoSquishRuntimeStatus } from "./transcript.js";
@@ -1711,11 +1712,27 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   const evalSummary = summarizeEvalSuites(storage);
   const observabilitySummary = summarizeObservability(storage);
   const orgProgramSummary = summarizeOrgPrograms(storage);
-  const autonomyMaintainSummary = summarizeAutonomyMaintain(storage.getAutonomyMaintainState(), storage);
+  const autonomyMaintainState = storage.getAutonomyMaintainState();
+  const autonomyMaintainSummary = summarizeAutonomyMaintain(autonomyMaintainState, storage);
   const reactionEngineSummary = summarizeReactionEngine(storage.getReactionEngineState());
   const swarmSummary = summarizeSwarmCoordination(storage, openGoals);
   const workflowExportSummary = summarizeWorkflowExports(storage);
   const runtimeWorkerSummary = summarizeRuntimeWorkers(storage);
+  const providerBridgeDiagnostics =
+    Array.isArray(autonomyMaintainState?.provider_bridge_diagnostics) &&
+    (autonomyMaintainState?.provider_bridge_diagnostics.length ?? 0) > 0
+      ? {
+          generated_at: autonomyMaintainState?.last_provider_bridge_check_at ?? autonomyMaintainState?.updated_at ?? new Date().toISOString(),
+          cached: true,
+          diagnostics: autonomyMaintainState?.provider_bridge_diagnostics ?? [],
+        }
+      : resolveProviderBridgeDiagnostics({
+          workspace_root: process.cwd(),
+          probe_timeout_ms: 1500,
+        });
+  const providerBridgeEntries = Array.isArray(providerBridgeDiagnostics.diagnostics)
+    ? providerBridgeDiagnostics.diagnostics
+    : [];
   const goalSummaries = openGoals.map((goal) => {
     const plan = resolveGoalPlan(storage, goal);
     const steps = plan ? storage.listPlanSteps(plan.plan_id) : [];
@@ -2002,6 +2019,12 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   if (runtimeWorkerSummary.counts.failed > 0) {
     attention.push("One or more runtime workers failed recently.");
   }
+  const providerBridgeDisconnectedCount = providerBridgeEntries.filter(
+    (entry) => String(entry.status ?? "").trim().toLowerCase() === "disconnected"
+  ).length;
+  if (providerBridgeDisconnectedCount > 0) {
+    attention.push(`Provider bridges report ${providerBridgeDisconnectedCount} disconnected client session(s).`);
+  }
   if (attention.length === 0 && state === "active") {
     attention.push("Kernel is progressing normally.");
   }
@@ -2107,6 +2130,13 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
         failed_count: runtimeWorkerSummary.counts.failed,
         runtime_counts: runtimeWorkerSummary.runtime_counts,
       },
+      provider_bridge: {
+        client_count: providerBridgeEntries.length,
+        connected_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "connected").length,
+        configured_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "configured").length,
+        disconnected_count: providerBridgeDisconnectedCount,
+        unavailable_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "unavailable").length,
+      },
       ready_step_count: totals.ready_step_count,
       running_step_count: totals.running_step_count,
       blocked_approval_count: totals.blocked_approval_count,
@@ -2137,6 +2167,15 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     reaction_engine: reactionEngineSummary,
     workflow_exports: workflowExportSummary,
     runtime_workers: runtimeWorkerSummary,
+    provider_bridge: {
+      generated_at: providerBridgeDiagnostics.generated_at,
+      cached: providerBridgeDiagnostics.cached,
+      diagnostics: providerBridgeEntries,
+      connected_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "connected").length,
+      configured_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "configured").length,
+      disconnected_count: providerBridgeDisconnectedCount,
+      unavailable_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "unavailable").length,
+    },
     learning: {
       ...learningOverview,
       active_session_coverage: {

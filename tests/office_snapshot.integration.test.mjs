@@ -38,6 +38,15 @@ test("office.snapshot returns a storage-backed GUI payload without depending on 
       },
     });
 
+    await callTool(client, "autonomy.maintain", {
+      action: "run_once",
+      fast: true,
+      publish_runtime_event: false,
+      run_eval_if_due: false,
+      run_optimizer_if_due: false,
+      mutation: nextMutation("office-snapshot", "autonomy.maintain", () => mutationCounter++),
+    });
+
     const snapshot = await callTool(client, "office.snapshot", {
       thread_id: "ring-leader-main",
     });
@@ -57,7 +66,7 @@ test("office.snapshot returns a storage-backed GUI payload without depending on 
     assert.ok(snapshot.roster.agents.length >= 1);
     assert.ok(snapshot.roster.active_agent_ids.includes("ring-leader"));
     assert.equal(snapshot.task_summary.counts.pending, 1);
-    assert.equal(snapshot.agent_sessions.count, 1);
+    assert.ok(snapshot.agent_sessions.count >= 1);
     assert.equal(snapshot.tmux.action, "status_cached");
     assert.equal(typeof snapshot.kernel.state, "string");
     assert.equal(snapshot.kernel.worker_fabric.host_count, fabric.state.hosts.length);
@@ -69,6 +78,9 @@ test("office.snapshot returns a storage-backed GUI payload without depending on 
     assert.equal(snapshot.operator_brief.kernel, null);
     assert.equal(typeof snapshot.operator_brief.brief_markdown, "string");
     assert.ok(snapshot.operator_brief.brief_markdown.includes("# Operator Brief"));
+    assert.equal(typeof snapshot.provider_bridge.snapshot.canonical_ingress_tool, "string");
+    assert.ok(Array.isArray(snapshot.provider_bridge.diagnostics.diagnostics));
+    assert.equal(snapshot.provider_bridge.diagnostics.cached, true);
     assert.equal(Array.isArray(snapshot.errors), true);
   } finally {
     await client.close().catch(() => {});

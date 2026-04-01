@@ -25,7 +25,7 @@ const sourceSchema = z.object({
 
 export const providerBridgeSchema = z
   .object({
-    action: z.enum(["status", "export_bundle", "install"]).default("status"),
+    action: z.enum(["status", "diagnose", "export_bundle", "install"]).default("status"),
     mutation: mutationSchema.optional(),
     clients: z.array(providerBridgeClientSchema).max(20).optional(),
     transport: transportSchema.default("auto"),
@@ -38,6 +38,7 @@ export const providerBridgeSchema = z
     stdio_args: z.array(z.string().min(1)).optional(),
     db_path: z.string().min(1).optional(),
     workspace_root: z.string().min(1).optional(),
+    probe_timeout_ms: z.number().int().min(250).max(30000).optional(),
     ...sourceSchema.shape,
   })
   .superRefine((value, ctx) => {
@@ -55,6 +56,7 @@ type ProviderBridgeClientId = z.infer<typeof providerBridgeClientSchema>;
 type ProviderBridgeClientStatus = {
   client_id: ProviderBridgeClientId;
   display_name: string;
+  office_agent_id: string | null;
   install_mode: "cli" | "json-config" | "export-only" | "remote-only";
   config_path: string | null;
   installed: boolean;
@@ -97,6 +99,37 @@ type ProviderBridgeTransportConfig = {
   db_path: string;
 };
 
+type ProviderBridgeDiagnostic = {
+  client_id: ProviderBridgeClientId;
+  display_name: string;
+  office_agent_id: string | null;
+  available: boolean;
+  runtime_probed: boolean;
+  connected: boolean | null;
+  status: "connected" | "disconnected" | "configured" | "unavailable";
+  detail: string;
+  notes: string[];
+  command: string | null;
+  config_path: string | null;
+};
+
+function resolveClientTransportConfig(
+  clientId: ProviderBridgeClientId,
+  base: ProviderBridgeTransportConfig,
+  requestedMode: "auto" | "http" | "stdio"
+): ProviderBridgeTransportConfig {
+  if (requestedMode !== "auto") {
+    return base;
+  }
+  if (clientId === "gemini-cli") {
+    return {
+      ...base,
+      mode: "stdio",
+    };
+  }
+  return base;
+}
+
 type ProviderBridgeSnapshot = {
   canonical_ingress_tool: "autonomy.ide_ingress";
   local_first_ide_agent_ids: string[];
@@ -116,6 +149,7 @@ type ProviderBridgeSnapshot = {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const distServerPath = path.join(repoRoot, "dist", "server.js");
+const providerStdioBridgePath = path.join(repoRoot, "scripts", "provider_stdio_bridge.mjs");
 const defaultLocalFirstAgents = [
   "implementation-director",
   "research-director",
@@ -130,6 +164,21 @@ const defaultProviderClients: ProviderBridgeClientId[] = [
   "gemini-cli",
   "chatgpt-developer-mode",
 ];
+const providerBridgeDiagnosticCache = new Map<
+  string,
+  {
+    captured_at: number;
+    diagnostics: ProviderBridgeDiagnostic[];
+  }
+>();
+
+function providerBridgeDiagnosticsCacheTtlMs() {
+  const override = Number(process.env.PROVIDER_BRIDGE_DIAGNOSTICS_CACHE_SECONDS || "");
+  if (Number.isFinite(override) && override > 0) {
+    return Math.max(5_000, Math.round(override * 1000));
+  }
+  return 60_000;
+}
 
 function timestampForPath() {
   return new Date().toISOString().replace(/[:.]/g, "-");
@@ -147,6 +196,97 @@ function commandSucceeds(command: string, args: string[]) {
     stdio: "ignore",
   });
   return result.status === 0;
+}
+
+function runCommandProbe(
+  command: string,
+  args: string[],
+  options: {
+    cwd?: string;
+    timeout?: number;
+    env?: NodeJS.ProcessEnv;
+  } = {}
+) {
+  const result = spawnSync(command, args, {
+    cwd: options.cwd,
+    env: options.env ?? process.env,
+    encoding: "utf8",
+    timeout: options.timeout ?? 5000,
+  });
+  return {
+    status: result.status,
+    signal: result.signal,
+    timed_out:
+      result.error?.name === "Error" &&
+      (() => {
+        const message = String(result.error?.message ?? "");
+        return message.toLowerCase().includes("timed out") || message.toUpperCase().includes("ETIMEDOUT");
+      })(),
+    error: result.error ? String(result.error.message ?? result.error) : null,
+    stdout: String(result.stdout ?? ""),
+    stderr: String(result.stderr ?? ""),
+    combined: [String(result.stdout ?? ""), String(result.stderr ?? "")].filter(Boolean).join("\n"),
+  };
+}
+
+function buildProviderProbeEnv(workspaceRoot: string) {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const home = env.HOME?.trim() || os.homedir();
+  const shell = env.SHELL?.trim() || "/bin/zsh";
+  const existingPath = env.PATH?.trim();
+  const fallbackPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+  env.HOME = home;
+  env.SHELL = shell;
+  env.TERM = env.TERM?.trim() || "xterm-256color";
+  env.PWD = workspaceRoot;
+  env.PATH = existingPath && existingPath.length > 0 ? existingPath : fallbackPath;
+  return env;
+}
+
+function resolveEntryDbPath(config: ProviderBridgeTransportConfig, cwd?: string) {
+  if (path.isAbsolute(config.db_path)) {
+    return config.db_path;
+  }
+  if (cwd) {
+    return path.resolve(cwd, config.db_path);
+  }
+  return path.resolve(repoRoot, config.db_path);
+}
+
+function listProcessLines(pattern: string) {
+  const result = spawnSync("pgrep", ["-fal", pattern], {
+    encoding: "utf8",
+    env: process.env,
+    timeout: 5000,
+  });
+  if (result.status !== 0) {
+    return [];
+  }
+  return String(result.stdout ?? "")
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function isCodexRuntimeObserved() {
+  return listProcessLines("Codex").some((line) => line.includes("/Applications/Codex.app"));
+}
+
+function isCursorRuntimeObserved(workspaceRoot: string) {
+  const lines = listProcessLines("Cursor");
+  if (!lines.some((line) => line.includes("/Applications/Cursor.app"))) {
+    return false;
+  }
+  const workspaceLabel = path.basename(workspaceRoot).trim();
+  if (!workspaceLabel) {
+    return true;
+  }
+  return lines.some(
+    (line) =>
+      line.includes(`CURSOR_WORKSPACE_LABEL=${workspaceLabel}`) ||
+      line.includes(`Agentic Playground`) ||
+      line.includes(workspaceLabel)
+  );
 }
 
 function hasCopilotCliBinary() {
@@ -210,7 +350,10 @@ function resolveTransportConfig(
 ): ProviderBridgeTransportConfig {
   const url = input.http_url?.trim() || process.env.TRICHAT_MCP_URL || "http://127.0.0.1:8787/";
   const origin = input.http_origin?.trim() || process.env.TRICHAT_MCP_ORIGIN || "http://127.0.0.1";
-  const bearerToken = String(process.env.MCP_HTTP_BEARER_TOKEN ?? "").trim();
+  const tokenFile = path.join(repoRoot, "data", "imprint", "http_bearer_token");
+  const bearerToken =
+    String(process.env.MCP_HTTP_BEARER_TOKEN ?? "").trim() ||
+    (fs.existsSync(tokenFile) ? String(fs.readFileSync(tokenFile, "utf8") ?? "").trim() : "");
   const command = input.stdio_command?.trim() || process.execPath;
   const args = input.stdio_args?.length ? input.stdio_args : [distServerPath];
   const dbPath =
@@ -428,13 +571,27 @@ function buildHttpEntry(config: ProviderBridgeTransportConfig, serverName: strin
   };
 }
 
-function buildStdioEntry(config: ProviderBridgeTransportConfig) {
+function buildStdioEntry(
+  config: ProviderBridgeTransportConfig,
+  options: {
+    cwd?: string;
+    type?: "stdio";
+    timeout?: number;
+    trust?: boolean;
+    description?: string;
+  } = {}
+) {
   return {
+    ...(options.type ? { type: options.type } : {}),
     command: config.command,
     args: config.args,
     env: {
-      ANAMNESIS_HUB_DB_PATH: config.db_path,
+      ANAMNESIS_HUB_DB_PATH: resolveEntryDbPath(config, options.cwd),
     },
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    ...(typeof options.timeout === "number" ? { timeout: options.timeout } : {}),
+    ...(typeof options.trust === "boolean" ? { trust: options.trust } : {}),
+    ...(options.description ? { description: options.description } : {}),
   };
 }
 
@@ -444,6 +601,41 @@ function buildCursorOrGeminiEntry(
   includeBearerToken: boolean
 ) {
   return config.mode === "http" ? buildHttpEntry(config, serverName, includeBearerToken) : buildStdioEntry(config);
+}
+
+function buildGeminiEntry(
+  config: ProviderBridgeTransportConfig,
+  serverName: string,
+  includeBearerToken: boolean,
+  workspaceRoot: string
+) {
+  if (config.mode === "http") {
+    return {
+      type: "http" as const,
+      timeout: 600000,
+      trust: true,
+      description: "MCPlayground MCP server",
+      ...buildHttpEntry(config, serverName, includeBearerToken),
+    };
+  }
+  return {
+    type: "stdio" as const,
+    command: process.execPath,
+    args: [providerStdioBridgePath],
+    env: {
+      MCP_PROXY_HTTP_URL: config.url,
+      MCP_PROXY_HTTP_ORIGIN: config.origin,
+      ...(includeBearerToken && config.bearer_token
+        ? { MCP_PROXY_HTTP_BEARER_TOKEN: config.bearer_token }
+        : config.bearer_token
+          ? { MCP_PROXY_HTTP_BEARER_TOKEN: "<set MCP_HTTP_BEARER_TOKEN>" }
+          : {}),
+    },
+    cwd: workspaceRoot,
+    timeout: 600000,
+    trust: true,
+    description: "MCPlayground MCP HTTP proxy",
+  };
 }
 
 function buildCopilotCliEntry(
@@ -514,6 +706,14 @@ function buildClientStatuses(
     "github-copilot-vscode": null,
     "chatgpt-developer-mode": null,
   };
+  const officeAgentIds: Record<ProviderBridgeClientId, string | null> = {
+    codex: "codex",
+    cursor: "cursor",
+    "github-copilot-cli": "github-copilot",
+    "github-copilot-vscode": "github-copilot",
+    "gemini-cli": "gemini",
+    "chatgpt-developer-mode": null,
+  };
 
   const notes = {
     codex: [
@@ -548,6 +748,7 @@ function buildClientStatuses(
     {
       client_id: "codex",
       display_name: "Codex",
+      office_agent_id: officeAgentIds.codex,
       install_mode: "cli",
       config_path: configPaths.codex,
       installed: codexInstalled(configPaths.codex, serverName),
@@ -565,6 +766,7 @@ function buildClientStatuses(
     {
       client_id: "cursor",
       display_name: "Cursor",
+      office_agent_id: officeAgentIds.cursor,
       install_mode: "json-config",
       config_path: configPaths.cursor,
       installed:
@@ -584,6 +786,7 @@ function buildClientStatuses(
     {
       client_id: "github-copilot-cli",
       display_name: "GitHub Copilot CLI",
+      office_agent_id: officeAgentIds["github-copilot-cli"],
       install_mode: "json-config",
       config_path: configPaths.copilotCli,
       installed: jsonServerInstalled(configPaths.copilotCli, serverName),
@@ -601,6 +804,7 @@ function buildClientStatuses(
     {
       client_id: "github-copilot-vscode",
       display_name: "GitHub Copilot Agent Mode (VS Code)",
+      office_agent_id: officeAgentIds["github-copilot-vscode"],
       install_mode: "export-only",
       config_path: configPaths.vscode,
       installed: false,
@@ -618,13 +822,14 @@ function buildClientStatuses(
     {
       client_id: "gemini-cli",
       display_name: "Gemini CLI",
+      office_agent_id: officeAgentIds["gemini-cli"],
       install_mode: "json-config",
       config_path: configPaths.gemini,
       installed: jsonServerInstalled(configPaths.gemini, serverName),
       binary_present: commandExists("gemini"),
       config_present: fs.existsSync(configPaths.gemini),
       supported_transports: ["http", "stdio"],
-      preferred_transport: transport.mode,
+      preferred_transport: "stdio",
       inbound_mcp_supported: true,
       outbound_council_supported: true,
       outbound_agent_id: rosterAgentIds["gemini-cli"],
@@ -635,6 +840,7 @@ function buildClientStatuses(
     {
       client_id: "chatgpt-developer-mode",
       display_name: "ChatGPT Developer Mode",
+      office_agent_id: officeAgentIds["chatgpt-developer-mode"],
       install_mode: "remote-only",
       config_path: null,
       installed: false,
@@ -661,6 +867,483 @@ function resolveOutboundBridgeReady(agentId: string | null) {
     return false;
   }
   return getTriChatBridgeCandidates(repoRoot, agent.agent_id).some((candidate) => fs.existsSync(candidate));
+}
+
+function hasHttpConfiguredServer(filePath: string, serverName: string) {
+  const parsed = readJsonFile(filePath) as Record<string, unknown>;
+  const mcpServers =
+    parsed.mcpServers && typeof parsed.mcpServers === "object" && !Array.isArray(parsed.mcpServers)
+      ? (parsed.mcpServers as Record<string, unknown>)
+      : {};
+  const entry =
+    mcpServers && typeof mcpServers[serverName] === "object" && !Array.isArray(mcpServers[serverName])
+      ? (mcpServers[serverName] as Record<string, unknown>)
+      : null;
+  if (!entry) {
+    return false;
+  }
+  return typeof entry.url === "string" && entry.url.trim().length > 0;
+}
+
+function resolveProviderHome() {
+  return process.env.HOME?.trim() || os.homedir();
+}
+
+function readGeminiConfigEntry(filePath: string | null, serverName: string) {
+  if (!filePath) {
+    return null;
+  }
+  const parsed = readJsonFile(filePath) as Record<string, unknown>;
+  const mcpServers =
+    parsed.mcpServers && typeof parsed.mcpServers === "object" && !Array.isArray(parsed.mcpServers)
+      ? (parsed.mcpServers as Record<string, unknown>)
+      : {};
+  const entry =
+    mcpServers && typeof mcpServers[serverName] === "object" && !Array.isArray(mcpServers[serverName])
+      ? (mcpServers[serverName] as Record<string, unknown>)
+      : null;
+  return entry;
+}
+
+function summarizeGeminiConfigEntry(entry: Record<string, unknown> | null) {
+  if (!entry) {
+    return {
+      present: false,
+      valid: false,
+      mode: null as "http" | "stdio" | null,
+      detail: "Gemini CLI MCP server entry is missing.",
+    };
+  }
+  const type = String(entry.type ?? "").trim().toLowerCase();
+  const command = String(entry.command ?? "").trim();
+  const args = readStringArray(entry.args);
+  const url = String(entry.url ?? "").trim();
+  if ((type === "stdio" || command) && command && args.length > 0) {
+    return {
+      present: true,
+      valid: true,
+      mode: "stdio" as const,
+      detail: `Gemini CLI MCP bridge configured via stdio (${path.basename(command)}).`,
+    };
+  }
+  if ((type === "http" || url) && url) {
+    return {
+      present: true,
+      valid: true,
+      mode: "http" as const,
+      detail: `Gemini CLI MCP bridge configured via HTTP (${url}).`,
+    };
+  }
+  return {
+    present: true,
+    valid: false,
+    mode: null as "http" | "stdio" | null,
+    detail: "Gemini CLI MCP entry exists but is incomplete.",
+  };
+}
+
+function readGeminiOauthState() {
+  const filePath = path.join(resolveProviderHome(), ".gemini", "oauth_creds.json");
+  if (!fs.existsSync(filePath)) {
+    return {
+      available: false,
+      connected: false,
+      detail: "Gemini CLI OAuth credentials are missing.",
+      file_path: filePath,
+    };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    const expiryDate = Number(parsed.expiry_date ?? 0);
+    const refreshToken = String(parsed.refresh_token ?? "").trim();
+    const accessToken = String(parsed.access_token ?? "").trim();
+    const now = Date.now();
+    const hasRefresh = refreshToken.length > 0;
+    const hasAccess = accessToken.length > 0;
+    const notExpired = Number.isFinite(expiryDate) && expiryDate > now;
+    if (hasRefresh || (hasAccess && notExpired)) {
+      return {
+        available: true,
+        connected: true,
+        detail:
+          hasRefresh && !notExpired
+            ? "Gemini CLI OAuth session is renewable via refresh token."
+            : "Gemini CLI OAuth session is present.",
+        file_path: filePath,
+      };
+    }
+    return {
+      available: true,
+      connected: false,
+      detail: "Gemini CLI OAuth credentials are stale and not refreshable.",
+      file_path: filePath,
+    };
+  } catch {
+    return {
+      available: true,
+      connected: false,
+      detail: "Gemini CLI OAuth credentials file is unreadable.",
+      file_path: filePath,
+    };
+  }
+}
+
+function readRecentFileTail(filePath: string, maxBytes = 4096) {
+  try {
+    const stats = fs.statSync(filePath);
+    const size = Math.max(0, stats.size);
+    const start = Math.max(0, size - maxBytes);
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(size - start);
+      fs.readSync(fd, buffer, 0, buffer.length, start);
+      return {
+        text: buffer.toString("utf8"),
+        mtimeMs: stats.mtimeMs,
+      };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+function inspectRecentCopilotAuthLogs() {
+  const logsDir = path.join(resolveProviderHome(), ".copilot", "logs");
+  if (!fs.existsSync(logsDir)) {
+    return null;
+  }
+  const candidates = fs
+    .readdirSync(logsDir)
+    .filter((entry) => entry.endsWith(".log"))
+    .map((entry) => path.join(logsDir, entry))
+    .map((filePath) => ({
+      filePath,
+      stats: fs.statSync(filePath),
+    }))
+    .sort((left, right) => right.stats.mtimeMs - left.stats.mtimeMs)
+    .slice(0, 6);
+  const recencyCutoff = Date.now() - 1000 * 60 * 60 * 24;
+  for (const entry of candidates) {
+    if (entry.stats.mtimeMs < recencyCutoff) {
+      continue;
+    }
+    const tail = readRecentFileTail(entry.filePath, 8192);
+    const text = tail?.text || "";
+    if (text.includes("No authentication information found.")) {
+      return {
+        connected: false,
+        status: "disconnected" as const,
+        detail: "Copilot CLI is installed, but no authenticated session is currently available.",
+        source: path.basename(entry.filePath),
+      };
+    }
+  }
+  return null;
+}
+
+function parseCopilotPromptProbe(output: string) {
+  const normalized = output.toLowerCase();
+  if (!normalized.trim()) {
+    return {
+      connected: null,
+      status: "configured" as const,
+      detail: "Copilot probe returned no output.",
+    };
+  }
+  if (
+    normalized.includes("no authentication information found") ||
+    normalized.includes("to authenticate") ||
+    normalized.includes("copilot can be authenticated")
+  ) {
+    return {
+      connected: false,
+      status: "disconnected" as const,
+      detail: "Copilot CLI is installed, but no authenticated session is currently available.",
+    };
+  }
+  if (normalized.includes("401") || normalized.includes("unauthorized")) {
+    return {
+      connected: false,
+      status: "disconnected" as const,
+      detail: "Copilot CLI authentication appears stale or unauthorized.",
+    };
+  }
+  return {
+    connected: null,
+    status: "configured" as const,
+    detail: compactProbeDetail(output, "Copilot CLI probe did not return a definitive auth result."),
+  };
+}
+
+function compactProbeDetail(output: string, fallback: string) {
+  const line = output
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .find(Boolean);
+  return line ? line.slice(0, 240) : fallback;
+}
+
+function runProviderDiagnostics(
+  workspaceRoot: string,
+  serverName: string,
+  statuses: ProviderBridgeClientStatus[],
+  probeTimeoutMs: number
+): ProviderBridgeDiagnostic[] {
+  return statuses.map((status) => {
+    if (status.client_id === "codex") {
+      const observed = status.installed && isCodexRuntimeObserved();
+      return {
+        client_id: status.client_id,
+        display_name: status.display_name,
+        office_agent_id: status.office_agent_id,
+        available: status.binary_present || status.config_present,
+        runtime_probed: observed,
+        connected: observed ? true : null,
+        status: observed ? "connected" : status.installed ? "configured" : "unavailable",
+        detail: observed
+          ? "Codex desktop runtime is running and MCP is configured."
+          : status.installed
+            ? "Codex bridge is configured. Live runtime is not currently observed on this host."
+            : "Codex bridge config is missing.",
+        notes: status.notes,
+        command: null,
+        config_path: status.config_path,
+      } satisfies ProviderBridgeDiagnostic;
+    }
+    if (status.client_id === "gemini-cli") {
+      if (!status.binary_present || !status.config_present) {
+        return {
+          client_id: status.client_id,
+          display_name: status.display_name,
+          office_agent_id: status.office_agent_id,
+          available: false,
+          runtime_probed: false,
+          connected: null,
+          status: "unavailable",
+          detail: !status.binary_present
+            ? "Gemini CLI binary is not installed."
+            : "Gemini CLI config is missing.",
+          notes: status.notes,
+          command: "gemini mcp list",
+          config_path: status.config_path,
+        } satisfies ProviderBridgeDiagnostic;
+      }
+      const entry = readGeminiConfigEntry(status.config_path, serverName);
+      const configSummary = summarizeGeminiConfigEntry(entry);
+      const oauth = readGeminiOauthState();
+      const notes = [...status.notes];
+      if (configSummary.mode === "http" && hasHttpConfiguredServer(status.config_path ?? "", serverName)) {
+        notes.push("Gemini CLI is configured over HTTP here; this repo prefers stdio for Gemini because it is more reliable.");
+      }
+      if (configSummary.valid && oauth.connected) {
+        return {
+          client_id: status.client_id,
+          display_name: status.display_name,
+          office_agent_id: status.office_agent_id,
+          available: true,
+          runtime_probed: true,
+          connected: true,
+          status: "connected",
+          detail: `${configSummary.detail} ${oauth.detail}`,
+          notes,
+          command: "stateful config + oauth heartbeat",
+          config_path: status.config_path,
+        } satisfies ProviderBridgeDiagnostic;
+      }
+      if (configSummary.valid) {
+        return {
+          client_id: status.client_id,
+          display_name: status.display_name,
+          office_agent_id: status.office_agent_id,
+          available: true,
+          runtime_probed: true,
+          connected: false,
+          status: oauth.available ? "disconnected" : "configured",
+          detail: oauth.detail,
+          notes,
+          command: "stateful config + oauth heartbeat",
+          config_path: status.config_path,
+        } satisfies ProviderBridgeDiagnostic;
+      }
+      return {
+        client_id: status.client_id,
+        display_name: status.display_name,
+        office_agent_id: status.office_agent_id,
+        available: true,
+        runtime_probed: true,
+        connected: false,
+        status: "disconnected",
+        detail: configSummary.detail,
+        notes,
+        command: "stateful config + oauth heartbeat",
+        config_path: status.config_path,
+      } satisfies ProviderBridgeDiagnostic;
+    }
+    if (status.client_id === "cursor") {
+      const observed = status.installed && isCursorRuntimeObserved(workspaceRoot);
+      return {
+        client_id: status.client_id,
+        display_name: status.display_name,
+        office_agent_id: status.office_agent_id,
+        available: status.binary_present || status.config_present,
+        runtime_probed: observed,
+        connected: observed ? true : null,
+        status: observed ? "connected" : status.installed ? "configured" : "unavailable",
+        detail: observed
+          ? "Cursor is running on this workspace and the MCP bridge is configured."
+          : status.installed
+            ? "Cursor bridge is configured. Runtime MCP status is not currently observed on this host."
+          : "Cursor bridge config is missing.",
+        notes: status.notes,
+        command: null,
+        config_path: status.config_path,
+      } satisfies ProviderBridgeDiagnostic;
+    }
+    if (status.client_id === "github-copilot-cli") {
+      if (!status.binary_present || !status.config_present) {
+        return {
+          client_id: status.client_id,
+          display_name: status.display_name,
+          office_agent_id: status.office_agent_id,
+          available: false,
+          runtime_probed: false,
+          connected: null,
+          status: "unavailable",
+          detail: !status.binary_present
+            ? "Copilot CLI binary is not installed."
+            : "Copilot CLI MCP config is missing.",
+          notes: status.notes,
+          command: "copilot -p \"Respond with OK\" --allow-all-tools --output-format json --stream off",
+          config_path: status.config_path,
+        } satisfies ProviderBridgeDiagnostic;
+      }
+      const copilotLogState = inspectRecentCopilotAuthLogs();
+      if (copilotLogState) {
+        return {
+          client_id: status.client_id,
+          display_name: status.display_name,
+          office_agent_id: status.office_agent_id,
+          available: true,
+          runtime_probed: true,
+          connected: copilotLogState.connected,
+          status: copilotLogState.status,
+          detail: `${copilotLogState.detail} (${copilotLogState.source})`,
+          notes: status.notes,
+          command: "stateful log heartbeat",
+          config_path: status.config_path,
+        } satisfies ProviderBridgeDiagnostic;
+      }
+      const probe = runCommandProbe(
+        "copilot",
+        ["-p", "Respond with OK", "--allow-all-tools", "--output-format", "json", "--stream", "off", "--reasoning-effort", "low"],
+        {
+          cwd: workspaceRoot,
+          timeout: probeTimeoutMs,
+          env: buildProviderProbeEnv(workspaceRoot),
+        }
+      );
+      const parsed = parseCopilotPromptProbe(probe.combined);
+      return {
+        client_id: status.client_id,
+        display_name: status.display_name,
+        office_agent_id: status.office_agent_id,
+        available: true,
+        runtime_probed: true,
+        connected: parsed.connected,
+        status:
+          probe.status === 0
+            ? "connected"
+            : probe.timed_out && parsed.status === "configured"
+              ? "configured"
+              : parsed.status,
+        detail:
+          parsed.status === "disconnected"
+            ? parsed.detail
+            : probe.timed_out
+              ? "Copilot CLI auth probe timed out before returning a definitive result."
+            : probe.status === 0
+            ? "Copilot CLI is authenticated and accepted a non-interactive probe."
+            : probe.error
+              ? `Copilot CLI probe failed: ${probe.error}`
+              : parsed.detail,
+        notes: status.notes,
+        command: "copilot -p \"Respond with OK\" --allow-all-tools --output-format json --stream off --reasoning-effort low",
+        config_path: status.config_path,
+      } satisfies ProviderBridgeDiagnostic;
+    }
+    return {
+      client_id: status.client_id,
+      display_name: status.display_name,
+      office_agent_id: status.office_agent_id,
+      available: status.binary_present || status.config_present,
+      runtime_probed: false,
+      connected: null,
+      status: status.installed ? "configured" : "unavailable",
+      detail: status.installed
+        ? "Bridge is configured."
+        : "Bridge is not configured for this client on this host.",
+      notes: status.notes,
+      command: null,
+      config_path: status.config_path,
+    } satisfies ProviderBridgeDiagnostic;
+  });
+}
+
+export function resolveProviderBridgeDiagnostics(
+  input: {
+    workspace_root?: string;
+    transport?: "auto" | "http" | "stdio";
+    http_url?: string;
+    http_origin?: string;
+    stdio_command?: string;
+    stdio_args?: string[];
+    db_path?: string;
+    server_name?: string;
+    bypass_cache?: boolean;
+    probe_timeout_ms?: number;
+  } = {}
+) {
+  const workspaceRoot = input.workspace_root?.trim() || repoRoot;
+  const transport = resolveTransportConfig({
+    transport: input.transport ?? "auto",
+    http_url: input.http_url,
+    http_origin: input.http_origin,
+    stdio_command: input.stdio_command,
+    stdio_args: input.stdio_args,
+    db_path: input.db_path,
+    workspace_root: workspaceRoot,
+  });
+  const serverName = input.server_name?.trim() || "mcplayground";
+  const cacheKey = JSON.stringify({
+    workspaceRoot,
+    serverName,
+    transport: transport.mode,
+    command: transport.command,
+    args: transport.args,
+    url: transport.url,
+    probeTimeoutMs: input.probe_timeout_ms ?? 5000,
+  });
+  const cached = providerBridgeDiagnosticCache.get(cacheKey);
+  if (!input.bypass_cache && cached && Date.now() - cached.captured_at <= providerBridgeDiagnosticsCacheTtlMs()) {
+    return {
+      generated_at: new Date(cached.captured_at).toISOString(),
+      cached: true,
+      diagnostics: cached.diagnostics,
+    };
+  }
+  const statuses = buildClientStatuses(workspaceRoot, transport, serverName);
+  const diagnostics = runProviderDiagnostics(workspaceRoot, serverName, statuses, input.probe_timeout_ms ?? 5000);
+  providerBridgeDiagnosticCache.set(cacheKey, {
+    captured_at: Date.now(),
+    diagnostics,
+  });
+  return {
+    generated_at: new Date().toISOString(),
+    cached: false,
+    diagnostics,
+  };
 }
 
 function mergeJsonServer(filePath: string, serverName: string, entry: Record<string, unknown>) {
@@ -707,29 +1390,35 @@ function writeBundle(
   selectedClients: ProviderBridgeClientId[],
   serverName: string,
   transport: ProviderBridgeTransportConfig,
+  requestedTransport: "auto" | "http" | "stdio",
   includeBearerToken: boolean,
   workspaceRoot: string,
   status: ProviderBridgeClientStatus[]
 ) {
   fs.mkdirSync(outputDir, { recursive: true });
   const snippets: Record<string, string> = {};
-  const cursorGeminiEntry = buildCursorOrGeminiEntry(transport, serverName, includeBearerToken);
-  const copilotCliEntry = buildCopilotCliEntry(transport, serverName, includeBearerToken);
-  const vscodeEntry = buildVsCodeEntry(transport, serverName, includeBearerToken);
+  const cursorTransport = resolveClientTransportConfig("cursor", transport, requestedTransport);
+  const geminiTransport = resolveClientTransportConfig("gemini-cli", transport, requestedTransport);
+  const copilotTransport = resolveClientTransportConfig("github-copilot-cli", transport, requestedTransport);
+  const vscodeTransport = resolveClientTransportConfig("github-copilot-vscode", transport, requestedTransport);
+  const cursorEntry = buildCursorOrGeminiEntry(cursorTransport, serverName, includeBearerToken);
+  const geminiEntry = buildGeminiEntry(geminiTransport, serverName, includeBearerToken, workspaceRoot);
+  const copilotCliEntry = buildCopilotCliEntry(copilotTransport, serverName, includeBearerToken);
+  const vscodeEntry = buildVsCodeEntry(vscodeTransport, serverName, includeBearerToken);
   const configPaths = resolveClientConfigPaths(workspaceRoot);
 
   if (selectedClients.includes("cursor")) {
     const filePath = path.join(outputDir, "cursor-mcp.json");
     writeJsonFile(filePath, {
       mcpServers: {
-        [serverName]: cursorGeminiEntry,
+        [serverName]: cursorEntry,
       },
     });
     snippets.cursor = filePath;
     const workspaceFilePath = path.join(outputDir, "cursor-workspace-mcp.json");
     writeJsonFile(workspaceFilePath, {
       mcpServers: {
-        [serverName]: cursorGeminiEntry,
+        [serverName]: cursorEntry,
       },
     });
     snippets["cursor-workspace"] = workspaceFilePath;
@@ -738,7 +1427,7 @@ function writeBundle(
     const filePath = path.join(outputDir, "gemini-settings.json");
     writeJsonFile(filePath, {
       mcpServers: {
-        [serverName]: cursorGeminiEntry,
+        [serverName]: geminiEntry,
       },
     });
     snippets["gemini-cli"] = filePath;
@@ -872,6 +1561,31 @@ export async function providerBridge(
       };
     }
 
+    if (input.action === "diagnose") {
+      const diagnostics = resolveProviderBridgeDiagnostics({
+        workspace_root: input.workspace_root,
+        transport: input.transport,
+        http_url: input.http_url,
+        http_origin: input.http_origin,
+        stdio_command: input.stdio_command,
+        stdio_args: input.stdio_args,
+        db_path: input.db_path,
+        server_name: input.server_name,
+        bypass_cache: true,
+        probe_timeout_ms: input.probe_timeout_ms,
+      });
+      return {
+        ok: true,
+        canonical_ingress_tool: snapshot.canonical_ingress_tool,
+        workspace_root: snapshot.workspace_root,
+        server_name: snapshot.server_name,
+        generated_at: diagnostics.generated_at,
+        cached: diagnostics.cached,
+        diagnostics: diagnostics.diagnostics.filter((entry) => clients.includes(entry.client_id)),
+        clients: selectedStatus,
+      };
+    }
+
     if (input.action === "export_bundle") {
       if (transport.mode === "http") {
         ensureHttpInstallable(transport);
@@ -883,6 +1597,7 @@ export async function providerBridge(
         clients,
         serverName,
         transport,
+        input.transport,
         input.include_bearer_token === true,
         workspaceRoot,
         status
@@ -911,40 +1626,44 @@ export async function providerBridge(
         continue;
       }
       if (client === "cursor") {
-        mergeJsonServer(configPaths.cursor, serverName, buildCursorOrGeminiEntry(transport, serverName, true));
-        mergeJsonServer(configPaths.cursorWorkspace, serverName, buildCursorOrGeminiEntry(transport, serverName, true));
+        const clientTransport = resolveClientTransportConfig(client, transport, input.transport);
+        mergeJsonServer(configPaths.cursor, serverName, buildCursorOrGeminiEntry(clientTransport, serverName, true));
+        mergeJsonServer(configPaths.cursorWorkspace, serverName, buildCursorOrGeminiEntry(clientTransport, serverName, true));
         installs.push({
           client_id: client,
           config_path: configPaths.cursor,
           workspace_config_path: configPaths.cursorWorkspace,
-          transport_used: transport.mode,
+          transport_used: clientTransport.mode,
         });
         continue;
       }
       if (client === "gemini-cli") {
-        mergeJsonServer(configPaths.gemini, serverName, buildCursorOrGeminiEntry(transport, serverName, true));
+        const clientTransport = resolveClientTransportConfig(client, transport, input.transport);
+        mergeJsonServer(configPaths.gemini, serverName, buildGeminiEntry(clientTransport, serverName, true, workspaceRoot));
         installs.push({
           client_id: client,
           config_path: configPaths.gemini,
-          transport_used: transport.mode,
+          transport_used: clientTransport.mode,
         });
         continue;
       }
       if (client === "github-copilot-cli") {
-        mergeJsonServer(configPaths.copilotCli, serverName, buildCopilotCliEntry(transport, serverName, true));
+        const clientTransport = resolveClientTransportConfig(client, transport, input.transport);
+        mergeJsonServer(configPaths.copilotCli, serverName, buildCopilotCliEntry(clientTransport, serverName, true));
         installs.push({
           client_id: client,
           config_path: configPaths.copilotCli,
-          transport_used: transport.mode,
+          transport_used: clientTransport.mode,
         });
         continue;
       }
       if (client === "github-copilot-vscode") {
-        writeJsonFile(configPaths.vscode, buildVsCodeEntry(transport, serverName, true));
+        const clientTransport = resolveClientTransportConfig(client, transport, input.transport);
+        writeJsonFile(configPaths.vscode, buildVsCodeEntry(clientTransport, serverName, true));
         installs.push({
           client_id: client,
           config_path: configPaths.vscode,
-          transport_used: transport.mode,
+          transport_used: clientTransport.mode,
         });
         continue;
       }
@@ -970,7 +1689,7 @@ export async function providerBridge(
     };
   };
 
-  if (input.action === "status") {
+  if (input.action === "status" || input.action === "diagnose") {
     return execute();
   }
   return runIdempotentMutation({

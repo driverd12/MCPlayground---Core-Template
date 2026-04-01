@@ -158,6 +158,26 @@ Raw MCP example:
 node ./scripts/mcp_tool_call.mjs --tool operator.brief --args '{}' --transport http --url http://127.0.0.1:8787/ --origin http://127.0.0.1 --cwd .
 ```
 
+## Provider Bridge Diagnostics
+
+Use the provider bridge to distinguish three different states:
+
+- client config is installed
+- a provider runtime is present on this host
+- the provider can actually see the shared MCP server right now
+
+Commands:
+
+```bash
+npm run providers:status
+npm run providers:diagnose -- gemini-cli cursor github-copilot-cli
+```
+
+Notes:
+
+- Gemini CLI now installs with an explicit trusted stdio config, working directory, and timeout in `~/.gemini/settings.json`.
+- Cursor is validated as configured on this host, but runtime MCP status still has to be checked in the Cursor UI because Cursor does not expose a local MCP status CLI on this machine.
+
 ## Quick Start
 
 ```bash
@@ -483,6 +503,7 @@ npm run providers:install -- cursor gemini-cli github-copilot-cli
 - `autonomy.command`, `goal.execute`, and `plan.dispatch` use router output to augment local-first councils with relevant hosted agents instead of treating provider bridges as a separate side path
 - it exports config bundles for Cursor, Gemini CLI, GitHub Copilot, and Codex
 - it installs both global and workspace-local Cursor MCP config for better editor reliability
+- it defaults Gemini CLI to stdio MCP transport for better local compatibility
 - it preserves `autonomy.ide_ingress` as the one canonical operator/IDE ingress path
 
 Fast STDIO connection example:

@@ -586,6 +586,119 @@ test("autonomy.maintain status reports eval debt when the last score is below th
   }
 });
 
+test("autonomy.maintain self-drive synthesizes one bounded repair goal through autonomy.command when the system is idle with actionable debt", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-maintain-self-drive-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const ollama = await startFakeOllamaServer({
+    models: [
+      {
+        name: "llama3.2:3b",
+      },
+    ],
+  });
+  let mutationCounter = 0;
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+    TRICHAT_OLLAMA_URL: ollama.url,
+    TRICHAT_RING_LEADER_AUTOSTART: "1",
+    TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+    TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+    TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+    MCP_NOTIFIER_DRY_RUN: "1",
+  });
+
+  try {
+    const ensured = await callTool(session.client, "autonomy.bootstrap", {
+      action: "ensure",
+      mutation: nextMutation("autonomy-maintain-self-drive", "autonomy.bootstrap.ensure", () => mutationCounter++),
+      probe_ollama_url: ollama.url,
+      autostart_ring_leader: true,
+      run_immediately: false,
+    });
+    assert.equal(ensured.ok, true);
+    assert.equal(ensured.status.self_start_ready, true);
+
+    const now = new Date().toISOString();
+    const db = new Database(dbPath);
+    db.prepare(
+      `INSERT INTO daemon_configs (daemon_key, enabled, config_json, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(daemon_key) DO UPDATE SET
+         enabled = excluded.enabled,
+         config_json = excluded.config_json,
+         updated_at = excluded.updated_at`
+    ).run(
+      "autonomy.maintain",
+      1,
+      JSON.stringify({
+        enabled: true,
+        interval_seconds: 120,
+        learning_review_interval_seconds: 300,
+        enable_self_drive: true,
+        self_drive_cooldown_seconds: 60,
+        run_eval_if_due: false,
+        eval_interval_seconds: 21600,
+        eval_suite_id: "autonomy.control-plane",
+        minimum_eval_score: 75,
+        last_run_at: now,
+        last_eval_run_at: now,
+        last_eval_run_id: "eval-run-self-drive",
+        last_eval_score: 50,
+        last_actions: [],
+        last_attention: [],
+        last_error: null,
+      }),
+      now
+    );
+    db.close();
+
+    const maintained = await callTool(session.client, "autonomy.maintain", {
+      action: "run_once",
+      mutation: nextMutation("autonomy-maintain-self-drive", "autonomy.maintain.run_once", () => mutationCounter++),
+      ensure_bootstrap: false,
+      maintain_tmux_controller: false,
+      run_eval_if_due: false,
+      local_host_id: "local",
+      probe_ollama_url: ollama.url,
+      run_goal_hygiene: false,
+    });
+
+    const selfDriveAction = maintained.actions.find((action) => action.startsWith("autonomy.self_drive:"));
+    assert.equal(typeof selfDriveAction, "string");
+    assert.equal(typeof maintained.status.self_drive.last_goal_id, "string");
+    assert.ok(maintained.status.self_drive.last_goal_id.length > 0);
+    assert.equal(
+      maintained.status.attention.includes("eval.autonomy.control-plane.below_threshold"),
+      true
+    );
+
+    const goals = await callTool(session.client, "goal.list", {
+      status: "active",
+      limit: 10,
+    });
+    const selfDriveGoal = goals.goals.find((goal) => goal.goal_id === maintained.status.self_drive.last_goal_id);
+    assert.ok(selfDriveGoal);
+    assert.match(selfDriveGoal.title, /^\[self-drive\] /);
+    assert.equal(selfDriveGoal.metadata?.self_drive, true);
+    assert.equal(selfDriveGoal.metadata?.spawned_by, "autonomy.maintain");
+
+    const goal = await callTool(session.client, "goal.get", {
+      goal_id: maintained.status.self_drive.last_goal_id,
+    });
+    assert.equal(goal.found, true);
+    assert.equal(goal.goal.metadata?.self_drive, true);
+    assert.equal(goal.goal.metadata?.spawned_by, "autonomy.maintain");
+    assert.equal(typeof goal.goal.objective, "string");
+    assert.ok(goal.goal.objective.length > 20);
+  } finally {
+    await session.client.close().catch(() => {});
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("autonomy.maintain status reports eval debt when the eval suite fingerprint drifts", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-maintain-eval-drift-"));
   const dbPath = path.join(tempDir, "hub.sqlite");

@@ -182,6 +182,70 @@ function buildChatSignals(busTail: Record<string, unknown>, nowSeconds: number) 
   return chat;
 }
 
+function buildProviderSignals(raw: Record<string, unknown>) {
+  const providerBridge = asDict(raw.provider_bridge);
+  const diagnosticsPayload = asDict(providerBridge.diagnostics);
+  const diagnostics = asList(diagnosticsPayload.diagnostics);
+  const agentIdsByClient: Record<string, string[]> = {
+    codex: ["codex"],
+    cursor: ["cursor"],
+    "gemini-cli": ["gemini"],
+    "github-copilot-cli": ["github-copilot"],
+    "github-copilot-vscode": ["github-copilot"],
+  };
+  const signals = new Map<string, { state: string; activity: string; detail: string; location: string }>();
+  for (const entryRaw of diagnostics) {
+    const entry = asDict(entryRaw);
+    const clientId = String(entry.client_id ?? "").trim();
+    const displayName = String((entry.display_name ?? clientId) || "provider").trim() || "provider";
+    const status = String(entry.status ?? "").trim().toLowerCase();
+    const detail = compactSingleLine(entry.detail || status || "provider-bridge", 120);
+    const mappedAgentIds = agentIdsByClient[clientId] || [];
+    if (!mappedAgentIds.length) {
+      continue;
+    }
+    let signal:
+      | { state: string; activity: string; detail: string; location: string }
+      | null = null;
+    if (status === "connected") {
+      signal = {
+        state: "idle",
+        activity: `${displayName} bridge connected`,
+        detail,
+        location: "desk",
+      };
+    } else if (status === "configured") {
+      signal = {
+        state: "sleeping",
+        activity: `${displayName} bridge configured`,
+        detail,
+        location: "sofa",
+      };
+    } else if (status === "disconnected") {
+      signal = {
+        state: "blocked",
+        activity: `${displayName} bridge disconnected`,
+        detail,
+        location: "ops",
+      };
+    } else if (status === "unavailable") {
+      signal = {
+        state: "offline",
+        activity: `${displayName} bridge unavailable`,
+        detail,
+        location: "ops",
+      };
+    }
+    if (!signal) {
+      continue;
+    }
+    for (const agentId of mappedAgentIds) {
+      signals.set(agentId, signal);
+    }
+  }
+  return signals;
+}
+
 function buildTaskSignals(
   catalog: Map<string, GuiAgent>,
   tmux: Record<string, unknown>,
@@ -336,6 +400,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const sessionSignals = buildSessionSignals(catalog, agentSessions, taskIndex, nowSeconds);
   const blockedSignals = buildAdapterBlocks(adapter, nowSeconds);
   const chatSignals = buildChatSignals(busTail, nowSeconds);
+  const providerSignals = buildProviderSignals(raw);
   const turnRecent = Boolean(asDict(workboard.active_turn).turn_id) && ageSeconds(latestTurn.updated_at, nowSeconds) <= 300;
 
   const presences: GuiPresence[] = [];
@@ -351,6 +416,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
     const supervisor = supervisorSignals.get(agent.agent_id);
     const session = sessionSignals.get(agent.agent_id);
     const chat = chatSignals.get(agent.agent_id);
+    const provider = providerSignals.get(agent.agent_id);
 
     if (blocked) {
       state = blocked.state;
@@ -377,6 +443,12 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
       activity = compactSingleLine(latestTurn.selected_strategy || latestTurn.user_prompt || "active turn", 56);
       evidenceSource = "turn";
       evidenceDetail = String(latestTurn.turn_id ?? "active-turn");
+    } else if (provider) {
+      state = provider.state;
+      location = provider.location;
+      activity = provider.activity;
+      evidenceSource = "provider_bridge";
+      evidenceDetail = provider.detail;
     } else if (chat) {
       state = chat.state;
       location = chat.state === "talking" ? "cooler" : "lounge";
@@ -453,6 +525,10 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const maintainState = asDict(maintain.state);
   const maintainRuntime = asDict(maintain.runtime);
   const maintainDue = asDict(maintain.due);
+  const maintainSelfDrive = asDict(maintain.self_drive);
+  const providerBridge = asDict(raw.provider_bridge);
+  const providerBridgeDiagnostics = asDict(providerBridge.diagnostics);
+  const providerEntries = asList(providerBridgeDiagnostics.diagnostics);
   const threadId = String(raw.thread_id ?? "ring-leader-main").trim() || "ring-leader-main";
   const latestAutopilotSession = asList(agentSessions.sessions).find((entry) => {
     const session = asDict(entry);
@@ -565,12 +641,23 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         source_kind_counts: asList(kernelObservability.source_kind_counts).slice(0, 4),
         service_counts: asList(kernelObservability.service_counts).slice(0, 4),
       },
+      provider_bridge: {
+        generated_at: String(providerBridgeDiagnostics.generated_at ?? ""),
+        cached: Boolean(providerBridgeDiagnostics.cached),
+        connected_count: providerEntries.filter((entry) => String(asDict(entry).status ?? "").trim().toLowerCase() === "connected").length,
+        configured_count: providerEntries.filter((entry) => String(asDict(entry).status ?? "").trim().toLowerCase() === "configured").length,
+        disconnected_count: providerEntries.filter((entry) => String(asDict(entry).status ?? "").trim().toLowerCase() === "disconnected").length,
+        unavailable_count: providerEntries.filter((entry) => String(asDict(entry).status ?? "").trim().toLowerCase() === "unavailable").length,
+      },
       maintain: {
         enabled: Boolean(maintainState.enabled),
         running: Boolean(maintainRuntime.running),
         stale: Boolean(maintainDue.stale),
         eval_due: Boolean(maintainDue.eval),
         last_eval_score: kernelMaintain.last_eval_score,
+        self_drive_enabled: Boolean(maintainSelfDrive.enabled),
+        self_drive_last_run_at: String(maintainSelfDrive.last_run_at ?? ""),
+        self_drive_last_goal_id: String(maintainSelfDrive.last_goal_id ?? ""),
         subsystems: asDict(maintain.subsystems),
       },
       swarm: {
@@ -615,5 +702,10 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
     },
     events: asList(busTail.events).slice(0, 20),
     runtime_sessions: asList(runtimeWorkers.sessions).slice(0, 20),
+    provider_bridge: {
+      generated_at: String(providerBridgeDiagnostics.generated_at ?? ""),
+      cached: Boolean(providerBridgeDiagnostics.cached),
+      diagnostics: providerEntries.map((entry) => asDict(entry)),
+    },
   };
 }

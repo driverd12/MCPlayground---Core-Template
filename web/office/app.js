@@ -149,6 +149,7 @@
     var liveBackend = router.live_backend || {};
     var runtimeWorkers = summary.runtime_workers || {};
     var maintain = summary.maintain || {};
+    var providers = summary.provider_bridge || {};
     var chips = [];
     if (state.snapshot.errors && state.snapshot.errors.length) {
       chips.push(["Snapshot", String(state.snapshot.errors.length) + " partial errors"]);
@@ -159,7 +160,8 @@
       ["Host", "cpu " + Math.round((host.cpu_utilization || 0) * 100) + "% | ram " + fmt(host.ram_available_gb) + " / " + fmt(host.ram_total_gb) + " GB | swap " + fmt(host.swap_used_gb) + " GB"],
       ["Router", String(router.default_backend_id || "n/a") + " | " + (liveBackend.probe_model_loaded ? "warm" : "cold") + " | " + fmt(liveBackend.latency_ms_p50, 0) + " ms"],
       ["Workers", "active " + String(runtimeWorkers.active_count || 0) + " | sessions " + String(runtimeWorkers.session_count || 0)],
-      ["Maintain", (maintain.running ? "running" : "idle") + " | eval_due " + (maintain.eval_due ? "yes" : "no")]
+      ["Maintain", (maintain.running ? "running" : "idle") + " | eval_due " + (maintain.eval_due ? "yes" : "no")],
+      ["Providers", "connected " + String(providers.connected_count || 0) + " | disconnected " + String(providers.disconnected_count || 0)]
     );
     els.statusStrip.innerHTML = chips
       .map(function (entry) {
@@ -241,6 +243,7 @@
     var maintain = summary.maintain || {};
     var swarm = summary.swarm || {};
     var workflowExports = summary.workflow_exports || {};
+    var providers = summary.provider_bridge || {};
     var confidence = current.confidence_method || {};
     var checks = confidence.checks || {};
     els.briefingView.innerHTML =
@@ -264,6 +267,8 @@
       '<div class="metric"><span>Runtime workers</span><strong>' + String(runtimeWorkers.active_count || 0) + " active / " + String(runtimeWorkers.session_count || 0) + ' total</strong></div>' +
       '<div class="metric"><span>Reaction engine</span><strong class="' + statusClass(reactionEngine.runtime_running) + '">' + (reactionEngine.runtime_running ? "running" : "down") + '</strong></div>' +
       '<div class="metric"><span>Maintain loop</span><strong class="' + statusClass(maintain.running) + '">' + (maintain.running ? "running" : "idle") + '</strong></div>' +
+      '<div class="metric"><span>Self-drive</span><strong>' + (maintain.self_drive_enabled ? (maintain.self_drive_last_run_at ? ("last " + relativeTime(maintain.self_drive_last_run_at)) : "armed") : "off") + '</strong></div>' +
+      '<div class="metric"><span>Providers</span><strong>' + String(providers.connected_count || 0) + " connected / " + String((providers.connected_count || 0) + (providers.configured_count || 0) + (providers.disconnected_count || 0) + (providers.unavailable_count || 0)) + ' total</strong></div>' +
       '<div class="metric"><span>Swarm profiles</span><strong>' + String(swarm.active_profile_count || 0) + '</strong></div>' +
       '<div class="metric"><span>Workflow exports</span><strong>' + String(workflowExports.bundle_count || 0) + "</strong></div>" +
       "</div></section>" +
@@ -281,16 +286,24 @@
     var localHost = summary.local_host || {};
     var routingOutlook = Array.isArray(router.routing_outlook) ? router.routing_outlook.slice(0, 6) : [];
     var runtimeSessions = Array.isArray(state.snapshot.runtime_sessions) ? state.snapshot.runtime_sessions.slice(0, 10) : [];
+    var providerBridge = state.snapshot.provider_bridge || {};
+    var providerDiagnostics = Array.isArray(providerBridge.diagnostics) ? providerBridge.diagnostics.slice(0, 8) : [];
     var routingHtml = routingOutlook.map(function (entry) {
       return '<div class="metric"><span>' + escapeHtml(entry.task_kind || "n/a") + '</span><strong>' + escapeHtml((entry.selected_backend_id || "n/a") + " -> " + (entry.top_planned_backend_id || "n/a") + "@" + (entry.top_planned_node_id || "n/a")) + "</strong></div>";
     }).join("");
     var sessionsHtml = runtimeSessions.map(function (entry) {
       return '<div class="metric"><span>' + escapeHtml((entry.runtime_id || "n/a") + " · " + (entry.status || "n/a")) + '</span><strong>' + escapeHtml(entry.task_id || entry.runtime_session_id || "n/a") + "</strong></div>";
     }).join("");
+    var providersHtml = providerDiagnostics.map(function (entry) {
+      var label = (entry.display_name || entry.client_id || "provider") + " · " + (entry.status || "n/a");
+      var detail = entry.detail || entry.command || "no detail";
+      return '<div class="metric"><span>' + escapeHtml(label) + '</span><strong>' + escapeHtml(detail) + "</strong></div>";
+    }).join("");
     els.workersView.innerHTML =
       '<div class="workers-grid">' +
       '<section class="brief-card"><div class="section-title">Hybrid Routing Outlook</div><div class="metric-list">' + (routingHtml || '<div class="metric"><span>Routing</span><strong>no outlook entries</strong></div>') + "</div></section>" +
       '<section class="brief-card"><div class="section-title">Runtime Sessions</div><div class="metric-list">' + (sessionsHtml || '<div class="metric"><span>Runtime workers</span><strong>no active sessions</strong></div>') + "</div></section>" +
+      '<section class="brief-card"><div class="section-title">Provider Bridges</div><div class="metric-list">' + (providersHtml || '<div class="metric"><span>Provider bridge</span><strong>no diagnostics</strong></div>') + "</div></section>" +
       '<section class="brief-card"><div class="section-title">Local Host</div><div class="metric-list">' +
       '<div class="metric"><span>CPU</span><strong>' + Math.round((localHost.cpu_utilization || 0) * 100) + '%</strong></div>' +
       '<div class="metric"><span>RAM</span><strong>' + fmt(localHost.ram_available_gb) + " / " + fmt(localHost.ram_total_gb) + ' GB</strong></div>' +

@@ -408,6 +408,12 @@ registerRuntimeShutdownHandlers();
 
 const SERVER_NAME = "mcplayground-core-template";
 const SERVER_VERSION = "1.0.0";
+const SERVER_INSTRUCTIONS = [
+  "Use autonomy.ide_ingress as the canonical operator objective entrypoint.",
+  "Prefer local-first specialist routing and bounded execution.",
+  "Use operator.brief and office.snapshot for current runtime state before mutating work.",
+  "This server exposes durable autonomy, observability, workflow, and office-control tooling.",
+].join(" ");
 const CONSENSUS_ALERT_MIN_AGENTS = parseConsensusMinAgents(process.env.TRICHAT_CONSENSUS_ALERT_MIN_AGENTS);
 const DEFAULT_TRICHAT_VERIFY_COMMAND = String(process.env.TRICHAT_VERIFY_COMMAND ?? "").trim();
 const DEFAULT_TRICHAT_VERIFY_TIMEOUT_SECONDS = parseBoundedInt(process.env.TRICHAT_VERIFY_TIMEOUT_SECONDS, 90, 5, 1800);
@@ -3082,6 +3088,7 @@ function createServerInstance() {
       version: SERVER_VERSION,
     },
     {
+      instructions: SERVER_INSTRUCTIONS,
       capabilities: {
         tools: {},
       },
@@ -3324,6 +3331,8 @@ async function main() {
           learning_review_interval_seconds: 300,
           run_goal_hygiene: true,
           start_reaction_engine_daemon: true,
+          enable_self_drive: true,
+          self_drive_cooldown_seconds: 1800,
           interval_seconds: 120,
           publish_runtime_event: true,
           run_immediately: maintainRunImmediatelyOnStart,

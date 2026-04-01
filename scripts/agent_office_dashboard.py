@@ -90,6 +90,7 @@ THEME_ORDER = ["night", "sunrise", "mono"]
 DESK_STATES = {"working", "idle", "blocked", "offline", "supervising"}
 STATE_LABELS = {
     "working": "WORK",
+    "ready": "READY",
     "idle": "IDLE",
     "talking": "CHAT",
     "break": "BREAK",
@@ -605,6 +606,7 @@ class DashboardSnapshot:
     autonomy_maintain: Dict[str, Any] = field(default_factory=dict)
     runtime_workers: Dict[str, Any] = field(default_factory=dict)
     operator_brief: Dict[str, Any] = field(default_factory=dict)
+    provider_bridge: Dict[str, Any] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
     agent_sessions: Dict[str, Any] = field(default_factory=dict)
     task_running: Dict[str, Any] = field(default_factory=dict)
@@ -1149,6 +1151,38 @@ def build_adapter_age_map(adapter_payload: Dict[str, Any], now_epoch: float) -> 
             ages[agent_id] = age
     return ages
 
+
+def build_provider_bridge_notes(provider_bridge_payload: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    diagnostics_payload = as_dict(provider_bridge_payload.get("diagnostics"))
+    notes: Dict[str, Dict[str, str]] = {}
+    for entry_raw in as_list(diagnostics_payload.get("diagnostics")):
+        entry = as_dict(entry_raw)
+        agent_id = normalize_agent_id(entry.get("office_agent_id"))
+        if not agent_id:
+            continue
+        status = str(entry.get("status") or "").strip().lower() or "unavailable"
+        display_name = str(entry.get("display_name") or agent_id).strip() or agent_id
+        if status == "connected":
+            state = "ready"
+            activity = f"{display_name} bridge connected"
+        elif status == "configured":
+            state = "ready"
+            activity = f"{display_name} bridge configured"
+        elif status == "disconnected":
+            state = "blocked"
+            activity = f"{display_name} bridge disconnected"
+        else:
+            state = "offline"
+            activity = f"{display_name} bridge unavailable"
+        notes[agent_id] = {
+            "state": state,
+            "activity": compact_single_line(activity, 56),
+            "detail": compact_single_line(str(entry.get("detail") or status), 72),
+            "source": "provider_bridge",
+            "status": status,
+        }
+    return notes
+
 def infer_role_action(agent: DashboardAgent, activity: str) -> str:
     haystack = f"{agent.role} {activity}".lower()
     if any(token in haystack for token in ("verify", "regression", "test", "release", "failure")):
@@ -1180,6 +1214,7 @@ def build_action_tags(
     primary = {
         "working": "desk",
         "supervising": "brief",
+        "ready": "ready",
         "talking": "chat",
         "break": "break",
         "sleeping": "sleep",
@@ -1188,8 +1223,10 @@ def build_action_tags(
         "idle": "ready",
     }.get(state, "ready")
     tags.append(primary)
-    if state in {"working", "supervising", "idle"}:
+    if state in {"working", "supervising", "idle", "ready"}:
         tags.append(infer_role_action(agent, activity))
+    if location == "ops":
+        tags.append("ops")
     if location == "cooler":
         tags.append("coffee")
     elif location == "lounge":
@@ -1211,6 +1248,7 @@ def derive_presence_map(
     adapter_payload: Dict[str, Any],
     bus_payload: Dict[str, Any],
     now_epoch: Optional[float] = None,
+    provider_bridge_payload: Optional[Dict[str, Any]] = None,
 ) -> List[OfficePresence]:
     now_epoch = now_epoch if now_epoch is not None else time.time()
     catalog = {agent.agent_id: agent for agent in agents}
@@ -1219,6 +1257,7 @@ def derive_presence_map(
     expected_agents = set(dedupe(as_list(current_turn.get("expected_agents"))))
     selected_agent = normalize_agent_id(current_turn.get("selected_agent"))
     blocked_notes = build_blocked_notes(adapter_payload, now_epoch)
+    provider_notes = build_provider_bridge_notes(provider_bridge_payload or {})
     recent_chat = build_recent_chat_notes(catalog, bus_payload, now_epoch)
     adapter_ages = build_adapter_age_map(adapter_payload, now_epoch)
     task_index = build_task_index(task_running_payload, task_pending_payload)
@@ -1242,6 +1281,7 @@ def derive_presence_map(
         evidence_source = "none"
         evidence_detail = "no current evidence"
         blocked = blocked_notes.get(agent.agent_id)
+        provider_signal = provider_notes.get(agent.agent_id)
         owner_signal = owner_signals.get(agent.agent_id)
         supervisor_signal = supervisor_signals.get(agent.agent_id)
         session_signal = session_signals.get(agent.agent_id)
@@ -1260,14 +1300,7 @@ def derive_presence_map(
         if turn_recent and (agent.agent_id == selected_agent or agent.agent_id in expected_agents):
             signal_ages.append(age_seconds(current_turn.get("updated_at"), now_epoch))
         freshest_signal_age = min(signal_ages) if signal_ages else 1e12
-        if blocked:
-            severity, detail = blocked
-            state = "offline" if severity == "offline" else "blocked"
-            activity = detail
-            location = "desk"
-            evidence_source = "adapter"
-            evidence_detail = detail
-        elif owner_signal and owner_signal.state == "running":
+        if owner_signal and owner_signal.state == "running":
             state = "working"
             location = "desk"
             activity = owner_signal.activity
@@ -1303,6 +1336,25 @@ def derive_presence_map(
             activity = chat_signal[0]
             evidence_source = "bus"
             evidence_detail = chat_signal[2]
+        elif provider_signal and provider_signal.get("state") == "ready":
+            state = "ready"
+            location = "ops"
+            activity = str(provider_signal.get("activity") or "provider bridge ready")
+            evidence_source = str(provider_signal.get("source") or "provider_bridge")
+            evidence_detail = str(provider_signal.get("detail") or provider_signal.get("status") or "connected")
+        elif blocked:
+            severity, detail = blocked
+            state = "offline" if severity == "offline" else "blocked"
+            activity = detail
+            location = "ops" if agent.tier == "support" or agent.role in {"planner", "implementer", "analyst"} else "desk"
+            evidence_source = "adapter"
+            evidence_detail = detail
+        elif provider_signal:
+            state = str(provider_signal.get("state") or "offline")
+            location = "ops"
+            activity = str(provider_signal.get("activity") or "provider bridge unavailable")
+            evidence_source = str(provider_signal.get("source") or "provider_bridge")
+            evidence_detail = str(provider_signal.get("detail") or provider_signal.get("status") or "unavailable")
         elif owner_signal and owner_signal.state in {"queued", "dispatched"}:
             state = "idle"
             activity = compact_single_line(f"queued: {owner_signal.activity}", 56)
@@ -1573,20 +1625,21 @@ def render_floorplan_scene(
     ops_room = (main_width + 3, top_height + 3, side_width, bottom_height)
 
     lounge_presences = [p for p in presences if p.location in {"cooler", "lounge", "sofa"} or p.state in {"talking", "break", "sleeping"}]
-    blocked_presences = [p for p in presences if p.state in {"blocked", "offline"} and p not in lounge_presences]
+    ops_presences = [p for p in presences if p.location == "ops" and p not in lounge_presences]
+    blocked_presences = [p for p in ops_presences if p.state in {"blocked", "offline"}]
     command_presences = [
         p
         for p in presences
         if p not in lounge_presences
-        and p not in blocked_presences
+        and p not in ops_presences
         and (p.agent.tier in {"lead", "director"} or p.agent.role in {"planner", "orchestrator", "reliability-critic"})
     ]
-    build_presences = [p for p in presences if p not in lounge_presences and p not in blocked_presences and p not in command_presences]
+    build_presences = [p for p in presences if p not in lounge_presences and p not in ops_presences and p not in command_presences]
 
     paint_box(canvas, *command_room, title=f" COMMAND DECK [{len(command_presences)}] ")
     paint_box(canvas, *lounge_room, title=f" LOUNGE + WATER [{len(lounge_presences)}] ")
     paint_box(canvas, *build_room, title=f" BUILD BAY [{len(build_presences)}] ")
-    paint_box(canvas, *ops_room, title=f" OPS RACK [{len(blocked_presences)}] ")
+    paint_box(canvas, *ops_room, title=f" OPS RACK [{len(ops_presences)}] ")
 
     paint_text(canvas, command_room[0] + 2, command_room[1] + 1, "window ===  map wall []  coffee [::]")
     paint_text(canvas, lounge_room[0] + 2, lounge_room[1] + 1, "water [OO]  sofa [__]  snack bar")
@@ -1604,7 +1657,7 @@ def render_floorplan_scene(
         place_presence_tile(canvas, presence, slot[0], slot[1], 10, frame)
     for presence, slot in zip(sorted(lounge_presences, key=sort_presence_for_floorplan), lounge_slots):
         place_presence_tile(canvas, presence, slot[0], slot[1], 10, frame, compact=True)
-    for presence, slot in zip(sorted(blocked_presences, key=sort_presence_for_floorplan), ops_slots):
+    for presence, slot in zip(sorted(ops_presences, key=sort_presence_for_floorplan), ops_slots):
         place_presence_tile(canvas, presence, slot[0], slot[1], 10, frame)
 
     counts = state_counts(presences)
@@ -1714,6 +1767,7 @@ def render_office_view(snapshot: DashboardSnapshot, width: int, height: int, fra
         snapshot.adapter,
         snapshot.bus_tail,
         snapshot.fetched_at,
+        provider_bridge_payload=snapshot.provider_bridge,
     )
     counts = state_counts(presences)
     banner = (
@@ -1785,26 +1839,28 @@ def partition_office_presences(presences: List[OfficePresence]) -> Dict[str, Lis
         for presence in presences
         if presence.location in {"cooler", "lounge", "sofa"} or presence.state in {"talking", "break", "sleeping"}
     ]
-    blocked_presences = [
-        presence for presence in presences if presence.state in {"blocked", "offline"} and presence not in lounge_presences
+    ops_presences = [
+        presence
+        for presence in presences
+        if presence not in lounge_presences and (presence.location == "ops" or presence.state in {"blocked", "offline"})
     ]
     command_presences = [
         presence
         for presence in presences
         if presence not in lounge_presences
-        and presence not in blocked_presences
+        and presence not in ops_presences
         and (presence.agent.tier in {"lead", "director"} or presence.agent.role in {"planner", "orchestrator", "reliability-critic"})
     ]
     build_presences = [
         presence
         for presence in presences
-        if presence not in lounge_presences and presence not in blocked_presences and presence not in command_presences
+        if presence not in lounge_presences and presence not in ops_presences and presence not in command_presences
     ]
     return {
         "command": sorted(command_presences, key=sort_presence_for_floorplan),
         "lounge": sorted(lounge_presences, key=sort_presence_for_floorplan),
         "build": sorted(build_presences, key=sort_presence_for_floorplan),
-        "ops": sorted(blocked_presences, key=sort_presence_for_floorplan),
+        "ops": sorted(ops_presences, key=sort_presence_for_floorplan),
     }
 
 
@@ -2274,6 +2330,7 @@ def build_gui_snapshot(snapshot: DashboardSnapshot, theme: str) -> Dict[str, Any
         snapshot.adapter,
         snapshot.bus_tail,
         snapshot.fetched_at,
+        provider_bridge_payload=snapshot.provider_bridge,
     )
     rooms = partition_office_presences(presences)
     counts = state_counts(presences)
@@ -2287,6 +2344,9 @@ def build_gui_snapshot(snapshot: DashboardSnapshot, theme: str) -> Dict[str, Any
     kernel_swarm = as_dict(kernel.get("swarm"))
     kernel_observability = as_dict(kernel.get("observability"))
     kernel_workflow_exports = as_dict(kernel.get("workflow_exports"))
+    provider_bridge = as_dict(snapshot.provider_bridge)
+    provider_bridge_diagnostics = as_dict(provider_bridge.get("diagnostics"))
+    provider_bridge_entries = [as_dict(entry) for entry in as_list(provider_bridge_diagnostics.get("diagnostics"))]
     tmux_state = as_dict(snapshot.tmux.get("state"))
     tmux_dashboard = as_dict(snapshot.tmux.get("dashboard"))
     task_counts = as_dict(snapshot.task_summary.get("counts"))
@@ -2444,6 +2504,15 @@ def build_gui_snapshot(snapshot: DashboardSnapshot, theme: str) -> Dict[str, Any
                 "last_eval_score": kernel_autonomy_maintain.get("last_eval_score"),
                 "subsystems": as_dict(snapshot.autonomy_maintain.get("subsystems")),
             },
+            "provider_bridge": {
+                "generated_at": provider_bridge_diagnostics.get("generated_at"),
+                "cached": bool(provider_bridge_diagnostics.get("cached")),
+                "connected_count": sum(1 for entry in provider_bridge_entries if str(entry.get("status") or "").strip().lower() == "connected"),
+                "configured_count": sum(1 for entry in provider_bridge_entries if str(entry.get("status") or "").strip().lower() == "configured"),
+                "disconnected_count": sum(1 for entry in provider_bridge_entries if str(entry.get("status") or "").strip().lower() == "disconnected"),
+                "unavailable_count": sum(1 for entry in provider_bridge_entries if str(entry.get("status") or "").strip().lower() == "unavailable"),
+                "diagnostics": provider_bridge_entries,
+            },
             "swarm": {
                 "active_profile_count": parse_any_int(kernel_swarm.get("active_profile_count")),
                 "checkpoint_artifact_count": parse_any_int(kernel_swarm.get("checkpoint_artifact_count")),
@@ -2560,6 +2629,9 @@ def render_workers_view(snapshot: DashboardSnapshot, width: int, height: int) ->
         normalize_agent_id(as_dict(agent).get("agent_id")): as_dict(agent)
         for agent in as_list(snapshot.learning.get("top_agents"))
     }
+    provider_bridge = as_dict(snapshot.provider_bridge)
+    provider_bridge_diagnostics = as_dict(provider_bridge.get("diagnostics"))
+    provider_entries = [as_dict(entry) for entry in as_list(provider_bridge_diagnostics.get("diagnostics"))]
     lines = [
         fit_text("WORKER TASK QUEUE", width),
         fit_text(
@@ -2577,6 +2649,26 @@ def render_workers_view(snapshot: DashboardSnapshot, width: int, height: int) ->
         ),
         "",
     ]
+    if provider_entries:
+        lines.append(fit_text("Provider bridge heartbeat:", width))
+        lines.append(
+            fit_text(
+                f"connected={sum(1 for entry in provider_entries if str(entry.get('status') or '').strip().lower() == 'connected')} "
+                f"configured={sum(1 for entry in provider_entries if str(entry.get('status') or '').strip().lower() == 'configured')} "
+                f"disconnected={sum(1 for entry in provider_entries if str(entry.get('status') or '').strip().lower() == 'disconnected')}",
+                width,
+            )
+        )
+        for entry in provider_entries[:4]:
+            lines.append(
+                fit_text(
+                    f"  {entry.get('display_name') or entry.get('client_id')}: "
+                    f"{entry.get('status') or 'n/a'} - "
+                    f"{compact_single_line(str(entry.get('detail') or 'no detail'), max(24, width - 18))}",
+                    width,
+                )
+            )
+        lines.append("")
     if runtime_worker_sessions:
         lines.append(fit_text("Runtime worker sessions:", width))
         for session in runtime_worker_sessions[: max(2, min(6, height - 8))]:
@@ -2800,6 +2892,7 @@ def fetch_snapshot(caller: McpToolCaller, thread_id: str, theme: str = "night") 
                     autopilot=as_dict(payload.get("autopilot")),
                     autonomy_maintain=as_dict(payload.get("autonomy_maintain")),
                     runtime_workers=as_dict(payload.get("runtime_workers")),
+                    provider_bridge=as_dict(payload.get("provider_bridge")),
                     operator_brief=as_dict(payload.get("operator_brief")),
                     errors=[compact_single_line(str(item), 160) for item in as_list(payload.get("errors"))],
                     agent_sessions=as_dict(payload.get("agent_sessions")),
@@ -2871,6 +2964,7 @@ def fetch_snapshot(caller: McpToolCaller, thread_id: str, theme: str = "night") 
         "autopilot": ("trichat.autopilot", {"action": "status"}),
         "autonomy_maintain": ("autonomy.maintain", {"action": "status"}),
         "runtime_workers": ("runtime.worker", {"action": "status", "limit": 20}),
+        "provider_bridge": ("provider.bridge", {"action": "diagnose"}),
         "operator_brief": (
             "operator.brief",
             {
@@ -2924,6 +3018,7 @@ def fetch_snapshot(caller: McpToolCaller, thread_id: str, theme: str = "night") 
         autopilot=results.get("autopilot", {}),
         autonomy_maintain=results.get("autonomy_maintain", {}),
         runtime_workers=results.get("runtime_workers", {}),
+        provider_bridge=results.get("provider_bridge", {}),
         operator_brief=results.get("operator_brief", {}),
         errors=errors,
     )

@@ -3,11 +3,17 @@ import { z } from "zod";
 import { probeLocalOllamaBackend, setLocalOllamaModelResidency } from "../local_backend_probe.js";
 import { probeLocalMlxBackend } from "../local_mlx_backend_probe.js";
 import { captureLocalHostProfile, deriveLocalExecutionBudget } from "../local_host_profile.js";
-import { type AutonomyMaintainStateRecord, type TaskSummaryRecord, Storage } from "../storage.js";
+import {
+  type AutonomyMaintainStateRecord,
+  type ProviderBridgeDiagnosticSnapshotRecord,
+  type TaskSummaryRecord,
+  Storage,
+} from "../storage.js";
 import { buildAgentLearningOverview } from "./agent_learning.js";
 import { getAutoSnapshotRuntimeStatus } from "./imprint.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { loadOrgPrograms } from "./org_program.js";
+import { resolveProviderBridgeDiagnostics } from "./provider_bridge.js";
 import { getReactionEngineRuntimeStatus } from "./reaction_engine.js";
 import { getAutoSquishRuntimeStatus } from "./transcript.js";
 import { getTriChatAutoRetentionRuntimeStatus, getTriChatTurnWatchdogRuntimeStatus } from "./trichat.js";
@@ -53,6 +59,8 @@ export const autonomyMaintainSchema = z
     autorun_interval_seconds: z.number().int().min(5).max(3600).optional(),
     maintain_tmux_controller: z.boolean().default(true),
     tmux_capture_lines: z.number().int().min(50).max(4000).optional(),
+    enable_self_drive: z.boolean().default(true),
+    self_drive_cooldown_seconds: z.number().int().min(60).max(86400).default(1800),
     run_eval_if_due: z.boolean().default(true),
     eval_interval_seconds: z.number().int().min(300).max(604800).default(21600),
     eval_suite_id: z.string().min(1).default("autonomy.control-plane"),
@@ -112,6 +120,8 @@ type AutonomyMaintainRuntimeConfig = {
   autorun_interval_seconds?: number;
   maintain_tmux_controller: boolean;
   tmux_capture_lines?: number;
+  enable_self_drive: boolean;
+  self_drive_cooldown_seconds: number;
   run_eval_if_due: boolean;
   eval_interval_seconds: number;
   eval_suite_id: string;
@@ -156,6 +166,8 @@ const DEFAULT_AUTONOMY_MAINTAIN_CONFIG: AutonomyMaintainRuntimeConfig = {
   start_trichat_turn_watchdog_daemon: true,
   start_reaction_engine_daemon: true,
   maintain_tmux_controller: true,
+  enable_self_drive: true,
+  self_drive_cooldown_seconds: 1800,
   run_eval_if_due: true,
   eval_interval_seconds: 21600,
   eval_suite_id: "autonomy.control-plane",
@@ -716,10 +728,92 @@ function buildGuardrails() {
   ];
 }
 
+function buildSelfDriveCandidate(params: {
+  attention: string[];
+  providerBridgeEntries: Array<Record<string, unknown>>;
+}) {
+  const repairableAttention = [...new Set(params.attention.map((entry) => String(entry ?? "").trim()).filter(Boolean))].filter(
+    (entry) => entry !== "agent.learning.no_active_entries"
+  );
+  if (repairableAttention.length <= 0) {
+    return null;
+  }
+  const disconnectedProviders = params.providerBridgeEntries
+    .filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "disconnected")
+    .map((entry) => ({
+      client_id: String(entry.client_id ?? "").trim(),
+      display_name: String(entry.display_name ?? "").trim() || String(entry.client_id ?? "").trim(),
+    }))
+    .filter((entry) => entry.client_id.length > 0);
+  const evalIssues = repairableAttention.filter((entry) => entry.startsWith("eval."));
+  const subsystemIssues = repairableAttention.filter((entry) => /\.(not_running|stale|error)$/.test(entry));
+  const providerIssues = repairableAttention.filter((entry) => entry.startsWith("provider.bridge."));
+  const localIssues = repairableAttention.filter((entry) => entry.startsWith("local."));
+  const topAttention = repairableAttention.slice(0, 3);
+  if (evalIssues.length > 0) {
+    return {
+      title: "[self-drive] Restore eval health",
+      objective:
+        "Investigate the failing control-plane eval posture, restore the autonomy evaluation baseline above policy, and record the concrete cause if the issue cannot be repaired automatically.",
+      tags: ["self-drive", "eval", "control-plane"],
+      reason: "eval",
+      metadata: { attention: evalIssues },
+    };
+  }
+  if (subsystemIssues.length > 0) {
+    return {
+      title: "[self-drive] Stabilize control plane services",
+      objective:
+        "Inspect the control-plane subsystems that are stale, errored, or not running, apply only bounded local repairs, and verify the service state returns to healthy.",
+      tags: ["self-drive", "reliability", "control-plane"],
+      reason: "subsystems",
+      metadata: { attention: subsystemIssues },
+    };
+  }
+  if (providerIssues.length > 0) {
+    return {
+      title: "[self-drive] Audit provider bridge health",
+      objective: `Audit disconnected provider bridges (${disconnectedProviders
+        .map((entry) => entry.display_name)
+        .join(", ") || "unknown"}), repair any local config issue that can be fixed without new credentials, and record exact blockers for anything that still needs human re-authentication.`,
+      tags: ["self-drive", "provider-bridge", "auth"],
+      reason: "provider-bridge",
+      metadata: { attention: providerIssues, disconnected_providers: disconnectedProviders },
+    };
+  }
+  if (localIssues.length > 0) {
+    return {
+      title: "[self-drive] Reduce local runtime pressure",
+      objective:
+        "Inspect the local execution budget and host pressure signals, apply only bounded local scheduling or routing fixes, and verify the host returns to a healthier operating posture.",
+      tags: ["self-drive", "runtime", "local-host"],
+      reason: "local-runtime",
+      metadata: { attention: localIssues },
+    };
+  }
+  return {
+    title: "[self-drive] Resolve control-plane attention",
+    objective: `Inspect the current control-plane attention set (${topAttention.join(
+      ", "
+    )}), fix any bounded local issue that is actionable without human input, and record blockers for anything external.`,
+    tags: ["self-drive", "control-plane"],
+    reason: "generic",
+    metadata: { attention: topAttention },
+  };
+}
+
 function buildDefaultState(
   input: Pick<
     AutonomyMaintainInput,
-    "local_host_id" | "interval_seconds" | "learning_review_interval_seconds" | "run_eval_if_due" | "eval_interval_seconds" | "eval_suite_id" | "minimum_eval_score"
+    | "local_host_id"
+    | "interval_seconds"
+    | "learning_review_interval_seconds"
+    | "enable_self_drive"
+    | "self_drive_cooldown_seconds"
+    | "run_eval_if_due"
+    | "eval_interval_seconds"
+    | "eval_suite_id"
+    | "minimum_eval_score"
   >
 ): AutonomyMaintainStateRecord {
   return {
@@ -727,6 +821,8 @@ function buildDefaultState(
     local_host_id: input.local_host_id,
     interval_seconds: input.interval_seconds,
     learning_review_interval_seconds: input.learning_review_interval_seconds,
+    enable_self_drive: input.enable_self_drive,
+    self_drive_cooldown_seconds: input.self_drive_cooldown_seconds,
     run_eval_if_due: input.run_eval_if_due,
     eval_interval_seconds: input.eval_interval_seconds,
     eval_suite_id: input.eval_suite_id,
@@ -743,6 +839,11 @@ function buildDefaultState(
     last_eval_score: null,
     last_eval_dependency_fingerprint: null,
     last_observability_ship_at: null,
+    last_provider_bridge_check_at: null,
+    provider_bridge_diagnostics: [],
+    last_self_drive_at: null,
+    last_self_drive_goal_id: null,
+    last_self_drive_fingerprint: null,
     last_actions: [],
     last_attention: [],
     last_error: null,
@@ -804,6 +905,9 @@ function resolveAutonomyMaintainConfig(
     maintain_tmux_controller:
       readBoolean(input.maintain_tmux_controller) ?? fallback.maintain_tmux_controller,
     tmux_capture_lines: readNumber(input.tmux_capture_lines) ?? fallback.tmux_capture_lines,
+    enable_self_drive: readBoolean(input.enable_self_drive) ?? fallback.enable_self_drive,
+    self_drive_cooldown_seconds:
+      readNumber(input.self_drive_cooldown_seconds) ?? fallback.self_drive_cooldown_seconds,
     run_eval_if_due: readBoolean(input.run_eval_if_due) ?? fallback.run_eval_if_due,
     eval_interval_seconds: readNumber(input.eval_interval_seconds) ?? fallback.eval_interval_seconds,
     eval_suite_id: readString(input.eval_suite_id) ?? fallback.eval_suite_id,
@@ -840,6 +944,30 @@ function buildRuntimeStatus() {
 
 export function getAutonomyMaintainRuntimeStatus() {
   return buildRuntimeStatus();
+}
+
+function resolveProviderBridgeHeartbeat(
+  state: AutonomyMaintainStateRecord | null,
+  options: {
+    workspace_root: string;
+    probe_timeout_ms?: number;
+    prefer_persisted?: boolean;
+  }
+) {
+  const persistedDiagnostics = Array.isArray(state?.provider_bridge_diagnostics)
+    ? state.provider_bridge_diagnostics
+    : [];
+  if (options.prefer_persisted !== false && persistedDiagnostics.length > 0) {
+    return {
+      generated_at: state?.last_provider_bridge_check_at ?? state?.updated_at ?? new Date().toISOString(),
+      cached: true,
+      diagnostics: persistedDiagnostics,
+    };
+  }
+  return resolveProviderBridgeDiagnostics({
+    workspace_root: options.workspace_root,
+    probe_timeout_ms: options.probe_timeout_ms,
+  });
 }
 
 function buildEffectiveRuntimeStatus(
@@ -1028,6 +1156,9 @@ async function buildStatus(
     | "run_optimizer_if_due"
     | "optimizer_interval_seconds"
     | "optimizer_min_improvement"
+    | "enable_self_drive"
+    | "self_drive_cooldown_seconds"
+    | "fast"
     | "interval_seconds"
     | "learning_review_interval_seconds"
   >,
@@ -1083,6 +1214,13 @@ async function buildStatus(
     ...input,
     current_dependency_fingerprint: computeEvalDependencyFingerprint(storage, input.eval_suite_id),
   });
+  const providerBridgeDiagnostics = resolveProviderBridgeHeartbeat(state, {
+    workspace_root: process.cwd(),
+    probe_timeout_ms: input.fast === true ? 1500 : 2500,
+  });
+  const providerBridgeEntries = Array.isArray(providerBridgeDiagnostics.diagnostics)
+    ? providerBridgeDiagnostics.diagnostics
+    : [];
   const due = {
     stale:
       startupGraceActive(runtime, state.interval_seconds) !== true &&
@@ -1117,6 +1255,14 @@ async function buildStatus(
   }
   if (learning.active_entry_count === 0) {
     attention.push("agent.learning.no_active_entries");
+  }
+  for (const entry of providerBridgeEntries) {
+    const clientId = String(entry.client_id ?? "").trim();
+    const status = String(entry.status ?? "").trim().toLowerCase();
+    if (!clientId || status !== "disconnected") {
+      continue;
+    }
+    attention.push(`provider.bridge.${clientId}.disconnected`);
   }
   if (evalHealth.below_threshold) {
     attention.push(`eval.${evalHealth.suite_id}.below_threshold`);
@@ -1173,6 +1319,25 @@ async function buildStatus(
       worker_count: readNumber(asRecord(tmux.state).worker_count) ?? 0,
     },
     learning,
+    provider_bridge: {
+      generated_at: providerBridgeDiagnostics.generated_at,
+      cached: providerBridgeDiagnostics.cached,
+      last_check_at: state.last_provider_bridge_check_at,
+      stale:
+        isoAgeSeconds(state.last_provider_bridge_check_at) >
+        Math.max((state.interval_seconds || input.interval_seconds || 120) * 3, 300),
+      connected_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "connected").length,
+      configured_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "configured").length,
+      disconnected_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "disconnected").length,
+      unavailable_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "unavailable").length,
+      diagnostics: providerBridgeEntries,
+    },
+    self_drive: {
+      enabled: state.enabled && state.enable_self_drive,
+      last_run_at: state.last_self_drive_at,
+      last_goal_id: state.last_self_drive_goal_id,
+      last_fingerprint: state.last_self_drive_fingerprint,
+    },
     eval_health: evalHealth,
     due,
     guardrails: buildGuardrails(),
@@ -1270,6 +1435,55 @@ async function executeAutonomyMaintainPass(
     taskSummary = storage.getTaskSummary({ running_limit: 12 });
   }
   const localProfile = captureLocalHostProfile({ workspace_root: process.cwd() });
+  const providerBridgeProbeTimeoutMs = input.fast === true ? 1500 : 4000;
+  const providerBridgeDiagnostics = resolveProviderBridgeDiagnostics({
+    workspace_root: process.cwd(),
+    bypass_cache: true,
+    probe_timeout_ms: providerBridgeProbeTimeoutMs,
+  });
+  const providerBridgeEntries = Array.isArray(providerBridgeDiagnostics.diagnostics)
+    ? providerBridgeDiagnostics.diagnostics
+    : [];
+  const providerBridgeHeartbeatEntries = providerBridgeEntries
+    .map((entry) => ({
+      client_id: String(entry.client_id ?? "").trim(),
+      display_name: String(entry.display_name ?? "").trim(),
+      office_agent_id: readString(entry.office_agent_id),
+      available: readBoolean(entry.available) === true,
+      runtime_probed: readBoolean(entry.runtime_probed) === true,
+      connected:
+        typeof entry.connected === "boolean"
+          ? Boolean(entry.connected)
+          : entry.connected === null || entry.connected === undefined
+            ? null
+            : null,
+      status: (() => {
+        const normalized = String(entry.status ?? "").trim().toLowerCase();
+        if (
+          normalized === "connected" ||
+          normalized === "disconnected" ||
+          normalized === "configured" ||
+          normalized === "unavailable"
+        ) {
+          return normalized;
+        }
+        return "configured";
+      })(),
+      detail: String(entry.detail ?? "").trim(),
+      notes: Array.isArray(entry.notes) ? entry.notes.map((value) => String(value ?? "")) : [],
+      command: readString(entry.command),
+      config_path: readString(entry.config_path),
+    } satisfies ProviderBridgeDiagnosticSnapshotRecord))
+    .filter((entry): entry is ProviderBridgeDiagnosticSnapshotRecord => entry.client_id.length > 0 && entry.display_name.length > 0);
+  actions.push("provider.bridge.heartbeat");
+  for (const entry of providerBridgeEntries) {
+    const clientId = String(entry.client_id ?? "").trim();
+    const status = String(entry.status ?? "").trim().toLowerCase();
+    if (!clientId || status !== "disconnected") {
+      continue;
+    }
+    attention.push(`provider.bridge.${clientId}.disconnected`);
+  }
   let runtimeWorkerStatus = asRecord(await invokeTool("runtime.worker", { action: "status", limit: 20 }));
   let runtimeWorkerSpawnResult: Record<string, unknown> | null = null;
   if (input.start_runtime_workers !== false) {
@@ -2197,11 +2411,89 @@ async function executeAutonomyMaintainPass(
     }
   }
 
+  let selfDriveResult: Record<string, unknown> | null = null;
+  let lastSelfDriveAt = previousState?.last_self_drive_at ?? null;
+  let lastSelfDriveGoalId = previousState?.last_self_drive_goal_id ?? null;
+  let lastSelfDriveFingerprint = previousState?.last_self_drive_fingerprint ?? null;
+  const activeGoals = storage.listGoals({ status: "active", limit: 10 });
+  const idleForSelfDrive =
+    activeGoals.length <= 0 &&
+    taskSummary.counts.pending <= 0 &&
+    taskSummary.counts.running <= 0 &&
+    runtimeWorkerActiveCount <= 0 &&
+    readBoolean(bootstrapStatus.self_start_ready) === true;
+  const selfDriveCandidate =
+    input.enable_self_drive !== false && idleForSelfDrive
+      ? buildSelfDriveCandidate({
+          attention,
+          providerBridgeEntries,
+        })
+      : null;
+  if (selfDriveCandidate) {
+    const fingerprint = crypto
+      .createHash("sha256")
+      .update(
+        JSON.stringify({
+          reason: selfDriveCandidate.reason,
+          attention: selfDriveCandidate.metadata.attention ?? [],
+        })
+      )
+      .digest("hex");
+    const cooldownAgeSeconds = isoAgeSeconds(previousState?.last_self_drive_at ?? null);
+    const cooldownSatisfied =
+      cooldownAgeSeconds === Number.POSITIVE_INFINITY ||
+      cooldownAgeSeconds >= Math.max(60, input.self_drive_cooldown_seconds ?? 1800);
+    if (fingerprint !== previousState?.last_self_drive_fingerprint || cooldownSatisfied) {
+      try {
+        selfDriveResult = asRecord(
+          await invokeTool("autonomy.command", {
+            mutation: deriveMutation(input.mutation!, `self-drive:${selfDriveCandidate.reason}`),
+            objective: selfDriveCandidate.objective,
+            title: selfDriveCandidate.title,
+            priority: 70,
+            risk_tier: "low",
+            autonomy_mode: "execute_bounded",
+            ensure_bootstrap: false,
+            start_goal_autorun_daemon: false,
+            dispatch_limit: 6,
+            max_passes: 2,
+            dry_run: true,
+            trichat_bridge_dry_run: true,
+            constraints: [
+              "Do not require new human credentials or approval.",
+              "Apply only bounded local repairs; if an external login or account action is required, record the blocker and stop.",
+              "Do not create recursive self-improvement or broad refactor goals from self-drive.",
+            ],
+            tags: selfDriveCandidate.tags,
+            metadata: {
+              ...(selfDriveCandidate.metadata ?? {}),
+              self_drive: true,
+              spawned_by: "autonomy.maintain",
+            },
+            source_client: sourceClient,
+            source_model: input.source_model,
+            source_agent: sourceAgent,
+          })
+        );
+        lastSelfDriveAt = now;
+        lastSelfDriveGoalId = readString(asRecord(selfDriveResult.goal).goal_id) ?? lastSelfDriveGoalId;
+        lastSelfDriveFingerprint = fingerprint;
+        actions.push(`autonomy.self_drive:${selfDriveCandidate.reason}`);
+      } catch (error) {
+        attention.push(`autonomy.self_drive.failed:${error instanceof Error ? error.message : String(error)}`);
+      }
+    } else {
+      actions.push("autonomy.self_drive.cooldown");
+    }
+  }
+
   const nextState = storage.setAutonomyMaintainState({
     enabled: true,
     local_host_id: input.local_host_id,
     interval_seconds: input.interval_seconds,
     learning_review_interval_seconds: input.learning_review_interval_seconds,
+    enable_self_drive: input.enable_self_drive,
+    self_drive_cooldown_seconds: input.self_drive_cooldown_seconds,
     run_eval_if_due: input.run_eval_if_due,
     eval_interval_seconds: input.eval_interval_seconds,
     eval_suite_id: input.eval_suite_id,
@@ -2220,6 +2512,11 @@ async function executeAutonomyMaintainPass(
       ? currentEvalDependencyFingerprint
       : previousState?.last_eval_dependency_fingerprint ?? null,
     last_observability_ship_at: lastObservabilityShipAt,
+    last_provider_bridge_check_at: providerBridgeDiagnostics.generated_at,
+    provider_bridge_diagnostics: providerBridgeHeartbeatEntries,
+    last_self_drive_at: lastSelfDriveAt,
+    last_self_drive_goal_id: lastSelfDriveGoalId,
+    last_self_drive_fingerprint: lastSelfDriveFingerprint,
     last_actions: actions,
     last_attention: attention,
     last_error: lastError,
@@ -2250,6 +2547,7 @@ async function executeAutonomyMaintainPass(
         attention,
         eval_run_id: nextState.last_eval_run_id,
         eval_score: nextState.last_eval_score,
+        self_drive_goal_id: nextState.last_self_drive_goal_id,
         learning_entry_count: nextState.last_learning_entry_count,
         learning_active_agent_count: nextState.last_learning_active_agent_count,
         goal_hygiene_archived_count: readNumber(goalHygieneResult?.archived_count) ?? 0,
@@ -2275,6 +2573,13 @@ async function executeAutonomyMaintainPass(
         optimizer_due: optimizerPlan.due,
         optimizer_improvement: readNumber(optimizerResult?.improvement),
         optimizer_promoted: readBoolean(optimizerResult?.promoted),
+        provider_bridge: {
+          generated_at: providerBridgeDiagnostics.generated_at,
+          connected_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "connected").length,
+          configured_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "configured").length,
+          disconnected_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "disconnected").length,
+          unavailable_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "unavailable").length,
+        },
       },
       source_client: sourceClient,
       source_model: input.source_model,
@@ -2408,6 +2713,8 @@ export function initializeAutonomyMaintainDaemon(storage: Storage, invokeTool: I
     {
       interval_seconds: persisted.interval_seconds,
       learning_review_interval_seconds: persisted.learning_review_interval_seconds,
+      enable_self_drive: persisted.enable_self_drive,
+      self_drive_cooldown_seconds: persisted.self_drive_cooldown_seconds,
       run_eval_if_due: persisted.run_eval_if_due,
       eval_interval_seconds: persisted.eval_interval_seconds,
       eval_suite_id: persisted.eval_suite_id,
@@ -2452,6 +2759,8 @@ export async function autonomyMaintain(
           local_host_id: previousState.local_host_id,
           interval_seconds: previousState.interval_seconds,
           learning_review_interval_seconds: previousState.learning_review_interval_seconds,
+          enable_self_drive: previousState.enable_self_drive,
+          self_drive_cooldown_seconds: previousState.self_drive_cooldown_seconds,
           run_eval_if_due: previousState.run_eval_if_due,
           eval_interval_seconds: previousState.eval_interval_seconds,
           eval_suite_id: previousState.eval_suite_id,
@@ -2468,6 +2777,11 @@ export async function autonomyMaintain(
           last_eval_score: previousState.last_eval_score,
           last_eval_dependency_fingerprint: previousState.last_eval_dependency_fingerprint,
           last_observability_ship_at: previousState.last_observability_ship_at,
+          last_provider_bridge_check_at: previousState.last_provider_bridge_check_at,
+          provider_bridge_diagnostics: previousState.provider_bridge_diagnostics,
+          last_self_drive_at: previousState.last_self_drive_at,
+          last_self_drive_goal_id: previousState.last_self_drive_goal_id,
+          last_self_drive_fingerprint: previousState.last_self_drive_fingerprint,
           last_actions: previousState.last_actions,
           last_attention: previousState.last_attention,
           last_error: previousState.last_error,
@@ -2497,6 +2811,8 @@ export async function autonomyMaintain(
             local_host_id: autonomyMaintainRuntime.config.local_host_id,
             interval_seconds: autonomyMaintainRuntime.config.interval_seconds,
             learning_review_interval_seconds: autonomyMaintainRuntime.config.learning_review_interval_seconds,
+            enable_self_drive: autonomyMaintainRuntime.config.enable_self_drive,
+            self_drive_cooldown_seconds: autonomyMaintainRuntime.config.self_drive_cooldown_seconds,
             run_eval_if_due: autonomyMaintainRuntime.config.run_eval_if_due,
             eval_interval_seconds: autonomyMaintainRuntime.config.eval_interval_seconds,
             eval_suite_id: autonomyMaintainRuntime.config.eval_suite_id,
@@ -2513,6 +2829,11 @@ export async function autonomyMaintain(
             last_eval_score: current.last_eval_score,
             last_eval_dependency_fingerprint: current.last_eval_dependency_fingerprint,
             last_observability_ship_at: current.last_observability_ship_at,
+            last_provider_bridge_check_at: current.last_provider_bridge_check_at,
+            provider_bridge_diagnostics: current.provider_bridge_diagnostics,
+            last_self_drive_at: current.last_self_drive_at,
+            last_self_drive_goal_id: current.last_self_drive_goal_id,
+            last_self_drive_fingerprint: current.last_self_drive_fingerprint,
             last_actions: current.last_actions,
             last_attention: current.last_attention,
             last_error: current.last_error,

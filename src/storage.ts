@@ -1104,6 +1104,8 @@ export type AutonomyMaintainStateRecord = {
   local_host_id: string;
   interval_seconds: number;
   learning_review_interval_seconds: number;
+  enable_self_drive: boolean;
+  self_drive_cooldown_seconds: number;
   run_eval_if_due: boolean;
   eval_interval_seconds: number;
   eval_suite_id: string;
@@ -1120,10 +1122,29 @@ export type AutonomyMaintainStateRecord = {
   last_eval_score: number | null;
   last_eval_dependency_fingerprint: string | null;
   last_observability_ship_at: string | null;
+  last_provider_bridge_check_at: string | null;
+  provider_bridge_diagnostics: ProviderBridgeDiagnosticSnapshotRecord[];
+  last_self_drive_at: string | null;
+  last_self_drive_goal_id: string | null;
+  last_self_drive_fingerprint: string | null;
   last_actions: string[];
   last_attention: string[];
   last_error: string | null;
   updated_at: string;
+};
+
+export type ProviderBridgeDiagnosticSnapshotRecord = {
+  client_id: string;
+  display_name: string;
+  office_agent_id: string | null;
+  available: boolean;
+  runtime_probed: boolean;
+  connected: boolean | null;
+  status: "connected" | "disconnected" | "configured" | "unavailable";
+  detail: string;
+  notes: string[];
+  command: string | null;
+  config_path: string | null;
 };
 
 export type ReactionEngineNotificationRecord = {
@@ -2403,6 +2424,8 @@ export class Storage {
       local_host_id: asNullableString(config.local_host_id)?.trim() || "local",
       interval_seconds: parseBoundedInt(config.interval_seconds, 120, 5, 3600),
       learning_review_interval_seconds: parseBoundedInt(config.learning_review_interval_seconds, 300, 60, 604800),
+      enable_self_drive: typeof config.enable_self_drive === "boolean" ? config.enable_self_drive : true,
+      self_drive_cooldown_seconds: parseBoundedInt(config.self_drive_cooldown_seconds, 1800, 60, 86400),
       run_eval_if_due: typeof config.run_eval_if_due === "boolean" ? config.run_eval_if_due : true,
       eval_interval_seconds: parseBoundedInt(config.eval_interval_seconds, 21600, 300, 604800),
       eval_suite_id: asNullableString(config.eval_suite_id)?.trim() || "autonomy.control-plane",
@@ -2422,6 +2445,15 @@ export class Storage {
           : null,
       last_eval_dependency_fingerprint: asNullableString(config.last_eval_dependency_fingerprint)?.trim() || null,
       last_observability_ship_at: asNullableString(config.last_observability_ship_at)?.trim() || null,
+      last_provider_bridge_check_at: asNullableString(config.last_provider_bridge_check_at)?.trim() || null,
+      provider_bridge_diagnostics: Array.isArray(config.provider_bridge_diagnostics)
+        ? config.provider_bridge_diagnostics
+            .map((entry) => normalizeProviderBridgeDiagnosticSnapshot(entry))
+            .filter((entry): entry is ProviderBridgeDiagnosticSnapshotRecord => entry !== null)
+        : [],
+      last_self_drive_at: asNullableString(config.last_self_drive_at)?.trim() || null,
+      last_self_drive_goal_id: asNullableString(config.last_self_drive_goal_id)?.trim() || null,
+      last_self_drive_fingerprint: asNullableString(config.last_self_drive_fingerprint)?.trim() || null,
       last_actions: dedupeNonEmpty(Array.isArray(config.last_actions) ? config.last_actions.map((entry) => String(entry ?? "")) : []),
       last_attention: dedupeNonEmpty(Array.isArray(config.last_attention) ? config.last_attention.map((entry) => String(entry ?? "")) : []),
       last_error: asNullableString(config.last_error)?.trim() || null,
@@ -2434,6 +2466,8 @@ export class Storage {
     local_host_id?: string;
     interval_seconds: number;
     learning_review_interval_seconds: number;
+    enable_self_drive?: boolean;
+    self_drive_cooldown_seconds?: number;
     run_eval_if_due?: boolean;
     eval_interval_seconds: number;
     eval_suite_id?: string;
@@ -2450,6 +2484,11 @@ export class Storage {
     last_eval_score?: number | null;
     last_eval_dependency_fingerprint?: string | null;
     last_observability_ship_at?: string | null;
+    last_provider_bridge_check_at?: string | null;
+    provider_bridge_diagnostics?: ProviderBridgeDiagnosticSnapshotRecord[];
+    last_self_drive_at?: string | null;
+    last_self_drive_goal_id?: string | null;
+    last_self_drive_fingerprint?: string | null;
     last_actions?: string[];
     last_attention?: string[];
     last_error?: string | null;
@@ -2460,6 +2499,8 @@ export class Storage {
       local_host_id: params.local_host_id?.trim() || "local",
       interval_seconds: parseBoundedInt(params.interval_seconds, 120, 5, 3600),
       learning_review_interval_seconds: parseBoundedInt(params.learning_review_interval_seconds, 300, 60, 604800),
+      enable_self_drive: typeof params.enable_self_drive === "boolean" ? params.enable_self_drive : true,
+      self_drive_cooldown_seconds: parseBoundedInt(params.self_drive_cooldown_seconds, 1800, 60, 86400),
       run_eval_if_due: typeof params.run_eval_if_due === "boolean" ? params.run_eval_if_due : true,
       eval_interval_seconds: parseBoundedInt(params.eval_interval_seconds, 21600, 300, 604800),
       eval_suite_id: params.eval_suite_id?.trim() || "autonomy.control-plane",
@@ -2479,6 +2520,13 @@ export class Storage {
           : null,
       last_eval_dependency_fingerprint: params.last_eval_dependency_fingerprint?.trim() || null,
       last_observability_ship_at: params.last_observability_ship_at?.trim() || null,
+      last_provider_bridge_check_at: params.last_provider_bridge_check_at?.trim() || null,
+      provider_bridge_diagnostics: (params.provider_bridge_diagnostics ?? [])
+        .map((entry) => normalizeProviderBridgeDiagnosticSnapshot(entry))
+        .filter((entry): entry is ProviderBridgeDiagnosticSnapshotRecord => entry !== null),
+      last_self_drive_at: params.last_self_drive_at?.trim() || null,
+      last_self_drive_goal_id: params.last_self_drive_goal_id?.trim() || null,
+      last_self_drive_fingerprint: params.last_self_drive_fingerprint?.trim() || null,
       last_actions: [...new Set((params.last_actions ?? []).map((entry) => String(entry ?? "").trim()).filter(Boolean))],
       last_attention: [...new Set((params.last_attention ?? []).map((entry) => String(entry ?? "").trim()).filter(Boolean))],
       last_error: params.last_error?.trim() || null,
@@ -2487,6 +2535,8 @@ export class Storage {
       local_host_id: normalized.local_host_id,
       interval_seconds: normalized.interval_seconds,
       learning_review_interval_seconds: normalized.learning_review_interval_seconds,
+      enable_self_drive: normalized.enable_self_drive,
+      self_drive_cooldown_seconds: normalized.self_drive_cooldown_seconds,
       run_eval_if_due: normalized.run_eval_if_due,
       eval_interval_seconds: normalized.eval_interval_seconds,
       eval_suite_id: normalized.eval_suite_id,
@@ -2503,6 +2553,11 @@ export class Storage {
       last_eval_score: normalized.last_eval_score,
       last_eval_dependency_fingerprint: normalized.last_eval_dependency_fingerprint,
       last_observability_ship_at: normalized.last_observability_ship_at,
+      last_provider_bridge_check_at: normalized.last_provider_bridge_check_at,
+      provider_bridge_diagnostics: normalized.provider_bridge_diagnostics,
+      last_self_drive_at: normalized.last_self_drive_at,
+      last_self_drive_goal_id: normalized.last_self_drive_goal_id,
+      last_self_drive_fingerprint: normalized.last_self_drive_fingerprint,
       last_actions: normalized.last_actions,
       last_attention: normalized.last_attention,
       last_error: normalized.last_error,
@@ -13157,6 +13212,33 @@ function dedupeNonEmpty(values: string[]): string[] {
     }
   }
   return Array.from(unique);
+}
+
+function normalizeProviderBridgeDiagnosticSnapshot(value: unknown): ProviderBridgeDiagnosticSnapshotRecord | null {
+  const record =
+    value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const clientId = asNullableString(record.client_id)?.trim() || null;
+  const displayName = asNullableString(record.display_name)?.trim() || null;
+  const status = asNullableString(record.status)?.trim() || null;
+  if (!clientId || !displayName) {
+    return null;
+  }
+  if (status !== "connected" && status !== "disconnected" && status !== "configured" && status !== "unavailable") {
+    return null;
+  }
+  return {
+    client_id: clientId,
+    display_name: displayName,
+    office_agent_id: asNullableString(record.office_agent_id)?.trim() || null,
+    available: record.available === true,
+    runtime_probed: record.runtime_probed === true,
+    connected: typeof record.connected === "boolean" ? record.connected : null,
+    status,
+    detail: asNullableString(record.detail)?.trim() || "",
+    notes: dedupeNonEmpty(Array.isArray(record.notes) ? record.notes.map((entry: unknown) => String(entry ?? "")) : []),
+    command: asNullableString(record.command)?.trim() || null,
+    config_path: asNullableString(record.config_path)?.trim() || null,
+  };
 }
 
 function parseKeywords(value: unknown): string[] {

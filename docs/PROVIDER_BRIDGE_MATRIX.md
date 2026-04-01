@@ -37,7 +37,7 @@ Override with explicit `trichat_agent_ids` only when you intentionally want a di
 | --- | --- | --- | --- | --- |
 | Codex | Yes | Yes | Yes for MCP, no for frontier model inference | Inbound via Codex MCP config; outward via `bridges/codex_bridge.py` |
 | Cursor | Yes | Yes | Yes for MCP, no for cloud model inference | Inbound via both `~/.cursor/mcp.json` and workspace-local `.cursor/mcp.json`; outward via `bridges/cursor_bridge.py` |
-| Gemini CLI | Yes | Yes | Yes for MCP transport, no for Gemini model inference | Inbound via `~/.gemini/settings.json`; standalone `gemini` CLI binary; outward via `bridges/gemini_bridge.py` |
+| Gemini CLI | Yes | Yes | Yes for MCP transport, no for Gemini model inference | Inbound via `~/.gemini/settings.json`; standalone `gemini` CLI binary; defaults to `stdio` for MCP reliability; outward via `bridges/gemini_bridge.py` |
 | GitHub Copilot CLI | Yes | No | Yes for MCP transport, no for Copilot model inference | Inbound via `~/.copilot/mcp-config.json`; current official standalone CLI is `copilot`; no truthful outbound council bridge in this repo yet |
 | GitHub Copilot Agent Mode / VS Code | Exportable | No | Yes for MCP transport, no for Copilot model inference | Export workspace `.vscode/mcp.json`; keep this honest as an editor-client integration |
 | ChatGPT Developer Mode | Remote-only | No | No | Requires a remote MCP server path and internet connectivity; export manifest only |
@@ -48,6 +48,7 @@ Status:
 
 ```bash
 npm run providers:status
+npm run providers:diagnose -- gemini-cli cursor github-copilot-cli
 ```
 
 Export a presentation/import bundle:
@@ -77,6 +78,7 @@ Codex install still uses the dedicated script:
 - lets local-first councils stay primary while `autonomy.command`, `goal.execute`, and `plan.dispatch` add routed hosted agents only when the router says they are relevant
 - exports ready-to-import config snippets and a truthful ChatGPT remote manifest
 - installs the supported local JSON config paths for Cursor, Gemini CLI, and GitHub Copilot CLI, including workspace-local `.cursor/mcp.json`
+- diagnoses bridge truth without conflating “configured” and “runtime connected”
 - preserves `autonomy.ide_ingress` as the one canonical ingress lane
 
 ## Source References

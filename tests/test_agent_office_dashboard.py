@@ -970,6 +970,28 @@ class AgentOfficeDashboardTests(unittest.TestCase):
                     "trichat_turn_watchdog": {"enabled": True, "running": True, "stale": False, "last_error": None},
                 },
             },
+            provider_bridge={
+                "diagnostics": {
+                    "generated_at": "2026-03-30T08:00:00Z",
+                    "cached": False,
+                    "diagnostics": [
+                        {
+                            "client_id": "cursor",
+                            "display_name": "Cursor",
+                            "office_agent_id": "cursor",
+                            "status": "connected",
+                            "detail": "Cursor is running on this workspace and the MCP bridge is configured.",
+                        },
+                        {
+                            "client_id": "gemini-cli",
+                            "display_name": "Gemini CLI",
+                            "office_agent_id": "gemini",
+                            "status": "configured",
+                            "detail": "Gemini bridge configured.",
+                        },
+                    ],
+                }
+            },
             errors=[],
         )
         payload = MODULE.build_gui_snapshot(snapshot, "night")
@@ -978,6 +1000,8 @@ class AgentOfficeDashboardTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["router"]["default_backend_id"], "ollama-llama3-2-3b")
         self.assertEqual(payload["summary"]["local_host"]["worker_count"], 9)
         self.assertIn("transcript_auto_squish", payload["summary"]["maintain"]["subsystems"])
+        self.assertEqual(payload["summary"]["provider_bridge"]["connected_count"], 1)
+        self.assertEqual(payload["summary"]["provider_bridge"]["configured_count"], 1)
         self.assertEqual(payload["counts"]["working"], 1)
         self.assertIn("command", payload["rooms"])
         self.assertTrue(any(agent["agent"]["agent_id"] == "code-smith" for agent in payload["agents"]))

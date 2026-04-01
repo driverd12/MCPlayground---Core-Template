@@ -5,6 +5,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   ./scripts/provider_bridge.sh status [--transport auto|http|stdio] [client...]
+  ./scripts/provider_bridge.sh diagnose [--transport auto|http|stdio] [client...]
   ./scripts/provider_bridge.sh export [--transport auto|http|stdio] [--out <dir>] [--include-bearer-token] [client...]
   ./scripts/provider_bridge.sh install [--transport auto|http|stdio] [client...]
 
@@ -24,7 +25,7 @@ if [[ $# -gt 0 ]]; then
 fi
 
 case "${ACTION}" in
-  status|export|install)
+  status|diagnose|export|install)
     ;;
   -h|--help|help)
     usage

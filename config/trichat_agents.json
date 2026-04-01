@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "default_agent_ids": ["ring-leader", "implementation-director", "research-director", "verification-director", "local-imprint", "codex"],
+  "default_agent_ids": ["ring-leader", "implementation-director", "research-director", "verification-director", "local-imprint", "codex", "github-copilot"],
   "agents": [
     {
       "agent_id": "codex",
@@ -56,6 +56,18 @@
       "system_prompt": "You are Claude in tri-chat mode. Respond with careful critique, risk surfacing, and concise reasoning. Keep replies to max 6 lines unless asked for detail. Avoid recap sections and focus on tradeoffs that matter."
     },
     {
+      "agent_id": "github-copilot",
+      "display_name": "GitHub Copilot",
+      "provider": "github-copilot",
+      "auth_mode": "cli-login",
+      "role_lane": "implementer",
+      "coordination_tier": "support",
+      "accent_color": "#7aa2f7",
+      "supports_local_model_fallback": true,
+      "description": "Hosted implementation support lane for GitHub-native coding assistance and MCP-connected editing flows.",
+      "system_prompt": "You are GitHub Copilot in tri-chat mode. Respond with concise, implementation-heavy guidance, favoring minimal diffs, concrete code actions, and bounded execution details. Keep replies to max 6 lines unless asked for depth."
+    },
+    {
       "agent_id": "local-imprint",
       "display_name": "Local Imprint",
       "provider": "local",
@@ -77,7 +89,7 @@
       "auth_mode": "local-model",
       "role_lane": "orchestrator",
       "coordination_tier": "lead",
-      "managed_agent_ids": ["implementation-director", "research-director", "verification-director", "local-imprint", "codex"],
+      "managed_agent_ids": ["implementation-director", "research-director", "verification-director", "local-imprint", "codex", "github-copilot"],
       "accent_color": "#f25f5c",
       "bridge_env_var": "TRICHAT_RING_LEADER_CMD",
       "bridge_script_names": ["local-imprint_bridge.py", "local_imprint_bridge.py"],

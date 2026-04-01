@@ -32,7 +32,7 @@ const rosterConfigPath =
 
 const fallbackConfig: TriChatRosterConfig = {
   version: 1,
-  default_agent_ids: ["codex", "cursor", "local-imprint"],
+  default_agent_ids: ["codex", "cursor", "github-copilot", "local-imprint"],
   agents: [
     {
       agent_id: "codex",
@@ -92,6 +92,19 @@ const fallbackConfig: TriChatRosterConfig = {
         "You are Claude in tri-chat mode. Respond with careful critique, risk surfacing, and concise reasoning. Keep replies to max 6 lines unless asked for detail. Avoid recap sections and focus on tradeoffs that matter.",
     },
     {
+      agent_id: "github-copilot",
+      display_name: "GitHub Copilot",
+      provider: "github-copilot",
+      auth_mode: "cli-login",
+      role_lane: "implementer",
+      coordination_tier: "support",
+      accent_color: "#7aa2f7",
+      description: "Hosted implementation support lane for GitHub-native coding assistance and MCP-connected editing flows.",
+      supports_local_model_fallback: true,
+      system_prompt:
+        "You are GitHub Copilot in tri-chat mode. Respond with concise, implementation-heavy guidance, favoring minimal diffs, concrete code actions, and bounded execution details. Keep replies to max 6 lines unless asked for depth.",
+    },
+    {
       agent_id: "local-imprint",
       display_name: "Local Imprint",
       provider: "local",
@@ -120,6 +133,7 @@ const fallbackConfig: TriChatRosterConfig = {
         "verification-director",
         "local-imprint",
         "codex",
+        "github-copilot",
       ],
       accent_color: "#f25f5c",
       bridge_env_var: "TRICHAT_RING_LEADER_CMD",

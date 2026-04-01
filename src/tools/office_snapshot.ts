@@ -13,6 +13,7 @@ import { summarizeAgentLearning } from "./agent_learning.js";
 import { getAutonomyMaintainRuntimeStatus } from "./autonomy_maintain.js";
 import { kernelSummary, summarizeAutonomyMaintain } from "./kernel.js";
 import { operatorBrief } from "./operator_brief.js";
+import { resolveProviderBridgeDiagnostics, resolveProviderBridgeSnapshot } from "./provider_bridge.js";
 import { getReactionEngineRuntimeStatus } from "./reaction_engine.js";
 import { summarizeLiveRuntimeWorkers } from "./runtime_worker.js";
 import { taskList, taskSummary } from "./task.js";
@@ -27,6 +28,10 @@ type AdapterPayload = ReturnType<typeof trichatAdapterTelemetry>;
 type WorkboardPayload = ReturnType<typeof trichatWorkboard>;
 type TriChatSummaryPayload = ReturnType<typeof trichatSummary>;
 type OperatorBriefPayload = ReturnType<typeof operatorBrief>;
+type ProviderBridgePayload = {
+  snapshot: ReturnType<typeof resolveProviderBridgeSnapshot>;
+  diagnostics: ReturnType<typeof resolveProviderBridgeDiagnostics>;
+};
 type RuntimeWorkersPayload = {
   count: number;
   sessions: RuntimeWorkerSessionRecord[];
@@ -58,6 +63,10 @@ function normalizeAgentId(value: unknown) {
   return String(value ?? "")
     .trim()
     .toLowerCase();
+}
+
+function asRecord(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 function dedupeAgentIds(values: unknown[]) {
@@ -135,6 +144,8 @@ function summarizeAutonomyMaintainState(storage: Storage) {
       last_eval_run_at: null,
       last_eval_run_id: null,
       last_eval_score: null,
+      last_provider_bridge_check_at: null,
+      provider_bridge_diagnostics: [],
       last_actions: [],
       last_attention: [],
       last_error: null,
@@ -408,6 +419,34 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
   const autonomyMaintain = safe("autonomy_maintain", summarizeAutonomyMaintainState(storage), () =>
     summarizeAutonomyMaintainState(storage)
   );
+  const autonomyMaintainState = asRecord(autonomyMaintain.state);
+  const persistedProviderBridgeDiagnostics = Array.isArray(autonomyMaintainState.provider_bridge_diagnostics)
+    ? autonomyMaintainState.provider_bridge_diagnostics
+    : [];
+  const providerBridge = safe<ProviderBridgePayload>(
+    "provider_bridge",
+    {
+      snapshot: resolveProviderBridgeSnapshot({ workspace_root: process.cwd() }),
+      diagnostics: {
+        generated_at:
+          String(autonomyMaintainState.last_provider_bridge_check_at ?? "").trim() || new Date().toISOString(),
+        cached: persistedProviderBridgeDiagnostics.length > 0,
+        diagnostics: persistedProviderBridgeDiagnostics,
+      },
+    },
+    () => ({
+      snapshot: resolveProviderBridgeSnapshot({ workspace_root: process.cwd() }),
+      diagnostics:
+        persistedProviderBridgeDiagnostics.length > 0
+          ? {
+              generated_at:
+                String(autonomyMaintainState.last_provider_bridge_check_at ?? "").trim() || new Date().toISOString(),
+              cached: true,
+              diagnostics: persistedProviderBridgeDiagnostics,
+            }
+          : resolveProviderBridgeDiagnostics({ workspace_root: process.cwd(), probe_timeout_ms: 1500 }),
+    })
+  );
   const kernel = input.include_kernel
     ? safe("kernel", buildKernelPayload(storage, taskSummaryPayload, agentSessions), () =>
         buildKernelPayload(storage, taskSummaryPayload, agentSessions)
@@ -417,6 +456,15 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
     const state = storage.getTriChatAutopilotState();
     return state ? { state } : {};
   });
+  const providerReadyAgentIds = providerBridge.diagnostics.diagnostics
+    .filter((entry) => entry.status === "connected" || entry.status === "configured")
+    .map((entry) => String(entry.office_agent_id || "").trim().toLowerCase())
+    .filter(Boolean);
+  if (providerReadyAgentIds.length) {
+    const rosterPayload = roster as Record<string, unknown>;
+    const activeAgentIds = Array.isArray(rosterPayload.active_agent_ids) ? (rosterPayload.active_agent_ids as unknown[]) : [];
+    rosterPayload.active_agent_ids = dedupeAgentIds([...activeAgentIds, ...providerReadyAgentIds]);
+  }
 
   return {
     generated_at: new Date().toISOString(),
@@ -438,6 +486,7 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
     autonomy_maintain: autonomyMaintain,
     runtime_workers: runtimeWorkers,
     operator_brief: operatorBriefPayload,
+    provider_bridge: providerBridge,
     source: "office.snapshot",
   };
 }

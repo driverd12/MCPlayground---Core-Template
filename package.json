@@ -63,6 +63,7 @@
     "autonomy:intake:shell": "./scripts/autonomy_intake_shell.sh",
     "brief:current": "./scripts/operator_brief.sh",
     "providers:status": "./scripts/provider_bridge.sh status",
+    "providers:diagnose": "./scripts/provider_bridge.sh diagnose",
     "providers:export": "./scripts/provider_bridge.sh export",
     "providers:install": "./scripts/provider_bridge.sh install",
     "dell:r450:doctor": "./scripts/dell_serial_doctor.sh",
