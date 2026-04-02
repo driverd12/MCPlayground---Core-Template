@@ -620,11 +620,58 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const autopilotConfig = asDict(autopilotState.config);
   const autopilotPool = asDict(autopilotState.effective_agent_pool);
   const autopilotExecution = asDict(lastTick.execution);
+  const executionTaskIds = dedupe([
+    ...asList(autopilotExecution.task_ids),
+    ...asList(autopilotSessionMetadata.last_execution_task_ids),
+  ]);
+  const hasLiveExecutionContext =
+    Boolean(currentTaskId) ||
+    Boolean(autopilotState.running) ||
+    Boolean(autopilotState.local_running) ||
+    Boolean(autopilotState.in_tick) ||
+    executionTaskIds.length > 0 ||
+    parseAnyInt(tmuxDashboard.queue_depth) > 0 ||
+    parseAnyInt(runtimeSummary.active_count) > 0;
   const autopilotCouncilAgentIds = dedupe([
     autopilotPool.lead_agent_id,
     ...asList(autopilotPool.council_agent_ids),
   ]);
   const autopilotSpecialistAgentIds = dedupe(asList(autopilotPool.specialist_agent_ids));
+  const currentObjective = hasLiveExecutionContext
+    ? compactSingleLine(
+        currentTask.objective ||
+          asDict(currentTask.payload).task_objective ||
+          String(autopilotConfig.objective ?? "") ||
+          String(autopilotSessionMetadata.last_source_task_objective ?? ""),
+        220
+      )
+    : "";
+  const currentDecisionSummary = hasLiveExecutionContext
+    ? String(latestDecision.decision_summary ?? latestTurn.decision_summary ?? "")
+    : "";
+  const currentSelectedStrategy = hasLiveExecutionContext
+    ? String(latestDecision.selected_strategy ?? latestTurn.selected_strategy ?? "")
+    : "";
+  const currentSelectedAgent = hasLiveExecutionContext
+    ? String(latestDecision.selected_agent ?? latestTurn.selected_agent ?? "")
+    : "";
+  const currentSpawnPath = hasLiveExecutionContext
+    ? compactSingleLine(
+        dedupe([
+          autopilotSessionMetadata.lead_agent_id || latestTurn.lead_agent_id || "ring-leader",
+          latestDecision.selected_agent || latestTurn.selected_agent,
+          asDict(latestDecision.selected_delegation_brief).delegate_agent_id ||
+            asDict(latestTurn.selected_delegation_brief).delegate_agent_id,
+        ]).join(" -> "),
+        120
+      )
+    : "";
+  const currentDelegationBrief =
+    hasLiveExecutionContext && asDict(latestDecision.selected_delegation_brief).delegate_agent_id
+      ? asDict(latestDecision.selected_delegation_brief)
+      : hasLiveExecutionContext
+        ? asDict(latestTurn.selected_delegation_brief)
+        : {};
 
   return {
     thread_id: threadId,
@@ -836,30 +883,14 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
       },
     },
     current: {
-      decision_summary: String(latestDecision.decision_summary ?? latestTurn.decision_summary ?? ""),
-      selected_strategy: String(latestDecision.selected_strategy ?? latestTurn.selected_strategy ?? ""),
-      selected_agent: String(latestDecision.selected_agent ?? latestTurn.selected_agent ?? ""),
+      decision_summary: currentDecisionSummary,
+      selected_strategy: currentSelectedStrategy,
+      selected_agent: currentSelectedAgent,
       current_task_id: currentTaskId,
-      current_objective: compactSingleLine(
-        currentTask.objective || asDict(currentTask.payload).task_objective || autopilotSessionMetadata.last_source_task_objective || "",
-        220
-      ),
-      spawn_path: compactSingleLine(
-        dedupe([
-          autopilotSessionMetadata.lead_agent_id || latestTurn.lead_agent_id || "ring-leader",
-          latestDecision.selected_agent || latestTurn.selected_agent,
-          asDict(latestDecision.selected_delegation_brief).delegate_agent_id || asDict(latestTurn.selected_delegation_brief).delegate_agent_id,
-        ]).join(" -> "),
-        120
-      ),
-      delegation_brief:
-        asDict(latestDecision.selected_delegation_brief).delegate_agent_id
-          ? asDict(latestDecision.selected_delegation_brief)
-          : asDict(latestTurn.selected_delegation_brief),
-      execution_task_ids: dedupe([
-        ...asList(asDict(lastTick.execution).task_ids),
-        ...asList(autopilotSessionMetadata.last_execution_task_ids),
-      ]),
+      current_objective: currentObjective,
+      spawn_path: currentSpawnPath,
+      delegation_brief: currentDelegationBrief,
+      execution_task_ids: executionTaskIds,
       execution_mode: String(autopilotExecution.mode ?? autopilotSessionMetadata.last_execution_mode ?? "none"),
       execute_enabled: Boolean(autopilotConfig.execute_enabled),
       council_agent_ids: autopilotCouncilAgentIds,

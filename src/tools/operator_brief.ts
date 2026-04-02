@@ -472,11 +472,15 @@ export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBr
         task_running_limit: 12,
       })
     : null;
+  const ringLeaderStatus = String(ringLeaderSession?.status ?? "")
+    .trim()
+    .toLowerCase();
+  const ringLeaderAppearsActive = ["active", "busy", "running", "supervising", "working"].includes(ringLeaderStatus);
   const currentObjective =
-    readString(ringLeaderSession?.metadata.last_source_task_objective) ??
-    delegationBrief.task_objective ??
     task?.objective ??
     goal?.objective ??
+    delegationBrief.task_objective ??
+    (ringLeaderAppearsActive ? readString(ringLeaderSession?.metadata.last_source_task_objective) : null) ??
     null;
   const executionBacklog = readStringArray(ringLeaderSession?.metadata.last_execution_task_ids);
   const runningTasks = storage.listTasks({ status: "running", limit: 25 });

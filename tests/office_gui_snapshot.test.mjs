@@ -338,6 +338,106 @@ test("office gui snapshot exposes live autopilot execution posture and council s
   ]);
 });
 
+test("office gui snapshot clears briefing current context when autopilot is idle and no live task is active", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    {
+      roster: {
+        active_agent_ids: ["ring-leader", "quality-guard"],
+        agents: [
+          { agent_id: "ring-leader", display_name: "Ring Leader", coordination_tier: "lead", role_lane: "orchestrator" },
+          { agent_id: "quality-guard", display_name: "Quality Guard", coordination_tier: "leaf", role_lane: "verifier" },
+        ],
+      },
+      workboard: {
+        latest_turn: {
+          turn_id: "turn-stale",
+          updated_at: new Date().toISOString(),
+          selected_agent: "quality-guard",
+          selected_strategy: "Inspect kernel state to check for weak evidence and risky assumptions",
+          decision_summary: "turn decision: selected quality-guard strategy.",
+        },
+      },
+      tmux: {
+        state: { enabled: true, worker_count: 1 },
+        dashboard: { queue_depth: 0, queue_age_seconds: 0, failure_count: 0 },
+      },
+      task_summary: { counts: {} },
+      task_running: { tasks: [] },
+      task_pending: { tasks: [] },
+      agent_sessions: {
+        sessions: [
+          {
+            session_id: "trichat-autopilot:ring-leader-main",
+            agent_id: "ring-leader",
+            client_kind: "trichat-autopilot",
+            status: "idle",
+            metadata: {
+              thread_id: "ring-leader-main",
+              last_source_task_objective:
+                "Complete orchestration functionality and autonomous MCP control for MCPlayground tonight.",
+              last_execution_mode: "advisory",
+            },
+          },
+        ],
+      },
+      adapter: {},
+      bus_tail: {},
+      trichat_summary: {},
+      learning: {},
+      autopilot: {
+        state: {
+          running: false,
+          local_running: false,
+          in_tick: false,
+          config: {
+            execute_enabled: false,
+            execute_backend: "tmux",
+            objective: "",
+          },
+          effective_agent_pool: {
+            lead_agent_id: "ring-leader",
+            specialist_agent_ids: ["quality-guard"],
+            council_agent_ids: ["ring-leader", "quality-guard"],
+          },
+          last_tick: {},
+        },
+      },
+      runtime_workers: { summary: { active_count: 0, session_count: 0 }, sessions: [] },
+      kernel: {
+        overview: {},
+        worker_fabric: { hosts: [] },
+        model_router: { backends: [] },
+        runtime_workers: {},
+        autonomy_maintain: {},
+        reaction_engine: {},
+        observability: {},
+        swarm: {},
+        workflow_exports: {},
+      },
+      autonomy_maintain: {
+        state: {},
+        runtime: {},
+        due: {},
+      },
+      provider_bridge: {
+        diagnostics: {
+          generated_at: "2026-04-01T17:00:00.000Z",
+          cached: true,
+          diagnostics: [],
+        },
+      },
+    },
+    { theme: "dark" }
+  );
+
+  assert.equal(snapshot.current.current_objective, "");
+  assert.equal(snapshot.current.decision_summary, "");
+  assert.equal(snapshot.current.selected_strategy, "");
+  assert.equal(snapshot.current.selected_agent, "");
+  assert.equal(snapshot.current.spawn_path, "");
+  assert.deepEqual(snapshot.current.delegation_brief, {});
+});
+
 test("office gui snapshot keeps active roster agents desk-ready when they are armed but idle", () => {
   const snapshot = buildOfficeGuiSnapshot(
     {

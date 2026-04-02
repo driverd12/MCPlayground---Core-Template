@@ -319,7 +319,7 @@
       '<div class="metric"><span>Runtime workers</span><strong>' + String(runtimeWorkers.active_count || 0) + " active / " + String(runtimeWorkers.session_count || 0) + ' total</strong></div>' +
       '<div class="metric"><span>Reaction engine</span><strong class="' + statusClass(reactionEngine.runtime_running) + '">' + (reactionEngine.runtime_running ? "running" : "down") + '</strong></div>' +
       '<div class="metric"><span>Maintain loop</span><strong class="' + statusClass(maintain.running) + '">' + (maintain.running ? "running" : "idle") + '</strong></div>' +
-      '<div class="metric"><span>Self-drive</span><strong>' + (maintain.self_drive_enabled ? (maintain.self_drive_last_run_at ? ("last " + relativeTime(maintain.self_drive_last_run_at)) : "armed") : "off") + '</strong></div>' +
+      '<div class="metric"><span>Maintain self-drive</span><strong>' + (maintain.self_drive_enabled ? (maintain.self_drive_last_run_at ? ("last " + relativeTime(maintain.self_drive_last_run_at)) : "armed") : "off") + '</strong></div>' +
       '<div class="metric"><span>Providers</span><strong>' + String(providers.connected_count || 0) + " connected / " + String((providers.connected_count || 0) + (providers.configured_count || 0) + (providers.disconnected_count || 0) + (providers.unavailable_count || 0)) + ' total</strong></div>' +
       '<div class="metric"><span>Desktop</span><strong>' + escapeHtml((desktop.enabled ? "enabled" : "disabled") + " · " + (desktop.observe_ready ? "eyes" : "no-eyes") + " / " + (desktop.act_ready ? "hands" : "no-hands") + " / " + (desktop.listen_ready ? "ears" : "no-ears")) + '</strong></div>' +
       '<div class="metric"><span>Swarm profiles</span><strong>' + String(swarm.active_profile_count || 0) + '</strong></div>' +
