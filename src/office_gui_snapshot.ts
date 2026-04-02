@@ -637,6 +637,18 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
     ...asList(autopilotPool.council_agent_ids),
   ]);
   const autopilotSpecialistAgentIds = dedupe(asList(autopilotPool.specialist_agent_ids));
+  const patientZeroAutonomousControlEnabled =
+    Boolean(patientZeroSummary.autonomy_enabled) &&
+    Boolean(maintainSelfDrive.enabled) &&
+    Boolean(autopilotConfig.execute_enabled);
+  const patientZeroFullControlAuthority =
+    Boolean(patientZeroSummary.enabled) &&
+    Boolean(desktopControlSummary.observe_ready) &&
+    Boolean(desktopControlSummary.act_ready) &&
+    Boolean(desktopControlSummary.listen_ready) &&
+    Boolean(patientZeroSummary.browser_ready) &&
+    Boolean(privilegedAccessSummary.root_execution_ready) &&
+    patientZeroAutonomousControlEnabled;
   const currentObjective = hasLiveExecutionContext
     ? compactSingleLine(
         currentTask.objective ||
@@ -795,6 +807,8 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         root_shell_enabled: Boolean(patientZeroSummary.root_shell_enabled),
         root_shell_reason: String(patientZeroSummary.root_shell_reason ?? ""),
         autonomy_enabled: Boolean(patientZeroSummary.autonomy_enabled),
+        autonomous_control_enabled: patientZeroAutonomousControlEnabled,
+        full_control_authority: patientZeroFullControlAuthority,
         armed_at: String(patientZeroSummary.armed_at ?? ""),
         armed_by: String(patientZeroSummary.armed_by ?? ""),
         last_operator_note: String(patientZeroSummary.last_operator_note ?? ""),
@@ -879,6 +893,8 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         warm_cache_stale: Boolean(kernelWarmCache.stale),
         disabled_feature_flags: parseAnyInt(kernelFeatureFlags.disabled_count),
         patient_zero_enabled: Boolean(patientZeroSummary.enabled),
+        patient_zero_autonomous_control_enabled: patientZeroAutonomousControlEnabled,
+        patient_zero_full_control_authority: patientZeroFullControlAuthority,
         privileged_root_ready: Boolean(privilegedAccessSummary.root_execution_ready),
       },
     },

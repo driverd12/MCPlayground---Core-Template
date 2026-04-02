@@ -202,15 +202,119 @@ test("office gui snapshot surfaces control-plane rollup signals", () => {
   assert.equal(snapshot.summary.desktop_control.last_frontmost_app, "Cursor");
   assert.equal(snapshot.summary.patient_zero.enabled, true);
   assert.equal(snapshot.summary.patient_zero.posture, "armed");
+  assert.equal(snapshot.summary.patient_zero.autonomous_control_enabled, false);
+  assert.equal(snapshot.summary.patient_zero.full_control_authority, false);
   assert.equal(snapshot.summary.patient_zero.browser_app, "Safari");
   assert.equal(snapshot.summary.patient_zero.browser_ready, true);
   assert.equal(snapshot.summary.patient_zero.root_shell_enabled, true);
   assert.equal(snapshot.summary.patient_zero.report.activity_summary.length, 2);
   assert.equal(snapshot.summary.control_plane.patient_zero_enabled, true);
+  assert.equal(snapshot.summary.control_plane.patient_zero_autonomous_control_enabled, false);
+  assert.equal(snapshot.summary.control_plane.patient_zero_full_control_authority, false);
   assert.equal(snapshot.summary.privileged_access.root_execution_ready, true);
   assert.equal(snapshot.summary.privileged_access.credential_verified, true);
   assert.equal(snapshot.summary.privileged_access.account, "mcagent");
   assert.equal(snapshot.summary.control_plane.privileged_root_ready, true);
+});
+
+test("office gui snapshot marks Patient Zero full authority only when autonomy and all local lanes are armed", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    {
+      roster: {
+        active_agent_ids: ["ring-leader"],
+        agents: [{ agent_id: "ring-leader", display_name: "Ring Leader", coordination_tier: "lead", role_lane: "ops" }],
+      },
+      workboard: {},
+      tmux: {},
+      task_summary: { counts: {} },
+      task_running: {},
+      task_pending: {},
+      agent_sessions: { sessions: [] },
+      adapter: {},
+      bus_tail: {},
+      trichat_summary: {},
+      learning: {},
+      autopilot: {
+        state: {
+          config: {
+            execute_enabled: true,
+          },
+        },
+      },
+      runtime_workers: { summary: {}, sessions: [] },
+      kernel: {
+        overview: {},
+        worker_fabric: { hosts: [] },
+        model_router: { backends: [] },
+        runtime_workers: {},
+        autonomy_maintain: {},
+        reaction_engine: {},
+        observability: {},
+        swarm: {},
+        workflow_exports: {},
+        desktop_control: {
+          summary: {
+            enabled: true,
+            stale: false,
+            observe_ready: true,
+            act_ready: true,
+            listen_ready: true,
+          },
+        },
+        patient_zero: {
+          summary: {
+            enabled: true,
+            posture: "armed",
+            severity: "critical",
+            permission_profile: "high_risk",
+            browser_app: "Safari",
+            browser_ready: true,
+            root_shell_enabled: true,
+            root_shell_reason: "Privileged root lane ready via mcagent.",
+            autonomy_enabled: true,
+          },
+        },
+        privileged_access: {
+          summary: {
+            root_execution_ready: true,
+            credential_verified: true,
+            account: "mcagent",
+            target_user: "root",
+            patient_zero_armed: true,
+            secret_present: true,
+            helper_ready: true,
+            blockers: [],
+          },
+        },
+      },
+      patient_zero: {
+        report: {
+          activity_summary: [],
+        },
+      },
+      autonomy_maintain: {
+        state: {},
+        runtime: {},
+        due: {},
+        self_drive: {
+          enabled: true,
+        },
+      },
+      provider_bridge: {
+        diagnostics: {
+          generated_at: "2026-04-01T17:00:00.000Z",
+          cached: true,
+          diagnostics: [],
+        },
+      },
+    },
+    { theme: "dark" }
+  );
+
+  assert.equal(snapshot.summary.patient_zero.autonomous_control_enabled, true);
+  assert.equal(snapshot.summary.patient_zero.full_control_authority, true);
+  assert.equal(snapshot.summary.control_plane.patient_zero_autonomous_control_enabled, true);
+  assert.equal(snapshot.summary.control_plane.patient_zero_full_control_authority, true);
 });
 
 test("office gui snapshot exposes live autopilot execution posture and council state", () => {

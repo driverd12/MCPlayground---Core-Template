@@ -337,7 +337,11 @@ test("patient.zero arms and disarms explicit elevated local control with an oper
   const dbPath = path.join(tempDir, "hub.sqlite");
   let mutationCounter = 0;
 
-  const { client } = await openClient(tempDir, dbPath);
+  const { client } = await openClient(tempDir, dbPath, {
+    MCP_PRIVILEGED_EXEC_DRY_RUN: "1",
+    MCP_PRIVILEGED_EXEC_TEST_ACCOUNT_EXISTS: "1",
+    MCP_PRIVILEGED_EXEC_TEST_SECRET: "integration-secret",
+  });
   try {
     const initial = await callTool(client, "patient.zero", {
       action: "status",
@@ -358,16 +362,31 @@ test("patient.zero arms and disarms explicit elevated local control with an oper
     assert.equal(armed.summary.posture, "armed");
     assert.equal(typeof armed.summary.browser_ready, "boolean");
     assert.equal(armed.summary.root_shell_enabled, true);
+    assert.equal(armed.summary.autonomous_control_enabled, true);
+    assert.equal(armed.summary.full_control_authority, false);
     assert.equal(armed.summary.last_operator_note, "Taking over while the operator steps away.");
     assert.equal(armed.desktop_control.state.enabled, true);
     assert.equal(armed.desktop_control.state.allow_observe, true);
     assert.equal(armed.desktop_control.state.allow_act, true);
     assert.equal(armed.desktop_control.state.allow_listen, true);
+    assert.equal(armed.autonomy_control.maintain.self_drive_enabled, true);
+    assert.equal(armed.autonomy_control.autopilot.execute_enabled, true);
     assert.equal(armed.report.activity_summary.length >= 0, true);
+
+    const maintain = await callTool(client, "autonomy.maintain", {
+      action: "status",
+    });
+    assert.equal(maintain.self_drive.enabled, true);
+
+    const autopilot = await callTool(client, "trichat.autopilot", {
+      action: "status",
+    });
+    assert.equal(autopilot.config.execute_enabled, true);
 
     const kernel = await callTool(client, "kernel.summary", {});
     assert.equal(kernel.patient_zero.summary.enabled, true);
     assert.equal(kernel.overview.patient_zero.posture, "armed");
+    assert.equal(kernel.overview.patient_zero.autonomy_enabled, true);
 
     const disarmed = await callTool(client, "patient.zero", {
       action: "disable",
@@ -382,6 +401,9 @@ test("patient.zero arms and disarms explicit elevated local control with an oper
     assert.equal(disarmed.desktop_control.state.allow_observe, false);
     assert.equal(disarmed.desktop_control.state.allow_act, false);
     assert.equal(disarmed.desktop_control.state.allow_listen, false);
+    assert.equal(disarmed.summary.autonomous_control_enabled, false);
+    assert.equal(disarmed.autonomy_control.maintain.self_drive_enabled, false);
+    assert.equal(disarmed.autonomy_control.autopilot.execute_enabled, false);
     assert.equal(disarmed.summary.last_operator_note, "Operator back at the keyboard.");
   } finally {
     await closeClient(client);

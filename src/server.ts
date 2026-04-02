@@ -3086,7 +3086,7 @@ registerTool(
   "patient.zero",
   "Arm or disarm an explicit high-risk local-control posture with operator-visible desktop access and audit reporting.",
   patientZeroSchema,
-  (input) => patientZeroControl(storage, input)
+  (input) => patientZeroControl(storage, invokeRegisteredTool, input)
 );
 
 registerTool(

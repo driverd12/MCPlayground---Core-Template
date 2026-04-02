@@ -416,6 +416,8 @@ function summarizeControlPlane(
     enabled: typeof patientZeroSummaryRecord.enabled === "boolean" ? patientZeroSummaryRecord.enabled : false,
     posture: readString(patientZeroSummaryRecord.posture) ?? "standby",
     permission_profile: readString(patientZeroSummaryRecord.permission_profile) ?? "high_risk",
+    autonomy_enabled:
+      typeof patientZeroSummaryRecord.autonomy_enabled === "boolean" ? patientZeroSummaryRecord.autonomy_enabled : false,
     browser_ready: typeof patientZeroSummaryRecord.browser_ready === "boolean" ? patientZeroSummaryRecord.browser_ready : false,
     root_shell_enabled:
       typeof patientZeroSummaryRecord.root_shell_enabled === "boolean" ? patientZeroSummaryRecord.root_shell_enabled : false,
@@ -524,7 +526,7 @@ export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBr
     `- warm_cache: ${controlPlaneSummary.warm_cache.enabled ? (controlPlaneSummary.warm_cache.stale ? "stale" : "warm") : "disabled"}`,
     `- disabled_feature_flags: ${controlPlaneSummary.feature_flags.disabled_count}/${controlPlaneSummary.feature_flags.total_count}`,
     `- desktop_control: ${controlPlaneSummary.desktop_control.enabled ? `enabled (eyes=${controlPlaneSummary.desktop_control.observe_ready ? "yes" : "no"}, hands=${controlPlaneSummary.desktop_control.act_ready ? "yes" : "no"}, ears=${controlPlaneSummary.desktop_control.listen_ready ? "yes" : "no"})` : "disabled"}`,
-    `- patient_zero: ${controlPlaneSummary.patient_zero.enabled ? `${controlPlaneSummary.patient_zero.posture} (profile=${controlPlaneSummary.patient_zero.permission_profile}, browser=${controlPlaneSummary.patient_zero.browser_ready ? "yes" : "no"}, root=${controlPlaneSummary.patient_zero.root_shell_enabled ? "yes" : "no"})` : "standby"}`,
+    `- patient_zero: ${controlPlaneSummary.patient_zero.enabled ? `${controlPlaneSummary.patient_zero.posture} (profile=${controlPlaneSummary.patient_zero.permission_profile}, autonomy=${controlPlaneSummary.patient_zero.autonomy_enabled ? "yes" : "no"}, browser=${controlPlaneSummary.patient_zero.browser_ready ? "yes" : "no"}, root=${controlPlaneSummary.patient_zero.root_shell_enabled ? "yes" : "no"})` : "standby"}`,
     `- privileged_access: ${
       controlPlaneSummary.privileged_access.root_execution_ready
         ? `ready via ${controlPlaneSummary.privileged_access.account}`

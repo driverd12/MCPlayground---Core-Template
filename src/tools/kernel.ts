@@ -2217,6 +2217,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
         enabled: patientZeroSummary.enabled,
         posture: patientZeroSummary.posture,
         permission_profile: patientZeroSummary.permission_profile,
+        autonomy_enabled: patientZeroSummary.autonomy_enabled,
         browser_ready: patientZeroSummary.browser_ready,
         root_shell_enabled: patientZeroSummary.root_shell_enabled,
       },

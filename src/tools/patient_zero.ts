@@ -2,8 +2,10 @@ import { z } from "zod";
 import { summarizeDesktopControlState } from "../desktop_control_plane.js";
 import { summarizePatientZeroState } from "../patient_zero_plane.js";
 import { Storage } from "../storage.js";
+import { getAutonomyMaintainRuntimeStatus } from "./autonomy_maintain.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { buildPrivilegedAccessStatus, verifyPrivilegedAccess } from "./privileged_exec.js";
+import { getAutopilotStatus } from "./trichat.js";
 
 const sourceSchema = z.object({
   source_client: z.string().optional(),
@@ -48,11 +50,206 @@ function actorLabel(input: z.infer<typeof patientZeroSchema>) {
   return String(input.source_agent || input.source_client || "operator").trim() || "operator";
 }
 
+function deriveMutation(base: { idempotency_key: string; side_effect_fingerprint: string }, phase: string) {
+  const safePhase = phase.replace(/[^a-z0-9._:-]+/gi, "-");
+  return {
+    idempotency_key: `${base.idempotency_key}:${safePhase}`,
+    side_effect_fingerprint: `${base.side_effect_fingerprint}:${safePhase}`,
+  };
+}
+
+function buildAutonomyControlStatus(storage: Storage) {
+  const maintainState = storage.getAutonomyMaintainState();
+  const maintainRuntime = getAutonomyMaintainRuntimeStatus();
+  const autopilot = getAutopilotStatus(storage);
+  const maintainSelfDriveEnabled = Boolean(
+    maintainState?.enable_self_drive ?? maintainRuntime.config.enable_self_drive
+  );
+  const autopilotExecuteEnabled = Boolean(autopilot.config.execute_enabled);
+  return {
+    maintain: {
+      daemon_enabled: Boolean(maintainState?.enabled),
+      running: Boolean(maintainRuntime.running),
+      self_drive_enabled: maintainSelfDriveEnabled,
+      last_self_drive_at: maintainState?.last_self_drive_at ?? null,
+      last_self_drive_goal_id: maintainState?.last_self_drive_goal_id ?? null,
+    },
+    autopilot: {
+      daemon_enabled: Boolean(autopilot.expected_running),
+      running: Boolean(autopilot.running),
+      execute_enabled: autopilotExecuteEnabled,
+      away_mode: String(autopilot.config.away_mode ?? "normal"),
+      thread_id: String(autopilot.config.thread_id ?? ""),
+    },
+    autonomous_control_enabled: maintainSelfDriveEnabled && autopilotExecuteEnabled,
+  };
+}
+
+function setPersistedMaintainSelfDrive(storage: Storage, enabled: boolean) {
+  const current = storage.getAutonomyMaintainState();
+  if (!current) {
+    return null;
+  }
+  return storage.setAutonomyMaintainState({
+    enabled: current.enabled,
+    local_host_id: current.local_host_id,
+    interval_seconds: current.interval_seconds,
+    learning_review_interval_seconds: current.learning_review_interval_seconds,
+    enable_self_drive: enabled,
+    self_drive_cooldown_seconds: current.self_drive_cooldown_seconds,
+    run_eval_if_due: current.run_eval_if_due,
+    eval_interval_seconds: current.eval_interval_seconds,
+    eval_suite_id: current.eval_suite_id,
+    minimum_eval_score: current.minimum_eval_score,
+    last_run_at: current.last_run_at,
+    last_bootstrap_ready_at: current.last_bootstrap_ready_at,
+    last_goal_autorun_daemon_at: current.last_goal_autorun_daemon_at,
+    last_tmux_maintained_at: current.last_tmux_maintained_at,
+    last_learning_review_at: current.last_learning_review_at,
+    last_learning_entry_count: current.last_learning_entry_count,
+    last_learning_active_agent_count: current.last_learning_active_agent_count,
+    last_eval_run_at: current.last_eval_run_at,
+    last_eval_run_id: current.last_eval_run_id,
+    last_eval_score: current.last_eval_score,
+    last_eval_dependency_fingerprint: current.last_eval_dependency_fingerprint,
+    last_observability_ship_at: current.last_observability_ship_at,
+    last_provider_bridge_check_at: current.last_provider_bridge_check_at,
+    provider_bridge_diagnostics: current.provider_bridge_diagnostics,
+    last_self_drive_at: current.last_self_drive_at,
+    last_self_drive_goal_id: current.last_self_drive_goal_id,
+    last_self_drive_fingerprint: current.last_self_drive_fingerprint,
+    last_actions: current.last_actions,
+    last_attention: current.last_attention,
+    last_error: current.last_error,
+  });
+}
+
+function setPersistedAutopilotExecute(storage: Storage, enabled: boolean) {
+  const current = storage.getTriChatAutopilotState();
+  if (!current) {
+    return null;
+  }
+  return storage.setTriChatAutopilotState({
+    enabled: current.enabled,
+    away_mode: current.away_mode,
+    interval_seconds: current.interval_seconds,
+    thread_id: current.thread_id,
+    thread_title: current.thread_title,
+    thread_status: current.thread_status,
+    objective: current.objective,
+    lead_agent_id: current.lead_agent_id,
+    specialist_agent_ids: current.specialist_agent_ids,
+    max_rounds: current.max_rounds,
+    min_success_agents: current.min_success_agents,
+    bridge_timeout_seconds: current.bridge_timeout_seconds,
+    bridge_dry_run: current.bridge_dry_run,
+    execute_enabled: enabled,
+    command_allowlist: current.command_allowlist,
+    execute_backend: current.execute_backend,
+    tmux_session_name: current.tmux_session_name,
+    tmux_worker_count: current.tmux_worker_count,
+    tmux_max_queue_per_worker: current.tmux_max_queue_per_worker,
+    tmux_auto_scale_workers: current.tmux_auto_scale_workers,
+    tmux_sync_after_dispatch: current.tmux_sync_after_dispatch,
+    confidence_threshold: current.confidence_threshold,
+    max_consecutive_errors: current.max_consecutive_errors,
+    lock_key: current.lock_key,
+    lock_lease_seconds: current.lock_lease_seconds,
+    adr_policy: current.adr_policy,
+    pause_reason: current.pause_reason,
+  });
+}
+
+async function syncAutonomyControl(
+  storage: Storage,
+  invokeTool: (toolName: string, input: Record<string, unknown>) => Promise<unknown>,
+  input: z.infer<typeof patientZeroSchema>,
+  enabled: boolean
+) {
+  const warnings: string[] = [];
+  const maintainState = storage.getAutonomyMaintainState();
+  const maintainRuntime = getAutonomyMaintainRuntimeStatus();
+  const autopilotStatus = getAutopilotStatus(storage);
+  const autopilotState = storage.getTriChatAutopilotState();
+  const source_client = input.source_client ?? "patient.zero";
+  const source_agent = input.source_agent ?? "operator";
+  const source_model = input.source_model;
+
+  try {
+    if (enabled) {
+      await Promise.resolve(
+        invokeTool("autonomy.maintain", {
+          action: "start",
+          mutation: deriveMutation(input.mutation!, "autonomy.maintain.start"),
+          enable_self_drive: true,
+          run_immediately: false,
+          source_client,
+          source_agent,
+          source_model,
+        })
+      );
+    } else if (maintainRuntime.running || maintainState?.enabled) {
+      await Promise.resolve(
+        invokeTool("autonomy.maintain", {
+          action: "start",
+          mutation: deriveMutation(input.mutation!, "autonomy.maintain.advisory"),
+          enable_self_drive: false,
+          run_immediately: false,
+          source_client,
+          source_agent,
+          source_model,
+        })
+      );
+    } else {
+      setPersistedMaintainSelfDrive(storage, false);
+    }
+  } catch (error) {
+    warnings.push(`autonomy.maintain: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    if (enabled) {
+      await Promise.resolve(
+        invokeTool("trichat.autopilot", {
+          action: "start",
+          mutation: deriveMutation(input.mutation!, "trichat.autopilot.start"),
+          execute_enabled: true,
+          run_immediately: false,
+        })
+      );
+    } else if (autopilotStatus.running || autopilotState?.enabled) {
+      await Promise.resolve(
+        invokeTool("trichat.autopilot", {
+          action: "start",
+          mutation: deriveMutation(input.mutation!, "trichat.autopilot.advisory"),
+          execute_enabled: false,
+          run_immediately: false,
+        })
+      );
+    } else {
+      setPersistedAutopilotExecute(storage, false);
+    }
+  } catch (error) {
+    warnings.push(`trichat.autopilot: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return warnings;
+}
+
 export function buildPatientZeroReport(storage: Storage) {
   const state = storage.getPatientZeroState();
   const desktopState = storage.getDesktopControlState();
   const privilegedAccess = buildPrivilegedAccessStatus(storage);
   const summary = summarizePatientZeroState(state, desktopState, privilegedAccess.summary as Record<string, unknown>);
+  const autonomyControl = buildAutonomyControlStatus(storage);
+  const fullControlAuthority =
+    summary.enabled &&
+    summary.observe_ready &&
+    summary.act_ready &&
+    summary.listen_ready &&
+    summary.browser_ready &&
+    summary.root_shell_enabled &&
+    autonomyControl.autonomous_control_enabled;
   const since = startOfTodayIso();
   const events = storage.listRuntimeEvents({ since, limit: 8 });
   const eventSummary = storage.summarizeRuntimeEvents({ since });
@@ -63,6 +260,7 @@ export function buildPatientZeroReport(storage: Storage) {
   const autopilot = storage.getTriChatAutopilotState();
 
   const recentActivity = [
+    `Autonomy: ${autonomyControl.autonomous_control_enabled ? "armed" : "advisory only"} · self-drive ${autonomyControl.maintain.self_drive_enabled ? "on" : "off"} · autopilot exec ${autonomyControl.autopilot.execute_enabled ? "on" : "off"}`,
     ...runningTasks.map((task) => `Running: ${compactText(task.objective || task.task_id, 92)}`),
     ...pendingTasks.slice(0, Math.max(0, 3 - runningTasks.length)).map((task) => `Queued: ${compactText(task.objective || task.task_id, 92)}`),
     ...events
@@ -71,20 +269,26 @@ export function buildPatientZeroReport(storage: Storage) {
   ].slice(0, 6);
 
   const stance = summary.enabled
-    ? "Armed for operator-visible high-risk local control within the existing MCP and macOS permission boundary."
+    ? fullControlAuthority
+      ? "Armed for operator-authorized full local control across desktop, browser, root, and autonomous execution lanes."
+      : "Armed for operator-authorized high-risk local control, but one or more requested execution lanes are not fully ready yet."
     : "Standing by in bounded autonomy mode until an operator explicitly arms elevated local control.";
   const priorityPull =
     runningTasks[0]?.objective ??
     autopilot?.objective ??
     "Keep the local control plane truthful, bounded, and ready for the next delegated objective.";
   const concern =
-    todayErrorCount > 0
+    !fullControlAuthority && summary.enabled
+      ? `Full-control posture is armed, but autonomy=${autonomyControl.autonomous_control_enabled ? "ready" : "not-ready"} and root=${summary.root_shell_enabled ? "ready" : "not-ready"}.`
+      : todayErrorCount > 0
       ? `Recent runtime errors detected today: ${todayErrorCount} event(s).`
       : desktopState.last_error
         ? `Desktop control reported a recent error: ${compactText(desktopState.last_error, 96)}`
         : "No fresh runtime error spike is visible in today’s event feed.";
   const desire = summary.enabled
-    ? "Convert explicit operator intent into end-to-end bounded execution with a clean audit trail."
+    ? fullControlAuthority
+      ? "Carry delegated work from start to finish with visible audit trails, bounded execution records, and clean operator hand-back."
+      : "Finish bringing every requested execution lane online without overstating current authority."
     : "Stay ready, keep the evidence trail tight, and avoid pretending to have authority that was not explicitly armed.";
 
   return {
@@ -95,6 +299,7 @@ export function buildPatientZeroReport(storage: Storage) {
     priority_pull: priorityPull,
     concern,
     desire,
+    full_control_authority: fullControlAuthority,
     activity_count: events.length,
     activity_summary: recentActivity,
     latest_runtime_events: events.slice(-5).map((event) => ({
@@ -129,20 +334,38 @@ function buildPayload(storage: Storage) {
   const state = storage.getPatientZeroState();
   const desktopState = storage.getDesktopControlState();
   const privilegedAccess = buildPrivilegedAccessStatus(storage);
+  const autonomyControl = buildAutonomyControlStatus(storage);
+  const summary = summarizePatientZeroState(state, desktopState, privilegedAccess.summary as Record<string, unknown>);
   return {
     state,
-    summary: summarizePatientZeroState(state, desktopState, privilegedAccess.summary as Record<string, unknown>),
+    summary: {
+      ...summary,
+      autonomous_control_enabled: autonomyControl.autonomous_control_enabled,
+      full_control_authority:
+        summary.enabled &&
+        summary.observe_ready &&
+        summary.act_ready &&
+        summary.listen_ready &&
+        summary.browser_ready &&
+        summary.root_shell_enabled &&
+        autonomyControl.autonomous_control_enabled,
+    },
     desktop_control: {
       state: desktopState,
       summary: summarizeDesktopControlState(desktopState),
     },
+    autonomy_control: autonomyControl,
     privileged_access: privilegedAccess,
     report: buildPatientZeroReport(storage),
     source: "patient.zero",
   };
 }
 
-export function patientZeroControl(storage: Storage, input: z.infer<typeof patientZeroSchema>) {
+export async function patientZeroControl(
+  storage: Storage,
+  invokeTool: (toolName: string, input: Record<string, unknown>) => Promise<unknown>,
+  input: z.infer<typeof patientZeroSchema>
+) {
   if (input.action === "status" || input.action === "report") {
     return buildPayload(storage);
   }
@@ -152,12 +375,13 @@ export function patientZeroControl(storage: Storage, input: z.infer<typeof patie
     tool_name: "patient.zero",
     mutation: input.mutation!,
     payload: input,
-    execute: () => {
+    execute: async () => {
       const now = new Date().toISOString();
       const note = input.operator_note?.trim() || null;
       if (input.action === "enable") {
         const state = storage.setPatientZeroState({
           enabled: true,
+          autonomy_enabled: true,
           armed_at: now,
           armed_by: actorLabel(input),
           disarmed_at: null,
@@ -171,12 +395,15 @@ export function patientZeroControl(storage: Storage, input: z.infer<typeof patie
           allow_listen: true,
           last_error: null,
         });
+        const syncWarnings = await syncAutonomyControl(storage, invokeTool, input, true);
         recordPatientZeroEvent(storage, input, "enabled", {
           permission_profile: state.permission_profile,
           desktop_control_enabled: desktopState.enabled,
           allow_observe: desktopState.allow_observe,
           allow_act: desktopState.allow_act,
           allow_listen: desktopState.allow_listen,
+          autonomy_enabled: state.autonomy_enabled,
+          autonomy_sync_warnings: syncWarnings,
           operator_note: note,
         });
         verifyPrivilegedAccess(storage, input);
@@ -185,6 +412,7 @@ export function patientZeroControl(storage: Storage, input: z.infer<typeof patie
 
       const state = storage.setPatientZeroState({
         enabled: false,
+        autonomy_enabled: false,
         disarmed_at: now,
         disarmed_by: actorLabel(input),
         last_operator_note: note,
@@ -195,9 +423,12 @@ export function patientZeroControl(storage: Storage, input: z.infer<typeof patie
         allow_act: false,
         allow_listen: false,
       });
+      const syncWarnings = await syncAutonomyControl(storage, invokeTool, input, false);
       recordPatientZeroEvent(storage, input, "disabled", {
         permission_profile: state.permission_profile,
         desktop_control_enabled: desktopState.enabled,
+        autonomy_enabled: state.autonomy_enabled,
+        autonomy_sync_warnings: syncWarnings,
         operator_note: note,
       });
       return buildPayload(storage);

@@ -60,7 +60,7 @@ export function getDefaultPatientZeroState(): PatientZeroStateRecord {
   return {
     enabled: false,
     permission_profile: "high_risk",
-    autonomy_enabled: true,
+    autonomy_enabled: false,
     allow_observe: true,
     allow_act: true,
     allow_listen: true,

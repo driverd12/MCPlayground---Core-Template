@@ -196,6 +196,7 @@
       [
         "Patient Zero",
         (patientZero.enabled ? "armed" : "standby") +
+          " | autonomy " + (patientZero.autonomous_control_enabled ? "yes" : "no") +
           " | browser " + (patientZero.browser_ready ? "yes" : "no") +
           " | root " + (patientZero.root_shell_enabled ? "yes" : "manual")
       ],
@@ -322,6 +323,7 @@
       '<div class="metric"><span>Maintain self-drive</span><strong>' + (maintain.self_drive_enabled ? (maintain.self_drive_last_run_at ? ("last " + relativeTime(maintain.self_drive_last_run_at)) : "armed") : "off") + '</strong></div>' +
       '<div class="metric"><span>Providers</span><strong>' + String(providers.connected_count || 0) + " connected / " + String((providers.connected_count || 0) + (providers.configured_count || 0) + (providers.disconnected_count || 0) + (providers.unavailable_count || 0)) + ' total</strong></div>' +
       '<div class="metric"><span>Desktop</span><strong>' + escapeHtml((desktop.enabled ? "enabled" : "disabled") + " · " + (desktop.observe_ready ? "eyes" : "no-eyes") + " / " + (desktop.act_ready ? "hands" : "no-hands") + " / " + (desktop.listen_ready ? "ears" : "no-ears")) + '</strong></div>' +
+      '<div class="metric"><span>Patient Zero control</span><strong>' + escapeHtml((summary.patient_zero && summary.patient_zero.full_control_authority) ? "full authority" : ((summary.patient_zero && summary.patient_zero.autonomous_control_enabled) ? "autonomy armed" : "bounded")) + '</strong></div>' +
       '<div class="metric"><span>Swarm profiles</span><strong>' + String(swarm.active_profile_count || 0) + '</strong></div>' +
       '<div class="metric"><span>Workflow exports</span><strong>' + String(workflowExports.bundle_count || 0) + "</strong></div>" +
       "</div></section>" +
@@ -386,6 +388,12 @@
       ["Ears", desktop.listen_ready ? "Microphone/listen lane available." : "Listen lane not ready."],
       ["Browser", patientZero.browser_ready ? String(patientZero.browser_app || "Safari") + " ready for operator-directed work." : String(patientZero.browser_app || "Safari") + " not currently ready."],
       [
+        "Autonomy",
+        patientZero.autonomous_control_enabled
+          ? "Maintain self-drive and autopilot execution are armed for independent local work."
+          : "Autonomous execution is not fully armed yet."
+      ],
+      [
         "Root Shell",
         privilegedAccess.root_execution_ready
           ? "Root execution ready through " + String(privilegedAccess.account || "mcagent") + "."
@@ -405,6 +413,7 @@
       '<p>' + escapeHtml(report.scope_notice || "Operator-visible elevated control surface for local execution.") + '</p>' +
       '<div class="patient-zero-banner__meta">' +
       '<span class="tag ' + (enabled ? "tag--block" : "tag--talk") + '">' + escapeHtml(String(patientZero.permission_profile || "high_risk")) + '</span>' +
+      '<span class="tag">' + escapeHtml("authority " + (patientZero.full_control_authority ? "full" : (patientZero.autonomous_control_enabled ? "autonomous" : "partial"))) + '</span>' +
       '<span class="tag">' + escapeHtml("armed_by " + (patientZero.armed_by || "n/a")) + '</span>' +
       '<span class="tag">' + escapeHtml("armed_at " + (patientZero.armed_at || "n/a")) + '</span>' +
       "</div>" +
