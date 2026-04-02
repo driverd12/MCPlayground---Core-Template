@@ -66,6 +66,15 @@ else:
 PY
 }
 
+capture_status_json_parallel() {
+  local output_file="$1"
+  shift
+  (
+    capture_status_json "$@" >"${output_file}"
+  ) &
+  printf '%s\n' "$!"
+}
+
 bootout_if_exists() {
   local plist="$1"
   if [[ -f "${plist}" ]]; then
@@ -196,10 +205,20 @@ if is_loaded "${KEEPALIVE_LABEL}"; then KEEPALIVE_AGENT_LOADED=true; fi
 if is_loaded "${MLX_LABEL}"; then MLX_AGENT_LOADED=true; fi
 
 AUTO_SNAPSHOT_STATUS="{}"
-AUTO_SNAPSHOT_STATUS="$(capture_status_json "${REPO_ROOT}/scripts/imprint_auto_snapshot_ctl.sh" status)"
-
 AUTONOMY_STATUS="{}"
-AUTONOMY_STATUS="$(capture_status_json "${REPO_ROOT}/scripts/autonomy_ctl.sh" status)"
+AUTO_SNAPSHOT_STATUS_FILE="$(mktemp)"
+AUTONOMY_STATUS_FILE="$(mktemp)"
+AUTO_SNAPSHOT_PID="$(capture_status_json_parallel "${AUTO_SNAPSHOT_STATUS_FILE}" "${REPO_ROOT}/scripts/imprint_auto_snapshot_ctl.sh" status)"
+AUTONOMY_STATUS_PID="$(capture_status_json_parallel "${AUTONOMY_STATUS_FILE}" "${REPO_ROOT}/scripts/autonomy_ctl.sh" status)"
+wait "${AUTO_SNAPSHOT_PID}" >/dev/null 2>&1 || true
+wait "${AUTONOMY_STATUS_PID}" >/dev/null 2>&1 || true
+if [[ -s "${AUTO_SNAPSHOT_STATUS_FILE}" ]]; then
+  AUTO_SNAPSHOT_STATUS="$(cat "${AUTO_SNAPSHOT_STATUS_FILE}")"
+fi
+if [[ -s "${AUTONOMY_STATUS_FILE}" ]]; then
+  AUTONOMY_STATUS="$(cat "${AUTONOMY_STATUS_FILE}")"
+fi
+rm -f "${AUTO_SNAPSHOT_STATUS_FILE}" "${AUTONOMY_STATUS_FILE}"
 
 node --input-type=module - <<'NODE' \
 "${ACTION}" \

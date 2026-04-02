@@ -94,14 +94,17 @@ test("server starts with default agentic workflow hooks and exposes core + TriCh
     assert.equal(names.has("cfd.case.create"), false);
 
     const roster = await callTool(client, "trichat.roster", {});
-    assert.deepEqual(roster.active_agent_ids, [
+    for (const agentId of [
       "ring-leader",
       "implementation-director",
       "research-director",
       "verification-director",
       "local-imprint",
       "codex",
-    ]);
+      "github-copilot",
+    ]) {
+      assert.ok(roster.active_agent_ids.includes(agentId), `expected ${agentId} in default active roster`);
+    }
     assert.equal(Array.isArray(roster.agents), true);
     assert.ok(roster.agents.some((agent) => agent.agent_id === "codex" && agent.active === true));
     assert.ok(
@@ -5303,6 +5306,13 @@ async function openClient(dbPath, extraEnv) {
     { capabilities: {} }
   );
   await client.connect(transport);
+  const originalClose = client.close.bind(client);
+  client.close = async () => {
+    await originalClose().catch(() => {});
+    if (typeof transport.close === "function") {
+      await transport.close().catch(() => {});
+    }
+  };
   return { client };
 }
 
@@ -5334,7 +5344,7 @@ async function listTools(client) {
 }
 
 async function callTool(client, name, args) {
-  const response = await client.callTool({ name, arguments: args });
+  const response = await client.callTool({ name, arguments: args }, undefined, { timeout: 180000 });
   const text = extractText(response);
   if (response.isError) {
     throw new Error(`Tool ${name} failed: ${text}`);

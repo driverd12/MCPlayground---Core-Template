@@ -1385,6 +1385,13 @@ async function openClient(extraEnv) {
     { capabilities: {} }
   );
   await client.connect(transport);
+  const originalClose = client.close.bind(client);
+  client.close = async () => {
+    await originalClose().catch(() => {});
+    if (typeof transport.close === "function") {
+      await transport.close().catch(() => {});
+    }
+  };
   return { client };
 }
 
@@ -1402,10 +1409,14 @@ function inheritedEnv(extra) {
 }
 
 async function callTool(client, name, args) {
-  const result = await client.callTool({
-    name,
-    arguments: args,
-  });
+  const result = await client.callTool(
+    {
+      name,
+      arguments: args,
+    },
+    undefined,
+    { timeout: 180000 }
+  );
   const first = result.content?.[0];
   assert.equal(first?.type, "text");
   return JSON.parse(first.text);

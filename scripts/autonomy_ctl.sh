@@ -131,6 +131,35 @@ call_tool_json() {
     --cwd "${REPO_ROOT}"
 }
 
+call_tool_json_retry_on_timeout() {
+  local tool_name="${1}"
+  local args_json="${2}"
+  local max_attempts="${3:-3}"
+  local attempt=1
+  local delay_seconds=1
+
+  while true; do
+    local stdout_file stderr_file status stderr_text
+    stdout_file="$(mktemp)"
+    stderr_file="$(mktemp)"
+    if call_tool_json "${tool_name}" "${args_json}" >"${stdout_file}" 2>"${stderr_file}"; then
+      cat "${stdout_file}"
+      rm -f "${stdout_file}" "${stderr_file}"
+      return 0
+    fi
+    status=$?
+    stderr_text="$(cat "${stderr_file}")"
+    rm -f "${stdout_file}" "${stderr_file}"
+    if (( attempt >= max_attempts )) || ! grep -qiE 'request timed out|timed out' <<<"${stderr_text}"; then
+      printf '%s\n' "${stderr_text}" >&2
+      return "${status}"
+    fi
+    sleep "${delay_seconds}"
+    delay_seconds=$((delay_seconds * 2))
+    attempt=$((attempt + 1))
+  done
+}
+
 start_maintain_entry() {
   local quiet="${1:-1}"
   local args_json
@@ -210,6 +239,7 @@ const stamp = Date.now();
 process.stdout.write(
   JSON.stringify({
     action: "ensure",
+    fast: true,
     mutation: {
       idempotency_key: `autonomy-bootstrap-ensure-${stamp}-${process.pid}`,
       side_effect_fingerprint: `autonomy-bootstrap-ensure-${stamp}-${process.pid}`,
@@ -225,9 +255,9 @@ process.stdout.write(
 NODE
 )"
   if [[ "${quiet}" == "1" ]]; then
-    call_tool_json autonomy.bootstrap "${args_json}" >/dev/null
+    call_tool_json_retry_on_timeout autonomy.bootstrap "${args_json}" "${AUTONOMY_ENSURE_MAX_ATTEMPTS:-3}" >/dev/null
   else
-    bootstrap_result="$(call_tool_json autonomy.bootstrap "${args_json}")"
+    bootstrap_result="$(call_tool_json_retry_on_timeout autonomy.bootstrap "${args_json}" "${AUTONOMY_ENSURE_MAX_ATTEMPTS:-3}")"
   fi
   start_maintain_entry 1
   if [[ "${quiet}" != "1" ]]; then

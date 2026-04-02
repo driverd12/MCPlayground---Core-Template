@@ -167,11 +167,18 @@ async function openClient(extraEnv) {
   });
   const client = new Client({ name: "mcp-office-snapshot-test", version: "0.1.0" }, { capabilities: {} });
   await client.connect(transport);
+  const originalClose = client.close.bind(client);
+  client.close = async () => {
+    await originalClose().catch(() => {});
+    if (typeof transport.close === "function") {
+      await transport.close().catch(() => {});
+    }
+  };
   return client;
 }
 
 async function callTool(client, name, args) {
-  const response = await client.callTool({ name, arguments: args });
+  const response = await client.callTool({ name, arguments: args }, undefined, { timeout: 180000 });
   const first = response.content?.[0];
   assert.equal(first?.type, "text");
   if (response.isError) {

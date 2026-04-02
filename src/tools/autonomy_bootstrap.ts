@@ -284,26 +284,48 @@ function detectLocalHost(storage: Storage, input: z.infer<typeof autonomyBootstr
 }
 
 async function fetchJsonWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 4000) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  return fetchJsonWithRetry(url, init, timeoutMs, 0);
+}
+
+function isLoopbackUrl(url: string) {
   try {
-    const response = await fetch(url, {
-      ...init,
-      headers: {
-        Accept: "application/json",
-        ...(init.headers ?? {}),
-      },
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      return null;
-    }
-    return await response.json();
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.trim().toLowerCase();
+    return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
   } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
+    return false;
   }
+}
+
+async function fetchJsonWithRetry(url: string, init: RequestInit, timeoutMs: number, retries: number) {
+  let lastValue = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        ...init,
+        headers: {
+          Accept: "application/json",
+          ...(init.headers ?? {}),
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        lastValue = null;
+      } else {
+        return await response.json();
+      }
+    } catch {
+      lastValue = null;
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (attempt < retries) {
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+  }
+  return lastValue;
 }
 
 async function detectBackends(
@@ -316,7 +338,13 @@ async function detectBackends(
   const discovered: BackendCandidate[] = [];
   const preferredOllamaModel = String(process.env.TRICHAT_OLLAMA_MODEL || "").trim();
   const ollamaUrl = String(input.probe_ollama_url || process.env.TRICHAT_OLLAMA_URL || "http://127.0.0.1:11434").trim();
-  const ollamaTags = await fetchJsonWithTimeout(`${ollamaUrl.replace(/\/+$/, "")}/api/tags`);
+  const ollamaIsLocal = localBackendLocality(ollamaUrl) === "local" || isLoopbackUrl(ollamaUrl);
+  const ollamaTags = await fetchJsonWithRetry(
+    `${ollamaUrl.replace(/\/+$/, "")}/api/tags`,
+    {},
+    ollamaIsLocal ? 8000 : 4000,
+    ollamaIsLocal ? 1 : 0
+  );
   const models = Array.isArray((ollamaTags as Record<string, unknown> | null)?.models)
     ? ((ollamaTags as Record<string, unknown>).models as Array<Record<string, unknown>>)
     : [];
@@ -1041,8 +1069,8 @@ export async function autonomyBootstrap(storage: Storage, invokeTool: InvokeTool
     return inspectBootstrapStateFast(storage, input);
   }
   const statusLocalHost = detectLocalHost(storage, input);
-  const detectedBackends = await detectBackends(input, statusLocalHost.profile);
   if (input.action === "status") {
+    const detectedBackends = await detectBackends(input, statusLocalHost.profile);
     return inspectBootstrapState(storage, invokeTool, input, detectedBackends);
   }
 
@@ -1279,7 +1307,10 @@ export async function autonomyBootstrap(storage: Storage, invokeTool: InvokeTool
         actions.push("warm.cache");
       }
 
-        const status = await inspectBootstrapState(storage, invokeTool, input, detectedBackends);
+        const status =
+          input.fast === true
+            ? inspectBootstrapStateFast(storage, input)
+            : await inspectBootstrapState(storage, invokeTool, input, ensuredBackends);
         return {
           ok: status.self_start_ready,
           actions,

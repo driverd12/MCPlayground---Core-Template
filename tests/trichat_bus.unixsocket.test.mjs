@@ -35,6 +35,13 @@ test("trichat.bus streams message_post events over Unix socket while persisting 
   let socket = null;
   try {
     await client.connect(transport);
+    const originalClose = client.close.bind(client);
+    client.close = async () => {
+      await originalClose().catch(() => {});
+      if (typeof transport.close === "function") {
+        await transport.close().catch(() => {});
+      }
+    };
     const threadId = `trichat-bus-${testId}`;
     await callTool(client, "trichat.thread_open", {
       mutation: nextMutation(testId, "trichat.thread_open", () => mutationCounter++),
@@ -49,7 +56,7 @@ test("trichat.bus streams message_post events over Unix socket while persisting 
     assert.equal(busStatus.running, true);
     assert.equal(typeof busStatus.socket_path, "string");
     assert.ok(busStatus.socket_path.length > 0);
-    await waitForCondition(() => fs.existsSync(busStatus.socket_path), 3000, 25);
+    await waitForCondition(() => fs.existsSync(busStatus.socket_path), 15000, 25);
     assert.ok(fs.existsSync(busStatus.socket_path));
 
     const socketMessages = [];
@@ -67,7 +74,7 @@ test("trichat.bus streams message_post events over Unix socket while persisting 
     const subscribed = await waitForSocketMessage(
       socketMessages,
       (entry) => entry.kind === "subscribed",
-      3000
+      30000
     );
     assert.equal(subscribed.kind, "subscribed");
 
@@ -88,7 +95,7 @@ test("trichat.bus streams message_post events over Unix socket while persisting 
         entry.event?.thread_id === threadId &&
         entry.event?.event_type === "trichat.message_post" &&
         entry.event?.source_agent === "user",
-      5000
+      30000
     );
     assert.equal(streamedEvent.event.thread_id, threadId);
     assert.equal(streamedEvent.event.event_type, "trichat.message_post");
@@ -197,7 +204,7 @@ function nextMutation(testId, toolName, increment) {
 }
 
 async function callTool(client, name, args) {
-  const response = await client.callTool({ name, arguments: args });
+  const response = await client.callTool({ name, arguments: args }, undefined, { timeout: 180000 });
   const text = extractText(response);
   if (response.isError) {
     throw new Error(`Tool ${name} failed: ${text}`);

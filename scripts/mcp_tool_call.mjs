@@ -124,7 +124,7 @@ async function invokeToolOnce(options, args) {
   try {
     await withTimeout(client.connect(transport), options.timeoutMs, `connect ${options.transport}:${options.tool}`);
     const response = await withTimeout(
-      client.callTool({ name: options.tool, arguments: args }),
+      client.callTool({ name: options.tool, arguments: args }, undefined, { timeout: options.timeoutMs }),
       options.timeoutMs,
       `call ${options.transport}:${options.tool}`
     );

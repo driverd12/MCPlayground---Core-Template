@@ -257,6 +257,11 @@ test("office action maintain returns immediately with 202 instead of blocking on
       origin: "http://127.0.0.1",
       bearerToken,
     });
+    await waitForAutonomyMaintainStatus({
+      url: `http://127.0.0.1:${httpPort}/`,
+      origin: "http://127.0.0.1",
+      bearerToken,
+    });
 
     const startedAt = Date.now();
     const response = await postHttpJson(`http://127.0.0.1:${httpPort}/office/api/action`, {
