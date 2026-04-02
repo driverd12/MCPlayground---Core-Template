@@ -2,6 +2,7 @@ import { z } from "zod";
 import { summarizeDesktopControlState } from "../desktop_control_plane.js";
 import { summarizePatientZeroState } from "../patient_zero_plane.js";
 import { Storage } from "../storage.js";
+import { getTriChatActiveAgentIds } from "../trichat_roster.js";
 import { getAutonomyMaintainRuntimeStatus } from "./autonomy_maintain.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { buildPrivilegedAccessStatus, verifyPrivilegedAccess } from "./privileged_exec.js";
@@ -50,6 +51,22 @@ function actorLabel(input: z.infer<typeof patientZeroSchema>) {
   return String(input.source_agent || input.source_client || "operator").trim() || "operator";
 }
 
+const PATIENT_ZERO_TERMINAL_TOOLKIT = ["codex", "cursor", "gemini", "gh"] as const;
+const PATIENT_ZERO_TERMINAL_ALLOWLIST = PATIENT_ZERO_TERMINAL_TOOLKIT.map((entry) => `${entry} `);
+const PATIENT_ZERO_BRIDGE_AGENT_IDS = ["codex", "cursor", "gemini", "github-copilot", "local-imprint"] as const;
+const PATIENT_ZERO_LOCAL_AGENT_IDS = [
+  "implementation-director",
+  "research-director",
+  "verification-director",
+  "code-smith",
+  "research-scout",
+  "quality-guard",
+  "local-imprint",
+] as const;
+const PATIENT_ZERO_SPECIALIST_AGENT_IDS = [
+  ...new Set([...PATIENT_ZERO_BRIDGE_AGENT_IDS, ...PATIENT_ZERO_LOCAL_AGENT_IDS, ...getTriChatActiveAgentIds()].filter(Boolean)),
+];
+
 function deriveMutation(base: { idempotency_key: string; side_effect_fingerprint: string }, phase: string) {
   const safePhase = phase.replace(/[^a-z0-9._:-]+/gi, "-");
   return {
@@ -66,6 +83,27 @@ function buildAutonomyControlStatus(storage: Storage) {
     maintainState?.enable_self_drive ?? maintainRuntime.config.enable_self_drive
   );
   const autopilotExecuteEnabled = Boolean(autopilot.config.execute_enabled);
+  const specialistAgentIds = Array.isArray(autopilot.config.specialist_agent_ids)
+    ? autopilot.config.specialist_agent_ids.map((entry) => String(entry ?? "").trim()).filter(Boolean)
+    : [];
+  const commandAllowlist = Array.isArray(autopilot.config.command_allowlist)
+    ? autopilot.config.command_allowlist.map((entry) => String(entry ?? "").trim()).filter(Boolean)
+    : [];
+  const bridgeToolkit = PATIENT_ZERO_BRIDGE_AGENT_IDS.map((agent_id) => ({
+    agent_id,
+    armed: specialistAgentIds.includes(agent_id),
+  }));
+  const localAgentToolkit = PATIENT_ZERO_LOCAL_AGENT_IDS.map((agent_id) => ({
+    agent_id,
+    armed: specialistAgentIds.includes(agent_id),
+  }));
+  const terminalToolkit = PATIENT_ZERO_TERMINAL_TOOLKIT.map((command) => ({
+    command,
+    armed: commandAllowlist.some((entry) => entry === `${command}` || entry === `${command} `),
+  }));
+  const bridgeToolkitReady = bridgeToolkit.every((entry) => entry.armed);
+  const localAgentToolkitReady = localAgentToolkit.every((entry) => entry.armed);
+  const terminalToolkitReady = terminalToolkit.every((entry) => entry.armed);
   return {
     maintain: {
       daemon_enabled: Boolean(maintainState?.enabled),
@@ -80,8 +118,26 @@ function buildAutonomyControlStatus(storage: Storage) {
       execute_enabled: autopilotExecuteEnabled,
       away_mode: String(autopilot.config.away_mode ?? "normal"),
       thread_id: String(autopilot.config.thread_id ?? ""),
+      lead_agent_id: String(autopilot.config.lead_agent_id ?? "ring-leader"),
+      specialist_agent_ids: specialistAgentIds,
+      command_allowlist: commandAllowlist,
     },
-    autonomous_control_enabled: maintainSelfDriveEnabled && autopilotExecuteEnabled,
+    toolkit: {
+      bridge_agents: bridgeToolkit,
+      local_agents: localAgentToolkit,
+      terminal_commands: terminalToolkit,
+      bridge_toolkit_ready: bridgeToolkitReady,
+      local_agent_spawn_ready: localAgentToolkitReady,
+      terminal_toolkit_ready: terminalToolkitReady,
+      imprint_ready: specialistAgentIds.includes("local-imprint"),
+      github_cli_ready: commandAllowlist.some((entry) => entry === "gh" || entry === "gh "),
+    },
+    autonomous_control_enabled:
+      maintainSelfDriveEnabled &&
+      autopilotExecuteEnabled &&
+      bridgeToolkitReady &&
+      localAgentToolkitReady &&
+      terminalToolkitReady,
   };
 }
 
@@ -209,11 +265,30 @@ async function syncAutonomyControl(
 
   try {
     if (enabled) {
+      const specialistAgentIds = [
+        ...new Set([
+          ...((Array.isArray(autopilotStatus.config.specialist_agent_ids)
+            ? autopilotStatus.config.specialist_agent_ids
+            : []) as string[]),
+          ...PATIENT_ZERO_SPECIALIST_AGENT_IDS,
+        ]),
+      ];
+      const commandAllowlist = [
+        ...new Set([
+          ...((Array.isArray(autopilotStatus.config.command_allowlist)
+            ? autopilotStatus.config.command_allowlist
+            : []) as string[]),
+          ...PATIENT_ZERO_TERMINAL_ALLOWLIST,
+        ]),
+      ];
       await Promise.resolve(
         invokeTool("trichat.autopilot", {
           action: "start",
           mutation: deriveMutation(input.mutation!, "trichat.autopilot.start"),
           execute_enabled: true,
+          lead_agent_id: String(autopilotStatus.config.lead_agent_id ?? "ring-leader"),
+          specialist_agent_ids: specialistAgentIds,
+          command_allowlist: commandAllowlist,
           run_immediately: false,
         })
       );
@@ -261,6 +336,7 @@ export function buildPatientZeroReport(storage: Storage) {
 
   const recentActivity = [
     `Autonomy: ${autonomyControl.autonomous_control_enabled ? "armed" : "advisory only"} · self-drive ${autonomyControl.maintain.self_drive_enabled ? "on" : "off"} · autopilot exec ${autonomyControl.autopilot.execute_enabled ? "on" : "off"}`,
+    `Toolkit: bridge ${autonomyControl.toolkit.bridge_toolkit_ready ? "ready" : "partial"} · local-agents ${autonomyControl.toolkit.local_agent_spawn_ready ? "ready" : "partial"} · terminal ${autonomyControl.toolkit.terminal_toolkit_ready ? "ready" : "partial"} · imprint ${autonomyControl.toolkit.imprint_ready ? "ready" : "off"}`,
     ...runningTasks.map((task) => `Running: ${compactText(task.objective || task.task_id, 92)}`),
     ...pendingTasks.slice(0, Math.max(0, 3 - runningTasks.length)).map((task) => `Queued: ${compactText(task.objective || task.task_id, 92)}`),
     ...events
@@ -279,7 +355,7 @@ export function buildPatientZeroReport(storage: Storage) {
     "Keep the local control plane truthful, bounded, and ready for the next delegated objective.";
   const concern =
     !fullControlAuthority && summary.enabled
-      ? `Full-control posture is armed, but autonomy=${autonomyControl.autonomous_control_enabled ? "ready" : "not-ready"} and root=${summary.root_shell_enabled ? "ready" : "not-ready"}.`
+      ? `Full-control posture is armed, but autonomy=${autonomyControl.autonomous_control_enabled ? "ready" : "not-ready"}, toolkit=${autonomyControl.toolkit.bridge_toolkit_ready && autonomyControl.toolkit.local_agent_spawn_ready && autonomyControl.toolkit.terminal_toolkit_ready ? "ready" : "not-ready"}, and root=${summary.root_shell_enabled ? "ready" : "not-ready"}.`
       : todayErrorCount > 0
       ? `Recent runtime errors detected today: ${todayErrorCount} event(s).`
       : desktopState.last_error
@@ -300,6 +376,7 @@ export function buildPatientZeroReport(storage: Storage) {
     concern,
     desire,
     full_control_authority: fullControlAuthority,
+    toolkit: autonomyControl.toolkit,
     activity_count: events.length,
     activity_summary: recentActivity,
     latest_runtime_events: events.slice(-5).map((event) => ({

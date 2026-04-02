@@ -601,6 +601,8 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const rawPrivilegedAccess = asDict(raw.privileged_access);
   const patientZeroSummary = asDict(kernelPatientZero.summary || rawPatientZero.summary);
   const patientZeroReport = asDict(rawPatientZero.report);
+  const patientZeroAutonomyControl = asDict(rawPatientZero.autonomy_control);
+  const patientZeroToolkit = asDict(patientZeroAutonomyControl.toolkit);
   const privilegedAccessSummary = asDict(kernelPrivilegedAccess.summary || rawPrivilegedAccess.summary || rawPrivilegedAccess);
   const threadId = String(raw.thread_id ?? "ring-leader-main").trim() || "ring-leader-main";
   const latestAutopilotSession = asList(agentSessions.sessions).find((entry) => {
@@ -809,6 +811,16 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         autonomy_enabled: Boolean(patientZeroSummary.autonomy_enabled),
         autonomous_control_enabled: patientZeroAutonomousControlEnabled,
         full_control_authority: patientZeroFullControlAuthority,
+        toolkit: {
+          bridge_agents: asList(patientZeroToolkit.bridge_agents),
+          local_agents: asList(patientZeroToolkit.local_agents),
+          terminal_commands: asList(patientZeroToolkit.terminal_commands),
+          bridge_toolkit_ready: Boolean(patientZeroToolkit.bridge_toolkit_ready),
+          local_agent_spawn_ready: Boolean(patientZeroToolkit.local_agent_spawn_ready),
+          terminal_toolkit_ready: Boolean(patientZeroToolkit.terminal_toolkit_ready),
+          imprint_ready: Boolean(patientZeroToolkit.imprint_ready),
+          github_cli_ready: Boolean(patientZeroToolkit.github_cli_ready),
+        },
         armed_at: String(patientZeroSummary.armed_at ?? ""),
         armed_by: String(patientZeroSummary.armed_by ?? ""),
         last_operator_note: String(patientZeroSummary.last_operator_note ?? ""),
@@ -861,6 +873,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         in_tick: Boolean(autopilotState.in_tick),
         execute_enabled: Boolean(autopilotConfig.execute_enabled),
         execute_backend: String(autopilotConfig.execute_backend ?? "n/a"),
+        lead_agent_id: String(autopilotConfig.lead_agent_id ?? autopilotPool.lead_agent_id ?? "ring-leader"),
         objective: compactSingleLine(String(autopilotConfig.objective ?? ""), 180),
         last_execution_mode: String(autopilotExecution.mode ?? autopilotSessionMetadata.last_execution_mode ?? "none"),
         last_tick_ok:

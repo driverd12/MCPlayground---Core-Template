@@ -379,6 +379,7 @@
     var patientZero = summary.patient_zero || {};
     var privilegedAccess = summary.privileged_access || {};
     var desktop = summary.desktop_control || {};
+    var toolkit = patientZero.toolkit || {};
     var report = patientZero.report || {};
     var enabled = !!patientZero.enabled;
     var posture = enabled ? "ARMED" : "STANDBY";
@@ -392,6 +393,24 @@
         patientZero.autonomous_control_enabled
           ? "Maintain self-drive and autopilot execution are armed for independent local work."
           : "Autonomous execution is not fully armed yet."
+      ],
+      [
+        "CLI Toolkit",
+        (toolkit.terminal_toolkit_ready
+          ? "codex / cursor / gemini / gh available for autonomous terminal execution."
+          : "CLI toolkit is not fully armed yet.")
+      ],
+      [
+        "Office Agents",
+        (toolkit.local_agent_spawn_ready
+          ? "Local directors and leaf agents are available for delegation and follow-through."
+          : "Local agent pool is not fully armed yet.")
+      ],
+      [
+        "Imprint",
+        toolkit.imprint_ready
+          ? "Local Imprint is in the active specialist pool."
+          : "Local Imprint is not currently armed in the specialist pool."
       ],
       [
         "Root Shell",
@@ -436,6 +455,20 @@
       }).join("") +
       "</div>" +
       "</section>" +
+      '<section class="patient-zero-card">' +
+      '<div class="section-title">Autonomous Toolkit</div>' +
+      '<div class="metric-list">' +
+      '<div class="metric"><span>Bridge toolkit</span><strong>' + escapeHtml(toolkit.bridge_toolkit_ready ? "ready" : "partial") + '</strong></div>' +
+      '<div class="metric"><span>Local agent spawn</span><strong>' + escapeHtml(toolkit.local_agent_spawn_ready ? "ready" : "partial") + '</strong></div>' +
+      '<div class="metric"><span>Terminal toolkit</span><strong>' + escapeHtml(toolkit.terminal_toolkit_ready ? "ready" : "partial") + '</strong></div>' +
+      '<div class="metric"><span>GitHub CLI</span><strong>' + escapeHtml(toolkit.github_cli_ready ? "ready" : "off") + '</strong></div>' +
+      '<div class="metric"><span>Imprint</span><strong>' + escapeHtml(toolkit.imprint_ready ? "ready" : "off") + '</strong></div>' +
+      '<div class="metric"><span>Lead</span><strong>' + escapeHtml(((state.snapshot.summary.autopilot || {}).lead_agent_id || "ring-leader")) + '</strong></div>' +
+      '<div class="metric"><span>Bridge agents</span><strong>' + escapeHtml((toolkit.bridge_agents || []).map(function (entry) { return String((entry && entry.agent_id) || ""); }).filter(Boolean).join(", ") || "none") + '</strong></div>' +
+      '<div class="metric"><span>Local agents</span><strong>' + escapeHtml((toolkit.local_agents || []).map(function (entry) { return String((entry && entry.agent_id) || ""); }).filter(Boolean).join(", ") || "none") + '</strong></div>' +
+      '<div class="metric"><span>CLI commands</span><strong>' + escapeHtml((toolkit.terminal_commands || []).map(function (entry) { return String((entry && entry.command) || ""); }).filter(Boolean).join(", ") || "none") + '</strong></div>' +
+      '</div>' +
+      '</section>' +
       '<section class="patient-zero-card">' +
       '<div class="section-title">Privileged Lane</div>' +
       '<div class="metric-list">' +

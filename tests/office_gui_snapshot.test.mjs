@@ -171,6 +171,18 @@ test("office gui snapshot surfaces control-plane rollup signals", () => {
           activity_summary: ["Running: Ship the next slice", "Queued: Verify the runtime"],
           scope_notice: "Operator-facing self-report only.",
         },
+        autonomy_control: {
+          toolkit: {
+            bridge_agents: [{ agent_id: "codex", armed: true }],
+            local_agents: [{ agent_id: "local-imprint", armed: true }],
+            terminal_commands: [{ command: "gh", armed: true }],
+            bridge_toolkit_ready: true,
+            local_agent_spawn_ready: true,
+            terminal_toolkit_ready: true,
+            imprint_ready: true,
+            github_cli_ready: true,
+          },
+        },
       },
       autonomy_maintain: {
         state: {},
@@ -207,6 +219,8 @@ test("office gui snapshot surfaces control-plane rollup signals", () => {
   assert.equal(snapshot.summary.patient_zero.browser_app, "Safari");
   assert.equal(snapshot.summary.patient_zero.browser_ready, true);
   assert.equal(snapshot.summary.patient_zero.root_shell_enabled, true);
+  assert.equal(snapshot.summary.patient_zero.toolkit.github_cli_ready, true);
+  assert.equal(snapshot.summary.patient_zero.toolkit.imprint_ready, true);
   assert.equal(snapshot.summary.patient_zero.report.activity_summary.length, 2);
   assert.equal(snapshot.summary.control_plane.patient_zero_enabled, true);
   assert.equal(snapshot.summary.control_plane.patient_zero_autonomous_control_enabled, false);
@@ -290,6 +304,18 @@ test("office gui snapshot marks Patient Zero full authority only when autonomy a
       patient_zero: {
         report: {
           activity_summary: [],
+        },
+        autonomy_control: {
+          toolkit: {
+            bridge_agents: [{ agent_id: "codex", armed: true }],
+            local_agents: [{ agent_id: "local-imprint", armed: true }],
+            terminal_commands: [{ command: "gh", armed: true }],
+            bridge_toolkit_ready: true,
+            local_agent_spawn_ready: true,
+            terminal_toolkit_ready: true,
+            imprint_ready: true,
+            github_cli_ready: true,
+          },
         },
       },
       autonomy_maintain: {
