@@ -119,6 +119,13 @@ function ageSeconds(value: string | null | undefined) {
   return Math.max(0, (Date.now() - parsed) / 1000);
 }
 
+function providerBridgeDiagnosticsStale(autonomyMaintainState: Record<string, unknown>) {
+  const lastCheckAt = String(autonomyMaintainState.last_provider_bridge_check_at ?? "").trim();
+  const configuredIntervalSeconds = Number(autonomyMaintainState.interval_seconds ?? 120);
+  const intervalSeconds = Number.isFinite(configuredIntervalSeconds) && configuredIntervalSeconds > 0 ? configuredIntervalSeconds : 120;
+  return ageSeconds(lastCheckAt) > Math.max(intervalSeconds * 3, 300);
+}
+
 function summarizeTmuxDashboard(state: ReturnType<Storage["getTriChatTmuxControllerState"]>) {
   const tasks = state?.tasks ?? [];
   const queueDepth = tasks.filter((task) => task.status === "queued" || task.status === "dispatched").length;
@@ -445,31 +452,42 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     summarizeAutonomyMaintainState(storage)
   );
   const autonomyMaintainState = asRecord(autonomyMaintain.state);
+  const persistedProviderBridgeGeneratedAt =
+    String(autonomyMaintainState.last_provider_bridge_check_at ?? "").trim() || new Date().toISOString();
   const persistedProviderBridgeDiagnostics = Array.isArray(autonomyMaintainState.provider_bridge_diagnostics)
     ? autonomyMaintainState.provider_bridge_diagnostics
     : [];
+  const persistedProviderBridgeStale = providerBridgeDiagnosticsStale(autonomyMaintainState);
+  const liveProviderBridgeDiagnostics = safe<ReturnType<typeof resolveProviderBridgeDiagnostics>>(
+    "provider_bridge.live_diagnostics",
+    {
+      generated_at: persistedProviderBridgeGeneratedAt,
+      cached: persistedProviderBridgeDiagnostics.length > 0,
+      diagnostics: persistedProviderBridgeDiagnostics,
+    },
+    () => resolveProviderBridgeDiagnostics({ workspace_root: process.cwd(), probe_timeout_ms: 1500 })
+  );
+  const selectedProviderBridgeDiagnostics =
+    persistedProviderBridgeDiagnostics.length > 0 && !persistedProviderBridgeStale
+      ? {
+          generated_at: persistedProviderBridgeGeneratedAt,
+          cached: true,
+          stale: false,
+          diagnostics: persistedProviderBridgeDiagnostics,
+        }
+      : {
+          ...liveProviderBridgeDiagnostics,
+          stale: persistedProviderBridgeStale && liveProviderBridgeDiagnostics.generated_at === persistedProviderBridgeGeneratedAt,
+        };
   const providerBridge = safe<ProviderBridgePayload>(
     "provider_bridge",
     {
       snapshot: resolveProviderBridgeSnapshot({ workspace_root: process.cwd() }),
-      diagnostics: {
-        generated_at:
-          String(autonomyMaintainState.last_provider_bridge_check_at ?? "").trim() || new Date().toISOString(),
-        cached: persistedProviderBridgeDiagnostics.length > 0,
-        diagnostics: persistedProviderBridgeDiagnostics,
-      },
+      diagnostics: selectedProviderBridgeDiagnostics,
     },
     () => ({
       snapshot: resolveProviderBridgeSnapshot({ workspace_root: process.cwd() }),
-      diagnostics:
-        persistedProviderBridgeDiagnostics.length > 0
-          ? {
-              generated_at:
-                String(autonomyMaintainState.last_provider_bridge_check_at ?? "").trim() || new Date().toISOString(),
-              cached: true,
-              diagnostics: persistedProviderBridgeDiagnostics,
-            }
-          : resolveProviderBridgeDiagnostics({ workspace_root: process.cwd(), probe_timeout_ms: 1500 }),
+      diagnostics: selectedProviderBridgeDiagnostics,
     })
   );
   const kernel = input.include_kernel

@@ -15,7 +15,7 @@ export type HttpOptions = {
   allowedOrigins: string[];
   bearerToken: string | null;
   healthSnapshot?: () => unknown | Promise<unknown>;
-  officeSnapshot?: (input: { threadId: string; theme: string }) => unknown | Promise<unknown>;
+  officeSnapshot?: (input: { threadId: string; theme: string; forceLive?: boolean }) => unknown | Promise<unknown>;
   officeRawSnapshot?: (input: { threadId: string; theme: string }) => unknown | Promise<unknown>;
 };
 
@@ -305,6 +305,7 @@ export async function startHttpTransport(createServer: () => Server, options: Ht
 
   const httpServer = http.createServer((req, res) => {
     const requestUrl = new URL(req.url ?? "/", `http://${options.host}:${options.port}`);
+    const pathname = requestUrl.pathname;
     Promise.resolve(handleFastPathRequest(req, res, requestUrl, options))
       .then((handled) => {
         if (handled) {
@@ -318,14 +319,18 @@ export async function startHttpTransport(createServer: () => Server, options: Ht
         }
 
         if (!validateOrigin(req.headers.origin, options.allowedOrigins)) {
-          res.statusCode = 403;
-          res.end("Forbidden");
+          sendApiError(res, pathname, 403, {
+            error: "forbidden_origin",
+            detail: "Origin is not allowed for this endpoint.",
+          });
           return;
         }
 
         if (!validateBearer(req.headers.authorization, options.bearerToken)) {
-          res.statusCode = 403;
-          res.end("Forbidden");
+          sendApiError(res, pathname, 403, {
+            error: "forbidden_bearer",
+            detail: "Bearer token is missing or invalid.",
+          });
           return;
         }
 
@@ -336,8 +341,10 @@ export async function startHttpTransport(createServer: () => Server, options: Ht
             url: req.url ?? "",
           });
           if (!res.headersSent) {
-            res.statusCode = 500;
-            res.end("Internal Server Error");
+            sendApiError(res, pathname, 500, {
+              error: "internal_server_error",
+              detail: error instanceof Error ? error.message : String(error),
+            });
           }
         });
       })
@@ -348,8 +355,10 @@ export async function startHttpTransport(createServer: () => Server, options: Ht
           url: req.url ?? "",
         });
         if (!res.headersSent) {
-          res.statusCode = 500;
-          res.end("Internal Server Error");
+          sendApiError(res, pathname, 500, {
+            error: "internal_server_error",
+            detail: error instanceof Error ? error.message : String(error),
+          });
         }
       });
   });
@@ -416,7 +425,29 @@ function validateOrigin(origin: string | undefined, allowed: string[]) {
   if (!origin) {
     return false;
   }
-  return allowed.includes(origin);
+  let requested: URL;
+  try {
+    requested = new URL(origin);
+  } catch {
+    return false;
+  }
+  return allowed.some((entry) => {
+    if (entry === origin) {
+      return true;
+    }
+    try {
+      const candidate = new URL(entry);
+      if (candidate.protocol !== requested.protocol || candidate.hostname !== requested.hostname) {
+        return false;
+      }
+      if (!candidate.port) {
+        return true;
+      }
+      return candidate.port === requested.port;
+    } catch {
+      return entry === origin;
+    }
+  });
 }
 
 function validateOptionalOrigin(origin: string | undefined, allowed: string[]) {
@@ -479,6 +510,24 @@ function sendJson(res: http.ServerResponse, statusCode: number, body: unknown) {
   res.statusCode = statusCode;
   res.setHeader("content-type", "application/json; charset=utf-8");
   res.end(JSON.stringify(body));
+}
+
+function sendApiError(
+  res: http.ServerResponse,
+  pathname: string,
+  statusCode: number,
+  body: { ok?: boolean; error: string; detail?: string }
+) {
+  if (pathname.startsWith("/office/api/")) {
+    sendJson(res, statusCode, {
+      ok: false,
+      error: body.error,
+      detail: body.detail ?? body.error,
+    });
+    return;
+  }
+  res.statusCode = statusCode;
+  res.end(body.detail ?? body.error);
 }
 
 function contentTypeFor(filePath: string) {
@@ -690,8 +739,10 @@ async function maybeHandleOfficeRequest(
     return false;
   }
   if (!validateOptionalOrigin(req.headers.origin, options.allowedOrigins)) {
-    res.statusCode = 403;
-    res.end("Forbidden");
+    sendApiError(res, pathname, 403, {
+      error: "forbidden_origin",
+      detail: "Origin is not allowed for office routes.",
+    });
     return true;
   }
 
@@ -753,6 +804,7 @@ async function maybeHandleOfficeRequest(
         const directPayload = await options.officeSnapshot({
           threadId: effectiveThreadId,
           theme,
+          forceLive,
         });
         const directBody = JSON.stringify(directPayload);
         const directParsed = parseOfficeSnapshotPayload(directBody);

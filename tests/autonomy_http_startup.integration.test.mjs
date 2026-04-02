@@ -187,6 +187,13 @@ test("http daemon serves the clickable office GUI and snapshot routes on the liv
     assert.ok(Array.isArray(snapshot.agents));
     assert.ok(snapshot.summary);
     assert.ok(snapshot.rooms);
+
+    const liveSnapshotResponse = await fetchHttpResponse(`http://127.0.0.1:${httpPort}/office/api/snapshot?live=1`);
+    assert.equal(liveSnapshotResponse.headers["x-office-snapshot-source"], "direct-node");
+    const liveSnapshot = JSON.parse(liveSnapshotResponse.body);
+    assert.equal(typeof liveSnapshot.thread_id, "string");
+    assert.ok(Array.isArray(liveSnapshot.agents));
+    assert.ok(liveSnapshot.summary);
   } finally {
     child.kill("SIGTERM");
     await new Promise((resolve) => child.once("exit", () => resolve()));
@@ -236,7 +243,7 @@ test("office action maintain returns immediately with 202 instead of blocking on
       action: "maintain",
     }, {
       Authorization: `Bearer ${bearerToken}`,
-      Origin: "http://127.0.0.1",
+      Origin: `http://127.0.0.1:${httpPort}`,
       "Content-Type": "application/json",
     });
     const durationMs = Date.now() - startedAt;
@@ -247,6 +254,19 @@ test("office action maintain returns immediately with 202 instead of blocking on
     assert.equal(payload.action, "maintain");
     assert.equal(typeof payload.started_at, "string");
     assert.ok(durationMs < 10_000, `expected maintain action to return without long blocking, got ${durationMs}ms`);
+
+    const forbidden = await postHttpJson(`http://127.0.0.1:${httpPort}/office/api/action`, {
+      action: "maintain",
+    }, {
+      Authorization: `Bearer ${bearerToken}`,
+      Origin: "http://malicious.example:9999",
+      "Content-Type": "application/json",
+    });
+    assert.equal(forbidden.statusCode, 403);
+    const forbiddenPayload = JSON.parse(forbidden.body);
+    assert.equal(forbiddenPayload.ok, false);
+    assert.equal(forbiddenPayload.error, "forbidden_origin");
+    assert.match(String(forbiddenPayload.detail || ""), /origin/i);
 
     const health = JSON.parse(await fetchHttpText(`http://127.0.0.1:${httpPort}/health`));
     assert.equal(health.ok, true);

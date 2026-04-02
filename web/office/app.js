@@ -383,11 +383,15 @@
           try {
             payload = JSON.parse(text);
           } catch (error) {
-            throw new Error("Invalid JSON response from " + url);
+            var snippet = String(text || "").trim().replace(/\s+/g, " ").slice(0, 160);
+            var contentType = response.headers.get("content-type") || "unknown";
+            throw new Error(
+              "Unexpected " + contentType + " response from " + url + (snippet ? ": " + snippet : "")
+            );
           }
         }
         if (!response.ok) {
-          throw new Error(payload.error || (response.status + " " + response.statusText));
+          throw new Error(payload.detail || payload.error || (response.status + " " + response.statusText));
         }
         return payload;
       });

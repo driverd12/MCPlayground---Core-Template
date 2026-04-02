@@ -88,6 +88,47 @@ test("office.snapshot returns a storage-backed GUI payload without depending on 
   }
 });
 
+test("office.snapshot metadata bypasses the warm office cache for dashboard-style direct reads", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-snapshot-live-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const client = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+  });
+
+  try {
+    await callTool(client, "warm.cache", {
+      action: "run_once",
+      thread_id: "ring-leader-main",
+      mutation: nextMutation("office-snapshot-live", "warm.cache.run_once", () => mutationCounter++),
+    });
+
+    await callTool(client, "task.create", {
+      mutation: nextMutation("office-snapshot-live", "task.create", () => mutationCounter++),
+      objective: "Task created after the warm office snapshot",
+      priority: 75,
+      tags: ["office-live"],
+    });
+
+    const cached = await callTool(client, "office.snapshot", {
+      thread_id: "ring-leader-main",
+    });
+    const live = await callTool(client, "office.snapshot", {
+      thread_id: "ring-leader-main",
+      metadata: { source: "dashboard.direct" },
+    });
+
+    assert.equal(cached.cache.hit, true);
+    assert.equal(live.cache.hit, false);
+    assert.equal(live.task_summary.counts.pending, 1);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function openClient(extraEnv) {
   const transport = new StdioClientTransport({
     command: "node",

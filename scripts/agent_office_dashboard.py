@@ -2920,6 +2920,7 @@ def fetch_snapshot(caller: McpToolCaller, thread_id: str, theme: str = "night") 
                     "include_bus": True,
                     "include_adapter": True,
                     "include_runtime_workers": True,
+                    "metadata": {"source": "dashboard.direct"},
                 },
             )
         )

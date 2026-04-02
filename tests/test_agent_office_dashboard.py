@@ -150,6 +150,60 @@ class AgentOfficeDashboardTests(unittest.TestCase):
         self.assertEqual(snapshot.kernel["state"], "ready")
         fetch_mock.assert_called_once_with("ring-leader-main", "night")
 
+    def test_fetch_snapshot_tool_fallback_bypasses_warm_cache(self) -> None:
+        caller = MODULE.McpToolCaller(
+            repo_root=REPO_ROOT,
+            transport="stdio",
+            url="http://127.0.0.1:8787/",
+            origin="http://127.0.0.1",
+            stdio_command="node",
+            stdio_args="dist/server.js",
+            retries=0,
+            retry_delay_seconds=0.05,
+            tool_timeout_seconds=1.0,
+        )
+        payload = {
+            "thread_id": "ring-leader-main",
+            "roster": {"agents": [{"agent_id": "ring-leader"}]},
+            "workboard": {},
+            "tmux": {},
+            "task_summary": {"counts": {"pending": 1}},
+            "adapter": {},
+            "bus_tail": {},
+            "trichat_summary": {},
+            "kernel": {"state": "ready"},
+            "learning": {},
+            "autopilot": {},
+            "autonomy_maintain": {},
+            "runtime_workers": {},
+            "errors": [],
+            "agent_sessions": {},
+            "task_running": {},
+            "task_pending": {},
+        }
+        with mock.patch.object(MODULE.McpToolCaller, "call_tool", return_value=payload) as call_mock:
+            snapshot = MODULE.fetch_snapshot(caller, "ring-leader-main", "night")
+        self.assertEqual(snapshot.thread_id, "ring-leader-main")
+        self.assertEqual(snapshot.task_summary["counts"]["pending"], 1)
+        call_mock.assert_called_once_with(
+            "office.snapshot",
+            {
+                "thread_id": "ring-leader-main",
+                "turn_limit": 12,
+                "task_limit": 24,
+                "session_limit": 50,
+                "event_limit": 24,
+                "learning_limit": 120,
+                "runtime_worker_limit": 20,
+                "include_kernel": True,
+                "include_learning": True,
+                "include_bus": True,
+                "include_adapter": True,
+                "include_runtime_workers": True,
+                "metadata": {"source": "dashboard.direct"},
+            },
+        )
+
     def test_build_config_roster_fallback_uses_repo_agent_config(self) -> None:
         workboard = {
             "latest_turn": {

@@ -3425,7 +3425,7 @@ async function main() {
       allowedOrigins,
       bearerToken: process.env.MCP_HTTP_BEARER_TOKEN ?? null,
       healthSnapshot: buildHttpHealthSnapshot,
-      officeSnapshot: ({ threadId, theme }) =>
+      officeSnapshot: ({ threadId, theme, forceLive }) =>
         buildOfficeGuiSnapshot(
           officeSnapshot(storage, {
             thread_id: threadId,
@@ -3440,6 +3440,7 @@ async function main() {
             include_bus: true,
             include_adapter: true,
             include_runtime_workers: true,
+            metadata: forceLive ? { source: "http.live" } : undefined,
           }) as Record<string, unknown>,
           { theme }
         ),
@@ -3457,6 +3458,7 @@ async function main() {
           include_bus: true,
           include_adapter: true,
           include_runtime_workers: true,
+          metadata: { source: "http.raw" },
         }),
     });
     void runStartupConvergence();

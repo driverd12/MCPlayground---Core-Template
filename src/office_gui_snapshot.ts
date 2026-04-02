@@ -144,17 +144,20 @@ function buildAdapterBlocks(adapter: Record<string, unknown>, nowSeconds: number
       continue;
     }
     const updatedAt = String(state.updated_at ?? "").trim();
-    if (ageSeconds(updatedAt, nowSeconds) > 1800) {
+    if (ageSeconds(updatedAt, nowSeconds) > 600) {
       continue;
     }
     const open = Boolean(state.open);
-    const errorText = compactSingleLine(state.last_error, 160);
-    if (open || errorText) {
-      blocked.set(agentId, {
-        state: open ? "blocked" : "offline",
-        detail: errorText || "adapter attention",
-      });
+    const lastResult = String(state.last_result ?? "").trim().toLowerCase();
+    if (!open && !["failure", "trip-opened"].includes(lastResult)) {
+      continue;
     }
+    const errorText = compactSingleLine(state.last_error, 160);
+    const detail = errorText || compactSingleLine(lastResult || "adapter issue", 160) || "adapter issue";
+    blocked.set(agentId, {
+      state: /command not found|permission denied/i.test(detail) ? "offline" : "blocked",
+      detail,
+    });
   }
   return blocked;
 }
@@ -185,6 +188,9 @@ function buildChatSignals(busTail: Record<string, unknown>, nowSeconds: number) 
 function buildProviderSignals(raw: Record<string, unknown>) {
   const providerBridge = asDict(raw.provider_bridge);
   const diagnosticsPayload = asDict(providerBridge.diagnostics);
+  if (diagnosticsPayload.stale === true) {
+    return new Map();
+  }
   const diagnostics = asList(diagnosticsPayload.diagnostics);
   const agentIdsByClient: Record<string, string[]> = {
     codex: ["codex"],
@@ -342,7 +348,8 @@ function buildSessionSignals(
     if (!catalog.has(agentId)) {
       continue;
     }
-    if (!["busy", "active"].includes(String(session.status ?? "").trim().toLowerCase())) {
+    const status = String(session.status ?? "").trim().toLowerCase();
+    if (!["busy", "active", "idle"].includes(status)) {
       continue;
     }
     const updatedAt = String(session.updated_at ?? session.heartbeat_at ?? "").trim();
@@ -355,14 +362,35 @@ function buildSessionSignals(
       String(metadata.last_source_task_id ?? "").trim() ||
       String(metadata.last_claimed_task_id ?? "").trim();
     const task = currentTaskId ? asDict(taskIndex.get(currentTaskId)) : {};
-    const activity = compactSingleLine(
-      task.objective || asDict(task.payload).task_objective || metadata.last_selected_strategy || metadata.objective || "active session",
-      56
-    );
+    const detail = String(session.session_id ?? "session").trim() || "session";
+    const existing = signals.get(agentId);
+    if (status === "busy" || Boolean(currentTaskId)) {
+      const activity = compactSingleLine(
+        task.objective || asDict(task.payload).task_objective || metadata.last_selected_strategy || metadata.objective || "active session",
+        56
+      );
+      signals.set(agentId, {
+        state: "running",
+        activity: activity || "active session",
+        detail,
+      });
+      continue;
+    }
+    if (existing?.state === "running") {
+      continue;
+    }
     signals.set(agentId, {
-      state: "running",
-      activity: activity || "active session",
-      detail: String(session.session_id ?? "session").trim() || "session",
+      state: "ready",
+      activity:
+        compactSingleLine(
+          metadata.last_selected_strategy ||
+            metadata.objective ||
+            metadata.current_focus ||
+            metadata.last_summary ||
+            "session heartbeat clean",
+          56
+        ) || "session heartbeat clean",
+      detail,
     });
   }
   return signals;
@@ -418,7 +446,9 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const blockedSignals = buildAdapterBlocks(adapter, nowSeconds);
   const chatSignals = buildChatSignals(busTail, nowSeconds);
   const providerSignals = buildProviderSignals(raw);
-  const turnRecent = Boolean(asDict(workboard.active_turn).turn_id) && ageSeconds(latestTurn.updated_at, nowSeconds) <= 300;
+  const turnRecent =
+    Boolean(String(latestTurn.turn_id ?? "").trim() || String(latestTurn.updated_at ?? "").trim()) &&
+    ageSeconds(latestTurn.updated_at, nowSeconds) <= 300;
 
   const presences: GuiPresence[] = [];
   for (const agent of [...catalog.values()].sort((left, right) => left.agent_id.localeCompare(right.agent_id))) {
@@ -435,12 +465,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
     const chat = chatSignals.get(agent.agent_id);
     const provider = providerSignals.get(agent.agent_id);
 
-    if (blocked) {
-      state = blocked.state;
-      activity = blocked.detail;
-      evidenceSource = "adapter";
-      evidenceDetail = blocked.detail;
-    } else if (owner?.state === "running") {
+    if (owner?.state === "running") {
       state = "working";
       activity = owner.activity;
       evidenceSource = "task";
@@ -460,6 +485,27 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
       activity = compactSingleLine(latestTurn.selected_strategy || latestTurn.user_prompt || "active turn", 56);
       evidenceSource = "turn";
       evidenceDetail = String(latestTurn.turn_id ?? "active-turn");
+    } else if (turnRecent && expectedAgents.has(agent.agent_id)) {
+      state = "idle";
+      activity = "waiting on the next turn";
+      evidenceSource = "turn";
+      evidenceDetail = String(latestTurn.turn_id ?? "active-turn");
+    } else if (session?.state === "ready") {
+      state = "ready";
+      activity = session.activity;
+      evidenceSource = "session";
+      evidenceDetail = session.detail;
+    } else if (provider && ["ready", "sleeping"].includes(provider.state)) {
+      state = provider.state;
+      location = provider.location;
+      activity = provider.activity;
+      evidenceSource = "provider_bridge";
+      evidenceDetail = provider.detail;
+    } else if (blocked) {
+      state = blocked.state;
+      activity = blocked.detail;
+      evidenceSource = "adapter";
+      evidenceDetail = blocked.detail;
     } else if (provider) {
       state = provider.state;
       location = provider.location;
@@ -477,11 +523,6 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
       activity = compactSingleLine(`queued: ${owner.activity}`, 56);
       evidenceSource = "task";
       evidenceDetail = owner.detail;
-    } else if (turnRecent && expectedAgents.has(agent.agent_id)) {
-      state = "idle";
-      activity = "waiting on the next turn";
-      evidenceSource = "turn";
-      evidenceDetail = String(latestTurn.turn_id ?? "active-turn");
     } else if (agent.active) {
       state = "sleeping";
       location = "sofa";
