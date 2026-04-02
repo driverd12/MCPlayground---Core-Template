@@ -373,6 +373,10 @@ function summarizeControlPlane(
   const budgetLedgerRecord: Record<string, unknown> = isRecord(kernel?.budget_ledger) ? kernel!.budget_ledger : {};
   const warmCacheRecord: Record<string, unknown> = isRecord(kernel?.warm_cache) ? kernel!.warm_cache : {};
   const featureFlagsRecord: Record<string, unknown> = isRecord(kernel?.feature_flags) ? kernel!.feature_flags : {};
+  const desktopControlRecord: Record<string, unknown> = isRecord(kernel?.desktop_control) ? kernel!.desktop_control : {};
+  const desktopControlSummaryRecord: Record<string, unknown> = isRecord(desktopControlRecord.summary)
+    ? desktopControlRecord.summary
+    : {};
   const budgetLedger = {
     total_entries: Number(budgetLedgerRecord.total_entries ?? 0),
     projected_cost_usd: Number(budgetLedgerRecord.projected_cost_usd ?? 0),
@@ -392,12 +396,23 @@ function summarizeControlPlane(
     disabled_count: Number(featureFlagsRecord.disabled_count ?? 0),
     total_count: Number(featureFlagsRecord.total_count ?? 0),
   };
+  const desktopControl = {
+    enabled: typeof desktopControlSummaryRecord.enabled === "boolean" ? desktopControlSummaryRecord.enabled : false,
+    stale: typeof desktopControlSummaryRecord.stale === "boolean" ? desktopControlSummaryRecord.stale : false,
+    observe_ready:
+      typeof desktopControlSummaryRecord.observe_ready === "boolean" ? desktopControlSummaryRecord.observe_ready : false,
+    act_ready: typeof desktopControlSummaryRecord.act_ready === "boolean" ? desktopControlSummaryRecord.act_ready : false,
+    listen_ready:
+      typeof desktopControlSummaryRecord.listen_ready === "boolean" ? desktopControlSummaryRecord.listen_ready : false,
+    last_frontmost_app: readString(desktopControlSummaryRecord.last_frontmost_app),
+  };
   return {
     permission_profile: permission.resolved_profile_id,
     permission_chain: permission.chain,
     budget_ledger: budgetLedger,
     warm_cache: warmCache,
     feature_flags: featureFlags,
+    desktop_control: desktopControl,
   };
 }
 
@@ -464,6 +479,7 @@ export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBr
     `- budget: projected=${Number(controlPlaneSummary.budget_ledger.projected_cost_usd ?? 0).toFixed(4)} actual=${Number(controlPlaneSummary.budget_ledger.actual_cost_usd ?? 0).toFixed(4)} tokens=${controlPlaneSummary.budget_ledger.tokens_total}`,
     `- warm_cache: ${controlPlaneSummary.warm_cache.enabled ? (controlPlaneSummary.warm_cache.stale ? "stale" : "warm") : "disabled"}`,
     `- disabled_feature_flags: ${controlPlaneSummary.feature_flags.disabled_count}/${controlPlaneSummary.feature_flags.total_count}`,
+    `- desktop_control: ${controlPlaneSummary.desktop_control.enabled ? `enabled (eyes=${controlPlaneSummary.desktop_control.observe_ready ? "yes" : "no"}, hands=${controlPlaneSummary.desktop_control.act_ready ? "yes" : "no"}, ears=${controlPlaneSummary.desktop_control.listen_ready ? "yes" : "no"})` : "disabled"}`,
     "",
     renderBulletSection("Success criteria", delegationBrief.success_criteria),
     "",

@@ -13,6 +13,16 @@ import { Storage, type GoalRecord, type PlanRecord, type PlanStepRecord } from "
 import { listToolCatalogEntries, registerToolCatalogEntry } from "./control_plane.js";
 import { mergeDeclaredPermissionProfile } from "./control_plane_runtime.js";
 import {
+  desktopAct,
+  desktopActSchema,
+  desktopControl,
+  desktopControlSchema,
+  desktopListen,
+  desktopListenSchema,
+  desktopObserve,
+  desktopObserveSchema,
+} from "./tools/desktop_control.js";
+import {
   agentClaimNext,
   agentClaimNextSchema,
   agentCurrentTask,
@@ -3043,6 +3053,34 @@ registerTool(
 );
 
 registerTool(
+  "desktop.control",
+  "Manage the local desktop control lane, capability heartbeat, and durable host-control policy.",
+  desktopControlSchema,
+  (input) => desktopControl(storage, input)
+);
+
+registerTool(
+  "desktop.observe",
+  "Inspect the local desktop through frontmost-app, clipboard, and screenshot observation tools.",
+  desktopObserveSchema,
+  (input) => desktopObserve(storage, input)
+);
+
+registerTool(
+  "desktop.act",
+  "Act on the local desktop by opening apps/URLs, typing text, pressing keys, and setting the clipboard.",
+  desktopActSchema,
+  (input) => desktopAct(storage, input)
+);
+
+registerTool(
+  "desktop.listen",
+  "Capture short microphone clips to a temp file through the local desktop control lane.",
+  desktopListenSchema,
+  (input) => desktopListen(storage, input)
+);
+
+registerTool(
   "tool.search",
   "Search registered MCP tools by name, description, tags, or capability area using the live tool registry.",
   toolSearchSchema,
@@ -3407,6 +3445,24 @@ async function main() {
       } catch (error) {
         console.warn(
           `[autonomy.maintain] startup run failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    const desktopControlState = storage.getDesktopControlState();
+    if (desktopControlState.enabled) {
+      try {
+        await desktopControl(storage, {
+          action: "heartbeat",
+          mutation: {
+            idempotency_key: `server-startup-desktop-control-${startupNonce}`,
+            side_effect_fingerprint: `server-startup-desktop-control-${startupNonce}`,
+          },
+          source_client: "server.startup",
+        });
+      } catch (error) {
+        console.warn(
+          `[desktop.control] startup heartbeat failed: ${error instanceof Error ? error.message : String(error)}`
         );
       }
     }

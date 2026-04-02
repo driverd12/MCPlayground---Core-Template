@@ -6,6 +6,7 @@ import {
   summarizePermissionProfiles,
   summarizeToolCatalog,
 } from "../control_plane.js";
+import { summarizeDesktopControlState } from "../desktop_control_plane.js";
 import {
   type AutonomyMaintainStateRecord,
   type AgentSessionRecord,
@@ -1766,6 +1767,8 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   const providerBridgeEntries = Array.isArray(providerBridgeDiagnostics.diagnostics)
     ? providerBridgeDiagnostics.diagnostics
     : [];
+  const desktopControlState = storage.getDesktopControlState();
+  const desktopControlSummary = summarizeDesktopControlState(desktopControlState);
   const goalSummaries = openGoals.map((goal) => {
     const plan = resolveGoalPlan(storage, goal);
     const steps = plan ? storage.listPlanSteps(plan.plan_id) : [];
@@ -2069,6 +2072,18 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   if (featureFlagsSummary && featureFlagsSummary.disabled_count > 0) {
     attention.push(`${featureFlagsSummary.disabled_count} feature flag(s) are currently rolled out disabled.`);
   }
+  if (desktopControlSummary.enabled && desktopControlSummary.stale) {
+    attention.push("Desktop control heartbeat is stale and host-control telemetry may be outdated.");
+  }
+  if (desktopControlSummary.enabled && !desktopControlSummary.observe_ready && desktopControlState.allow_observe) {
+    attention.push("Desktop observation is enabled but currently unavailable on this host.");
+  }
+  if (desktopControlSummary.enabled && !desktopControlSummary.act_ready && desktopControlState.allow_act) {
+    attention.push("Desktop actuation is enabled but currently unavailable on this host.");
+  }
+  if (desktopControlSummary.enabled && !desktopControlSummary.listen_ready && desktopControlState.allow_listen) {
+    attention.push("Desktop listening is enabled but currently unavailable on this host.");
+  }
   if (attention.length === 0 && state === "active") {
     attention.push("Kernel is progressing normally.");
   }
@@ -2181,6 +2196,14 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
         disconnected_count: providerBridgeDisconnectedCount,
         unavailable_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "unavailable").length,
       },
+      desktop_control: {
+        enabled: desktopControlSummary.enabled,
+        stale: desktopControlSummary.stale,
+        observe_ready: desktopControlSummary.observe_ready,
+        act_ready: desktopControlSummary.act_ready,
+        listen_ready: desktopControlSummary.listen_ready,
+        heartbeat_age_seconds: desktopControlSummary.heartbeat_age_seconds,
+      },
       tool_catalog: toolCatalogSummary,
       permission_profiles: {
         default_profile: permissionProfilesSummary.default_profile,
@@ -2231,6 +2254,10 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     reaction_engine: reactionEngineSummary,
     workflow_exports: workflowExportSummary,
     runtime_workers: runtimeWorkerSummary,
+    desktop_control: {
+      state: desktopControlState,
+      summary: desktopControlSummary,
+    },
     tool_catalog: toolCatalogSummary,
     permission_profiles: permissionProfilesSummary,
     budget_ledger: budgetLedgerSummary,

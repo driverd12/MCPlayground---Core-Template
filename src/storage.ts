@@ -13,6 +13,11 @@ import {
   type PermissionProfilesStateRecord,
   type WarmCacheStateRecord,
 } from "./control_plane.js";
+import {
+  getDefaultDesktopControlState,
+  normalizeDesktopControlState,
+  type DesktopControlStateRecord,
+} from "./desktop_control_plane.js";
 
 const SQLITE_HEADER = Buffer.from("SQLite format 3\u0000", "utf8");
 
@@ -11273,6 +11278,109 @@ export class Storage {
           last_duration_ms: normalized.last_duration_ms,
           run_count: normalized.run_count,
           warmed_targets: normalized.warmed_targets,
+        }),
+        now
+      );
+    return {
+      ...normalized,
+      updated_at: now,
+      source: "persisted",
+    };
+  }
+
+  getDesktopControlState(): DesktopControlStateRecord {
+    const row = this.db
+      .prepare(
+        `SELECT enabled, config_json, updated_at
+         FROM daemon_configs
+         WHERE daemon_key = ?`
+      )
+      .get("desktop.control") as Record<string, unknown> | undefined;
+
+    if (!row) {
+      return getDefaultDesktopControlState();
+    }
+    return normalizeDesktopControlState(
+      {
+        ...parseJsonObject(row.config_json),
+        enabled: Number(row.enabled ?? 0) === 1,
+      },
+      String(row.updated_at ?? "") || null
+    );
+  }
+
+  setDesktopControlState(params: {
+    enabled?: boolean;
+    allow_observe?: boolean;
+    allow_act?: boolean;
+    allow_listen?: boolean;
+    screenshot_dir?: string;
+    action_timeout_ms?: number;
+    listen_max_seconds?: number;
+    heartbeat_interval_seconds?: number;
+    last_heartbeat_at?: string | null;
+    last_observation_at?: string | null;
+    last_action_at?: string | null;
+    last_listen_at?: string | null;
+    last_frontmost_app?: string | null;
+    last_frontmost_window?: string | null;
+    last_error?: string | null;
+    capability_probe?: Record<string, unknown>;
+  }): DesktopControlStateRecord {
+    const now = new Date().toISOString();
+    const existing = this.getDesktopControlState();
+    const normalized = normalizeDesktopControlState(
+      {
+        enabled: params.enabled ?? existing.enabled,
+        allow_observe: params.allow_observe ?? existing.allow_observe,
+        allow_act: params.allow_act ?? existing.allow_act,
+        allow_listen: params.allow_listen ?? existing.allow_listen,
+        screenshot_dir: params.screenshot_dir ?? existing.screenshot_dir,
+        action_timeout_ms: params.action_timeout_ms ?? existing.action_timeout_ms,
+        listen_max_seconds: params.listen_max_seconds ?? existing.listen_max_seconds,
+        heartbeat_interval_seconds: params.heartbeat_interval_seconds ?? existing.heartbeat_interval_seconds,
+        last_heartbeat_at: params.last_heartbeat_at === undefined ? existing.last_heartbeat_at : params.last_heartbeat_at,
+        last_observation_at:
+          params.last_observation_at === undefined ? existing.last_observation_at : params.last_observation_at,
+        last_action_at: params.last_action_at === undefined ? existing.last_action_at : params.last_action_at,
+        last_listen_at: params.last_listen_at === undefined ? existing.last_listen_at : params.last_listen_at,
+        last_frontmost_app:
+          params.last_frontmost_app === undefined ? existing.last_frontmost_app : params.last_frontmost_app,
+        last_frontmost_window:
+          params.last_frontmost_window === undefined ? existing.last_frontmost_window : params.last_frontmost_window,
+        last_error: params.last_error === undefined ? existing.last_error : params.last_error,
+        capability_probe: params.capability_probe ?? existing.capability_probe,
+      },
+      now
+    );
+    this.db
+      .prepare(
+        `INSERT INTO daemon_configs (daemon_key, enabled, config_json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(daemon_key) DO UPDATE SET
+           enabled = excluded.enabled,
+           config_json = excluded.config_json,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        "desktop.control",
+        normalized.enabled ? 1 : 0,
+        stableStringify({
+          allow_observe: normalized.allow_observe,
+          allow_act: normalized.allow_act,
+          allow_listen: normalized.allow_listen,
+          screenshot_dir: normalized.screenshot_dir,
+          action_timeout_ms: normalized.action_timeout_ms,
+          listen_max_seconds: normalized.listen_max_seconds,
+          heartbeat_interval_seconds: normalized.heartbeat_interval_seconds,
+          last_heartbeat_at: normalized.last_heartbeat_at,
+          last_observation_at: normalized.last_observation_at,
+          last_action_at: normalized.last_action_at,
+          last_listen_at: normalized.last_listen_at,
+          last_frontmost_app: normalized.last_frontmost_app,
+          last_frontmost_window: normalized.last_frontmost_window,
+          last_error: normalized.last_error,
+          capability_probe: normalized.capability_probe,
         }),
         now
       );

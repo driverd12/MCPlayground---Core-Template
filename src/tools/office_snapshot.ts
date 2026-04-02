@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { summarizeDesktopControlState } from "../desktop_control_plane.js";
 import {
   type AgentSessionRecord,
   type RuntimeWorkerSessionRecord,
@@ -522,6 +523,12 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     rosterPayload.active_agent_ids = dedupeAgentIds([...activeAgentIds, ...providerReadyAgentIds]);
   }
 
+  const desktopControlState = storage.getDesktopControlState();
+  const desktopControl = {
+    state: desktopControlState,
+    summary: summarizeDesktopControlState(desktopControlState),
+  };
+
   return {
     generated_at: new Date().toISOString(),
     thread_id: threadId,
@@ -543,6 +550,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     runtime_workers: runtimeWorkers,
     operator_brief: operatorBriefPayload,
     provider_bridge: providerBridge,
+    desktop_control: desktopControl,
     source: "office.snapshot",
   };
 }
@@ -553,8 +561,20 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
   if (isDefaultOfficeSnapshotRequest(input)) {
     const cached = readWarmCacheEntry(officeSnapshotWarmCacheKey(threadId), warmCacheState.ttl_seconds * 1000);
     if (cached && cached.payload && typeof cached.payload === "object" && !Array.isArray(cached.payload)) {
+      const liveDesktopControlState = storage.getDesktopControlState();
+      const liveDesktopControl = {
+        state: liveDesktopControlState,
+        summary: summarizeDesktopControlState(liveDesktopControlState),
+      };
+      const cachedPayload = cached.payload as Record<string, unknown>;
+      const cachedKernel = asRecord(cachedPayload.kernel);
       return {
-        ...(cached.payload as Record<string, unknown>),
+        ...cachedPayload,
+        kernel: {
+          ...cachedKernel,
+          desktop_control: liveDesktopControl,
+        },
+        desktop_control: liveDesktopControl,
         cache: {
           hit: true,
           key: cached.key,

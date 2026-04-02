@@ -572,6 +572,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const kernelBudgetLedger = asDict(kernel.budget_ledger);
   const kernelWarmCache = asDict(kernel.warm_cache);
   const kernelFeatureFlags = asDict(kernel.feature_flags);
+  const kernelDesktopControl = asDict(kernel.desktop_control);
   const defaultHostId = String(kernelWorkerFabric.default_host_id ?? "local").trim() || "local";
   const localHost = asDict(
     asList(kernelWorkerFabric.hosts).find((entry) => String(asDict(entry).host_id ?? "").trim() === defaultHostId)
@@ -592,6 +593,8 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const providerBridge = asDict(raw.provider_bridge);
   const providerBridgeDiagnostics = asDict(providerBridge.diagnostics);
   const providerEntries = asList(providerBridgeDiagnostics.diagnostics);
+  const rawDesktopControl = asDict(raw.desktop_control);
+  const desktopControlSummary = asDict(kernelDesktopControl.summary || rawDesktopControl.summary);
   const threadId = String(raw.thread_id ?? "ring-leader-main").trim() || "ring-leader-main";
   const latestAutopilotSession = asList(agentSessions.sessions).find((entry) => {
     const session = asDict(entry);
@@ -719,6 +722,14 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         configured_count: providerEntries.filter((entry) => String(asDict(entry).status ?? "").trim().toLowerCase() === "configured").length,
         disconnected_count: providerEntries.filter((entry) => String(asDict(entry).status ?? "").trim().toLowerCase() === "disconnected").length,
         unavailable_count: providerEntries.filter((entry) => String(asDict(entry).status ?? "").trim().toLowerCase() === "unavailable").length,
+      },
+      desktop_control: {
+        enabled: Boolean(desktopControlSummary.enabled),
+        stale: Boolean(desktopControlSummary.stale),
+        observe_ready: Boolean(desktopControlSummary.observe_ready),
+        act_ready: Boolean(desktopControlSummary.act_ready),
+        listen_ready: Boolean(desktopControlSummary.listen_ready),
+        last_frontmost_app: String(desktopControlSummary.last_frontmost_app ?? ""),
       },
       maintain: {
         enabled: Boolean(maintainState.enabled),

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { probeLocalOllamaBackend, setLocalOllamaModelResidency } from "../local_backend_probe.js";
 import { probeLocalMlxBackend } from "../local_mlx_backend_probe.js";
 import { captureLocalHostProfile, deriveLocalExecutionBudget } from "../local_host_profile.js";
+import { summarizeDesktopControlState } from "../desktop_control_plane.js";
 import {
   type AutonomyMaintainStateRecord,
   type ProviderBridgeDiagnosticSnapshotRecord,
@@ -1221,6 +1222,8 @@ async function buildStatus(
   const providerBridgeEntries = Array.isArray(providerBridgeDiagnostics.diagnostics)
     ? providerBridgeDiagnostics.diagnostics
     : [];
+  const desktopControlState = storage.getDesktopControlState();
+  const desktopControlSummary = summarizeDesktopControlState(desktopControlState);
   const due = {
     stale:
       startupGraceActive(runtime, state.interval_seconds) !== true &&
@@ -1263,6 +1266,18 @@ async function buildStatus(
       continue;
     }
     attention.push(`provider.bridge.${clientId}.disconnected`);
+  }
+  if (desktopControlSummary.enabled && desktopControlSummary.stale) {
+    attention.push("desktop.control.stale");
+  }
+  if (desktopControlSummary.enabled && !desktopControlSummary.observe_ready && desktopControlState.allow_observe) {
+    attention.push("desktop.control.observe_unavailable");
+  }
+  if (desktopControlSummary.enabled && !desktopControlSummary.act_ready && desktopControlState.allow_act) {
+    attention.push("desktop.control.act_unavailable");
+  }
+  if (desktopControlSummary.enabled && !desktopControlSummary.listen_ready && desktopControlState.allow_listen) {
+    attention.push("desktop.control.listen_unavailable");
   }
   if (evalHealth.below_threshold) {
     attention.push(`eval.${evalHealth.suite_id}.below_threshold`);
@@ -1331,6 +1346,10 @@ async function buildStatus(
       disconnected_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "disconnected").length,
       unavailable_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "unavailable").length,
       diagnostics: providerBridgeEntries,
+    },
+    desktop_control: {
+      state: desktopControlState,
+      summary: desktopControlSummary,
     },
     self_drive: {
       enabled: state.enabled && state.enable_self_drive,
@@ -1476,6 +1495,24 @@ async function executeAutonomyMaintainPass(
     } satisfies ProviderBridgeDiagnosticSnapshotRecord))
     .filter((entry): entry is ProviderBridgeDiagnosticSnapshotRecord => entry.client_id.length > 0 && entry.display_name.length > 0);
   actions.push("provider.bridge.heartbeat");
+  const desktopControlState = storage.getDesktopControlState();
+  let desktopControlHeartbeat: Record<string, unknown> | null = null;
+  if (desktopControlState.enabled) {
+    try {
+      desktopControlHeartbeat = asRecord(
+        await invokeTool("desktop.control", {
+          action: "heartbeat",
+          mutation: deriveMutation(input.mutation!, "desktop-control-heartbeat"),
+          source_client: sourceClient,
+          source_model: input.source_model,
+          source_agent: sourceAgent,
+        })
+      );
+      actions.push("desktop.control.heartbeat");
+    } catch (error) {
+      attention.push(`desktop.control.failed:${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   for (const entry of providerBridgeEntries) {
     const clientId = String(entry.client_id ?? "").trim();
     const status = String(entry.status ?? "").trim().toLowerCase();
@@ -2536,6 +2573,7 @@ async function executeAutonomyMaintainPass(
     last_attention: attention,
     last_error: lastError,
   });
+  const desktopControlHeartbeatSummary = asRecord(asRecord(desktopControlHeartbeat).summary);
 
   const shouldPublishEvent =
     input.publish_runtime_event !== false &&
@@ -2594,6 +2632,13 @@ async function executeAutonomyMaintainPass(
           configured_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "configured").length,
           disconnected_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "disconnected").length,
           unavailable_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "unavailable").length,
+        },
+        desktop_control: {
+          enabled: readBoolean(desktopControlHeartbeatSummary.enabled) === true || desktopControlState.enabled,
+          stale: readBoolean(desktopControlHeartbeatSummary.stale),
+          observe_ready: readBoolean(desktopControlHeartbeatSummary.observe_ready),
+          act_ready: readBoolean(desktopControlHeartbeatSummary.act_ready),
+          listen_ready: readBoolean(desktopControlHeartbeatSummary.listen_ready),
         },
       },
       source_client: sourceClient,

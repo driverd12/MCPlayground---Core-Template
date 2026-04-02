@@ -116,6 +116,16 @@ test("office gui snapshot surfaces control-plane rollup signals", () => {
         budget_ledger: { projected_cost_usd: 4.5, actual_cost_usd: 2.25 },
         warm_cache: { state: { enabled: true }, stale: false },
         feature_flags: { disabled_count: 2 },
+        desktop_control: {
+          summary: {
+            enabled: true,
+            stale: false,
+            observe_ready: true,
+            act_ready: true,
+            listen_ready: false,
+            last_frontmost_app: "Cursor",
+          },
+        },
       },
       autonomy_maintain: {
         state: {},
@@ -140,6 +150,11 @@ test("office gui snapshot surfaces control-plane rollup signals", () => {
   assert.equal(snapshot.summary.control_plane.warm_cache_enabled, true);
   assert.equal(snapshot.summary.control_plane.warm_cache_stale, false);
   assert.equal(snapshot.summary.control_plane.disabled_feature_flags, 2);
+  assert.equal(snapshot.summary.desktop_control.enabled, true);
+  assert.equal(snapshot.summary.desktop_control.observe_ready, true);
+  assert.equal(snapshot.summary.desktop_control.act_ready, true);
+  assert.equal(snapshot.summary.desktop_control.listen_ready, false);
+  assert.equal(snapshot.summary.desktop_control.last_frontmost_app, "Cursor");
 });
 
 test("office gui snapshot exposes live autopilot execution posture and council state", () => {
