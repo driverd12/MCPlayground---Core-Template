@@ -67,6 +67,8 @@ const officeActionInflight = new Map<string, Promise<void>>();
 const officeActionStatus = new Map<string, OfficeActionRuntimeState>();
 const officeRawSnapshotCache = new Map<string, { body: string; capturedAt: number }>();
 let lastReadySnapshotCache: ReadySnapshotCacheEntry | null = null;
+let readySnapshotInflight: Promise<{ payload: ReadySnapshotPayload; source: "live" | "cache-fallback" | "cache-stale" | "error" | "default" }> | null =
+  null;
 
 function readySnapshotTimeoutMs() {
   const override = Number(process.env.MCP_HTTP_READY_TIMEOUT_MS || "");
@@ -74,6 +76,22 @@ function readySnapshotTimeoutMs() {
     return Math.min(30_000, Math.max(50, Math.round(override)));
   }
   return 5_000;
+}
+
+function officeSnapshotNodeTimeoutMs() {
+  const override = Number(process.env.TRICHAT_OFFICE_SNAPSHOT_NODE_TIMEOUT_MS || "");
+  if (Number.isFinite(override) && override >= 50) {
+    return Math.min(60_000, Math.max(50, Math.round(override)));
+  }
+  return 8_000;
+}
+
+function officeRawSnapshotNodeTimeoutMs() {
+  const override = Number(process.env.TRICHAT_OFFICE_RAW_SNAPSHOT_NODE_TIMEOUT_MS || "");
+  if (Number.isFinite(override) && override >= 50) {
+    return Math.min(60_000, Math.max(50, Math.round(override)));
+  }
+  return 8_000;
 }
 
 function readySnapshotCacheMaxAgeMs() {
@@ -113,53 +131,81 @@ async function resolveReadySnapshot(options: HttpOptions) {
     };
     return { payload, source: "default" as const };
   }
+  if (readySnapshotInflight) {
+    return readySnapshotInflight;
+  }
 
-  try {
-    const snapshot = await Promise.race([
-      Promise.resolve(options.healthSnapshot()),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("health snapshot timed out")), readySnapshotTimeoutMs())
-      ),
-    ]);
-    const payload = normalizeReadySnapshotPayload(snapshot);
-    lastReadySnapshotCache = {
-      payload,
-      capturedAt: Date.now(),
-    };
-    return { payload, source: "live" as const };
-  } catch (error) {
-    if (lastReadySnapshotCache) {
-      const ageMs = Date.now() - lastReadySnapshotCache.capturedAt;
-      if (ageMs <= readySnapshotCacheMaxAgeMs()) {
-        const payload: ReadySnapshotPayload = {
-          ...lastReadySnapshotCache.payload,
-          ready_source: "cache-fallback",
-          ready_cache_age_seconds: Number((ageMs / 1000).toFixed(3)),
-          attention: mergeReadyAttention(lastReadySnapshotCache.payload, ["ready.cache_fallback"]),
-        };
-        return { payload, source: "cache-fallback" as const };
+  let pending: Promise<{ payload: ReadySnapshotPayload; source: "live" | "cache-fallback" | "cache-stale" | "error" }>;
+  pending = (async () => {
+    try {
+      const snapshot = await Promise.race([
+        Promise.resolve(options.healthSnapshot!()),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("health snapshot timed out")), readySnapshotTimeoutMs())
+        ),
+      ]);
+      const payload = normalizeReadySnapshotPayload(snapshot);
+      lastReadySnapshotCache = {
+        payload,
+        capturedAt: Date.now(),
+      };
+      return { payload, source: "live" as const };
+    } catch (error) {
+      if (lastReadySnapshotCache) {
+        const ageMs = Date.now() - lastReadySnapshotCache.capturedAt;
+        if (ageMs <= readySnapshotCacheMaxAgeMs()) {
+          const payload: ReadySnapshotPayload = {
+            ...lastReadySnapshotCache.payload,
+            ready_source: "cache-fallback",
+            ready_cache_age_seconds: Number((ageMs / 1000).toFixed(3)),
+            attention: mergeReadyAttention(lastReadySnapshotCache.payload, ["ready.cache_fallback"]),
+          };
+          return { payload, source: "cache-fallback" as const };
+        }
+        if (ageMs <= readySnapshotStaleCacheMaxAgeMs()) {
+          const payload: ReadySnapshotPayload = {
+            ...lastReadySnapshotCache.payload,
+            ready: false,
+            state: "degraded",
+            ready_source: "cache-stale",
+            ready_cache_age_seconds: Number((ageMs / 1000).toFixed(3)),
+            attention: mergeReadyAttention(lastReadySnapshotCache.payload, ["ready.cache_stale"]),
+          };
+          return { payload, source: "cache-stale" as const };
+        }
       }
-      if (ageMs <= readySnapshotStaleCacheMaxAgeMs()) {
-        const payload: ReadySnapshotPayload = {
-          ...lastReadySnapshotCache.payload,
-          ready: false,
-          state: "degraded",
-          ready_source: "cache-stale",
-          ready_cache_age_seconds: Number((ageMs / 1000).toFixed(3)),
-          attention: mergeReadyAttention(lastReadySnapshotCache.payload, ["ready.cache_stale"]),
-        };
-        return { payload, source: "cache-stale" as const };
-      }
+      const payload: ReadySnapshotPayload = {
+        ok: true,
+        ready: false,
+        state: "degraded",
+        ready_source: "unavailable",
+        attention: ["ready.snapshot_unavailable"],
+        error: error instanceof Error ? error.message : String(error),
+      };
+      return { payload, source: "error" as const };
     }
-    const payload: ReadySnapshotPayload = {
-      ok: true,
-      ready: false,
-      state: "degraded",
-      ready_source: "unavailable",
-      attention: ["ready.snapshot_unavailable"],
-      error: error instanceof Error ? error.message : String(error),
-    };
-    return { payload, source: "error" as const };
+  })().finally(() => {
+    if (readySnapshotInflight === pending) {
+      readySnapshotInflight = null;
+    }
+  });
+  readySnapshotInflight = pending;
+  return pending;
+}
+
+async function withTimeout<T>(value: Promise<T> | T, timeoutMs: number, label: string) {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      Promise.resolve(value),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
   }
 }
 
@@ -356,6 +402,7 @@ export async function startHttpTransport(createServer: () => Server, options: Ht
   }
 
   lastReadySnapshotCache = null;
+  readySnapshotInflight = null;
 
   const sessions = new Map<string, SessionBinding>();
 
@@ -846,11 +893,15 @@ async function maybeHandleOfficeRequest(
       try {
         let pendingRawSnapshot = officeRawSnapshotInflight.get(inflightKey);
         if (!pendingRawSnapshot) {
-          pendingRawSnapshot = Promise.resolve(
-            options.officeRawSnapshot({
-              threadId: effectiveThreadId,
-              theme,
-            })
+          pendingRawSnapshot = withTimeout(
+            Promise.resolve(
+              options.officeRawSnapshot({
+                threadId: effectiveThreadId,
+                theme,
+              })
+            ),
+            officeRawSnapshotNodeTimeoutMs(),
+            "office raw snapshot"
           )
             .then((rawPayload) => {
               const body = JSON.stringify(rawPayload);
@@ -917,12 +968,16 @@ async function maybeHandleOfficeRequest(
       try {
         let pendingDirectSnapshot = officeNodeSnapshotInflight.get(inflightKey);
         if (!pendingDirectSnapshot) {
-          pendingDirectSnapshot = Promise.resolve(
-            options.officeSnapshot({
-              threadId: effectiveThreadId,
-              theme,
-              forceLive,
-            })
+          pendingDirectSnapshot = withTimeout(
+            Promise.resolve(
+              options.officeSnapshot({
+                threadId: effectiveThreadId,
+                theme,
+                forceLive,
+              })
+            ),
+            officeSnapshotNodeTimeoutMs(),
+            "office snapshot"
           )
             .then((directPayload) => {
               const body = JSON.stringify(directPayload);

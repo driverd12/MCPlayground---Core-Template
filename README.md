@@ -11,7 +11,14 @@ This repository ships with one workflow pack by default:
 
 - `agentic` GSD/autoresearch-inspired planner and verifier hooks for local development workflows.
 
-The runtime also includes first-class TriChat orchestration tools (`trichat.*`) for multi-agent turns, autonomous loops, and tmux-backed nested execution control.
+The runtime also includes first-class TriChat orchestration tools (`trichat.*`) for multi-agent turns, autonomous loops, and tmux-backed nested execution control, plus the newer local control-plane surfaces:
+
+- `tool.search` for live capability discovery from the registered MCP tool registry
+- `permission.profile` for durable session permission inheritance across goals, plans, tasks, and sessions
+- `budget.ledger` for append-only token/cost tracking and operator budget summaries
+- `warm.cache` for startup prefetch and cached operator surfaces
+- `feature.flag` for durable rollout state
+- `desktop.*`, `patient.zero`, and `privileged.exec` for explicit local desktop and privileged execution lanes
 
 ## MCP Capability Wireframe
 
@@ -66,6 +73,86 @@ flowchart TD
   Execute --> Tmux["trichat.tmux_controller<br/>worker lanes / queue discipline / office telemetry"]
   Tmux --> Dashboard["Agent Office Dashboard<br/>desk work / chat / break / sleep sprites"]
 ```
+
+## System Interconnects
+
+This is the current end-to-end local topology: launchers, IDEs, terminal bridges, the MCP runtime, the autonomy fabric, and the local-control lanes.
+
+```mermaid
+flowchart LR
+  subgraph Operator["Operator Surfaces"]
+    OfficeGUI["Agent Office GUI<br/>/office/"]
+    OfficeTUI["Agent Office TUI / tmux"]
+    Suite["Agentic Suite.app"]
+    Shell["Shell wrappers<br/>autonomy_*.sh / provider_bridge.sh"]
+  end
+
+  subgraph Clients["IDE + Bridge Clients"]
+    Codex["Codex"]
+    Cursor["Cursor"]
+    Gemini["Gemini CLI"]
+    Copilot["GitHub Copilot CLI"]
+    Browser["Safari"]
+  end
+
+  subgraph Transport["Local MCP Transport"]
+    HTTP["HTTP transport<br/>/ready /office/api/* / MCP bearer auth"]
+    STDIO["STDIO transport<br/>single-client / helper calls"]
+  end
+
+  subgraph Kernel["MCPlayground MCP Server"]
+    Registry["toolRegistry + tool.search"]
+    Control["goal.* / plan.* / task.* / agent.session.* / operator.brief / kernel.summary"]
+    Fabric["trichat.* / worker.fabric / runtime.worker / model.router / provider.bridge"]
+    Flags["permission.profile / feature.flag / budget.ledger / warm.cache"]
+    Local["desktop.* / patient.zero / privileged.exec"]
+  end
+
+  subgraph State["Durable Local State"]
+    SQLite["SQLite state authority<br/>goals / plans / tasks / runs / events / ledgers / daemon configs"]
+    Cache["Warm cache + office snapshot cache"]
+    Secret["Local secret file<br/>~/.codex/secrets/mcagent_admin_password"]
+  end
+
+  subgraph Host["Local Host Capabilities"]
+    Desktop["Desktop control<br/>observe / act / listen"]
+    Admin["mcagent -> root lane"]
+    Runtime["launchd / tmux / local workers"]
+  end
+
+  OfficeGUI --> HTTP
+  OfficeTUI --> HTTP
+  Suite --> HTTP
+  Shell --> HTTP
+  Codex --> STDIO
+  Cursor --> STDIO
+  Gemini --> STDIO
+  Copilot --> STDIO
+  Browser --> HTTP
+
+  HTTP --> Registry
+  HTTP --> Control
+  HTTP --> Fabric
+  STDIO --> Registry
+  STDIO --> Control
+  STDIO --> Fabric
+
+  Registry --> Flags
+  Control --> SQLite
+  Fabric --> SQLite
+  Flags --> SQLite
+  Local --> SQLite
+  Control --> Cache
+  HTTP --> Cache
+
+  Fabric --> Runtime
+  Fabric --> Desktop
+  Local --> Desktop
+  Local --> Admin
+  Admin --> Secret
+```
+
+Full diagrams for demos and technical walk-throughs: [System Interconnects](./docs/SYSTEM_INTERCONNECTS.md)
 
 ## Why This Template Exists
 
@@ -341,6 +428,13 @@ This dashboard is MCP-backed and reads live state from:
 - `task.summary`
 - `trichat.summary`
 - `kernel.summary`
+- `patient.zero`
+- `privileged.exec`
+- `budget.ledger`
+- `feature.flag`
+- `warm.cache`
+
+The `/office/` GUI is served directly by the HTTP transport. Under normal polling it prefers cached office snapshots; explicit operator actions and forced refreshes are the only paths that demand live snapshot work.
 
 The office scene keeps working agents at their desks, moves active chatter to the coffee and water cooler strip, shows resets in the lounge, and parks long-idle agents on the sofa in sleep mode. Action badges reflect real MCP/tmux signals such as desk work, briefing, chatting, break/reset, blocked, offline, and sleep.
 
@@ -471,6 +565,9 @@ Core runtime tools include:
 - Decision and incident logging: `adr.create`, `decision.link`, `incident.*`
 - Runtime ops: `health.*`, `migration.status`, `imprint.*`, `imprint.inbox.*`
 - TriChat orchestration: `trichat.*` (`roster`, `thread/message/turn`, `autopilot`, `tmux_controller`, `bus`, `adapter_telemetry`, `chaos`, `slo`)
+- Control-plane discovery and rollout: `tool.search`, `permission.profile`, `feature.flag`, `warm.cache`
+- Budget and cost visibility: `budget.ledger`
+- Local host control: `desktop.control`, `desktop.observe`, `desktop.act`, `desktop.listen`, `patient.zero`, `privileged.exec`
 
 ## Domain Pack Framework
 
@@ -489,9 +586,8 @@ Connection examples and client setup:
 - [Transport Connection Guide](./docs/CONNECT.md)
 - [Coworker Quickstart (Cursor + Codex)](./docs/COWORKER_QUICKSTART_CURSOR_CODEX.md)
 - [Provider Bridge Matrix](./docs/PROVIDER_BRIDGE_MATRIX.md)
+- [System Interconnects](./docs/SYSTEM_INTERCONNECTS.md)
 - [Presentation Runbook](./docs/PRESENTATION_RUNBOOK.md)
-- [TriChat Multi-Agent Setup](./docs/TRICHAT_MULTI_AGENT_SETUP.md)
-- [Agent Adoption Guide](./docs/AGENT_ADOPTION.md)
 - [Ring Leader MCP Ops](./docs/RING_LEADER_MCP_OPS.md)
 
 Provider bridge commands:

@@ -7,7 +7,7 @@ import test from "node:test";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { startHttpTransport } from "../dist/transports/http.js";
 
-test("/ready falls back to the last successful cached snapshot when the live health snapshot stalls", async () => {
+test("/ready falls back to the last successful cached snapshot when the live health snapshot stalls", { concurrency: false }, async () => {
   const previousTimeout = process.env.MCP_HTTP_READY_TIMEOUT_MS;
   const previousCacheMaxAge = process.env.MCP_HTTP_READY_CACHE_MAX_AGE_SECONDS;
   process.env.MCP_HTTP_READY_TIMEOUT_MS = "75";
@@ -83,7 +83,7 @@ test("/ready falls back to the last successful cached snapshot when the live hea
   }
 });
 
-test("/ready returns a degraded stale-cache payload when only an older cached snapshot is available", async () => {
+test("/ready returns a degraded stale-cache payload when only an older cached snapshot is available", { concurrency: false }, async () => {
   const previousTimeout = process.env.MCP_HTTP_READY_TIMEOUT_MS;
   const previousCacheMaxAge = process.env.MCP_HTTP_READY_CACHE_MAX_AGE_SECONDS;
   const previousStaleCacheMaxAge = process.env.MCP_HTTP_READY_STALE_CACHE_MAX_AGE_SECONDS;
@@ -168,7 +168,7 @@ test("/ready returns a degraded stale-cache payload when only an older cached sn
   }
 });
 
-test("/office/api/snapshot honors explicit live refreshes but throttles repeated live polling", async () => {
+test("/office/api/snapshot honors explicit live refreshes but throttles repeated live polling", { concurrency: false }, async () => {
   const previousCacheDir = process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR;
   const previousRefreshSeconds = process.env.TRICHAT_OFFICE_REFRESH_SECONDS;
   const tempCacheDir = await mkdtemp(path.join(os.tmpdir(), "mcp-office-cache-"));
@@ -246,6 +246,251 @@ test("/office/api/snapshot honors explicit live refreshes but throttles repeated
       process.env.TRICHAT_OFFICE_REFRESH_SECONDS = previousRefreshSeconds;
     }
     await rm(tempCacheDir, { recursive: true, force: true });
+  }
+});
+
+test("/ready coalesces concurrent live health snapshot polls into a single in-flight read", { concurrency: false }, async () => {
+  const previousTimeout = process.env.MCP_HTTP_READY_TIMEOUT_MS;
+  process.env.MCP_HTTP_READY_TIMEOUT_MS = "500";
+
+  let callCount = 0;
+  let releaseSnapshot;
+  const gate = new Promise((resolve) => {
+    releaseSnapshot = resolve;
+  });
+
+  const port = await reservePort();
+  const server = await startHttpTransport(
+    () =>
+      new Server(
+        {
+          name: "http-ready-coalesce-test",
+          version: "1.0.0",
+        },
+        {
+          capabilities: {
+            tools: {},
+          },
+        }
+      ),
+    {
+      host: "127.0.0.1",
+      port,
+      allowedOrigins: ["http://127.0.0.1"],
+      bearerToken: "ready-coalesce-token",
+      healthSnapshot: async () => {
+        callCount += 1;
+        await gate;
+        return {
+          ready: true,
+          state: "ready",
+          attention: [],
+        };
+      },
+    }
+  );
+
+  try {
+    const pending = [
+      fetchReady(port, "ready-coalesce-token"),
+      fetchReady(port, "ready-coalesce-token"),
+      fetchReady(port, "ready-coalesce-token"),
+    ];
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(callCount, 1);
+    releaseSnapshot();
+    const results = await Promise.all(pending);
+    for (const result of results) {
+      assert.equal(result.statusCode, 200);
+      assert.equal(result.headers["x-ready-source"], "live");
+      assert.equal(result.body.ready, true);
+    }
+    assert.equal(callCount, 1);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+    if (previousTimeout === undefined) {
+      delete process.env.MCP_HTTP_READY_TIMEOUT_MS;
+    } else {
+      process.env.MCP_HTTP_READY_TIMEOUT_MS = previousTimeout;
+    }
+  }
+});
+
+test(
+  "/office/api/snapshot times out stalled node snapshots, falls back to cache, and recovers on the next live request",
+  { concurrency: false },
+  async () => {
+  const previousCacheDir = process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR;
+  const previousRefreshSeconds = process.env.TRICHAT_OFFICE_REFRESH_SECONDS;
+  const previousNodeTimeout = process.env.TRICHAT_OFFICE_SNAPSHOT_NODE_TIMEOUT_MS;
+  const tempCacheDir = await mkdtemp(path.join(os.tmpdir(), "mcp-office-node-timeout-"));
+  process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR = tempCacheDir;
+  process.env.TRICHAT_OFFICE_REFRESH_SECONDS = "2";
+  process.env.TRICHAT_OFFICE_SNAPSHOT_NODE_TIMEOUT_MS = "75";
+
+  let snapshotCalls = 0;
+  let stallSnapshot = false;
+  const port = await reservePort();
+  const server = await startHttpTransport(
+    () =>
+      new Server(
+        {
+          name: "http-office-timeout-fallback-test",
+          version: "1.0.0",
+        },
+        {
+          capabilities: {
+            tools: {},
+          },
+        }
+      ),
+    {
+      host: "127.0.0.1",
+      port,
+      allowedOrigins: ["http://127.0.0.1"],
+      bearerToken: "office-timeout-fallback-token",
+      officeSnapshot: async ({ threadId, theme, forceLive }) => {
+        snapshotCalls += 1;
+        if (stallSnapshot) {
+          await new Promise(() => {});
+        }
+        return {
+          thread_id: threadId,
+          theme,
+          fetched_at: Date.now() / 1000,
+          agents: [{ agent: { agent_id: forceLive ? "force-live" : "cached" } }],
+          summary: {},
+          rooms: {},
+          errors: [],
+        };
+      },
+    }
+  );
+
+  try {
+    const seeded = await fetchHttpJsonResponse(port, "/office/api/snapshot?live=force");
+    assert.equal(seeded.statusCode, 200);
+    assert.equal(seeded.headers["x-office-snapshot-source"], "direct-node");
+    assert.equal(snapshotCalls, 1);
+
+    stallSnapshot = true;
+    const cachedFallback = await fetchHttpJsonResponse(port, "/office/api/snapshot?live=force");
+    assert.equal(cachedFallback.statusCode, 200);
+    assert.equal(cachedFallback.headers["x-office-snapshot-source"], "cache-fallback");
+    assert.equal(snapshotCalls, 2);
+
+    stallSnapshot = false;
+    const recovered = await fetchHttpJsonResponse(port, "/office/api/snapshot?live=force");
+    assert.equal(recovered.statusCode, 200);
+    assert.equal(recovered.headers["x-office-snapshot-source"], "direct-node");
+    assert.equal(snapshotCalls, 3);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+    if (previousCacheDir === undefined) {
+      delete process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR;
+    } else {
+      process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR = previousCacheDir;
+    }
+    if (previousRefreshSeconds === undefined) {
+      delete process.env.TRICHAT_OFFICE_REFRESH_SECONDS;
+    } else {
+      process.env.TRICHAT_OFFICE_REFRESH_SECONDS = previousRefreshSeconds;
+    }
+    if (previousNodeTimeout === undefined) {
+      delete process.env.TRICHAT_OFFICE_SNAPSHOT_NODE_TIMEOUT_MS;
+    } else {
+      process.env.TRICHAT_OFFICE_SNAPSHOT_NODE_TIMEOUT_MS = previousNodeTimeout;
+    }
+    await rm(tempCacheDir, { recursive: true, force: true });
+  }
+  }
+);
+
+test("/office/api/snapshot raw mode times out stalled raw snapshots and falls back to cached raw payloads", { concurrency: false }, async () => {
+  const previousRawTimeout = process.env.TRICHAT_OFFICE_RAW_SNAPSHOT_NODE_TIMEOUT_MS;
+  process.env.TRICHAT_OFFICE_RAW_SNAPSHOT_NODE_TIMEOUT_MS = "75";
+
+  let rawCalls = 0;
+  let stallRaw = false;
+  const port = await reservePort();
+  const server = await startHttpTransport(
+    () =>
+      new Server(
+        {
+          name: "http-office-raw-timeout-test",
+          version: "1.0.0",
+        },
+        {
+          capabilities: {
+            tools: {},
+          },
+        }
+      ),
+    {
+      host: "127.0.0.1",
+      port,
+      allowedOrigins: ["http://127.0.0.1"],
+      bearerToken: "office-raw-timeout-token",
+      officeRawSnapshot: async ({ threadId, theme }) => {
+        rawCalls += 1;
+        if (stallRaw) {
+          await new Promise(() => {});
+        }
+        return {
+          thread_id: threadId,
+          theme,
+          fetched_at: Date.now() / 1000,
+          agents: [{ agent: { agent_id: "raw" } }],
+          summary: {},
+          rooms: {},
+          errors: [],
+        };
+      },
+    }
+  );
+
+  try {
+    const seeded = await fetchHttpJsonResponse(port, "/office/api/snapshot?format=raw");
+    assert.equal(seeded.statusCode, 200);
+    assert.equal(seeded.headers["x-office-snapshot-source"], "direct-node-raw");
+    assert.equal(rawCalls, 1);
+
+    stallRaw = true;
+    const fallback = await fetchHttpJsonResponse(port, "/office/api/snapshot?format=raw&live=force");
+    assert.equal(fallback.statusCode, 200);
+    assert.equal(fallback.headers["x-office-snapshot-source"], "cache-fallback-raw");
+    assert.equal(rawCalls, 2);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+    if (previousRawTimeout === undefined) {
+      delete process.env.TRICHAT_OFFICE_RAW_SNAPSHOT_NODE_TIMEOUT_MS;
+    } else {
+      process.env.TRICHAT_OFFICE_RAW_SNAPSHOT_NODE_TIMEOUT_MS = previousRawTimeout;
+    }
   }
 });
 
