@@ -24,6 +24,16 @@ class AgentOfficeDashboardTests(unittest.TestCase):
         self.assertEqual(MODULE.snapshot_max_workers("http", 1), 1)
         self.assertEqual(MODULE.snapshot_max_workers("stdio", 15), 8)
 
+    def test_allow_direct_tool_fanout_fallback_defaults_off_for_http(self) -> None:
+        with mock.patch.dict(MODULE.os.environ, {}, clear=False):
+            self.assertFalse(MODULE.allow_direct_tool_fanout_fallback("http"))
+            self.assertTrue(MODULE.allow_direct_tool_fanout_fallback("stdio"))
+
+    def test_compute_refresh_interval_seconds_backs_off_on_slow_or_failed_refresh(self) -> None:
+        self.assertEqual(MODULE.compute_refresh_interval_seconds(2.0, 0.2, False), 2.0)
+        self.assertGreaterEqual(MODULE.compute_refresh_interval_seconds(2.0, 2.5, False), 3.0)
+        self.assertGreaterEqual(MODULE.compute_refresh_interval_seconds(2.0, 0.1, True), 4.0)
+
     def test_snapshot_cache_round_trip_reads_fresh_thread_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = pathlib.Path(temp_dir)
@@ -185,6 +195,42 @@ class AgentOfficeDashboardTests(unittest.TestCase):
             snapshot = MODULE.fetch_snapshot(caller, "ring-leader-main", "night")
         self.assertEqual(snapshot.thread_id, "ring-leader-main")
         self.assertEqual(snapshot.task_summary["counts"]["pending"], 1)
+        call_mock.assert_called_once_with(
+            "office.snapshot",
+            {
+                "thread_id": "ring-leader-main",
+                "turn_limit": 12,
+                "task_limit": 24,
+                "session_limit": 50,
+                "event_limit": 24,
+                "learning_limit": 120,
+                "runtime_worker_limit": 20,
+                "include_kernel": True,
+                "include_learning": True,
+                "include_bus": True,
+                "include_adapter": True,
+                "include_runtime_workers": True,
+                "metadata": {"source": "dashboard.direct"},
+            },
+        )
+
+    def test_fetch_snapshot_http_failure_does_not_multiply_into_full_tool_fanout(self) -> None:
+        caller = MODULE.McpToolCaller(
+            repo_root=REPO_ROOT,
+            transport="http",
+            url="http://127.0.0.1:8787/",
+            origin="http://127.0.0.1",
+            stdio_command="node",
+            stdio_args="dist/server.js",
+            retries=0,
+            retry_delay_seconds=0.05,
+            tool_timeout_seconds=1.0,
+        )
+        with mock.patch.dict(MODULE.os.environ, {"MCP_HTTP_BEARER_TOKEN": "test-token"}, clear=False):
+            with mock.patch.object(MODULE.McpToolCaller, "fetch_http_snapshot", side_effect=RuntimeError("http raw down")):
+                with mock.patch.object(MODULE.McpToolCaller, "call_tool", side_effect=RuntimeError("office snapshot down")) as call_mock:
+                    with self.assertRaises(RuntimeError):
+                        MODULE.fetch_snapshot(caller, "ring-leader-main", "night")
         call_mock.assert_called_once_with(
             "office.snapshot",
             {

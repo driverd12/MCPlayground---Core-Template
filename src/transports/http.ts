@@ -60,8 +60,11 @@ const autonomyCtlScript = path.join(repoRoot, "scripts", "autonomy_ctl.sh");
 const officeTmuxScript = path.join(repoRoot, "scripts", "agent_office_tmux.sh");
 const officeTmuxOpenScript = path.join(repoRoot, "scripts", "agent_office_tmux_open.sh");
 const officeSnapshotInflight = new Map<string, Promise<OfficeSnapshotCommandResult>>();
+const officeNodeSnapshotInflight = new Map<string, Promise<{ body: string; parsed: OfficeSnapshotPayload | null }>>();
+const officeRawSnapshotInflight = new Map<string, Promise<string>>();
 const officeActionInflight = new Map<string, Promise<void>>();
 const officeActionStatus = new Map<string, OfficeActionRuntimeState>();
+const officeRawSnapshotCache = new Map<string, { body: string; capturedAt: number }>();
 let lastReadySnapshotCache: ReadySnapshotCacheEntry | null = null;
 
 function readySnapshotTimeoutMs() {
@@ -201,12 +204,48 @@ function officeSnapshotCacheMaxAgeSeconds() {
   return Math.max(3, Math.min(30, base * 2.5));
 }
 
+function officeSnapshotLiveThrottleSeconds() {
+  const override = Number(process.env.TRICHAT_OFFICE_SNAPSHOT_LIVE_THROTTLE_SECONDS || "");
+  if (Number.isFinite(override) && override > 0) {
+    return Math.max(1, Math.min(30, override));
+  }
+  const refreshSeconds = Number(process.env.TRICHAT_OFFICE_REFRESH_SECONDS || "2");
+  const base = Number.isFinite(refreshSeconds) && refreshSeconds > 0 ? refreshSeconds : 2;
+  return Math.max(1, Math.min(10, base * 1.5));
+}
+
 function officeSnapshotStaleMaxAgeSeconds() {
   const override = Number(process.env.TRICHAT_OFFICE_SNAPSHOT_STALE_MAX_AGE_SECONDS || "");
   if (Number.isFinite(override) && override > 0) {
     return override;
   }
   return Math.max(30, officeSnapshotCacheMaxAgeSeconds() * 12);
+}
+
+function officeRawSnapshotCacheMaxAgeMs() {
+  const override = Number(process.env.TRICHAT_OFFICE_RAW_SNAPSHOT_CACHE_MAX_AGE_SECONDS || "");
+  if (Number.isFinite(override) && override > 0) {
+    return Math.max(250, Math.round(override * 1000));
+  }
+  const refreshSeconds = Number(process.env.TRICHAT_OFFICE_REFRESH_SECONDS || "2");
+  const baseSeconds = Number.isFinite(refreshSeconds) && refreshSeconds > 0 ? refreshSeconds : 2;
+  return Math.max(1_000, Math.min(10_000, Math.round(baseSeconds * 1_500)));
+}
+
+function readOfficeRawSnapshotCache(inflightKey: string) {
+  const entry = officeRawSnapshotCache.get(inflightKey);
+  if (!entry) {
+    return null;
+  }
+  const ageMs = Date.now() - entry.capturedAt;
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > officeRawSnapshotCacheMaxAgeMs()) {
+    officeRawSnapshotCache.delete(inflightKey);
+    return null;
+  }
+  return {
+    body: entry.body,
+    ageSeconds: ageMs / 1000,
+  };
 }
 
 function readOfficeSnapshotCache(
@@ -304,6 +343,10 @@ export async function startHttpTransport(createServer: () => Server, options: Ht
   const sessions = new Map<string, SessionBinding>();
 
   const httpServer = http.createServer((req, res) => {
+    // This local control-plane daemon is polled frequently by short-lived clients.
+    // Forcing per-request socket closure avoids keep-alive stalls under mixed curl/browser/tool traffic.
+    res.shouldKeepAlive = false;
+    res.setHeader("connection", "close");
     const requestUrl = new URL(req.url ?? "/", `http://${options.host}:${options.port}`);
     const pathname = requestUrl.pathname;
     Promise.resolve(handleFastPathRequest(req, res, requestUrl, options))
@@ -362,6 +405,7 @@ export async function startHttpTransport(createServer: () => Server, options: Ht
         }
       });
   });
+  httpServer.keepAliveTimeout = 0;
 
   await new Promise<void>((resolve) => {
     httpServer.listen(options.port, options.host, () => resolve());
@@ -763,20 +807,63 @@ async function maybeHandleOfficeRequest(
     const theme = String(requestUrl.searchParams.get("theme") || process.env.TRICHAT_OFFICE_THEME || "night").trim() || "night";
     const requestedThreadId = String(requestUrl.searchParams.get("thread_id") || "").trim();
     const effectiveThreadId = requestedThreadId || "ring-leader-main";
+    const inflightKey = officeSnapshotInflightKey(theme, requestedThreadId || null);
     const responseFormat = String(requestUrl.searchParams.get("format") || "").trim().toLowerCase();
-    const forceLive = ["1", "true", "yes"].includes(String(requestUrl.searchParams.get("live") || "").trim().toLowerCase());
+    const liveMode = String(requestUrl.searchParams.get("live") || "").trim().toLowerCase();
+    const forceLive = ["1", "true", "yes", "force"].includes(liveMode);
+    const explicitForceLive = liveMode === "force" || ["1", "true", "yes"].includes(
+      String(req.headers["x-office-force-live"] || "").trim().toLowerCase()
+    );
     if (responseFormat === "raw" && options.officeRawSnapshot) {
+      if (!forceLive) {
+        const cachedRawSnapshot = readOfficeRawSnapshotCache(inflightKey);
+        if (cachedRawSnapshot) {
+          res.statusCode = 200;
+          res.setHeader("content-type", "application/json; charset=utf-8");
+          res.setHeader("x-office-snapshot-source", "cache-raw");
+          res.setHeader("x-office-snapshot-age-seconds", cachedRawSnapshot.ageSeconds.toFixed(3));
+          res.end(cachedRawSnapshot.body);
+          return true;
+        }
+      }
       try {
-        const rawPayload = await options.officeRawSnapshot({
-          threadId: effectiveThreadId,
-          theme,
-        });
+        let pendingRawSnapshot = officeRawSnapshotInflight.get(inflightKey);
+        if (!pendingRawSnapshot) {
+          pendingRawSnapshot = Promise.resolve(
+            options.officeRawSnapshot({
+              threadId: effectiveThreadId,
+              theme,
+            })
+          )
+            .then((rawPayload) => {
+              const body = JSON.stringify(rawPayload);
+              officeRawSnapshotCache.set(inflightKey, {
+                body,
+                capturedAt: Date.now(),
+              });
+              return body;
+            })
+            .finally(() => {
+              officeRawSnapshotInflight.delete(inflightKey);
+            });
+          officeRawSnapshotInflight.set(inflightKey, pendingRawSnapshot);
+        }
+        const rawBody = await pendingRawSnapshot;
         res.statusCode = 200;
         res.setHeader("content-type", "application/json; charset=utf-8");
         res.setHeader("x-office-snapshot-source", "direct-node-raw");
-        res.end(JSON.stringify(rawPayload));
+        res.end(rawBody);
         return true;
       } catch (error) {
+        const cachedRawSnapshot = readOfficeRawSnapshotCache(inflightKey);
+        if (cachedRawSnapshot) {
+          res.statusCode = 200;
+          res.setHeader("content-type", "application/json; charset=utf-8");
+          res.setHeader("x-office-snapshot-source", "cache-fallback-raw");
+          res.setHeader("x-office-snapshot-age-seconds", cachedRawSnapshot.ageSeconds.toFixed(3));
+          res.end(cachedRawSnapshot.body);
+          return true;
+        }
         sendJson(res, 500, {
           ok: false,
           error: "snapshot_failed",
@@ -800,14 +887,40 @@ async function maybeHandleOfficeRequest(
       }
     }
     if (options.officeSnapshot) {
+      const freshCachedSnapshot = readOfficeSnapshotCache(theme, requestedThreadId || null);
+      if (forceLive && !explicitForceLive && freshCachedSnapshot && freshCachedSnapshot.ageSeconds <= officeSnapshotLiveThrottleSeconds()) {
+        res.statusCode = 200;
+        res.setHeader("content-type", "application/json; charset=utf-8");
+        res.setHeader("x-office-snapshot-source", "cache-throttled-live");
+        res.setHeader("x-office-snapshot-age-seconds", freshCachedSnapshot.ageSeconds.toFixed(3));
+        res.setHeader("x-office-snapshot-stale", "false");
+        res.end(freshCachedSnapshot.body);
+        return true;
+      }
       try {
-        const directPayload = await options.officeSnapshot({
-          threadId: effectiveThreadId,
-          theme,
-          forceLive,
-        });
-        const directBody = JSON.stringify(directPayload);
-        const directParsed = parseOfficeSnapshotPayload(directBody);
+        let pendingDirectSnapshot = officeNodeSnapshotInflight.get(inflightKey);
+        if (!pendingDirectSnapshot) {
+          pendingDirectSnapshot = Promise.resolve(
+            options.officeSnapshot({
+              threadId: effectiveThreadId,
+              theme,
+              forceLive,
+            })
+          )
+            .then((directPayload) => {
+              const body = JSON.stringify(directPayload);
+              const parsed = parseOfficeSnapshotPayload(body);
+              if (!Array.isArray(parsed?.errors) || parsed.errors.length === 0) {
+                writeOfficeSnapshotCache(directPayload);
+              }
+              return { body, parsed };
+            })
+            .finally(() => {
+              officeNodeSnapshotInflight.delete(inflightKey);
+            });
+          officeNodeSnapshotInflight.set(inflightKey, pendingDirectSnapshot);
+        }
+        const { body: directBody, parsed: directParsed } = await pendingDirectSnapshot;
         const directAgents = Array.isArray(directParsed?.agents) ? directParsed.agents.length : 0;
         const directErrors = Array.isArray(directParsed?.errors) ? directParsed.errors.length : 0;
         if (directErrors > 0) {
@@ -823,8 +936,6 @@ async function maybeHandleOfficeRequest(
             res.end(cachedSnapshot.body);
             return true;
           }
-        } else {
-          writeOfficeSnapshotCache(directPayload);
         }
         res.statusCode = 200;
         res.setHeader("content-type", "application/json; charset=utf-8");
@@ -851,7 +962,6 @@ async function maybeHandleOfficeRequest(
       }
     }
 
-    const inflightKey = officeSnapshotInflightKey(theme, requestedThreadId || null);
     let pending = officeSnapshotInflight.get(inflightKey);
     if (!pending) {
       const args = [

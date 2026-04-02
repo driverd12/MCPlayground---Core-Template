@@ -124,16 +124,31 @@ export function runWarmCachePrefetch(storage: Storage, params?: { thread_id?: st
 }
 
 export function initializeWarmCacheLane(storage: Storage) {
-  const state = storage.getWarmCacheState();
-  let startup = null;
-  if (state.enabled && state.startup_prefetch) {
-    startup = runWarmCachePrefetch(storage, { thread_id: state.thread_id });
-  }
   return {
     state: storage.getWarmCacheState(),
     runtime: summarizeWarmCacheRuntime(),
-    startup,
+    startup: null,
   };
+}
+
+export function startWarmCacheStartupPrefetch(storage: Storage) {
+  const state = storage.getWarmCacheState();
+  if (!state.enabled || !state.startup_prefetch) {
+    return { scheduled: false };
+  }
+  setTimeout(() => {
+    try {
+      runWarmCachePrefetch(storage, { thread_id: state.thread_id });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      storage.setWarmCacheState({
+        ...storage.getWarmCacheState(),
+        last_error: message,
+      });
+      console.warn(`[warm.cache] startup prefetch failed: ${message}`);
+    }
+  }, 0);
+  return { scheduled: true };
 }
 
 export function warmCacheControl(storage: Storage, input: z.infer<typeof warmCacheSchema>) {

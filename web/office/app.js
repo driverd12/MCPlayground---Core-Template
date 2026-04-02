@@ -8,8 +8,6 @@
     snapshotRequest: false,
   };
 
-  var SNAPSHOT_QUERY = "live=1";
-
   var els = {
     subtitle: document.querySelector("#subtitle"),
     statusStrip: document.querySelector("#status-strip"),
@@ -418,7 +416,10 @@
     });
   }
 
-  function fetchSnapshot() {
+  function fetchSnapshot(options) {
+    var fetchOptions = options || {};
+    var forceLive = !!fetchOptions.forceLive;
+    var explicitForceLive = !!fetchOptions.explicitForceLive;
     if (state.snapshotRequest) {
       return state.snapshotRequest;
     }
@@ -428,7 +429,10 @@
     } else if (state.bootstrap && state.bootstrap.default_thread_id) {
       threadId = state.bootstrap.default_thread_id;
     }
-    var params = new URLSearchParams(SNAPSHOT_QUERY);
+    var params = new URLSearchParams();
+    if (forceLive) {
+      params.set("live", explicitForceLive ? "force" : "1");
+    }
     if (threadId) {
       params.set("thread_id", threadId);
     }
@@ -438,7 +442,7 @@
         if (!state.selectedAgentId && payload.agents && payload.agents.length && payload.agents[0].agent) {
           state.selectedAgentId = payload.agents[0].agent.agent_id || "";
         }
-        setResultText("Ready.");
+        setResultText(forceLive ? "Live refresh complete." : "Ready.");
         renderAll();
         return payload;
       }, function (error) {
@@ -464,8 +468,10 @@
     var intervalMs = Math.max(2000, refreshSeconds * 1000);
     state.refreshHandle = setInterval(function () {
       fetchSnapshot().catch(function (error) {
-        setResultText(String(error));
-        renderLoadingShell("Snapshot retrying after a partial failure.");
+        setResultText("Snapshot refresh degraded: " + String(error));
+        if (!state.snapshot) {
+          renderLoadingShell("Snapshot retrying after a partial failure.");
+        }
       });
     }, intervalMs);
   }
@@ -477,7 +483,7 @@
       body: JSON.stringify({ action: action }),
     }).then(function (result) {
       setResultText(JSON.stringify(result, null, 2));
-      return fetchSnapshot();
+      return fetchSnapshot({ forceLive: true, explicitForceLive: true });
     });
   }
 
@@ -505,7 +511,7 @@
       }),
     }).then(function (result) {
       setResultText(JSON.stringify(result, null, 2));
-      return fetchSnapshot();
+      return fetchSnapshot({ forceLive: true, explicitForceLive: true });
     });
   }
 
@@ -524,7 +530,7 @@
     }
     if (els.refreshButton) {
       els.refreshButton.addEventListener("click", function () {
-        fetchSnapshot().catch(function (error) {
+        fetchSnapshot({ forceLive: true, explicitForceLive: true }).catch(function (error) {
           setResultText(String(error));
         });
       });

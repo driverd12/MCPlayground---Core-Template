@@ -188,12 +188,32 @@ test("http daemon serves the clickable office GUI and snapshot routes on the liv
     assert.ok(snapshot.summary);
     assert.ok(snapshot.rooms);
 
-    const liveSnapshotResponse = await fetchHttpResponse(`http://127.0.0.1:${httpPort}/office/api/snapshot?live=1`);
-    assert.equal(liveSnapshotResponse.headers["x-office-snapshot-source"], "direct-node");
+    const liveSnapshotResponse = await fetchHttpResponse(`http://127.0.0.1:${httpPort}/office/api/snapshot?live=force`);
+    assert.ok(
+      ["direct-node", "cache", "cache-throttled-live"].includes(String(liveSnapshotResponse.headers["x-office-snapshot-source"] || ""))
+    );
     const liveSnapshot = JSON.parse(liveSnapshotResponse.body);
     assert.equal(typeof liveSnapshot.thread_id, "string");
     assert.ok(Array.isArray(liveSnapshot.agents));
     assert.ok(liveSnapshot.summary);
+
+    const throttledLiveSnapshotResponse = await fetchHttpResponse(`http://127.0.0.1:${httpPort}/office/api/snapshot?live=1`);
+    assert.ok(
+      ["cache-throttled-live", "cache"].includes(String(throttledLiveSnapshotResponse.headers["x-office-snapshot-source"] || ""))
+    );
+    const throttledLiveSnapshot = JSON.parse(throttledLiveSnapshotResponse.body);
+    assert.equal(throttledLiveSnapshot.thread_id, liveSnapshot.thread_id);
+
+    const rawSnapshotResponse = await fetchHttpResponse(`http://127.0.0.1:${httpPort}/office/api/snapshot?format=raw`);
+    assert.equal(rawSnapshotResponse.headers["x-office-snapshot-source"], "direct-node-raw");
+    const rawSnapshot = JSON.parse(rawSnapshotResponse.body);
+    assert.equal(typeof rawSnapshot.thread_id, "string");
+    assert.ok(rawSnapshot.roster);
+
+    const cachedRawSnapshotResponse = await fetchHttpResponse(`http://127.0.0.1:${httpPort}/office/api/snapshot?format=raw`);
+    assert.equal(cachedRawSnapshotResponse.headers["x-office-snapshot-source"], "cache-raw");
+    const cachedRawSnapshot = JSON.parse(cachedRawSnapshotResponse.body);
+    assert.equal(cachedRawSnapshot.thread_id, rawSnapshot.thread_id);
   } finally {
     child.kill("SIGTERM");
     await new Promise((resolve) => child.once("exit", () => resolve()));
@@ -529,7 +549,9 @@ test("http daemon exposes fast unauthenticated root and health routes", async ()
     assert.equal(root.ok, true);
     assert.equal(root.office_path, "/office/");
 
-    const health = JSON.parse(await waitForHttpText(`http://127.0.0.1:${httpPort}/health`));
+    const healthResponse = await fetchHttpResponse(`http://127.0.0.1:${httpPort}/health`);
+    assert.equal(String(healthResponse.headers.connection || "").toLowerCase(), "close");
+    const health = JSON.parse(healthResponse.body);
     assert.equal(health.ok, true);
     assert.equal(health.status, "ok");
   } finally {

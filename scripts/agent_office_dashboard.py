@@ -556,6 +556,26 @@ def snapshot_max_workers(transport: str, request_count: int) -> int:
     return max(2, min(8, request_count))
 
 
+def allow_direct_tool_fanout_fallback(transport: str) -> bool:
+    override = os.environ.get("TRICHAT_OFFICE_ALLOW_DIRECT_FANOUT_FALLBACK", "").strip().lower()
+    if override in {"1", "true", "yes"}:
+        return True
+    if override in {"0", "false", "no"}:
+        return False
+    return transport != "http"
+
+
+def compute_refresh_interval_seconds(base_interval: float, last_duration_seconds: float, had_error: bool) -> float:
+    base = max(0.5, float(base_interval))
+    duration = max(0.0, float(last_duration_seconds))
+    interval = base
+    if duration >= base * 0.8:
+        interval = max(interval, min(15.0, max(base, duration * 1.5)))
+    if had_error:
+        interval = max(interval, min(20.0, max(base * 2.0, duration * 2.0 if duration > 0 else base * 2.0)))
+    return interval
+
+
 @dataclass
 class DashboardAgent:
     agent_id: str
@@ -2949,6 +2969,9 @@ def fetch_snapshot(caller: McpToolCaller, thread_id: str, theme: str = "night") 
     except Exception as error:  # noqa: BLE001
         office_snapshot_error = compact_single_line(f"office_snapshot: {error}", 160)
 
+    if not allow_direct_tool_fanout_fallback(caller.transport):
+        raise RuntimeError(office_snapshot_error or "office_snapshot unavailable")
+
     requests = {
         "roster": ("trichat.roster", {"active_only": False}),
         "workboard": ("trichat.workboard", {"thread_id": thread_id, "limit": 12}),
@@ -3047,9 +3070,11 @@ class OfficeDashboardApp:
         self.last_error = ""
         self.snapshot: Optional[DashboardSnapshot] = None
         self.last_refresh_started = 0.0
+        self.current_refresh_interval = max(0.5, float(args.refresh_interval))
 
     def refresh(self) -> None:
         self.last_refresh_started = time.time()
+        had_error = False
         try:
             self.snapshot = fetch_snapshot(self.caller, self.thread_id, self.theme)
             write_snapshot_cache(self.repo_root, build_gui_snapshot(self.snapshot, self.theme))
@@ -3058,7 +3083,14 @@ class OfficeDashboardApp:
             else:
                 self.last_error = ""
         except Exception as error:  # noqa: BLE001
+            had_error = True
             self.last_error = compact_single_line(str(error), 180)
+        finally:
+            self.current_refresh_interval = compute_refresh_interval_seconds(
+                self.args.refresh_interval,
+                time.time() - self.last_refresh_started,
+                had_error,
+            )
 
     def run_once(self) -> int:
         self.refresh()
@@ -3094,13 +3126,13 @@ class OfficeDashboardApp:
         screen.timeout(120)
         init_colors(self.theme)
         self.refresh()
-        next_refresh_at = time.monotonic() + max(0.5, float(self.args.refresh_interval))
+        next_refresh_at = time.monotonic() + self.current_refresh_interval
         while True:
             height, width = screen.getmaxyx()
             frame = int(time.monotonic() * 4.0)
             if not self.paused and time.monotonic() >= next_refresh_at:
                 self.refresh()
-                next_refresh_at = time.monotonic() + max(0.5, float(self.args.refresh_interval))
+                next_refresh_at = time.monotonic() + self.current_refresh_interval
             self._render(screen, width, height, frame)
             key = screen.getch()
             if key < 0:
@@ -3122,7 +3154,7 @@ class OfficeDashboardApp:
                 self.view = "help"
             elif normalized == "r":
                 self.refresh()
-                next_refresh_at = time.monotonic() + max(0.5, float(self.args.refresh_interval))
+                next_refresh_at = time.monotonic() + self.current_refresh_interval
             elif normalized == "p":
                 self.paused = not self.paused
             elif normalized == "t":
@@ -3154,7 +3186,7 @@ class OfficeDashboardApp:
         )
         header = (
             f"Agent Office Dashboard [{self.view}] "
-            f"thread={self.thread_id} refresh={self.args.refresh_interval:.1f}s "
+            f"thread={self.thread_id} refresh={self.current_refresh_interval:.1f}s "
             f"theme={theme_label(self.theme)} {'PAUSED' if self.paused else 'LIVE'}"
         )
         tabs_line = build_view_tabs(self.view, width, self.theme)

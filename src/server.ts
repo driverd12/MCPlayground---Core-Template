@@ -271,7 +271,7 @@ import {
   reactionEngineSchema,
 } from "./tools/reaction_engine.js";
 import { matchDomainSpecialists, specialistCatalog, specialistCatalogSchema } from "./tools/specialist_catalog.js";
-import { initializeWarmCacheLane, warmCacheControl, warmCacheSchema } from "./tools/warm_cache.js";
+import { initializeWarmCacheLane, startWarmCacheStartupPrefetch, warmCacheControl, warmCacheSchema } from "./tools/warm_cache.js";
 import {
   trichatChaos,
   trichatChaosSchema,
@@ -3520,6 +3520,7 @@ async function main() {
     void runStartupConvergence();
   } else {
     await startStdioTransport(createServerInstance());
+    startWarmCacheStartupPrefetch(storage);
     if (backgroundOwnerEnabled) {
       void runStartupConvergence();
     }
