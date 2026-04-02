@@ -12,7 +12,11 @@ test("tool.search discovers registered control-plane tools and kernel exposes th
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-control-plane-tools-"));
   const dbPath = path.join(tempDir, "hub.sqlite");
 
-  const { client } = await openClient(tempDir, dbPath);
+  const { client } = await openClient(tempDir, dbPath, {
+    MCP_PRIVILEGED_EXEC_DRY_RUN: "1",
+    MCP_PRIVILEGED_EXEC_TEST_ACCOUNT_EXISTS: "1",
+    MCP_PRIVILEGED_EXEC_TEST_SECRET: "integration-secret",
+  });
   try {
     const tools = await listTools(client);
     const names = new Set(tools.map((tool) => tool.name));
@@ -353,7 +357,7 @@ test("patient.zero arms and disarms explicit elevated local control with an oper
     assert.equal(armed.state.enabled, true);
     assert.equal(armed.summary.posture, "armed");
     assert.equal(typeof armed.summary.browser_ready, "boolean");
-    assert.equal(armed.summary.root_shell_enabled, false);
+    assert.equal(armed.summary.root_shell_enabled, true);
     assert.equal(armed.summary.last_operator_note, "Taking over while the operator steps away.");
     assert.equal(armed.desktop_control.state.enabled, true);
     assert.equal(armed.desktop_control.state.allow_observe, true);

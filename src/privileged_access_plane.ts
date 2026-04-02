@@ -105,10 +105,12 @@ export function summarizePrivilegedAccessState(
   const secretPresent = Boolean(runtimeState.secret_present);
   const helperReady = Boolean(runtimeState.helper_ready);
   const secretFingerprint = readString(runtimeState.secret_fingerprint);
+  const secretFingerprintMatches =
+    !secretPresent || !secretFingerprint || state.last_secret_fingerprint === secretFingerprint;
   const verificationFresh =
     Boolean(state.last_verification_ok) &&
     Boolean(state.last_verified_at) &&
-    (!secretPresent || state.last_secret_fingerprint === secretFingerprint);
+    secretFingerprintMatches;
   const rootExecutionReady =
     patientZeroArmed &&
     userExists &&
@@ -129,7 +131,9 @@ export function summarizePrivilegedAccessState(
     blockers.push("privileged_helper_unavailable");
   }
   if (secretPresent && helperReady && userExists) {
-    if (state.last_verification_ok === false) {
+    if (!secretFingerprintMatches) {
+      blockers.push("credential_unverified");
+    } else if (state.last_verification_ok === false) {
       blockers.push("credential_invalid");
     } else if (!verificationFresh) {
       blockers.push("credential_unverified");
