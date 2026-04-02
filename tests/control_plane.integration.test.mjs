@@ -385,6 +385,87 @@ test("patient.zero arms and disarms explicit elevated local control with an oper
   }
 });
 
+test("privileged.exec only runs when Patient Zero is armed and logs every privileged action", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-control-plane-privileged-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(tempDir, dbPath, {
+    MCP_PRIVILEGED_EXEC_DRY_RUN: "1",
+    MCP_PRIVILEGED_EXEC_TEST_ACCOUNT_EXISTS: "1",
+    MCP_PRIVILEGED_EXEC_TEST_SECRET: "integration-secret",
+  });
+  try {
+    const initial = await callTool(client, "privileged.exec", {
+      action: "status",
+    });
+    assert.equal(initial.summary.account, "mcagent");
+    assert.equal(initial.summary.root_execution_ready, false);
+    assert.equal(initial.summary.patient_zero_armed, false);
+
+    await assert.rejects(
+      () =>
+        callTool(client, "privileged.exec", {
+          action: "execute",
+          mutation: nextMutation("privileged-exec", "privileged.exec.execute.denied", () => mutationCounter++),
+          command: "/usr/bin/id",
+          args: ["-u"],
+          source_agent: "ring-leader",
+          source_client: "integration-test",
+        }),
+      /Patient Zero to be armed|requires Patient Zero to be armed|requires Patient Zero/i
+    );
+
+    await callTool(client, "patient.zero", {
+      action: "enable",
+      mutation: nextMutation("privileged-exec", "patient.zero.enable", () => mutationCounter++),
+      source_agent: "operator",
+      source_client: "integration-test",
+    });
+
+    const armed = await callTool(client, "privileged.exec", {
+      action: "status",
+    });
+    assert.equal(armed.summary.patient_zero_armed, true);
+    assert.equal(armed.summary.secret_present, true);
+    assert.equal(armed.summary.root_execution_ready, true);
+
+    const executed = await callTool(client, "privileged.exec", {
+      action: "execute",
+      mutation: nextMutation("privileged-exec", "privileged.exec.execute", () => mutationCounter++),
+      command: "/usr/bin/id",
+      args: ["-u"],
+      source_agent: "ring-leader",
+      source_client: "integration-test",
+    });
+    assert.equal(executed.execution.ok, true);
+    assert.equal(executed.execution.account, "mcagent");
+    assert.equal(executed.execution.target_user, "root");
+
+    const deniedEvents = await callTool(client, "event.tail", {
+      event_type: "privileged.exec.denied",
+      source_agent: "ring-leader",
+      limit: 10,
+    });
+    assert.ok(deniedEvents.events.length >= 1);
+
+    const completedEvents = await callTool(client, "event.tail", {
+      event_type: "privileged.exec.completed",
+      source_agent: "ring-leader",
+      limit: 10,
+    });
+    assert.ok(completedEvents.events.length >= 1);
+    assert.equal(completedEvents.events[0].entity_id, "privileged.access");
+
+    const kernel = await callTool(client, "kernel.summary", {});
+    assert.equal(kernel.privileged_access.summary.account, "mcagent");
+    assert.equal(kernel.privileged_access.summary.root_execution_ready, true);
+  } finally {
+    await closeClient(client);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function openClient(tempDir, dbPath, extraEnv = {}) {
   const transport = new StdioClientTransport({
     command: "node",

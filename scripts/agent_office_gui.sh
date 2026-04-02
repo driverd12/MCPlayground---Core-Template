@@ -118,11 +118,21 @@ NODE
 
 case "${ACTION}" in
   start)
-    ensure_http
+    if ensure_http; then
+      echo "Agent Office ready at ${GUI_URL}"
+    else
+      echo "Agent Office failed to reach ready state. Run '${REPO_ROOT}/scripts/agent_office_gui.sh status'." >&2
+      exit 1
+    fi
     ;;
   open)
-    ensure_http
-    open "${GUI_URL}"
+    if ensure_http; then
+      echo "Opening Agent Office at ${GUI_URL}"
+      open "${GUI_URL}"
+    else
+      echo "Agent Office failed to reach ready state. Start it with '${REPO_ROOT}/scripts/agent_office_gui.sh start' and inspect status." >&2
+      exit 1
+    fi
     ;;
   status)
     print_status

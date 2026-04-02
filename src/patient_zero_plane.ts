@@ -16,6 +16,24 @@ function readBoolean(value: unknown, fallback = false): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
+function formatRootReason(fallback: string, privilegedSummary: Record<string, unknown>) {
+  if (readBoolean(privilegedSummary["root_execution_ready"])) {
+    const account = readString(privilegedSummary["account"]) ?? "mcagent";
+    return `Privileged root lane ready via ${account}.`;
+  }
+  const blockers = Array.isArray(privilegedSummary["blockers"]) ? (privilegedSummary["blockers"] as unknown[]) : [];
+  if (!blockers.length) {
+    return fallback;
+  }
+  return blockers
+    .map((entry) =>
+      String(entry)
+        .replace(/_/g, " ")
+        .trim()
+    )
+    .join(", ");
+}
+
 export type PatientZeroStateRecord = {
   enabled: boolean;
   permission_profile: "high_risk";
@@ -25,7 +43,7 @@ export type PatientZeroStateRecord = {
   allow_listen: boolean;
   browser_app: string;
   web_research_mode: "explicit_task_only";
-  root_shell_enabled: false;
+  root_shell_enabled: boolean;
   root_shell_reason: string;
   report_mode: "operator_visible_summary";
   audit_required: boolean;
@@ -90,11 +108,13 @@ export function normalizePatientZeroState(value: unknown, updatedAt: string | nu
 
 export function summarizePatientZeroState(
   state: PatientZeroStateRecord,
-  desktopControl?: DesktopControlStateRecord | Record<string, unknown> | null
+  desktopControl?: DesktopControlStateRecord | Record<string, unknown> | null,
+  privilegedAccess?: Record<string, unknown> | null
 ) {
   const desktopSummary: Record<string, unknown> = isRecord(desktopControl)
     ? (desktopControl as Record<string, unknown>)
     : {};
+  const privilegedSummary = isRecord(privilegedAccess) ? privilegedAccess : {};
   const capabilityProbe = isRecord(desktopSummary["capability_probe"]) ? desktopSummary["capability_probe"] : {};
   const observeSignal = readBoolean(desktopSummary["observe_ready"], readBoolean(capabilityProbe["can_observe"]));
   const actSignal = readBoolean(desktopSummary["act_ready"], readBoolean(capabilityProbe["can_act"]));
@@ -125,8 +145,8 @@ export function summarizePatientZeroState(
     browser_app: state.browser_app,
     browser_ready: actReady,
     web_research_mode: state.web_research_mode,
-    root_shell_enabled: state.root_shell_enabled,
-    root_shell_reason: state.root_shell_reason,
+    root_shell_enabled: readBoolean(privilegedSummary["root_execution_ready"], state.root_shell_enabled),
+    root_shell_reason: formatRootReason(state.root_shell_reason, privilegedSummary),
     audit_required: state.audit_required,
     report_mode: state.report_mode,
     armed_at: state.armed_at,

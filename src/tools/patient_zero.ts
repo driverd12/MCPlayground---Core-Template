@@ -3,6 +3,7 @@ import { summarizeDesktopControlState } from "../desktop_control_plane.js";
 import { summarizePatientZeroState } from "../patient_zero_plane.js";
 import { Storage } from "../storage.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
+import { buildPrivilegedAccessStatus } from "./privileged_exec.js";
 
 const sourceSchema = z.object({
   source_client: z.string().optional(),
@@ -50,7 +51,8 @@ function actorLabel(input: z.infer<typeof patientZeroSchema>) {
 export function buildPatientZeroReport(storage: Storage) {
   const state = storage.getPatientZeroState();
   const desktopState = storage.getDesktopControlState();
-  const summary = summarizePatientZeroState(state, desktopState);
+  const privilegedAccess = buildPrivilegedAccessStatus(storage);
+  const summary = summarizePatientZeroState(state, desktopState, privilegedAccess.summary as Record<string, unknown>);
   const since = startOfTodayIso();
   const events = storage.listRuntimeEvents({ since, limit: 8 });
   const eventSummary = storage.summarizeRuntimeEvents({ since });
@@ -126,13 +128,15 @@ function recordPatientZeroEvent(
 function buildPayload(storage: Storage) {
   const state = storage.getPatientZeroState();
   const desktopState = storage.getDesktopControlState();
+  const privilegedAccess = buildPrivilegedAccessStatus(storage);
   return {
     state,
-    summary: summarizePatientZeroState(state, desktopState),
+    summary: summarizePatientZeroState(state, desktopState, privilegedAccess.summary as Record<string, unknown>),
     desktop_control: {
       state: desktopState,
       summary: summarizeDesktopControlState(desktopState),
     },
+    privileged_access: privilegedAccess,
     report: buildPatientZeroReport(storage),
     source: "patient.zero",
   };

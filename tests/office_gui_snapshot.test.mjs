@@ -134,12 +134,27 @@ test("office gui snapshot surfaces control-plane rollup signals", () => {
             permission_profile: "high_risk",
             browser_app: "Safari",
             browser_ready: true,
-            root_shell_enabled: false,
-            root_shell_reason: "Manual operator-mediated only.",
+            root_shell_enabled: true,
+            root_shell_reason: "Privileged root lane ready via mcagent.",
             autonomy_enabled: true,
             armed_at: "2026-04-01T17:05:00.000Z",
             armed_by: "operator",
             last_operator_note: "Take over while I step away.",
+          },
+        },
+        privileged_access: {
+          summary: {
+            root_execution_ready: true,
+            account: "mcagent",
+            target_user: "root",
+            patient_zero_armed: true,
+            secret_present: true,
+            helper_ready: true,
+            secret_path: "/Users/dan.driver/.codex/secrets/mcagent_admin_password",
+            blockers: [],
+            last_actor: "ring-leader",
+            last_command: "pmset sleepnow",
+            last_exit_code: 0,
           },
         },
       },
@@ -185,9 +200,12 @@ test("office gui snapshot surfaces control-plane rollup signals", () => {
   assert.equal(snapshot.summary.patient_zero.posture, "armed");
   assert.equal(snapshot.summary.patient_zero.browser_app, "Safari");
   assert.equal(snapshot.summary.patient_zero.browser_ready, true);
-  assert.equal(snapshot.summary.patient_zero.root_shell_enabled, false);
+  assert.equal(snapshot.summary.patient_zero.root_shell_enabled, true);
   assert.equal(snapshot.summary.patient_zero.report.activity_summary.length, 2);
   assert.equal(snapshot.summary.control_plane.patient_zero_enabled, true);
+  assert.equal(snapshot.summary.privileged_access.root_execution_ready, true);
+  assert.equal(snapshot.summary.privileged_access.account, "mcagent");
+  assert.equal(snapshot.summary.control_plane.privileged_root_ready, true);
 });
 
 test("office gui snapshot exposes live autopilot execution posture and council state", () => {

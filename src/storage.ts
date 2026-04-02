@@ -23,6 +23,11 @@ import {
   normalizePatientZeroState,
   type PatientZeroStateRecord,
 } from "./patient_zero_plane.js";
+import {
+  getDefaultPrivilegedAccessState,
+  normalizePrivilegedAccessState,
+  type PrivilegedAccessStateRecord,
+} from "./privileged_access_plane.js";
 
 const SQLITE_HEADER = Buffer.from("SQLite format 3\u0000", "utf8");
 
@@ -11478,6 +11483,76 @@ export class Storage {
           disarmed_at: normalized.disarmed_at,
           disarmed_by: normalized.disarmed_by,
           last_operator_note: normalized.last_operator_note,
+        }),
+        now
+      );
+    return {
+      ...normalized,
+      updated_at: now,
+      source: "persisted",
+    };
+  }
+
+  getPrivilegedAccessState(): PrivilegedAccessStateRecord {
+    const row = this.db
+      .prepare(
+        `SELECT config_json, updated_at
+         FROM daemon_configs
+         WHERE daemon_key = ?`
+      )
+      .get("privileged.access") as Record<string, unknown> | undefined;
+    if (!row) {
+      return getDefaultPrivilegedAccessState();
+    }
+    return normalizePrivilegedAccessState(parseJsonObject(row.config_json), String(row.updated_at ?? "") || null);
+  }
+
+  setPrivilegedAccessState(params: {
+    account?: string;
+    secret_path?: string;
+    audit_required?: boolean;
+    last_executed_at?: string | null;
+    last_actor?: string | null;
+    last_command?: string | null;
+    last_exit_code?: number | null;
+    last_error?: string | null;
+  }): PrivilegedAccessStateRecord {
+    const now = new Date().toISOString();
+    const existing = this.getPrivilegedAccessState();
+    const normalized = normalizePrivilegedAccessState(
+      {
+        account: params.account ?? existing.account,
+        secret_path: params.secret_path ?? existing.secret_path,
+        audit_required: params.audit_required ?? existing.audit_required,
+        last_executed_at: params.last_executed_at === undefined ? existing.last_executed_at : params.last_executed_at,
+        last_actor: params.last_actor === undefined ? existing.last_actor : params.last_actor,
+        last_command: params.last_command === undefined ? existing.last_command : params.last_command,
+        last_exit_code: params.last_exit_code === undefined ? existing.last_exit_code : params.last_exit_code,
+        last_error: params.last_error === undefined ? existing.last_error : params.last_error,
+      },
+      now
+    );
+    this.db
+      .prepare(
+        `INSERT INTO daemon_configs (daemon_key, enabled, config_json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(daemon_key) DO UPDATE SET
+           enabled = excluded.enabled,
+           config_json = excluded.config_json,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        "privileged.access",
+        1,
+        stableStringify({
+          account: normalized.account,
+          secret_path: normalized.secret_path,
+          audit_required: normalized.audit_required,
+          last_executed_at: normalized.last_executed_at,
+          last_actor: normalized.last_actor,
+          last_command: normalized.last_command,
+          last_exit_code: normalized.last_exit_code,
+          last_error: normalized.last_error,
         }),
         now
       );

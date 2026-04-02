@@ -375,10 +375,14 @@ function summarizeControlPlane(
   const featureFlagsRecord: Record<string, unknown> = isRecord(kernel?.feature_flags) ? kernel!.feature_flags : {};
   const desktopControlRecord: Record<string, unknown> = isRecord(kernel?.desktop_control) ? kernel!.desktop_control : {};
   const patientZeroRecord: Record<string, unknown> = isRecord(kernel?.patient_zero) ? kernel!.patient_zero : {};
+  const privilegedAccessRecord: Record<string, unknown> = isRecord(kernel?.privileged_access) ? kernel!.privileged_access : {};
   const desktopControlSummaryRecord: Record<string, unknown> = isRecord(desktopControlRecord.summary)
     ? desktopControlRecord.summary
     : {};
   const patientZeroSummaryRecord: Record<string, unknown> = isRecord(patientZeroRecord.summary) ? patientZeroRecord.summary : {};
+  const privilegedAccessSummaryRecord: Record<string, unknown> = isRecord(privilegedAccessRecord.summary)
+    ? privilegedAccessRecord.summary
+    : {};
   const budgetLedger = {
     total_entries: Number(budgetLedgerRecord.total_entries ?? 0),
     projected_cost_usd: Number(budgetLedgerRecord.projected_cost_usd ?? 0),
@@ -416,6 +420,25 @@ function summarizeControlPlane(
     root_shell_enabled:
       typeof patientZeroSummaryRecord.root_shell_enabled === "boolean" ? patientZeroSummaryRecord.root_shell_enabled : false,
   };
+  const privilegedAccess = {
+    root_execution_ready:
+      typeof privilegedAccessSummaryRecord.root_execution_ready === "boolean"
+        ? privilegedAccessSummaryRecord.root_execution_ready
+        : false,
+    account: readString(privilegedAccessSummaryRecord.account) ?? "mcagent",
+    patient_zero_armed:
+      typeof privilegedAccessSummaryRecord.patient_zero_armed === "boolean"
+        ? privilegedAccessSummaryRecord.patient_zero_armed
+        : false,
+    secret_present:
+      typeof privilegedAccessSummaryRecord.secret_present === "boolean"
+        ? privilegedAccessSummaryRecord.secret_present
+        : false,
+    helper_ready:
+      typeof privilegedAccessSummaryRecord.helper_ready === "boolean"
+        ? privilegedAccessSummaryRecord.helper_ready
+        : false,
+  };
   return {
     permission_profile: permission.resolved_profile_id,
     permission_chain: permission.chain,
@@ -424,6 +447,7 @@ function summarizeControlPlane(
     feature_flags: featureFlags,
     desktop_control: desktopControl,
     patient_zero: patientZero,
+    privileged_access: privilegedAccess,
   };
 }
 
@@ -492,6 +516,7 @@ export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBr
     `- disabled_feature_flags: ${controlPlaneSummary.feature_flags.disabled_count}/${controlPlaneSummary.feature_flags.total_count}`,
     `- desktop_control: ${controlPlaneSummary.desktop_control.enabled ? `enabled (eyes=${controlPlaneSummary.desktop_control.observe_ready ? "yes" : "no"}, hands=${controlPlaneSummary.desktop_control.act_ready ? "yes" : "no"}, ears=${controlPlaneSummary.desktop_control.listen_ready ? "yes" : "no"})` : "disabled"}`,
     `- patient_zero: ${controlPlaneSummary.patient_zero.enabled ? `${controlPlaneSummary.patient_zero.posture} (profile=${controlPlaneSummary.patient_zero.permission_profile}, browser=${controlPlaneSummary.patient_zero.browser_ready ? "yes" : "no"}, root=${controlPlaneSummary.patient_zero.root_shell_enabled ? "yes" : "no"})` : "standby"}`,
+    `- privileged_access: ${controlPlaneSummary.privileged_access.root_execution_ready ? `ready via ${controlPlaneSummary.privileged_access.account}` : `not-ready (patient_zero=${controlPlaneSummary.privileged_access.patient_zero_armed ? "armed" : "standby"}, secret=${controlPlaneSummary.privileged_access.secret_present ? "yes" : "no"}, helper=${controlPlaneSummary.privileged_access.helper_ready ? "yes" : "no"})`}`,
     "",
     renderBulletSection("Success criteria", delegationBrief.success_criteria),
     "",

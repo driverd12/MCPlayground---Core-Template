@@ -22,6 +22,7 @@ import { taskList, taskSummary } from "./task.js";
 import { getAutopilotStatus, trichatAdapterTelemetry, trichatSummary, trichatWorkboard } from "./trichat.js";
 import { readWarmCacheEntry } from "../warm_cache_runtime.js";
 import { buildPatientZeroReport } from "./patient_zero.js";
+import { buildPrivilegedAccessStatus } from "./privileged_exec.js";
 
 const recordSchema = z.record(z.unknown());
 type TaskListPayload = ReturnType<typeof taskList>;
@@ -531,9 +532,10 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     summary: summarizeDesktopControlState(desktopControlState),
   };
   const patientZeroState = storage.getPatientZeroState();
+  const privilegedAccess = buildPrivilegedAccessStatus(storage);
   const patientZero = {
     state: patientZeroState,
-    summary: summarizePatientZeroState(patientZeroState, desktopControlState),
+    summary: summarizePatientZeroState(patientZeroState, desktopControlState, privilegedAccess.summary as Record<string, unknown>),
     report: buildPatientZeroReport(storage),
   };
 
@@ -560,6 +562,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     provider_bridge: providerBridge,
     desktop_control: desktopControl,
     patient_zero: patientZero,
+    privileged_access: privilegedAccess,
     source: "office.snapshot",
   };
 }
@@ -576,9 +579,14 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
         summary: summarizeDesktopControlState(liveDesktopControlState),
       };
       const livePatientZeroState = storage.getPatientZeroState();
+      const livePrivilegedAccess = buildPrivilegedAccessStatus(storage);
       const livePatientZero = {
         state: livePatientZeroState,
-        summary: summarizePatientZeroState(livePatientZeroState, liveDesktopControlState),
+        summary: summarizePatientZeroState(
+          livePatientZeroState,
+          liveDesktopControlState,
+          livePrivilegedAccess.summary as Record<string, unknown>
+        ),
         report: buildPatientZeroReport(storage),
       };
       const cachedPayload = cached.payload as Record<string, unknown>;
@@ -589,9 +597,11 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
           ...cachedKernel,
           desktop_control: liveDesktopControl,
           patient_zero: livePatientZero,
+          privileged_access: livePrivilegedAccess,
         },
         desktop_control: liveDesktopControl,
         patient_zero: livePatientZero,
+        privileged_access: livePrivilegedAccess,
         cache: {
           hit: true,
           key: cached.key,

@@ -178,6 +178,7 @@
     var providers = summary.provider_bridge || {};
     var desktop = summary.desktop_control || {};
     var patientZero = summary.patient_zero || {};
+    var privilegedAccess = summary.privileged_access || {};
     var chips = [];
     if (state.snapshot.errors && state.snapshot.errors.length) {
       chips.push(["Snapshot", String(state.snapshot.errors.length) + " partial errors"]);
@@ -197,6 +198,12 @@
         (patientZero.enabled ? "armed" : "standby") +
           " | browser " + (patientZero.browser_ready ? "yes" : "no") +
           " | root " + (patientZero.root_shell_enabled ? "yes" : "manual")
+      ],
+      [
+        "Root Lane",
+        (privilegedAccess.root_execution_ready ? "ready" : "not-ready") +
+          " | account " + String(privilegedAccess.account || "mcagent") +
+          " | secret " + (privilegedAccess.secret_present ? "yes" : "no")
       ]
     );
     els.statusStrip.innerHTML = chips
@@ -367,6 +374,7 @@
     }
     var summary = state.snapshot.summary || {};
     var patientZero = summary.patient_zero || {};
+    var privilegedAccess = summary.privileged_access || {};
     var desktop = summary.desktop_control || {};
     var report = patientZero.report || {};
     var enabled = !!patientZero.enabled;
@@ -376,7 +384,12 @@
       ["Hands", desktop.act_ready ? "Keyboard and pointer actuation available." : "Actuation lane not ready."],
       ["Ears", desktop.listen_ready ? "Microphone/listen lane available." : "Listen lane not ready."],
       ["Browser", patientZero.browser_ready ? String(patientZero.browser_app || "Safari") + " ready for operator-directed work." : String(patientZero.browser_app || "Safari") + " not currently ready."],
-      ["Root Shell", patientZero.root_shell_enabled ? "Enabled." : String(patientZero.root_shell_reason || "Manual operator-mediated only.")],
+      [
+        "Root Shell",
+        privilegedAccess.root_execution_ready
+          ? "Root execution ready through " + String(privilegedAccess.account || "mcagent") + "."
+          : "Not ready: " + String(patientZero.root_shell_reason || "Manual operator-mediated only.")
+      ],
       ["Audit", patientZero.autonomy_enabled ? "Operator-visible report mode active." : "Bounded audit mode only."],
     ];
     var activitySummary = Array.isArray(report.activity_summary) ? report.activity_summary : [];
@@ -411,6 +424,19 @@
       capabilityRows.map(function (entry) {
         return '<article class="patient-zero-capability"><strong>' + escapeHtml(entry[0]) + '</strong><span>' + escapeHtml(entry[1]) + "</span></article>";
       }).join("") +
+      "</div>" +
+      "</section>" +
+      '<section class="patient-zero-card">' +
+      '<div class="section-title">Privileged Lane</div>' +
+      '<div class="metric-list">' +
+      '<div class="metric"><span>Account</span><strong>' + escapeHtml(String(privilegedAccess.account || "mcagent")) + '</strong></div>' +
+      '<div class="metric"><span>Target user</span><strong>' + escapeHtml(String(privilegedAccess.target_user || "root")) + '</strong></div>' +
+      '<div class="metric"><span>Root ready</span><strong>' + escapeHtml(privilegedAccess.root_execution_ready ? "yes" : "no") + '</strong></div>' +
+      '<div class="metric"><span>Secret present</span><strong>' + escapeHtml(privilegedAccess.secret_present ? "yes" : "no") + '</strong></div>' +
+      '<div class="metric"><span>Helper ready</span><strong>' + escapeHtml(privilegedAccess.helper_ready ? "yes" : "no") + '</strong></div>' +
+      '<div class="metric"><span>Secret path</span><strong>' + escapeHtml(String(privilegedAccess.secret_path || "n/a")) + '</strong></div>' +
+      '<div class="metric"><span>Last privileged actor</span><strong>' + escapeHtml(String(privilegedAccess.last_actor || "none")) + '</strong></div>' +
+      '<div class="metric"><span>Last privileged command</span><strong>' + escapeHtml(String(privilegedAccess.last_command || "none")) + '</strong></div>' +
       "</div>" +
       "</section>" +
       '<section class="patient-zero-card">' +

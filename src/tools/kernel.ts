@@ -36,6 +36,7 @@ import { buildAgentLearningOverview } from "./agent_learning.js";
 import { buildEvalHealth, computeEvalDependencyFingerprint, getAutonomyMaintainRuntimeStatus } from "./autonomy_maintain.js";
 import { getAutoSnapshotRuntimeStatus } from "./imprint.js";
 import { isBenignObservabilityDocument } from "./observability.js";
+import { buildPrivilegedAccessStatus } from "./privileged_exec.js";
 import { resolveProviderBridgeDiagnostics } from "./provider_bridge.js";
 import { getReactionEngineRuntimeStatus } from "./reaction_engine.js";
 import { summarizeLiveRuntimeWorkers } from "./runtime_worker.js";
@@ -1771,7 +1772,12 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   const desktopControlState = storage.getDesktopControlState();
   const desktopControlSummary = summarizeDesktopControlState(desktopControlState);
   const patientZeroState = storage.getPatientZeroState();
-  const patientZeroSummary = summarizePatientZeroState(patientZeroState, desktopControlState);
+  const privilegedAccess = buildPrivilegedAccessStatus(storage);
+  const patientZeroSummary = summarizePatientZeroState(
+    patientZeroState,
+    desktopControlState,
+    privilegedAccess.summary as Record<string, unknown>
+  );
   const goalSummaries = openGoals.map((goal) => {
     const plan = resolveGoalPlan(storage, goal);
     const steps = plan ? storage.listPlanSteps(plan.plan_id) : [];
@@ -2214,6 +2220,13 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
         browser_ready: patientZeroSummary.browser_ready,
         root_shell_enabled: patientZeroSummary.root_shell_enabled,
       },
+      privileged_access: {
+        root_execution_ready: privilegedAccess.summary.root_execution_ready,
+        account: privilegedAccess.summary.account,
+        patient_zero_armed: privilegedAccess.summary.patient_zero_armed,
+        secret_present: privilegedAccess.summary.secret_present,
+        helper_ready: privilegedAccess.summary.helper_ready,
+      },
       tool_catalog: toolCatalogSummary,
       permission_profiles: {
         default_profile: permissionProfilesSummary.default_profile,
@@ -2272,6 +2285,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       state: patientZeroState,
       summary: patientZeroSummary,
     },
+    privileged_access: privilegedAccess,
     tool_catalog: toolCatalogSummary,
     permission_profiles: permissionProfilesSummary,
     budget_ledger: budgetLedgerSummary,

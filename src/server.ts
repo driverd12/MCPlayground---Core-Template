@@ -23,6 +23,7 @@ import {
   desktopObserveSchema,
 } from "./tools/desktop_control.js";
 import { patientZeroControl, patientZeroSchema } from "./tools/patient_zero.js";
+import { privilegedExec, privilegedExecSchema } from "./tools/privileged_exec.js";
 import {
   agentClaimNext,
   agentClaimNextSchema,
@@ -3086,6 +3087,13 @@ registerTool(
   "Arm or disarm an explicit high-risk local-control posture with operator-visible desktop access and audit reporting.",
   patientZeroSchema,
   (input) => patientZeroControl(storage, input)
+);
+
+registerTool(
+  "privileged.exec",
+  "Run explicit root-level local commands through the mcagent admin account when Patient Zero is armed, with full runtime auditing.",
+  privilegedExecSchema,
+  (input) => privilegedExec(storage, input)
 );
 
 registerTool(

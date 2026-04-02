@@ -574,6 +574,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const kernelFeatureFlags = asDict(kernel.feature_flags);
   const kernelDesktopControl = asDict(kernel.desktop_control);
   const kernelPatientZero = asDict(kernel.patient_zero);
+  const kernelPrivilegedAccess = asDict(kernel.privileged_access);
   const defaultHostId = String(kernelWorkerFabric.default_host_id ?? "local").trim() || "local";
   const localHost = asDict(
     asList(kernelWorkerFabric.hosts).find((entry) => String(asDict(entry).host_id ?? "").trim() === defaultHostId)
@@ -597,8 +598,10 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const rawDesktopControl = asDict(raw.desktop_control);
   const desktopControlSummary = asDict(kernelDesktopControl.summary || rawDesktopControl.summary);
   const rawPatientZero = asDict(raw.patient_zero);
+  const rawPrivilegedAccess = asDict(raw.privileged_access);
   const patientZeroSummary = asDict(kernelPatientZero.summary || rawPatientZero.summary);
   const patientZeroReport = asDict(rawPatientZero.report);
+  const privilegedAccessSummary = asDict(kernelPrivilegedAccess.summary || rawPrivilegedAccess.summary || rawPrivilegedAccess);
   const threadId = String(raw.thread_id ?? "ring-leader-main").trim() || "ring-leader-main";
   const latestAutopilotSession = asList(agentSessions.sessions).find((entry) => {
     const session = asDict(entry);
@@ -757,6 +760,22 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
           scope_notice: String(patientZeroReport.scope_notice ?? ""),
         },
       },
+      privileged_access: {
+        root_execution_ready: Boolean(privilegedAccessSummary.root_execution_ready),
+        account: String(privilegedAccessSummary.account ?? "mcagent"),
+        target_user: String(privilegedAccessSummary.target_user ?? "root"),
+        patient_zero_armed: Boolean(privilegedAccessSummary.patient_zero_armed),
+        secret_present: Boolean(privilegedAccessSummary.secret_present),
+        helper_ready: Boolean(privilegedAccessSummary.helper_ready),
+        secret_path: String(privilegedAccessSummary.secret_path ?? ""),
+        blockers: asList(privilegedAccessSummary.blockers).map((entry) => String(entry)),
+        last_executed_at: String(privilegedAccessSummary.last_executed_at ?? ""),
+        last_actor: String(privilegedAccessSummary.last_actor ?? ""),
+        last_command: String(privilegedAccessSummary.last_command ?? ""),
+        last_exit_code:
+          privilegedAccessSummary.last_exit_code == null ? null : parseAnyInt(privilegedAccessSummary.last_exit_code),
+        last_error: String(privilegedAccessSummary.last_error ?? ""),
+      },
       maintain: {
         enabled: Boolean(maintainState.enabled),
         running: Boolean(maintainRuntime.running),
@@ -806,6 +825,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         warm_cache_stale: Boolean(kernelWarmCache.stale),
         disabled_feature_flags: parseAnyInt(kernelFeatureFlags.disabled_count),
         patient_zero_enabled: Boolean(patientZeroSummary.enabled),
+        privileged_root_ready: Boolean(privilegedAccessSummary.root_execution_ready),
       },
     },
     current: {
