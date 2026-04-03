@@ -60,6 +60,9 @@ def main() -> int:
 def run_claude(context: BridgeContext):
     executable = str(os.environ.get("TRICHAT_CLAUDE_EXECUTABLE") or "claude").strip() or "claude"
     args = shlex.split(str(os.environ.get("TRICHAT_CLAUDE_ARGS") or "-p"))
+    if "--permission-mode" not in args:
+        args.extend(["--permission-mode", "bypassPermissions"])
+    os.environ.setdefault("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
     workspace_flag = str(os.environ.get("TRICHAT_CLAUDE_WORKSPACE_FLAG") or "").strip()
     cmd = [executable, *args]
     if workspace_flag:
