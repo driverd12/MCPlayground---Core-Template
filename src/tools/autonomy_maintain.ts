@@ -4,6 +4,7 @@ import { probeLocalOllamaBackend, setLocalOllamaModelResidency } from "../local_
 import { probeLocalMlxBackend } from "../local_mlx_backend_probe.js";
 import { captureLocalHostProfile, deriveLocalExecutionBudget } from "../local_host_profile.js";
 import { summarizeDesktopControlState } from "../desktop_control_plane.js";
+import { summarizePatientZeroState } from "../patient_zero_plane.js";
 import {
   type AutonomyMaintainStateRecord,
   type ProviderBridgeDiagnosticSnapshotRecord,
@@ -729,16 +730,26 @@ function buildGuardrails() {
   ];
 }
 
+type SelfDriveCandidate = {
+  title: string;
+  objective: string;
+  tags: string[];
+  reason: string;
+  metadata: Record<string, unknown>;
+  dry_run: boolean;
+  trichat_bridge_dry_run: boolean;
+  permission_profile: "bounded_execute" | "network_enabled";
+  constraints?: string[];
+};
+
 function buildSelfDriveCandidate(params: {
   attention: string[];
   providerBridgeEntries: Array<Record<string, unknown>>;
-}) {
+  patientZeroSummary: Record<string, unknown>;
+}): SelfDriveCandidate | null {
   const repairableAttention = [...new Set(params.attention.map((entry) => String(entry ?? "").trim()).filter(Boolean))].filter(
     (entry) => entry !== "agent.learning.no_active_entries"
   );
-  if (repairableAttention.length <= 0) {
-    return null;
-  }
   const disconnectedProviders = params.providerBridgeEntries
     .filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "disconnected")
     .map((entry) => ({
@@ -751,6 +762,15 @@ function buildSelfDriveCandidate(params: {
   const providerIssues = repairableAttention.filter((entry) => entry.startsWith("provider.bridge."));
   const localIssues = repairableAttention.filter((entry) => entry.startsWith("local."));
   const topAttention = repairableAttention.slice(0, 3);
+  const patientZeroEnabled = readBoolean(params.patientZeroSummary.enabled) === true;
+  const patientZeroAutonomyEnabled = readBoolean(params.patientZeroSummary.autonomy_enabled) === true;
+  const patientZeroObserveReady = readBoolean(params.patientZeroSummary.observe_ready) === true;
+  const patientZeroActReady = readBoolean(params.patientZeroSummary.act_ready) === true;
+  const patientZeroBrowserReady = readBoolean(params.patientZeroSummary.browser_ready) === true;
+  const patientZeroExplorationReady =
+    patientZeroEnabled &&
+    patientZeroAutonomyEnabled &&
+    ((patientZeroObserveReady && patientZeroActReady) || patientZeroBrowserReady);
   if (evalIssues.length > 0) {
     return {
       title: "[self-drive] Restore eval health",
@@ -759,6 +779,9 @@ function buildSelfDriveCandidate(params: {
       tags: ["self-drive", "eval", "control-plane"],
       reason: "eval",
       metadata: { attention: evalIssues },
+      dry_run: true,
+      trichat_bridge_dry_run: true,
+      permission_profile: "bounded_execute",
     };
   }
   if (subsystemIssues.length > 0) {
@@ -769,6 +792,9 @@ function buildSelfDriveCandidate(params: {
       tags: ["self-drive", "reliability", "control-plane"],
       reason: "subsystems",
       metadata: { attention: subsystemIssues },
+      dry_run: true,
+      trichat_bridge_dry_run: true,
+      permission_profile: "bounded_execute",
     };
   }
   if (providerIssues.length > 0) {
@@ -780,6 +806,9 @@ function buildSelfDriveCandidate(params: {
       tags: ["self-drive", "provider-bridge", "auth"],
       reason: "provider-bridge",
       metadata: { attention: providerIssues, disconnected_providers: disconnectedProviders },
+      dry_run: true,
+      trichat_bridge_dry_run: true,
+      permission_profile: "bounded_execute",
     };
   }
   if (localIssues.length > 0) {
@@ -790,7 +819,35 @@ function buildSelfDriveCandidate(params: {
       tags: ["self-drive", "runtime", "local-host"],
       reason: "local-runtime",
       metadata: { attention: localIssues },
+      dry_run: true,
+      trichat_bridge_dry_run: true,
+      permission_profile: "bounded_execute",
     };
+  }
+  if (repairableAttention.length <= 0 && patientZeroExplorationReady) {
+    return {
+      title: "[self-drive] Explore local agentic ecosystem",
+      objective:
+        "Conduct one bounded exploratory reconnaissance pass using the currently armed local-first autonomy stack. Focus on MCP tooling, local agent orchestration, desktop/browser execution, or local AI infrastructure. Gather operator-visible findings from at least two surfaces, compare what looks promising versus brittle, and leave one concrete next action that would improve the system without broad refactors or hidden reasoning dumps.",
+      tags: ["self-drive", "exploration", "patient-zero", "recon"],
+      reason: "exploration",
+      metadata: {
+        attention: [],
+        exploration_theme: "local-agentic-ecosystem",
+        patient_zero_required: true,
+      },
+      dry_run: false,
+      trichat_bridge_dry_run: false,
+      permission_profile: "network_enabled",
+      constraints: [
+        "Keep the exploration bounded to one concrete theme and one operator-visible summary.",
+        "Prefer local-first and browser-accessible sources; do not install new software or request new credentials.",
+        "Do not make broad repo mutations or recursive self-improvement plans from exploratory runs.",
+      ],
+    };
+  }
+  if (repairableAttention.length <= 0) {
+    return null;
   }
   return {
     title: "[self-drive] Resolve control-plane attention",
@@ -800,6 +857,9 @@ function buildSelfDriveCandidate(params: {
     tags: ["self-drive", "control-plane"],
     reason: "generic",
     metadata: { attention: topAttention },
+    dry_run: true,
+    trichat_bridge_dry_run: true,
+    permission_profile: "bounded_execute",
   };
 }
 
@@ -1150,6 +1210,7 @@ async function buildStatus(
     | "source_client"
     | "source_model"
     | "source_agent"
+    | "start_goal_autorun_daemon"
     | "run_eval_if_due"
     | "eval_interval_seconds"
     | "eval_suite_id"
@@ -1234,7 +1295,7 @@ async function buildStatus(
   const attention = [...new Set([...((bootstrap.repairs_needed as string[] | undefined) ?? [])])]
     .map((entry) => String(entry ?? "").trim())
     .filter(Boolean);
-  if (readBoolean(goalAutorun.running) !== true) {
+  if (input.start_goal_autorun_daemon !== false && readBoolean(goalAutorun.running) !== true) {
     attention.push("goal.autorun_daemon.not_running");
   }
   if ((taskSummary.expired_running_count ?? 0) > 0) {
@@ -1281,9 +1342,9 @@ async function buildStatus(
   }
   if (evalHealth.below_threshold) {
     attention.push(`eval.${evalHealth.suite_id}.below_threshold`);
-  } else if (evalHealth.due_by_dependency_drift) {
+  } else if (input.run_eval_if_due !== false && evalHealth.due_by_dependency_drift) {
     attention.push(`eval.${evalHealth.suite_id}.definition_changed`);
-  } else if (evalHealth.due_by_age) {
+  } else if (input.run_eval_if_due !== false && evalHealth.due_by_age) {
     attention.push(`eval.${evalHealth.suite_id}.overdue`);
   }
   for (const [subsystemKey, subsystem] of Object.entries(subsystems)) {
@@ -1417,7 +1478,7 @@ async function executeAutonomyMaintainPass(
     goalAutorunStarted = true;
     actions.push("goal.autorun_daemon.start");
   }
-  if (readBoolean(goalAutorunStatus.running) !== true) {
+  if (input.start_goal_autorun_daemon !== false && readBoolean(goalAutorunStatus.running) !== true) {
     attention.push("goal.autorun_daemon.not_running");
   }
 
@@ -1513,6 +1574,11 @@ async function executeAutonomyMaintainPass(
       attention.push(`desktop.control.failed:${error instanceof Error ? error.message : String(error)}`);
     }
   }
+  const desktopControlSnapshot = asRecord(asRecord(desktopControlHeartbeat).summary);
+  const patientZeroSummary = summarizePatientZeroState(
+    storage.getPatientZeroState(),
+    Object.keys(desktopControlSnapshot).length > 0 ? desktopControlSnapshot : desktopControlState
+  );
   for (const entry of providerBridgeEntries) {
     const clientId = String(entry.client_id ?? "").trim();
     const status = String(entry.status ?? "").trim().toLowerCase();
@@ -1604,6 +1670,7 @@ async function executeAutonomyMaintainPass(
 
   let transcriptAutoSquishState = storage.getTranscriptAutoSquishState();
   let transcriptAutoSquishStatus = asRecord(await invokeTool("transcript.auto_squish", { action: "status" }));
+  let transcriptAutoSquishStarted = false;
   if (input.start_transcript_auto_squish_daemon !== false && !transcriptAutoSquishState) {
     transcriptAutoSquishState = seedTranscriptAutoSquishState(storage, transcriptAutoSquishStatus);
     actions.push("transcript.auto_squish.seed");
@@ -1626,6 +1693,7 @@ async function executeAutonomyMaintainPass(
         max_points: transcriptAutoSquishState?.max_points,
       })
     );
+    transcriptAutoSquishStarted = true;
     actions.push("transcript.auto_squish.start");
   } else if (transcriptAutoSquishSummary.enabled && transcriptAutoSquishSummary.running === true && transcriptAutoSquishSummary.stale) {
     transcriptAutoSquishStatus = asRecord(
@@ -1649,7 +1717,7 @@ async function executeAutonomyMaintainPass(
   });
   if (transcriptAutoSquishSummary.enabled && transcriptAutoSquishSummary.running !== true) {
     attention.push("transcript.auto_squish.not_running");
-  } else if (transcriptAutoSquishSummary.stale) {
+  } else if (transcriptAutoSquishSummary.stale && !transcriptAutoSquishStarted) {
     attention.push("transcript.auto_squish.stale");
   }
   if (transcriptAutoSquishSummary.last_error) {
@@ -1658,6 +1726,7 @@ async function executeAutonomyMaintainPass(
 
   const imprintAutoSnapshotState = storage.getImprintAutoSnapshotState();
   let imprintAutoSnapshotStatus = asRecord(await invokeTool("imprint.auto_snapshot", { action: "status" }));
+  let imprintAutoSnapshotStarted = false;
   let imprintAutoSnapshotSummary = buildBackgroundSubsystemStatus({
     enabled: imprintAutoSnapshotState?.enabled ?? false,
     interval_seconds: imprintAutoSnapshotState?.interval_seconds ?? 900,
@@ -1676,6 +1745,7 @@ async function executeAutonomyMaintainPass(
         promote_summary: imprintAutoSnapshotState?.promote_summary,
       })
     );
+    imprintAutoSnapshotStarted = true;
     actions.push("imprint.auto_snapshot.start");
   } else if (imprintAutoSnapshotSummary.enabled && imprintAutoSnapshotSummary.running === true && imprintAutoSnapshotSummary.stale) {
     imprintAutoSnapshotStatus = asRecord(
@@ -1699,7 +1769,7 @@ async function executeAutonomyMaintainPass(
   });
   if (imprintAutoSnapshotSummary.enabled && imprintAutoSnapshotSummary.running !== true) {
     attention.push("imprint.auto_snapshot.not_running");
-  } else if (imprintAutoSnapshotSummary.stale) {
+  } else if (imprintAutoSnapshotSummary.stale && !imprintAutoSnapshotStarted) {
     attention.push("imprint.auto_snapshot.stale");
   }
   if (imprintAutoSnapshotSummary.last_error) {
@@ -1708,6 +1778,7 @@ async function executeAutonomyMaintainPass(
 
   let trichatAutoRetentionState = storage.getTriChatAutoRetentionState();
   let trichatAutoRetentionStatus = asRecord(await invokeTool("trichat.auto_retention", { action: "status" }));
+  let trichatAutoRetentionStarted = false;
   if (input.start_trichat_auto_retention_daemon !== false && !trichatAutoRetentionState) {
     trichatAutoRetentionState = seedTriChatAutoRetentionState(storage, trichatAutoRetentionStatus);
     actions.push("trichat.auto_retention.seed");
@@ -1731,6 +1802,7 @@ async function executeAutonomyMaintainPass(
         limit: trichatAutoRetentionState?.limit,
       })
     );
+    trichatAutoRetentionStarted = true;
     actions.push("trichat.auto_retention.start");
   } else if (
     trichatAutoRetentionSummary.enabled &&
@@ -1755,7 +1827,7 @@ async function executeAutonomyMaintainPass(
   });
   if (trichatAutoRetentionSummary.enabled && trichatAutoRetentionSummary.running !== true) {
     attention.push("trichat.auto_retention.not_running");
-  } else if (trichatAutoRetentionSummary.stale) {
+  } else if (trichatAutoRetentionSummary.stale && !trichatAutoRetentionStarted) {
     attention.push("trichat.auto_retention.stale");
   }
   if (trichatAutoRetentionSummary.last_error) {
@@ -1764,6 +1836,7 @@ async function executeAutonomyMaintainPass(
 
   let trichatTurnWatchdogState = storage.getTriChatTurnWatchdogState();
   let trichatTurnWatchdogStatus = asRecord(await invokeTool("trichat.turn_watchdog", { action: "status" }));
+  let trichatTurnWatchdogStarted = false;
   if (input.start_trichat_turn_watchdog_daemon !== false && !trichatTurnWatchdogState) {
     trichatTurnWatchdogState = seedTriChatTurnWatchdogState(storage, trichatTurnWatchdogStatus);
     actions.push("trichat.turn_watchdog.seed");
@@ -1796,6 +1869,7 @@ async function executeAutonomyMaintainPass(
         batch_limit: trichatTurnWatchdogState?.batch_limit,
       })
     );
+    trichatTurnWatchdogStarted = true;
     actions.push("trichat.turn_watchdog.start");
   } else if (
     trichatTurnWatchdogSummary.enabled &&
@@ -1829,7 +1903,7 @@ async function executeAutonomyMaintainPass(
   });
   if (trichatTurnWatchdogSummary.enabled && trichatTurnWatchdogSummary.running !== true) {
     attention.push("trichat.turn_watchdog.not_running");
-  } else if (trichatTurnWatchdogSummary.stale) {
+  } else if (trichatTurnWatchdogSummary.stale && !trichatTurnWatchdogStarted) {
     attention.push("trichat.turn_watchdog.stale");
   }
   if (trichatTurnWatchdogSummary.last_error) {
@@ -2314,6 +2388,9 @@ async function executeAutonomyMaintainPass(
     current_dependency_fingerprint: currentEvalDependencyFingerprint,
   });
   const evalNeedsRefresh = input.run_eval_if_due !== false && evalHealthBeforeRun.due;
+  if (evalHealthBeforeRun.below_threshold) {
+    attention.push(`eval.${input.eval_suite_id}.below_threshold`);
+  }
   const safeForEval =
     runtimeWorkerActiveCount <= 0 &&
     localProfile.health_state === "healthy" &&
@@ -2464,6 +2541,7 @@ async function executeAutonomyMaintainPass(
       ? buildSelfDriveCandidate({
           attention,
           providerBridgeEntries,
+          patientZeroSummary,
         })
       : null;
   if (selfDriveCandidate) {
@@ -2494,17 +2572,20 @@ async function executeAutonomyMaintainPass(
             start_goal_autorun_daemon: false,
             dispatch_limit: 6,
             max_passes: 2,
-            dry_run: true,
-            trichat_bridge_dry_run: true,
+            dry_run: selfDriveCandidate.dry_run,
+            trichat_bridge_dry_run: selfDriveCandidate.trichat_bridge_dry_run,
+            permission_profile: selfDriveCandidate.permission_profile,
             constraints: [
               "Do not require new human credentials or approval.",
               "Apply only bounded local repairs; if an external login or account action is required, record the blocker and stop.",
               "Do not create recursive self-improvement or broad refactor goals from self-drive.",
+              ...(selfDriveCandidate.constraints ?? []),
             ],
             tags: selfDriveCandidate.tags,
             metadata: {
               ...(selfDriveCandidate.metadata ?? {}),
               self_drive: true,
+              self_drive_mode: selfDriveCandidate.reason,
               spawned_by: "autonomy.maintain",
             },
             source_client: sourceClient,

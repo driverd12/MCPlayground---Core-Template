@@ -32,12 +32,8 @@ STDIO_COMMAND="${TRICHAT_MCP_STDIO_COMMAND:-node}"
 STDIO_ARGS="${TRICHAT_MCP_STDIO_ARGS:-dist/server.js}"
 
 resolve_transport() {
-  if [[ "${ACTION}" == "status" ]]; then
-    printf 'stdio\n'
-    return 0
-  fi
   local preferred="${TRICHAT_RING_LEADER_TRANSPORT:-}"
-  if [[ -n "${preferred}" ]]; then
+  if [[ "${ACTION}" != "status" && -n "${preferred}" ]]; then
     printf '%s\n' "${preferred}"
     return 0
   fi

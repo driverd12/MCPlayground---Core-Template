@@ -75,6 +75,79 @@ capture_status_json_parallel() {
   printf '%s\n' "$!"
 }
 
+capture_http_json() {
+  local url="$1"
+  local timeout_ms="${2:-2000}"
+  node --input-type=module - "${url}" "${timeout_ms}" <<'NODE'
+import http from "node:http";
+import https from "node:https";
+
+const rawUrl = String(process.argv[2] || "").trim();
+const timeoutMs = Math.max(100, Number.parseInt(String(process.argv[3] || "2000"), 10) || 2000);
+
+if (!rawUrl) {
+  process.stdout.write("{}");
+  process.exit(0);
+}
+
+let parsed;
+try {
+  parsed = new URL(rawUrl);
+} catch {
+  process.stdout.write("{}");
+  process.exit(0);
+}
+
+const client = parsed.protocol === "https:" ? https : http;
+const req = client.request(
+  parsed,
+  {
+    method: "GET",
+    headers: {
+      accept: "application/json",
+      connection: "close",
+    },
+  },
+  (res) => {
+    let body = "";
+    res.setEncoding("utf8");
+    res.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 1024 * 1024) {
+        req.destroy(new Error("response too large"));
+      }
+    });
+    res.on("end", () => {
+      if ((res.statusCode || 500) >= 400) {
+        process.stdout.write("{}");
+        return;
+      }
+      try {
+        const parsedBody = JSON.parse(body);
+        if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+          process.stdout.write("{}");
+          return;
+        }
+        process.stdout.write(JSON.stringify(parsedBody));
+      } catch {
+        process.stdout.write("{}");
+      }
+    });
+  }
+);
+
+req.on("error", () => {
+  process.stdout.write("{}");
+});
+
+req.setTimeout(timeoutMs, () => {
+  req.destroy(new Error("timed out"));
+});
+
+req.end();
+NODE
+}
+
 bootout_if_exists() {
   local plist="$1"
   if [[ -f "${plist}" ]]; then
@@ -206,19 +279,26 @@ if is_loaded "${MLX_LABEL}"; then MLX_AGENT_LOADED=true; fi
 
 AUTO_SNAPSHOT_STATUS="{}"
 AUTONOMY_STATUS="{}"
-AUTO_SNAPSHOT_STATUS_FILE="$(mktemp)"
-AUTONOMY_STATUS_FILE="$(mktemp)"
-AUTO_SNAPSHOT_PID="$(capture_status_json_parallel "${AUTO_SNAPSHOT_STATUS_FILE}" "${REPO_ROOT}/scripts/imprint_auto_snapshot_ctl.sh" status)"
-AUTONOMY_STATUS_PID="$(capture_status_json_parallel "${AUTONOMY_STATUS_FILE}" "${REPO_ROOT}/scripts/autonomy_ctl.sh" status)"
-wait "${AUTO_SNAPSHOT_PID}" >/dev/null 2>&1 || true
-wait "${AUTONOMY_STATUS_PID}" >/dev/null 2>&1 || true
-if [[ -s "${AUTO_SNAPSHOT_STATUS_FILE}" ]]; then
-  AUTO_SNAPSHOT_STATUS="$(cat "${AUTO_SNAPSHOT_STATUS_FILE}")"
+AUTONOMY_STATUS="$(capture_http_json "${HTTP_URL%/}/health" "${AGENTS_STATUS_HTTP_TIMEOUT_MS:-2000}")"
+if [[ "${AUTONOMY_STATUS}" != \{* ]]; then
+  AUTONOMY_STATUS="{}"
 fi
-if [[ -s "${AUTONOMY_STATUS_FILE}" ]]; then
-  AUTONOMY_STATUS="$(cat "${AUTONOMY_STATUS_FILE}")"
+
+if [[ "${AGENTS_STATUS_DEEP_RUNTIME:-0}" == "1" && "${AUTONOMY_STATUS}" == "{}" ]]; then
+  AUTO_SNAPSHOT_STATUS_FILE="$(mktemp)"
+  AUTONOMY_STATUS_FILE="$(mktemp)"
+  AUTO_SNAPSHOT_PID="$(capture_status_json_parallel "${AUTO_SNAPSHOT_STATUS_FILE}" "${REPO_ROOT}/scripts/imprint_auto_snapshot_ctl.sh" status)"
+  AUTONOMY_STATUS_PID="$(capture_status_json_parallel "${AUTONOMY_STATUS_FILE}" "${REPO_ROOT}/scripts/autonomy_ctl.sh" status)"
+  wait "${AUTO_SNAPSHOT_PID}" >/dev/null 2>&1 || true
+  wait "${AUTONOMY_STATUS_PID}" >/dev/null 2>&1 || true
+  if [[ -s "${AUTO_SNAPSHOT_STATUS_FILE}" ]]; then
+    AUTO_SNAPSHOT_STATUS="$(cat "${AUTO_SNAPSHOT_STATUS_FILE}")"
+  fi
+  if [[ -s "${AUTONOMY_STATUS_FILE}" ]]; then
+    AUTONOMY_STATUS="$(cat "${AUTONOMY_STATUS_FILE}")"
+  fi
+  rm -f "${AUTO_SNAPSHOT_STATUS_FILE}" "${AUTONOMY_STATUS_FILE}"
 fi
-rm -f "${AUTO_SNAPSHOT_STATUS_FILE}" "${AUTONOMY_STATUS_FILE}"
 
 node --input-type=module - <<'NODE' \
 "${ACTION}" \

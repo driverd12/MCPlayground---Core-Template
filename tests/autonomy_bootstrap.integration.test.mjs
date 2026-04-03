@@ -699,6 +699,161 @@ test("autonomy.maintain self-drive synthesizes one bounded repair goal through a
   }
 });
 
+test("autonomy.maintain self-drive synthesizes one bounded exploratory goal when Patient Zero is armed and the system is otherwise idle", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-maintain-exploration-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const ollama = await startFakeOllamaServer({
+    models: [
+      {
+        name: "llama3.2:3b",
+      },
+    ],
+  });
+  let mutationCounter = 0;
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+    TRICHAT_OLLAMA_URL: ollama.url,
+    TRICHAT_RING_LEADER_AUTOSTART: "1",
+    TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+    TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+    TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+    MCP_NOTIFIER_DRY_RUN: "1",
+  });
+
+  try {
+    const ensured = await callTool(session.client, "autonomy.bootstrap", {
+      action: "ensure",
+      mutation: nextMutation("autonomy-maintain-exploration", "autonomy.bootstrap.ensure", () => mutationCounter++),
+      probe_ollama_url: ollama.url,
+      autostart_ring_leader: true,
+      run_immediately: false,
+    });
+    assert.equal(ensured.ok, true);
+    assert.equal(ensured.status.self_start_ready, true);
+
+    const storage = new Storage(dbPath);
+    const dependencyFingerprint = computeEvalDependencyFingerprint(storage, "autonomy.control-plane");
+    const now = new Date().toISOString();
+    const db = new Database(dbPath);
+    db.prepare(
+      `INSERT INTO daemon_configs (daemon_key, enabled, config_json, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(daemon_key) DO UPDATE SET
+         enabled = excluded.enabled,
+         config_json = excluded.config_json,
+         updated_at = excluded.updated_at`
+    ).run(
+      "patient.zero",
+      1,
+      JSON.stringify({
+        autonomy_enabled: true,
+        allow_observe: true,
+        allow_act: true,
+        allow_listen: true,
+        browser_app: "Safari",
+        audit_required: true,
+        armed_at: now,
+        armed_by: "test",
+      }),
+      now
+    );
+    db.prepare(
+      `INSERT INTO daemon_configs (daemon_key, enabled, config_json, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(daemon_key) DO UPDATE SET
+         enabled = excluded.enabled,
+         config_json = excluded.config_json,
+         updated_at = excluded.updated_at`
+    ).run(
+      "desktop.control",
+      1,
+      JSON.stringify({
+        allow_observe: true,
+        allow_act: true,
+        allow_listen: true,
+        screenshot_dir: tempDir,
+        action_timeout_ms: 15000,
+        listen_max_seconds: 15,
+        heartbeat_interval_seconds: 60,
+        capability_probe: {
+          can_observe: true,
+          can_act: true,
+          can_listen: true,
+        },
+      }),
+      now
+    );
+    db.prepare(
+      `INSERT INTO daemon_configs (daemon_key, enabled, config_json, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(daemon_key) DO UPDATE SET
+         enabled = excluded.enabled,
+         config_json = excluded.config_json,
+         updated_at = excluded.updated_at`
+    ).run(
+      "autonomy.maintain",
+      1,
+      JSON.stringify({
+        enabled: true,
+        local_host_id: "local",
+        interval_seconds: 120,
+        learning_review_interval_seconds: 300,
+        enable_self_drive: true,
+        self_drive_cooldown_seconds: 60,
+        run_eval_if_due: false,
+        eval_interval_seconds: 21600,
+        eval_suite_id: "autonomy.control-plane",
+        minimum_eval_score: 75,
+        last_run_at: now,
+        last_eval_run_at: now,
+        last_eval_run_id: "eval-run-exploration",
+        last_eval_score: 100,
+        last_eval_dependency_fingerprint: dependencyFingerprint,
+        last_actions: [],
+        last_attention: [],
+        last_error: null,
+      }),
+      now
+    );
+    db.close();
+
+    const maintained = await callTool(session.client, "autonomy.maintain", {
+      action: "run_once",
+      mutation: nextMutation("autonomy-maintain-exploration", "autonomy.maintain.run_once", () => mutationCounter++),
+      ensure_bootstrap: false,
+      maintain_tmux_controller: false,
+      run_eval_if_due: false,
+      local_host_id: "local",
+      probe_ollama_url: ollama.url,
+      run_goal_hygiene: false,
+      start_runtime_workers: false,
+      start_goal_autorun_daemon: false,
+    });
+
+    assert.equal(maintained.actions.includes("autonomy.self_drive:exploration"), true);
+    assert.equal(typeof maintained.status.self_drive.last_goal_id, "string");
+    assert.ok(maintained.status.self_drive.last_goal_id.length > 0);
+
+    const goal = await callTool(session.client, "goal.get", {
+      goal_id: maintained.status.self_drive.last_goal_id,
+    });
+    assert.equal(goal.found, true);
+    assert.match(goal.goal.title, /^\[self-drive\] Explore /);
+    assert.equal(goal.goal.metadata?.self_drive, true);
+    assert.equal(goal.goal.metadata?.self_drive_mode, "exploration");
+    assert.equal(goal.goal.metadata?.patient_zero_required, true);
+    assert.equal(goal.goal.metadata?.permission_profile, "network_enabled");
+    assert.equal(typeof goal.goal.objective, "string");
+    assert.ok(goal.goal.objective.includes("exploratory reconnaissance"));
+  } finally {
+    await session.client.close().catch(() => {});
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("autonomy.maintain status reports eval debt when the eval suite fingerprint drifts", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-maintain-eval-drift-"));
   const dbPath = path.join(tempDir, "hub.sqlite");
