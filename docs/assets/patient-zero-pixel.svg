@@ -1,41 +1,139 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 320" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
   <title id="title">Patient Zero pixel art banner</title>
-  <desc id="desc">Pixel-art banner for Patient Zero, Agent Office, and the local-first MCP control plane.</desc>
-  <rect width="960" height="320" fill="#12161f"/>
-  <rect x="0" y="0" width="960" height="320" fill="url(#grid)"/>
+  <desc id="desc">Pixel-art banner showing Patient Zero, Agent Office, MCP Server, and a small crew of local autonomous agents.</desc>
 
-  <g transform="translate(72 54) scale(10)">
-    <rect x="4" y="0" width="8" height="2" fill="#e9edf6"/>
-    <rect x="3" y="2" width="10" height="1" fill="#e9edf6"/>
-    <rect x="2" y="3" width="12" height="1" fill="#e9edf6"/>
-    <rect x="2" y="4" width="12" height="2" fill="#e9edf6"/>
-    <rect x="1" y="6" width="14" height="1" fill="#e9edf6"/>
-    <rect x="1" y="7" width="14" height="4" fill="#e9edf6"/>
-    <rect x="2" y="11" width="12" height="2" fill="#e9edf6"/>
-    <rect x="3" y="13" width="2" height="2" fill="#e9edf6"/>
-    <rect x="6" y="13" width="2" height="3" fill="#e9edf6"/>
-    <rect x="9" y="13" width="2" height="3" fill="#e9edf6"/>
-    <rect x="12" y="13" width="2" height="2" fill="#e9edf6"/>
+  <rect width="1200" height="360" fill="#0f141c"/>
+  <rect width="1200" height="360" fill="url(#grid)"/>
+  <rect x="34" y="34" width="1132" height="292" rx="18" fill="#141b25" stroke="#323c4d" stroke-width="2"/>
+  <rect x="34" y="34" width="1132" height="292" rx="18" fill="url(#scan)"/>
+
+  <rect x="58" y="60" width="220" height="240" rx="14" fill="#111722" stroke="#2b3444" stroke-width="2"/>
+  <rect x="302" y="60" width="838" height="132" rx="14" fill="#121924" stroke="#2b3444" stroke-width="2"/>
+  <rect x="302" y="208" width="838" height="92" rx="14" fill="#121924" stroke="#2b3444" stroke-width="2"/>
+
+  <rect x="78" y="82" width="180" height="4" fill="#ff7a66"/>
+  <rect x="78" y="274" width="180" height="4" fill="#7dd3fc"/>
+
+  <g transform="translate(92 92) scale(8)">
+    <rect x="4" y="0" width="8" height="2" fill="#eef2fb"/>
+    <rect x="3" y="2" width="10" height="1" fill="#eef2fb"/>
+    <rect x="2" y="3" width="12" height="1" fill="#eef2fb"/>
+    <rect x="2" y="4" width="12" height="2" fill="#eef2fb"/>
+    <rect x="1" y="6" width="14" height="1" fill="#eef2fb"/>
+    <rect x="1" y="7" width="14" height="4" fill="#eef2fb"/>
+    <rect x="2" y="11" width="12" height="2" fill="#eef2fb"/>
+    <rect x="3" y="13" width="2" height="2" fill="#eef2fb"/>
+    <rect x="6" y="13" width="2" height="3" fill="#eef2fb"/>
+    <rect x="9" y="13" width="2" height="3" fill="#eef2fb"/>
+    <rect x="12" y="13" width="2" height="2" fill="#eef2fb"/>
     <rect x="4" y="6" width="3" height="3" fill="#ff7a66"/>
     <rect x="9" y="6" width="3" height="3" fill="#ff7a66"/>
-    <rect x="6" y="10" width="4" height="1" fill="#12161f"/>
+    <rect x="6" y="10" width="4" height="1" fill="#10141c"/>
   </g>
 
-  <g transform="translate(310 76)">
-    <text x="0" y="0" fill="#ff7a66" font-family="Menlo, Monaco, Consolas, monospace" font-size="22" letter-spacing="3">PATIENT ZERO</text>
-    <text x="0" y="66" fill="#f7f9fc" font-family="Menlo, Monaco, Consolas, monospace" font-size="64" font-weight="700">AGENT OFFICE</text>
-    <text x="0" y="108" fill="#a9b4cb" font-family="Menlo, Monaco, Consolas, monospace" font-size="26">LOCAL-FIRST MCP SERVER + AUTONOMY FABRIC</text>
-    <text x="0" y="156" fill="#d6deef" font-family="Menlo, Monaco, Consolas, monospace" font-size="20">
-      IDE BRIDGES • TERMINAL CLI AGENTS • OFFICE COUNCIL • HOST CONTROL • AUDITED EXECUTION
-    </text>
-    <rect x="0" y="188" width="498" height="2" fill="#2b3344"/>
-    <text x="0" y="228" fill="#7dd3fc" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">Agent Office is the operator surface.</text>
-    <text x="0" y="254" fill="#7dd3fc" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">Patient Zero is the fully-armed local execution posture.</text>
+  <text x="92" y="250" fill="#aeb8cb" font-family="Menlo, Monaco, Consolas, monospace" font-size="18" letter-spacing="2">PATIENT ZERO</text>
+  <text x="92" y="272" fill="#6ecff6" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">FULLY ARMED LOCAL EXECUTION</text>
+
+  <g transform="translate(330 92)">
+    <text x="0" y="0" fill="#ff7a66" font-family="Menlo, Monaco, Consolas, monospace" font-size="20" letter-spacing="3">PATIENT ZERO</text>
+    <text x="0" y="60" fill="#f4f7fd" font-family="Menlo, Monaco, Consolas, monospace" font-size="58" font-weight="700">AGENT OFFICE</text>
+    <text x="0" y="106" fill="#c9d2e5" font-family="Menlo, Monaco, Consolas, monospace" font-size="38" font-weight="700">MCP SERVER</text>
+    <text x="0" y="142" fill="#96a6c3" font-family="Menlo, Monaco, Consolas, monospace" font-size="20">LOCAL-FIRST AUTONOMOUS CONTROL PLANE</text>
+  </g>
+
+  <g transform="translate(330 230)">
+    <text x="0" y="0" fill="#dce4f4" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">IDE BRIDGES • CLI AGENTS • OFFICE COUNCIL</text>
+    <text x="0" y="28" fill="#dce4f4" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">DESKTOP + BROWSER + ROOT • AUDITED EXECUTION</text>
+    <rect x="0" y="46" width="782" height="2" fill="#2b3444"/>
+    <text x="0" y="74" fill="#7dd3fc" font-family="Menlo, Monaco, Consolas, monospace" font-size="16">Agent Office = operator surface. Patient Zero = fully armed local posture.</text>
+  </g>
+
+  <g transform="translate(328 214)">
+    <rect x="0" y="0" width="124" height="76" rx="10" fill="#182131" stroke="#344257" stroke-width="2"/>
+    <text x="62" y="64" text-anchor="middle" fill="#f0f4fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">builder</text>
+    <g transform="translate(44 16) scale(4)">
+      <rect x="1" y="1" width="4" height="2" fill="#6b452e"/>
+      <rect x="0" y="3" width="6" height="3" fill="#f0c6a4"/>
+      <rect x="1" y="6" width="4" height="1" fill="#2a1b16"/>
+      <rect x="1" y="7" width="4" height="2" fill="#ef9f63"/>
+      <rect x="0" y="9" width="6" height="2" fill="#ef9f63"/>
+      <rect x="1" y="11" width="1" height="2" fill="#f0c6a4"/>
+      <rect x="4" y="11" width="1" height="2" fill="#f0c6a4"/>
+    </g>
+  </g>
+
+  <g transform="translate(466 214)">
+    <rect x="0" y="0" width="124" height="76" rx="10" fill="#182131" stroke="#344257" stroke-width="2"/>
+    <text x="62" y="64" text-anchor="middle" fill="#f0f4fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">research</text>
+    <g transform="translate(44 16) scale(4)">
+      <rect x="1" y="1" width="4" height="2" fill="#e8eef8"/>
+      <rect x="0" y="3" width="6" height="3" fill="#e6c7aa"/>
+      <rect x="1" y="6" width="1" height="1" fill="#1d2430"/>
+      <rect x="4" y="6" width="1" height="1" fill="#1d2430"/>
+      <rect x="1" y="7" width="4" height="2" fill="#66c7ff"/>
+      <rect x="0" y="9" width="6" height="2" fill="#66c7ff"/>
+      <rect x="1" y="11" width="1" height="2" fill="#e6c7aa"/>
+      <rect x="4" y="11" width="1" height="2" fill="#e6c7aa"/>
+    </g>
+  </g>
+
+  <g transform="translate(604 214)">
+    <rect x="0" y="0" width="124" height="76" rx="10" fill="#182131" stroke="#344257" stroke-width="2"/>
+    <text x="62" y="64" text-anchor="middle" fill="#f0f4fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">ops</text>
+    <g transform="translate(44 16) scale(4)">
+      <rect x="1" y="1" width="4" height="2" fill="#202a35"/>
+      <rect x="0" y="3" width="6" height="3" fill="#f1ceb0"/>
+      <rect x="1" y="6" width="4" height="1" fill="#1d2430"/>
+      <rect x="1" y="7" width="4" height="2" fill="#86d39b"/>
+      <rect x="0" y="9" width="6" height="2" fill="#86d39b"/>
+      <rect x="1" y="11" width="1" height="2" fill="#f1ceb0"/>
+      <rect x="4" y="11" width="1" height="2" fill="#f1ceb0"/>
+    </g>
+  </g>
+
+  <g transform="translate(742 214)">
+    <rect x="0" y="0" width="124" height="76" rx="10" fill="#182131" stroke="#344257" stroke-width="2"/>
+    <text x="62" y="64" text-anchor="middle" fill="#f0f4fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">imprint</text>
+    <g transform="translate(44 16) scale(4)">
+      <rect x="1" y="1" width="4" height="2" fill="#6b5c88"/>
+      <rect x="0" y="3" width="6" height="3" fill="#efc8b0"/>
+      <rect x="1" y="6" width="1" height="1" fill="#1d2430"/>
+      <rect x="4" y="6" width="1" height="1" fill="#1d2430"/>
+      <rect x="1" y="7" width="4" height="2" fill="#b0a0ff"/>
+      <rect x="0" y="9" width="6" height="2" fill="#b0a0ff"/>
+      <rect x="1" y="11" width="1" height="2" fill="#efc8b0"/>
+      <rect x="4" y="11" width="1" height="2" fill="#efc8b0"/>
+    </g>
+  </g>
+
+  <g transform="translate(880 214)">
+    <rect x="0" y="0" width="232" height="76" rx="10" fill="#182131" stroke="#344257" stroke-width="2"/>
+    <text x="116" y="64" text-anchor="middle" fill="#f0f4fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">mcp core / office fabric</text>
+    <g transform="translate(34 16) scale(4)">
+      <rect x="0" y="0" width="10" height="2" fill="#7dd3fc"/>
+      <rect x="0" y="3" width="10" height="2" fill="#7dd3fc"/>
+      <rect x="0" y="6" width="10" height="2" fill="#7dd3fc"/>
+      <rect x="1" y="1" width="1" height="1" fill="#0f141c"/>
+      <rect x="4" y="1" width="1" height="1" fill="#0f141c"/>
+      <rect x="7" y="1" width="1" height="1" fill="#0f141c"/>
+      <rect x="1" y="4" width="1" height="1" fill="#0f141c"/>
+      <rect x="4" y="4" width="1" height="1" fill="#0f141c"/>
+      <rect x="7" y="4" width="1" height="1" fill="#0f141c"/>
+      <rect x="1" y="7" width="1" height="1" fill="#0f141c"/>
+      <rect x="4" y="7" width="1" height="1" fill="#0f141c"/>
+      <rect x="7" y="7" width="1" height="1" fill="#0f141c"/>
+    </g>
+    <text x="118" y="28" fill="#7dd3fc" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">goals • plans • tasks • events</text>
+    <text x="118" y="44" fill="#aeb8cb" font-family="Menlo, Monaco, Consolas, monospace" font-size="12">bridges • council • runtime • audit</text>
   </g>
 
   <defs>
-    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
-      <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#1d2330" stroke-width="1"/>
+    <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+      <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#1b2230" stroke-width="1"/>
     </pattern>
+    <linearGradient id="scan" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.08"/>
+    </linearGradient>
   </defs>
 </svg>
