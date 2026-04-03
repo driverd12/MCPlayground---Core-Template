@@ -94,6 +94,13 @@ test("autonomy.ide_ingress records continuity, mirrors to the office thread, and
       memories.some((memory) => String(memory.content ?? "").includes("IDE ingress objective: IDE ingress integration")),
       "expected distilled memory entry"
     );
+
+    const maintain = await callTool(session.client, "autonomy.maintain", {
+      action: "status",
+    });
+    assert.equal(typeof maintain.state.last_self_drive_at, "string");
+    assert.equal(maintain.state.last_self_drive_goal_id, ingress.autonomy.goal.goal_id);
+    assert.ok(maintain.state.last_actions.includes("autonomy.ide_ingress"));
   } finally {
     await session.client.close().catch(() => {});
     await ollama.close();

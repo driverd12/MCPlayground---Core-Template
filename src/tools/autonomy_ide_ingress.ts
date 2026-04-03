@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import { Storage } from "../storage.js";
 import { autonomyCommandBaseSchema } from "./autonomy_command.js";
+import { getAutonomyMaintainRuntimeStatus } from "./autonomy_maintain.js";
 import { runIdempotentMutation } from "./mutation.js";
 
 const recordSchema = z.record(z.unknown());
@@ -103,6 +104,74 @@ function buildMemoryContent(input: {
     lines.push(`Tags: ${input.tags.join(", ")}`);
   }
   return lines.join("\n");
+}
+
+function stampIngressAutonomyState(
+  storage: Storage,
+  input: {
+    objective: string;
+    title: string;
+    session_id: string;
+    thread_id: string | null;
+    source_client: string;
+    source_agent: string;
+    goal_id: string | null;
+  }
+) {
+  const now = new Date().toISOString();
+  const current = storage.getAutonomyMaintainState();
+  const runtimeConfig = getAutonomyMaintainRuntimeStatus().config;
+  const fingerprint = crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify({
+        kind: "autonomy.ide_ingress",
+        title: input.title,
+        objective: input.objective,
+        session_id: input.session_id,
+        thread_id: input.thread_id,
+        source_client: input.source_client,
+        source_agent: input.source_agent,
+        goal_id: input.goal_id,
+      })
+    )
+    .digest("hex");
+
+  const previousActions = Array.isArray(current?.last_actions) ? current.last_actions : [];
+  storage.setAutonomyMaintainState({
+    enabled: current?.enabled ?? false,
+    local_host_id: current?.local_host_id ?? runtimeConfig.local_host_id,
+    interval_seconds: current?.interval_seconds ?? runtimeConfig.interval_seconds,
+    learning_review_interval_seconds:
+      current?.learning_review_interval_seconds ?? runtimeConfig.learning_review_interval_seconds,
+    enable_self_drive: current?.enable_self_drive ?? runtimeConfig.enable_self_drive,
+    self_drive_cooldown_seconds:
+      current?.self_drive_cooldown_seconds ?? runtimeConfig.self_drive_cooldown_seconds,
+    run_eval_if_due: current?.run_eval_if_due ?? runtimeConfig.run_eval_if_due,
+    eval_interval_seconds: current?.eval_interval_seconds ?? runtimeConfig.eval_interval_seconds,
+    eval_suite_id: current?.eval_suite_id ?? runtimeConfig.eval_suite_id,
+    minimum_eval_score: current?.minimum_eval_score ?? runtimeConfig.minimum_eval_score,
+    last_run_at: current?.last_run_at ?? null,
+    last_bootstrap_ready_at: current?.last_bootstrap_ready_at ?? null,
+    last_goal_autorun_daemon_at: current?.last_goal_autorun_daemon_at ?? null,
+    last_tmux_maintained_at: current?.last_tmux_maintained_at ?? null,
+    last_learning_review_at: current?.last_learning_review_at ?? null,
+    last_learning_entry_count: current?.last_learning_entry_count ?? 0,
+    last_learning_active_agent_count: current?.last_learning_active_agent_count ?? 0,
+    last_eval_run_at: current?.last_eval_run_at ?? null,
+    last_eval_run_id: current?.last_eval_run_id ?? null,
+    last_eval_score: current?.last_eval_score ?? null,
+    last_eval_dependency_fingerprint: current?.last_eval_dependency_fingerprint ?? null,
+    last_observability_ship_at: current?.last_observability_ship_at ?? null,
+    last_provider_bridge_check_at: current?.last_provider_bridge_check_at ?? null,
+    provider_bridge_diagnostics: current?.provider_bridge_diagnostics ?? [],
+    last_self_drive_at: now,
+    last_self_drive_goal_id: input.goal_id,
+    last_self_drive_fingerprint: fingerprint,
+    last_actions: [...previousActions.slice(-11), "autonomy.ide_ingress"],
+    last_attention: current?.last_attention ?? [],
+    last_error: current?.last_error ?? null,
+  });
 }
 
 export async function autonomyIdeIngress(
@@ -247,6 +316,15 @@ export async function autonomyIdeIngress(
 
       const autonomyGoal = (autonomy.goal ?? null) as { goal_id?: string } | null;
       const autonomyPlan = (autonomy.plan ?? null) as { plan_id?: string } | null;
+      stampIngressAutonomyState(storage, {
+        objective: input.objective,
+        title,
+        session_id: sessionId,
+        thread_id: threadId,
+        source_client: sourceClient,
+        source_agent: sourceAgent,
+        goal_id: autonomyGoal?.goal_id?.trim() || null,
+      });
 
       const memory =
         input.append_memory === false

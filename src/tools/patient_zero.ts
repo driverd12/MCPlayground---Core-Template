@@ -362,10 +362,20 @@ export function buildPatientZeroReport(storage: Storage) {
   const runningTasks = storage.listTasks({ status: "running", limit: 4 });
   const pendingTasks = storage.listTasks({ status: "pending", limit: 4 });
   const autopilot = storage.getTriChatAutopilotState();
+  const lastSelfDriveAt = autonomyControl.maintain.last_self_drive_at;
+  const lastSelfDriveGoalId = autonomyControl.maintain.last_self_drive_goal_id;
 
   const recentActivity = [
     `Autonomy: ${autonomyControl.autonomous_control_enabled ? "armed" : "advisory only"} · self-drive ${autonomyControl.maintain.self_drive_enabled ? "on" : "off"} · autopilot exec ${autonomyControl.autopilot.execute_enabled ? "on" : "off"}`,
     `Toolkit: bridge ${autonomyControl.toolkit.bridge_toolkit_ready ? "ready" : "partial"} · local-agents ${autonomyControl.toolkit.local_agent_spawn_ready ? "ready" : "partial"} · terminal ${autonomyControl.toolkit.terminal_toolkit_ready ? "ready" : "partial"} · imprint ${autonomyControl.toolkit.imprint_ready ? "ready" : "off"}`,
+    ...(lastSelfDriveAt || lastSelfDriveGoalId
+      ? [
+          `Ingress: last autonomous mission ${compactText(
+            [lastSelfDriveGoalId, lastSelfDriveAt].filter(Boolean).join(" · "),
+            92
+          )}`,
+        ]
+      : []),
     ...runningTasks.map((task) => `Running: ${compactText(task.objective || task.task_id, 92)}`),
     ...pendingTasks.slice(0, Math.max(0, 3 - runningTasks.length)).map((task) => `Queued: ${compactText(task.objective || task.task_id, 92)}`),
     ...events
@@ -381,6 +391,7 @@ export function buildPatientZeroReport(storage: Storage) {
   const priorityPull =
     runningTasks[0]?.objective ??
     autopilot?.objective ??
+    (lastSelfDriveGoalId ? `Continue autonomous ingress goal ${lastSelfDriveGoalId}.` : null) ??
     "Keep the local control plane truthful, bounded, and ready for the next delegated objective.";
   const concern =
     !fullControlAuthority && summary.enabled
