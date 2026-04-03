@@ -1041,6 +1041,86 @@ test("reaction.engine dedupes repeated kernel-attention alerts instead of spammi
   }
 });
 
+test("reaction.engine dedupes failed-task incident churn when the task count changes between ticks", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-next-wave-reaction-engine-count-churn-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+    MCP_NOTIFIER_DRY_RUN: "1",
+  });
+
+  try {
+    const firstTask = await callTool(session.client, "task.create", {
+      mutation: nextMutation("reaction-engine-count-churn", "task.create.first", () => mutationCounter++),
+      objective: "Force a failed task so the notifier has a live incident to page on.",
+      project_dir: REPO_ROOT,
+      source_client: "next-wave-test",
+    });
+    await callTool(session.client, "task.claim", {
+      mutation: nextMutation("reaction-engine-count-churn", "task.claim.first", () => mutationCounter++),
+      worker_id: "reaction-worker",
+      task_id: firstTask.task.task_id,
+      lease_seconds: 60,
+    });
+    await callTool(session.client, "task.fail", {
+      mutation: nextMutation("reaction-engine-count-churn", "task.fail.first", () => mutationCounter++),
+      worker_id: "reaction-worker",
+      task_id: firstTask.task.task_id,
+      error: "Intentional failure for notifier dedupe coverage.",
+      summary: "First failed task for dedupe coverage.",
+    });
+
+    const firstTick = await callTool(session.client, "reaction.engine", {
+      action: "run_once",
+      mutation: nextMutation("reaction-engine-count-churn", "reaction.engine.first", () => mutationCounter++),
+      channels: ["desktop"],
+      source_client: "next-wave-test",
+    });
+    assert.equal(firstTick.ok, true);
+    assert.equal(firstTick.tick.sent_count, 1);
+    assert.ok(firstTick.tick.alert);
+    assert.ok(firstTick.tick.alert.reasons.some((entry) => /failed task\(s\) need triage/i.test(entry)));
+
+    const secondTask = await callTool(session.client, "task.create", {
+      mutation: nextMutation("reaction-engine-count-churn", "task.create.second", () => mutationCounter++),
+      objective: "Force another failed task so the count changes but the incident stays the same.",
+      project_dir: REPO_ROOT,
+      source_client: "next-wave-test",
+    });
+    await callTool(session.client, "task.claim", {
+      mutation: nextMutation("reaction-engine-count-churn", "task.claim.second", () => mutationCounter++),
+      worker_id: "reaction-worker",
+      task_id: secondTask.task.task_id,
+      lease_seconds: 60,
+    });
+    await callTool(session.client, "task.fail", {
+      mutation: nextMutation("reaction-engine-count-churn", "task.fail.second", () => mutationCounter++),
+      worker_id: "reaction-worker",
+      task_id: secondTask.task.task_id,
+      error: "Second intentional failure for notifier dedupe coverage.",
+      summary: "Second failed task for dedupe coverage.",
+    });
+
+    const secondTick = await callTool(session.client, "reaction.engine", {
+      action: "run_once",
+      mutation: nextMutation("reaction-engine-count-churn", "reaction.engine.second", () => mutationCounter++),
+      channels: ["desktop"],
+      source_client: "next-wave-test",
+    });
+    assert.equal(secondTick.ok, true);
+    assert.equal(secondTick.tick.sent_count, 0);
+    assert.equal(secondTick.tick.skipped, true);
+    assert.ok(secondTick.tick.alert);
+    assert.ok(secondTick.tick.alert.reasons.some((entry) => /failed task\(s\) need triage/i.test(entry)));
+  } finally {
+    await session.client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("autonomy.maintain starts reaction.engine and kernel.summary exposes the live notifier loop", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-next-wave-reaction-maintain-"));
   const dbPath = path.join(tempDir, "hub.sqlite");

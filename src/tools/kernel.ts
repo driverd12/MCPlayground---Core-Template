@@ -360,6 +360,8 @@ type AutonomyMaintainSummary = {
     minimum_eval_score: number;
     below_threshold: boolean;
     never_run: boolean;
+    due_by_age: boolean;
+    due_by_dependency_drift: boolean;
     healthy: boolean;
   };
   current_attention: string[];
@@ -1463,6 +1465,8 @@ export function summarizeAutonomyMaintain(state: AutonomyMaintainStateRecord | n
         minimum_eval_score: 75,
         below_threshold: true,
         never_run: true,
+        due_by_age: true,
+        due_by_dependency_drift: false,
         healthy: false,
       },
       current_attention: ["autonomy.maintain.never_started", "eval.autonomy.control-plane.never_run"],
@@ -1545,6 +1549,8 @@ export function summarizeAutonomyMaintain(state: AutonomyMaintainStateRecord | n
       minimum_eval_score: evalHealth.minimum_eval_score,
       below_threshold: evalHealth.below_threshold,
       never_run: evalHealth.never_run,
+      due_by_age: evalHealth.due_by_age,
+      due_by_dependency_drift: evalHealth.due_by_dependency_drift,
       healthy: evalHealth.healthy,
     },
     current_attention: [...new Set(currentAttention)],
@@ -1612,15 +1618,13 @@ function deriveKernelState(params: {
   active_session_count: number;
   autonomy_maintain_enabled: boolean;
   autonomy_maintain_running: boolean;
-  autonomy_eval_due: boolean;
-  autonomy_eval_healthy: boolean;
 }) {
   if (params.failed_goal_count > 0 || params.failed_task_count > 0 || params.failed_experiment_count > 0) {
     return "degraded";
   }
   if (
     params.autonomy_maintain_enabled &&
-    (!params.autonomy_maintain_running || params.autonomy_eval_due || !params.autonomy_eval_healthy) &&
+    !params.autonomy_maintain_running &&
     (params.ready_step_count > 0 || params.pending_task_count > 0 || params.active_session_count > 0)
   ) {
     return "degraded";
@@ -1875,8 +1879,6 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     active_session_count: activeSessions.length,
     autonomy_maintain_enabled: autonomyMaintainSummary.enabled,
     autonomy_maintain_running: autonomyMaintainSummary.runtime.running,
-    autonomy_eval_due: autonomyMaintainSummary.eval_due,
-    autonomy_eval_healthy: autonomyMaintainSummary.eval_health.healthy,
   });
 
   const attention: string[] = [];
@@ -2014,7 +2016,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   } else if (modelRouterSummary.enabled_backend_count === 0) {
     attention.push("Model router backends exist, but none are enabled.");
   }
-  if (evalSummary.suite_count === 0) {
+  if (evalSummary.enabled && evalSummary.suite_count === 0) {
     attention.push("No eval suites are configured yet.");
   }
   if (orgProgramSummary.role_count === 0) {
@@ -2031,17 +2033,22 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     attention.push("Background autonomy maintenance is enabled in storage, but the live daemon loop is not running.");
   } else if (autonomyMaintainSummary.stale) {
     attention.push("Background autonomy maintenance is stale and may no longer be refreshing readiness automatically.");
-  } else if (autonomyMaintainSummary.eval_due || !autonomyMaintainSummary.eval_health.healthy) {
-    attention.push("Background autonomy maintenance eval health is not production-ready.");
+  } else if (autonomyMaintainSummary.eval_health.below_threshold) {
+    attention.push("Background autonomy maintenance eval score is below threshold.");
+  } else if (autonomyMaintainSummary.eval_health.never_run && evalSummary.suite_count > 0) {
+    attention.push("Background autonomy maintenance has not completed its first eval run yet.");
   }
   if (observabilitySummary.recent_critical_count > 0) {
     attention.push(
       `Observability captured ${observabilitySummary.recent_critical_count} critical document(s) in the last 15 minutes.`
     );
   }
-  if (autonomyMaintainSummary.current_attention.length > 0) {
+  const actionableMaintainAttention = autonomyMaintainSummary.current_attention.filter(
+    (entry) => !entry.endsWith(".overdue") && !entry.endsWith(".definition_changed")
+  );
+  if (actionableMaintainAttention.length > 0) {
     attention.push(
-      `Background autonomy maintenance currently needs attention: ${autonomyMaintainSummary.current_attention.slice(0, 3).join(", ")}.`
+      `Background autonomy maintenance currently needs attention: ${actionableMaintainAttention.slice(0, 3).join(", ")}.`
     );
   }
   const degradedMaintenanceSubsystems = Object.entries(autonomyMaintainSummary.subsystems)

@@ -7,6 +7,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { Storage } from "../dist/storage.js";
+import { computeEvalDependencyFingerprint } from "../dist/tools/autonomy_maintain.js";
 
 const REPO_ROOT = process.cwd();
 
@@ -2199,6 +2201,27 @@ test("kernel.summary reports execution substrate summaries from durable host, ro
       },
     });
 
+    const storage = new Storage(dbPath);
+    const dependencyFingerprint = computeEvalDependencyFingerprint(storage, evalSuite.suite.suite_id);
+    storage.setAutonomyMaintainState({
+      enabled: true,
+      interval_seconds: 120,
+      learning_review_interval_seconds: 300,
+      enable_self_drive: true,
+      self_drive_cooldown_seconds: 1800,
+      run_eval_if_due: true,
+      eval_interval_seconds: 300,
+      eval_suite_id: evalSuite.suite.suite_id,
+      minimum_eval_score: 75,
+      last_run_at: new Date().toISOString(),
+      last_eval_run_at: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+      last_eval_run_id: "kernel-substrate-eval-run",
+      last_eval_score: 100,
+      last_eval_dependency_fingerprint: dependencyFingerprint,
+      last_actions: ["eval.completed"],
+      last_attention: [],
+    });
+
     const summary = await callTool(client, "kernel.summary", {
       goal_limit: 5,
       session_limit: 5,
@@ -2240,6 +2263,10 @@ test("kernel.summary reports execution substrate summaries from durable host, ro
     assert.ok(summary.evals.suites.some((suite) => suite.suite_id === evalSuite.suite.suite_id && suite.router_case_count === 1));
     assert.ok(summary.org_programs.roles.some((role) => role.role_id === "ring-leader" && role.active_version_id !== null));
     assert.equal(summary.attention.some((entry) => /No worker fabric hosts|No model router backends|No eval suites|No org-program roles/i.test(entry)), false);
+    assert.equal(summary.autonomy_maintain.eval_due, true);
+    assert.equal(summary.autonomy_maintain.last_eval_score, 100);
+    assert.equal(summary.attention.some((entry) => /first eval run yet|eval score is below threshold/i.test(entry)), false);
+    assert.equal(summary.attention.some((entry) => /currently needs attention: .*?(overdue|definition_changed)/i.test(entry)), false);
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

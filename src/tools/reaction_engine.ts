@@ -53,11 +53,14 @@ type ReactionAlert = {
   message: string;
   level: "info" | "warn" | "critical";
   reasons: string[];
+  fingerprint_tokens: string[];
 };
 
 const TRANSIENT_REACTION_REASONS = [
   "background autonomy maintenance is stale",
   "background autonomy maintenance is not running",
+  "no eval suites are configured yet.",
+  "background autonomy maintenance has not completed its first eval run yet.",
   "work is queued or ready, but no active agent sessions are available to claim it.",
   "queued work may stall because no active session is currently marked healthy by adaptive routing.",
   "all enabled worker fabric hosts are degraded; dispatch will proceed conservatively.",
@@ -204,13 +207,44 @@ function isBenignAttention(text: string) {
   return (
     normalized === "Kernel is progressing normally." ||
     normalized === "No actionable work is currently queued." ||
+    normalized === "No eval suites are configured yet." ||
     normalized.startsWith("Recovered failed task remains in history:") ||
+    normalized === "Background autonomy maintenance has not completed its first eval run yet." ||
     normalized === "Background autonomy maintenance is ready for its next eval health refresh." ||
     normalized.startsWith("Background autonomy maintenance last reported attention:") ||
+    normalized === "Background autonomy maintenance eval refresh is due; the last successful baseline remains usable." ||
+    /^Background autonomy maintenance currently needs attention: .*?\b(overdue|definition_changed)\b/i.test(normalized) ||
     normalized === "Reaction engine notifications are not enabled yet." ||
     normalized === "Reaction engine is enabled in storage, but the live notifier loop is not running." ||
     normalized === "Reaction engine is stale and may no longer surface human-attention alerts."
   );
+}
+
+function shouldIgnoreAttentionEntry(entry: string, context: { failedTasks: number }) {
+  if (context.failedTasks > 0 && entry.startsWith("Failed task detected:")) {
+    return true;
+  }
+  return false;
+}
+
+function pushReason(
+  reasons: string[],
+  fingerprintTokens: string[],
+  reason: string,
+  fingerprintToken: string
+) {
+  if (!reasons.includes(reason)) {
+    reasons.push(reason);
+  }
+  if (!fingerprintTokens.includes(fingerprintToken)) {
+    fingerprintTokens.push(fingerprintToken);
+  }
+}
+
+function attentionFingerprintToken(text: string) {
+  return `attention:${normalizeReactionReason(text)
+    .replace(/\b\d+\b/g, "#")
+    .replace(/[a-f0-9]{8,}/g, "<id>")}`;
 }
 
 export function buildReactionAlert(kernel: Record<string, unknown>): ReactionAlert | null {
@@ -220,16 +254,19 @@ export function buildReactionAlert(kernel: Record<string, unknown>): ReactionAle
   const adaptiveCounts = asRecord(overview.adaptive_session_counts);
   const autonomyMaintain = asRecord(kernel.autonomy_maintain);
   const autonomyRuntime = asRecord(autonomyMaintain.runtime);
-  const attention = Array.isArray(kernel.attention) ? kernel.attention.map((entry) => compactText(String(entry ?? ""), 180)) : [];
-  const actionableAttention = attention.filter((entry) => entry && !isBenignAttention(entry));
-  const recoveredFailedHistory = attention.some((entry) => entry.startsWith("Recovered failed task remains in history:"));
-
-  const reasons: string[] = [];
-  let level: ReactionAlert["level"] = "warn";
   const failedTasks = Math.max(
     0,
     Math.trunc(readNumber(overview.failed_task_count) ?? readNumber(taskCounts.failed) ?? 0)
   );
+  const attention = Array.isArray(kernel.attention) ? kernel.attention.map((entry) => compactText(String(entry ?? ""), 180)) : [];
+  const actionableAttention = attention.filter(
+    (entry) => entry && !isBenignAttention(entry) && !shouldIgnoreAttentionEntry(entry, { failedTasks })
+  );
+  const recoveredFailedHistory = attention.some((entry) => entry.startsWith("Recovered failed task remains in history:"));
+
+  const reasons: string[] = [];
+  const fingerprintTokens: string[] = [];
+  let level: ReactionAlert["level"] = "warn";
   const blockedGoals = Math.max(0, Math.trunc(readNumber(goalCounts.blocked) ?? 0));
   const failedGoals = Math.max(0, Math.trunc(readNumber(goalCounts.failed) ?? 0));
   const expiredRunning = Math.max(0, Math.trunc(readNumber(overview.expired_running_task_count) ?? 0));
@@ -237,42 +274,47 @@ export function buildReactionAlert(kernel: Record<string, unknown>): ReactionAle
 
   if (failedTasks > 0 && !recoveredFailedHistory) {
     level = "critical";
-    reasons.push(`${failedTasks} failed task(s) need triage`);
+    pushReason(reasons, fingerprintTokens, `${failedTasks} failed task(s) need triage`, "failed_tasks");
   }
   if (failedGoals > 0) {
     level = "critical";
-    reasons.push(`${failedGoals} goal(s) failed`);
+    pushReason(reasons, fingerprintTokens, `${failedGoals} goal(s) failed`, "failed_goals");
   }
   if (blockedGoals > 0) {
-    reasons.push(`${blockedGoals} goal(s) are blocked`);
+    pushReason(reasons, fingerprintTokens, `${blockedGoals} goal(s) are blocked`, "blocked_goals");
   }
   if (expiredRunning > 0) {
-    reasons.push(`${expiredRunning} running lease(s) expired`);
+    pushReason(reasons, fingerprintTokens, `${expiredRunning} running lease(s) expired`, "expired_running_leases");
   }
   if (degradedSessions > 0) {
-    reasons.push(`${degradedSessions} active session(s) are degraded`);
+    pushReason(reasons, fingerprintTokens, `${degradedSessions} active session(s) are degraded`, "degraded_sessions");
   }
   if (autonomyMaintain.enabled === true && autonomyRuntime.running === false) {
     level = "critical";
-    reasons.push("background autonomy maintenance is not running");
+    pushReason(reasons, fingerprintTokens, "background autonomy maintenance is not running", "autonomy_maintain_not_running");
   }
   if (autonomyMaintain.stale === true) {
-    reasons.push("background autonomy maintenance is stale");
+    pushReason(reasons, fingerprintTokens, "background autonomy maintenance is stale", "autonomy_maintain_stale");
   }
   for (const item of actionableAttention.slice(0, 2)) {
-    reasons.push(item);
+    pushReason(reasons, fingerprintTokens, item, attentionFingerprintToken(item));
   }
   if (reasons.length === 0) {
     return null;
   }
 
-  const digest = crypto.createHash("sha1").update(`${level}|${reasons.join("|")}`).digest("hex").slice(0, 16);
+  const digest = crypto
+    .createHash("sha1")
+    .update(`${level}|${[...fingerprintTokens].sort().join("|")}`)
+    .digest("hex")
+    .slice(0, 16);
   return {
     key: `kernel-attention:${digest}`,
     title: level === "critical" ? "Agent Office needs attention" : "Agent Office warning",
     message: compactText(reasons.slice(0, 3).join(" | "), 360),
     level,
     reasons,
+    fingerprint_tokens: fingerprintTokens,
   };
 }
 
