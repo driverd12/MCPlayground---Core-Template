@@ -10,6 +10,7 @@ import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 
 const providerBridgeClientSchema = z.enum([
   "codex",
+  "claude-cli",
   "cursor",
   "github-copilot-cli",
   "github-copilot-vscode",
@@ -78,7 +79,7 @@ type ProviderBridgeRouterBackendCandidate = {
   reason: string | null;
   backend: {
     backend_id: string;
-    provider: "openai" | "google" | "cursor" | "github-copilot" | "custom";
+    provider: "openai" | "google" | "anthropic" | "cursor" | "github-copilot" | "custom";
     model_id: string;
     endpoint: string | null;
     host_id: string | null;
@@ -121,7 +122,7 @@ function resolveClientTransportConfig(
   if (requestedMode !== "auto") {
     return base;
   }
-  if (clientId === "gemini-cli") {
+  if (clientId === "gemini-cli" || clientId === "claude-cli") {
     return {
       ...base,
       mode: "stdio",
@@ -158,6 +159,7 @@ const defaultLocalFirstAgents = [
 ];
 const defaultProviderClients: ProviderBridgeClientId[] = [
   "codex",
+  "claude-cli",
   "cursor",
   "github-copilot-cli",
   "github-copilot-vscode",
@@ -377,6 +379,7 @@ function resolveClientConfigPaths(workspaceRoot: string) {
   const home = process.env.HOME || os.homedir();
   return {
     codex: path.join(home, ".codex", "config.toml"),
+    claude: path.join(home, ".claude.json"),
     cursor: path.join(home, ".cursor", "mcp.json"),
     cursorWorkspace: path.join(workspaceRoot, ".cursor", "mcp.json"),
     copilotCli: path.join(home, ".copilot", "mcp-config.json"),
@@ -389,6 +392,8 @@ function inferTaskKindsForBridgeAgent(agentId: string | null) {
   switch (agentId) {
     case "codex":
       return ["planning", "coding", "verification", "tool_use"];
+    case "claude":
+      return ["planning", "review", "verification", "chat"];
     case "cursor":
       return ["coding", "verification", "tool_use"];
     case "github-copilot":
@@ -407,6 +412,11 @@ function inferTagsForBridgeAgent(agentId: string | null, clientId: ProviderBridg
     tags.add("planning");
     tags.add("coding");
     tags.add("verification");
+  } else if (agentId === "claude") {
+    tags.add("frontier");
+    tags.add("critic");
+    tags.add("review");
+    tags.add("planning");
   } else if (agentId === "cursor") {
     tags.add("coding");
     tags.add("implementer");
@@ -428,6 +438,8 @@ function resolveBridgeBackendProvider(clientId: ProviderBridgeClientId) {
     case "codex":
     case "chatgpt-developer-mode":
       return "openai" as const;
+    case "claude-cli":
+      return "anthropic" as const;
     case "gemini-cli":
       return "google" as const;
     case "cursor":
@@ -444,6 +456,8 @@ function resolveBridgeModelId(clientId: ProviderBridgeClientId) {
   switch (clientId) {
     case "codex":
       return readEnvString("TRICHAT_CODEX_MODEL") ?? "codex";
+    case "claude-cli":
+      return readEnvString("TRICHAT_CLAUDE_MODEL") ?? "claude-code";
     case "cursor":
       return readEnvString("TRICHAT_CURSOR_MODEL") ?? "cursor-agent";
     case "gemini-cli":
@@ -609,6 +623,58 @@ function buildCursorOrGeminiEntry(
   return config.mode === "http" ? buildHttpEntry(config, serverName, includeBearerToken) : buildStdioEntry(config);
 }
 
+function buildClaudeCliStdioEntry(config: ProviderBridgeTransportConfig, workspaceRoot: string) {
+  return {
+    type: "stdio" as const,
+    ...buildStdioEntry(config, {
+      cwd: workspaceRoot,
+    }),
+  };
+}
+
+function shellQuote(value: string) {
+  return JSON.stringify(value);
+}
+
+function buildClaudeCliInstallScript(
+  config: ProviderBridgeTransportConfig,
+  serverName: string,
+  includeBearerToken: boolean,
+  workspaceRoot: string
+) {
+  if (config.mode === "http") {
+    const lines = [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      `claude mcp remove -s user ${shellQuote(serverName)} >/dev/null 2>&1 || true`,
+    ];
+    if (!includeBearerToken && config.bearer_token) {
+      lines.push('if [[ -z "${MCP_HTTP_BEARER_TOKEN:-}" ]]; then');
+      lines.push('  echo "Set MCP_HTTP_BEARER_TOKEN before running this installer." >&2');
+      lines.push("  exit 1");
+      lines.push("fi");
+    }
+    const headerArgs = [`-H ${shellQuote(`Origin: ${config.origin}`)}`];
+    if (includeBearerToken && config.bearer_token) {
+      headerArgs.push(`-H ${shellQuote(`Authorization: Bearer ${config.bearer_token}`)}`);
+    } else if (config.bearer_token) {
+      headerArgs.push('-H "Authorization: Bearer ${MCP_HTTP_BEARER_TOKEN}"');
+    }
+    lines.push(
+      `claude mcp add -s user -t http ${shellQuote(serverName)} ${shellQuote(config.url)} ${headerArgs.join(" ")}`
+    );
+    return lines.join("\n");
+  }
+  return [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    `claude mcp remove -s user ${shellQuote(serverName)} >/dev/null 2>&1 || true`,
+    `claude mcp add-json -s user ${shellQuote(serverName)} ${shellQuote(
+      JSON.stringify(buildClaudeCliStdioEntry(config, workspaceRoot))
+    )}`,
+  ].join("\n");
+}
+
 function buildGeminiEntry(
   config: ProviderBridgeTransportConfig,
   serverName: string,
@@ -687,6 +753,61 @@ function codexInstalled(configPath: string, serverName: string) {
   }
 }
 
+function claudeInstalled(workspaceRoot: string, serverName: string) {
+  if (!commandExists("claude")) {
+    return false;
+  }
+  const probe = runCommandProbe("claude", ["mcp", "get", serverName], {
+    cwd: workspaceRoot,
+    timeout: 4000,
+    env: buildProviderProbeEnv(workspaceRoot),
+  });
+  if (probe.status === 0) {
+    return true;
+  }
+  return /(^|\n)\s*Scope:\s+/m.test(probe.combined) || /(^|\n)\s*Type:\s+/m.test(probe.combined);
+}
+
+function readClaudeAuthState(workspaceRoot: string) {
+  if (!commandExists("claude")) {
+    return {
+      available: false,
+      connected: false,
+      detail: "Claude CLI binary is not installed.",
+    };
+  }
+  const probe = runCommandProbe("claude", ["auth", "status"], {
+    cwd: workspaceRoot,
+    timeout: 4000,
+    env: buildProviderProbeEnv(workspaceRoot),
+  });
+  if (probe.status !== 0) {
+    return {
+      available: false,
+      connected: false,
+      detail: probe.error || probe.combined.trim() || "Claude CLI auth status probe failed.",
+    };
+  }
+  try {
+    const parsed = JSON.parse(probe.stdout || probe.combined || "{}") as Record<string, unknown>;
+    const loggedIn = Boolean(parsed.loggedIn);
+    const authMethod = String(parsed.authMethod ?? "unknown");
+    return {
+      available: true,
+      connected: loggedIn,
+      detail: loggedIn
+        ? `Claude CLI authentication is active (${authMethod}).`
+        : `Claude CLI is installed but not authenticated (${authMethod}).`,
+    };
+  } catch {
+    return {
+      available: true,
+      connected: false,
+      detail: "Claude CLI auth status returned unreadable output.",
+    };
+  }
+}
+
 function jsonServerInstalled(filePath: string, serverName: string) {
   const parsed = readJsonFile(filePath) as Record<string, unknown>;
   const mcpServers = parsed.mcpServers;
@@ -706,6 +827,7 @@ function buildClientStatuses(
   const configPaths = resolveClientConfigPaths(workspaceRoot);
   const rosterAgentIds: Record<string, string | null> = {
     codex: "codex",
+    "claude-cli": "claude",
     cursor: "cursor",
     "gemini-cli": "gemini",
     "github-copilot-cli": "github-copilot",
@@ -714,6 +836,7 @@ function buildClientStatuses(
   };
   const officeAgentIds: Record<ProviderBridgeClientId, string | null> = {
     codex: "codex",
+    "claude-cli": "claude",
     cursor: "cursor",
     "github-copilot-cli": "github-copilot",
     "github-copilot-vscode": "github-copilot",
@@ -725,6 +848,12 @@ function buildClientStatuses(
     codex: [
       "Best local install path is the existing Codex CLI MCP registration script.",
       "Outbound council consultation is available through bridges/codex_bridge.py.",
+    ],
+    "claude-cli": [
+      "Claude Code can connect inbound through its native `claude mcp` configuration.",
+      "Claude CLI defaults to stdio MCP transport on this host for better local compatibility.",
+      "Outbound council consultation is available through bridges/claude_bridge.py.",
+      "This repo installs the MCP bridge with `claude mcp add`/`add-json` instead of editing hidden config formats directly.",
     ],
     cursor: [
       "Cursor can connect to the shared HTTP daemon or launch the server via stdio.",
@@ -769,6 +898,24 @@ function buildClientStatuses(
       outbound_bridge_ready: resolveOutboundBridgeReady(rosterAgentIds.codex),
       requires_internet_for_model: true,
       notes: notes.codex,
+    },
+    {
+      client_id: "claude-cli",
+      display_name: "Claude CLI",
+      office_agent_id: officeAgentIds["claude-cli"],
+      install_mode: "cli",
+      config_path: configPaths.claude,
+      installed: claudeInstalled(workspaceRoot, serverName),
+      binary_present: commandExists("claude"),
+      config_present: fs.existsSync(configPaths.claude),
+      supported_transports: ["http", "stdio"],
+      preferred_transport: "stdio",
+      inbound_mcp_supported: true,
+      outbound_council_supported: true,
+      outbound_agent_id: rosterAgentIds["claude-cli"],
+      outbound_bridge_ready: resolveOutboundBridgeReady(rosterAgentIds["claude-cli"]),
+      requires_internet_for_model: true,
+      notes: notes["claude-cli"],
     },
     {
       client_id: "cursor",
@@ -1179,6 +1326,39 @@ function runProviderDiagnostics(
         config_path: status.config_path,
       } satisfies ProviderBridgeDiagnostic;
     }
+    if (status.client_id === "claude-cli") {
+      if (!status.binary_present || !status.installed) {
+        return {
+          client_id: status.client_id,
+          display_name: status.display_name,
+          office_agent_id: status.office_agent_id,
+          available: false,
+          runtime_probed: false,
+          connected: null,
+          status: "unavailable",
+          detail: !status.binary_present
+            ? "Claude CLI binary is not installed."
+            : "Claude CLI MCP bridge is not configured for this host.",
+          notes: status.notes,
+          command: "claude mcp get mcplayground && claude auth status",
+          config_path: status.config_path,
+        } satisfies ProviderBridgeDiagnostic;
+      }
+      const auth = readClaudeAuthState(workspaceRoot);
+      return {
+        client_id: status.client_id,
+        display_name: status.display_name,
+        office_agent_id: status.office_agent_id,
+        available: true,
+        runtime_probed: true,
+        connected: auth.available ? auth.connected : false,
+        status: auth.connected ? "connected" : auth.available ? "disconnected" : "configured",
+        detail: auth.detail,
+        notes: status.notes,
+        command: "claude mcp get mcplayground + claude auth status",
+        config_path: status.config_path,
+      } satisfies ProviderBridgeDiagnostic;
+    }
     if (status.client_id === "gemini-cli") {
       if (!status.binary_present || !status.config_present) {
         return {
@@ -1460,6 +1640,58 @@ function installCodex(serverName: string) {
   };
 }
 
+function installClaudeCli(
+  serverName: string,
+  config: ProviderBridgeTransportConfig,
+  workspaceRoot: string
+) {
+  const env = buildProviderProbeEnv(workspaceRoot);
+  runCommandProbe("claude", ["mcp", "remove", "-s", "user", serverName], {
+    cwd: workspaceRoot,
+    timeout: 5000,
+    env,
+  });
+  const addArgs =
+    config.mode === "http"
+      ? [
+          "mcp",
+          "add",
+          "-s",
+          "user",
+          "-t",
+          "http",
+          serverName,
+          config.url,
+          "-H",
+          `Origin: ${config.origin}`,
+          "-H",
+          `Authorization: Bearer ${config.bearer_token}`,
+        ]
+      : [
+          "mcp",
+          "add-json",
+          "-s",
+          "user",
+          serverName,
+          JSON.stringify(buildClaudeCliStdioEntry(config, workspaceRoot)),
+        ];
+  const result = runCommandProbe("claude", addArgs, {
+    cwd: workspaceRoot,
+    timeout: 10000,
+    env,
+  });
+  if (result.status !== 0) {
+    throw new Error(result.stderr?.trim() || result.stdout?.trim() || "claude mcp add failed");
+  }
+  return {
+    client_id: "claude-cli",
+    install_mode: "cli",
+    transport_used: config.mode,
+    config_path: resolveClientConfigPaths(workspaceRoot).claude,
+    output: result.stdout?.trim() || result.combined.trim() || null,
+  };
+}
+
 function selectClients(inputClients: ProviderBridgeClientId[] | undefined) {
   return inputClients?.length ? [...new Set(inputClients)] : defaultProviderClients.slice();
 }
@@ -1482,6 +1714,7 @@ function writeBundle(
 ) {
   fs.mkdirSync(outputDir, { recursive: true });
   const snippets: Record<string, string> = {};
+  const claudeTransport = resolveClientTransportConfig("claude-cli", transport, requestedTransport);
   const cursorTransport = resolveClientTransportConfig("cursor", transport, requestedTransport);
   const geminiTransport = resolveClientTransportConfig("gemini-cli", transport, requestedTransport);
   const copilotTransport = resolveClientTransportConfig("github-copilot-cli", transport, requestedTransport);
@@ -1492,6 +1725,17 @@ function writeBundle(
   const vscodeEntry = buildVsCodeEntry(vscodeTransport, serverName, includeBearerToken);
   const configPaths = resolveClientConfigPaths(workspaceRoot);
 
+  if (selectedClients.includes("claude-cli")) {
+    const filePath = path.join(outputDir, "claude-cli-mcp-add.sh");
+    ensureDirForFile(filePath);
+    fs.writeFileSync(
+      filePath,
+      `${buildClaudeCliInstallScript(claudeTransport, serverName, includeBearerToken, workspaceRoot)}\n`,
+      "utf8"
+    );
+    fs.chmodSync(filePath, 0o755);
+    snippets["claude-cli"] = filePath;
+  }
   if (selectedClients.includes("cursor")) {
     const filePath = path.join(outputDir, "cursor-mcp.json");
     writeJsonFile(filePath, {
@@ -1708,6 +1952,11 @@ export async function providerBridge(
     for (const client of clients) {
       if (client === "codex") {
         installs.push(installCodex(serverName));
+        continue;
+      }
+      if (client === "claude-cli") {
+        const clientTransport = resolveClientTransportConfig(client, transport, input.transport);
+        installs.push(installClaudeCli(serverName, clientTransport, workspaceRoot));
         continue;
       }
       if (client === "cursor") {

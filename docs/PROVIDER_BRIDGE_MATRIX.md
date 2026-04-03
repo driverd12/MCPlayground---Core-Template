@@ -48,7 +48,7 @@ Status:
 
 ```bash
 npm run providers:status
-npm run providers:diagnose -- gemini-cli cursor github-copilot-cli
+npm run providers:diagnose -- claude-cli gemini-cli cursor github-copilot-cli
 ```
 
 Export a presentation/import bundle:
@@ -60,8 +60,10 @@ npm run providers:export
 Install the locally supported client configs:
 
 ```bash
-npm run providers:install -- cursor gemini-cli github-copilot-cli
+npm run providers:install -- claude-cli cursor gemini-cli github-copilot-cli
 ```
+
+Claude CLI and Gemini CLI default to stdio MCP transport on this host for better local compatibility.
 
 Codex install still uses the dedicated script:
 

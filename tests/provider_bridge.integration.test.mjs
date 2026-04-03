@@ -36,6 +36,8 @@ test("provider.bridge reports truthful client and outbound council coverage", { 
     ]);
 
     const clients = new Map(status.clients.map((entry) => [entry.client_id, entry]));
+    assert.equal(clients.get("claude-cli")?.outbound_council_supported, true);
+    assert.equal(clients.get("claude-cli")?.outbound_bridge_ready, true);
     assert.equal(clients.get("cursor")?.outbound_council_supported, true);
     assert.equal(clients.get("cursor")?.outbound_bridge_ready, true);
     assert.equal(clients.get("gemini-cli")?.outbound_council_supported, true);
@@ -45,13 +47,15 @@ test("provider.bridge reports truthful client and outbound council coverage", { 
 
     const routerCandidates = new Map(status.router_backend_candidates.map((entry) => [entry.client_id, entry]));
     assert.ok(routerCandidates.has("codex"));
+    assert.ok(routerCandidates.has("claude-cli"));
     assert.ok(routerCandidates.has("cursor"));
     assert.ok(routerCandidates.has("gemini-cli"));
     assert.equal(routerCandidates.get("codex")?.backend.metadata.bridge_agent_id, "codex");
+    assert.equal(routerCandidates.get("claude-cli")?.backend.provider, "anthropic");
     assert.equal(typeof routerCandidates.get("gemini-cli")?.eligible, "boolean");
     assert.ok(
       status.eligible_router_backends.every((entry) =>
-        ["openai", "google", "cursor", "github-copilot", "custom"].includes(entry.provider)
+        ["openai", "google", "anthropic", "cursor", "github-copilot", "custom"].includes(entry.provider)
       )
     );
   } finally {
@@ -63,15 +67,19 @@ test("provider.bridge reports truthful client and outbound council coverage", { 
 test("provider.bridge export_bundle and install create real client config artifacts", { concurrency: false }, async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-provider-bridge-export-"));
   const homeDir = path.join(tempDir, "home");
+  const binDir = path.join(tempDir, "bin");
   const workspaceRoot = path.join(tempDir, "workspace");
   const exportDir = path.join(tempDir, "exports");
   fs.mkdirSync(homeDir, { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
   fs.mkdirSync(workspaceRoot, { recursive: true });
+  createFakeClaudeCli(path.join(binDir, "claude"));
 
   let mutationCounter = 0;
   const session = await openClient({
     ANAMNESIS_HUB_DB_PATH: path.join(tempDir, "hub.sqlite"),
     HOME: homeDir,
+    PATH: `${binDir}:${process.env.PATH || ""}`,
     MCP_HTTP_BEARER_TOKEN: "provider-bridge-install-token",
     TRICHAT_MCP_URL: "http://127.0.0.1:8787/",
     TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
@@ -84,12 +92,13 @@ test("provider.bridge export_bundle and install create real client config artifa
       transport: "http",
       output_dir: exportDir,
       workspace_root: workspaceRoot,
-      clients: ["cursor", "gemini-cli", "github-copilot-cli", "github-copilot-vscode", "chatgpt-developer-mode"],
+      clients: ["claude-cli", "cursor", "gemini-cli", "github-copilot-cli", "github-copilot-vscode", "chatgpt-developer-mode"],
     });
 
     assert.equal(exported.ok, true);
     assert.equal(exported.bundle.output_dir, exportDir);
     assert.equal(fs.existsSync(exported.bundle.manifest_path), true);
+    assert.equal(fs.existsSync(exported.bundle.snippets["claude-cli"]), true);
     assert.equal(fs.existsSync(exported.bundle.snippets.cursor), true);
     assert.equal(fs.existsSync(exported.bundle.snippets["gemini-cli"]), true);
     assert.equal(fs.existsSync(exported.bundle.snippets["github-copilot-cli"]), true);
@@ -101,10 +110,12 @@ test("provider.bridge export_bundle and install create real client config artifa
       mutation: nextMutation("provider-bridge", "install", () => mutationCounter++),
       transport: "http",
       workspace_root: workspaceRoot,
-      clients: ["cursor", "gemini-cli", "github-copilot-cli", "github-copilot-vscode"],
+      clients: ["claude-cli", "cursor", "gemini-cli", "github-copilot-cli", "github-copilot-vscode"],
     });
 
     assert.equal(installed.ok, true);
+    assert.ok(installed.installs.some((entry) => entry.client_id === "claude-cli"));
+    assert.equal(fs.existsSync(path.join(homeDir, ".claude.json")), true);
 
     const cursorConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".cursor", "mcp.json"), "utf8"));
     assert.ok(cursorConfig.mcpServers?.mcplayground?.url);
@@ -191,6 +202,7 @@ test("provider.bridge diagnose reports office agent mappings and truthful status
     assert.equal(diagnose.ok, true);
     const diagnostics = new Map(diagnose.diagnostics.map((entry) => [entry.client_id, entry]));
     assert.equal(diagnostics.get("codex")?.office_agent_id, "codex");
+    assert.equal(diagnostics.get("claude-cli")?.office_agent_id, "claude");
     assert.equal(diagnostics.get("cursor")?.office_agent_id, "cursor");
     assert.equal(diagnostics.get("gemini-cli")?.office_agent_id, "gemini");
     assert.equal(diagnostics.get("github-copilot-cli")?.office_agent_id, "github-copilot");
@@ -429,6 +441,54 @@ test("provider.bridge diagnose treats Copilot as connected from config metadata 
   }
 });
 
+test("provider.bridge diagnose treats Claude as connected from MCP config plus auth state", { concurrency: false }, async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-provider-bridge-claude-diagnose-"));
+  const homeDir = path.join(tempDir, "home");
+  const binDir = path.join(tempDir, "bin");
+  fs.mkdirSync(homeDir, { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+  createFakeClaudeCli(path.join(binDir, "claude"));
+  fs.writeFileSync(path.join(homeDir, ".claude.json"), JSON.stringify({ mcpServers: {} }, null, 2));
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: path.join(tempDir, "hub.sqlite"),
+    HOME: homeDir,
+    PATH: `${binDir}:${process.env.PATH || ""}`,
+    MCP_HTTP_BEARER_TOKEN: "provider-bridge-diagnose-token",
+    TRICHAT_MCP_URL: "http://127.0.0.1:8787/",
+    TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
+  });
+
+  try {
+    const install = await callTool(session.client, "provider.bridge", {
+      action: "install",
+      mutation: nextMutation("provider-bridge", "install-claude", () => 0),
+      transport: "http",
+      workspace_root: tempDir,
+      clients: ["claude-cli"],
+    });
+    assert.equal(install.ok, true);
+
+    const diagnose = await callTool(session.client, "provider.bridge", {
+      action: "diagnose",
+      clients: ["claude-cli"],
+      probe_timeout_ms: 1000,
+      workspace_root: tempDir,
+    });
+    assert.equal(diagnose.ok, true);
+    assert.equal(diagnose.diagnostics.length, 1);
+    const claude = diagnose.diagnostics[0];
+    assert.equal(claude.client_id, "claude-cli");
+    assert.equal(claude.status, "connected");
+    assert.equal(claude.connected, true);
+    assert.match(claude.detail, /authentication is active/i);
+    assert.match(claude.command, /claude mcp get mcplayground \+ claude auth status/i);
+  } finally {
+    await session.client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function openClient(extraEnv) {
   const transport = new StdioClientTransport({
     command: "node",
@@ -481,4 +541,89 @@ function inheritedEnv(extra) {
     env[key] = value;
   }
   return env;
+}
+
+function createFakeClaudeCli(filePath) {
+  fs.writeFileSync(
+    filePath,
+    `#!/usr/bin/env python3
+import json, os, pathlib, sys
+
+home = pathlib.Path(os.environ.get("HOME", "."))
+store = home / ".claude-mcp-test.json"
+config = home / ".claude.json"
+
+def load_store():
+    if store.exists():
+        return json.loads(store.read_text())
+    return {}
+
+def save_store(data):
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps(data, indent=2))
+    config.write_text(json.dumps({"mcpServers": data}, indent=2))
+
+args = sys.argv[1:]
+if args[:2] == ["auth", "status"]:
+    print(json.dumps({"loggedIn": True, "authMethod": "oauth", "apiProvider": "firstParty"}))
+    sys.exit(0)
+
+if len(args) >= 2 and args[0] == "mcp" and args[1] == "remove":
+    name = args[-1]
+    data = load_store()
+    data.pop(name, None)
+    save_store(data)
+    print("removed")
+    sys.exit(0)
+
+if len(args) >= 2 and args[0] == "mcp" and args[1] == "add-json":
+    name = args[-2]
+    payload = json.loads(args[-1])
+    data = load_store()
+    data[name] = payload
+    save_store(data)
+    print("added-json")
+    sys.exit(0)
+
+if len(args) >= 2 and args[0] == "mcp" and args[1] == "add":
+    tail = args[2:]
+    positional = []
+    i = 0
+    while i < len(tail):
+        current = tail[i]
+        if current in {"-s", "--scope", "-t", "--transport", "-H", "--header"}:
+            i += 2
+            continue
+        if current.startswith("-"):
+            i += 1
+            continue
+        positional.append(current)
+        i += 1
+    name = positional[0]
+    url = positional[1]
+    data = load_store()
+    data[name] = {"type": "http", "url": url}
+    save_store(data)
+    print("added-http")
+    sys.exit(0)
+
+if len(args) >= 2 and args[0] == "mcp" and args[1] == "get":
+    name = args[-1]
+    data = load_store()
+    if name in data:
+        print(json.dumps(data[name]))
+        sys.exit(0)
+    print("missing", file=sys.stderr)
+    sys.exit(1)
+
+if len(args) >= 2 and args[0] == "mcp" and args[1] == "list":
+    print(json.dumps(load_store()))
+    sys.exit(0)
+
+print("unsupported", file=sys.stderr)
+sys.exit(1)
+`,
+    { mode: 0o755 }
+  );
+  fs.chmodSync(filePath, 0o755);
 }

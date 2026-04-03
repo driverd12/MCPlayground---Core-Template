@@ -51,9 +51,9 @@ function actorLabel(input: z.infer<typeof patientZeroSchema>) {
   return String(input.source_agent || input.source_client || "operator").trim() || "operator";
 }
 
-const PATIENT_ZERO_TERMINAL_TOOLKIT = ["codex", "cursor", "gemini", "gh"] as const;
+const PATIENT_ZERO_TERMINAL_TOOLKIT = ["codex", "claude", "cursor", "gemini", "gh"] as const;
 const PATIENT_ZERO_TERMINAL_ALLOWLIST = PATIENT_ZERO_TERMINAL_TOOLKIT.map((entry) => `${entry}`);
-const PATIENT_ZERO_BRIDGE_AGENT_IDS = ["codex", "cursor", "gemini", "github-copilot", "local-imprint"] as const;
+const PATIENT_ZERO_BRIDGE_AGENT_IDS = ["codex", "claude", "cursor", "gemini", "github-copilot", "local-imprint"] as const;
 const PATIENT_ZERO_LOCAL_AGENT_IDS = [
   "implementation-director",
   "research-director",

@@ -276,8 +276,8 @@ flowchart TD
   PZ --> Maintain["autonomy.maintain<br/>self-drive on"]
   PZ --> Autopilot["office autopilot<br/>trichat.autopilot execute enabled"]
 
-  Autopilot --> Toolkit["Terminal toolkit<br/>codex / cursor / gemini / gh"]
-  Autopilot --> Bridges["Bridge-capable agents<br/>codex / cursor / gemini / github-copilot"]
+  Autopilot --> Toolkit["Terminal toolkit<br/>codex / claude / cursor / gemini / gh"]
+  Autopilot --> Bridges["Bridge-capable agents<br/>codex / claude / cursor / gemini / github-copilot"]
   Autopilot --> Locals["Local office agents<br/>directors / leaves / local-imprint"]
 
   Desktop --> Audit["event.* / run.* / operator surfaces"]
@@ -392,11 +392,12 @@ Commands:
 
 ```bash
 npm run providers:status
-npm run providers:diagnose -- gemini-cli cursor github-copilot-cli
+npm run providers:diagnose -- claude-cli gemini-cli cursor github-copilot-cli
 ```
 
 Notes:
 
+- Claude CLI now defaults to stdio MCP transport on this host for better local compatibility while still mapping to the `claude` office agent and `autonomy.ide_ingress`.
 - Gemini CLI now installs with an explicit trusted stdio config, working directory, and timeout in `~/.gemini/settings.json`.
 - Cursor is validated as configured on this host, but runtime MCP status still has to be checked in the Cursor UI because Cursor does not expose a local MCP status CLI on this machine.
 
@@ -652,7 +653,7 @@ Provider bridge commands:
 ```bash
 npm run providers:status
 npm run providers:export
-npm run providers:install -- cursor gemini-cli github-copilot-cli
+npm run providers:install -- claude-cli cursor gemini-cli github-copilot-cli
 ```
 
 `provider.bridge` is the truthful federation surface:
@@ -662,7 +663,7 @@ npm run providers:install -- cursor gemini-cli github-copilot-cli
 - it projects runtime-eligible outbound providers into bridge-backed `model.router` backend candidates
 - `autonomy.bootstrap` seeds those eligible bridge backends automatically without replacing the local default backend
 - `autonomy.command`, `goal.execute`, and `plan.dispatch` use router output to augment local-first councils with relevant hosted agents instead of treating provider bridges as a separate side path
-- it exports config bundles for Cursor, Gemini CLI, GitHub Copilot, and Codex
+- it exports config bundles for Claude CLI, Cursor, Gemini CLI, GitHub Copilot, and Codex
 - it installs both global and workspace-local Cursor MCP config for better editor reliability
 - it defaults Gemini CLI to stdio MCP transport for better local compatibility
 - it preserves `autonomy.ide_ingress` as the one canonical operator/IDE ingress path

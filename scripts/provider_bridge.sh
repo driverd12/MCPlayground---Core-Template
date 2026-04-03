@@ -10,6 +10,7 @@ Usage:
   ./scripts/provider_bridge.sh install [--transport auto|http|stdio] [client...]
 
 Clients:
+  claude-cli
   codex
   cursor
   github-copilot-cli

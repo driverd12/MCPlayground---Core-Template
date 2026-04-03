@@ -407,7 +407,7 @@ clients = {entry.get("client_id"): entry for entry in data.get("clients", [])}
 local_first = data.get("local_first_ide_agent_ids") or []
 if data.get("canonical_ingress_tool") != "autonomy.ide_ingress":
     raise SystemExit("provider.bridge did not report autonomy.ide_ingress as canonical ingress")
-required_clients = {"codex", "cursor", "gemini-cli", "github-copilot-cli", "chatgpt-developer-mode"}
+required_clients = {"claude-cli", "codex", "cursor", "gemini-cli", "github-copilot-cli", "chatgpt-developer-mode"}
 missing = sorted(required_clients - set(clients))
 if missing:
     raise SystemExit(f"provider.bridge missing expected clients: {missing}")

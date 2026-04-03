@@ -166,7 +166,7 @@ flowchart TD
 
   subgraph Execution["Execution Lanes"]
     LocalTools["Local MCP tools"]
-    CLI["Terminal CLI toolkit<br/>codex / cursor / gemini / gh"]
+    CLI["Terminal CLI toolkit<br/>codex / claude / cursor / gemini / gh"]
     Agents["Local office agents<br/>directors / leaves / local-imprint"]
     Desktop["desktop.* / patient.zero / privileged.exec"]
   end
@@ -255,8 +255,8 @@ flowchart TD
   PZ --> Desktop["desktop.control / desktop.observe / desktop.act / desktop.listen"]
   PZ --> Browser["Safari / browser actuation"]
   PZ --> Verify["privileged.exec action=verify"]
-  PZ --> Toolkit["Terminal toolkit<br/>codex / cursor / gemini / gh"]
-  PZ --> AgentPool["Local and bridge agents<br/>codex / cursor / gemini / github-copilot / local-imprint / directors / leaves"]
+  PZ --> Toolkit["Terminal toolkit<br/>codex / claude / cursor / gemini / gh"]
+  PZ --> AgentPool["Local and bridge agents<br/>codex / claude / cursor / gemini / github-copilot / local-imprint / directors / leaves"]
   PZ --> Maintain["autonomy.maintain self-drive"]
   PZ --> Autopilot["trichat.autopilot execute"]
 

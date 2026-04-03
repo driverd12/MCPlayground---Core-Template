@@ -388,10 +388,12 @@ test("patient.zero arms and disarms explicit elevated local control with an oper
     });
     assert.equal(autopilot.config.execute_enabled, true);
     assert.ok(autopilot.config.command_allowlist.includes("codex"));
+    assert.ok(autopilot.config.command_allowlist.includes("claude"));
     assert.ok(autopilot.config.command_allowlist.includes("cursor"));
     assert.ok(autopilot.config.command_allowlist.includes("gemini"));
     assert.ok(autopilot.config.command_allowlist.includes("gh"));
     assert.ok(autopilot.config.specialist_agent_ids.includes("codex"));
+    assert.ok(autopilot.config.specialist_agent_ids.includes("claude"));
     assert.ok(autopilot.config.specialist_agent_ids.includes("cursor"));
     assert.ok(autopilot.config.specialist_agent_ids.includes("gemini"));
     assert.ok(autopilot.config.specialist_agent_ids.includes("github-copilot"));
