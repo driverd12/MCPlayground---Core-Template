@@ -116,6 +116,9 @@ test("provider.bridge export_bundle and install create real client config artifa
     assert.equal(installed.ok, true);
     assert.ok(installed.installs.some((entry) => entry.client_id === "claude-cli"));
     assert.equal(fs.existsSync(path.join(homeDir, ".claude.json")), true);
+    const claudeConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".claude.json"), "utf8"));
+    assert.equal(claudeConfig.mcpServers?.mcplayground?.type, "http");
+    assert.equal(claudeConfig.mcpServers?.mcplayground?.url, "http://127.0.0.1:8787/");
 
     const cursorConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".cursor", "mcp.json"), "utf8"));
     assert.ok(cursorConfig.mcpServers?.mcplayground?.url);
@@ -175,6 +178,55 @@ test("provider.bridge installs Gemini CLI via stdio when transport is auto", { c
     assert.equal(geminiConfig.mcpServers?.mcplayground?.trust, true);
     assert.equal(geminiConfig.mcpServers?.mcplayground?.timeout, 600000);
     assert.equal(typeof geminiConfig.mcpServers?.mcplayground?.env?.MCP_PROXY_HTTP_URL, "string");
+    assert.equal(installed.clients[0].preferred_transport, "stdio");
+  } finally {
+    await session.client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("provider.bridge installs Claude CLI via stdio proxy when transport is auto", { concurrency: false }, async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-provider-bridge-claude-auto-"));
+  const homeDir = path.join(tempDir, "home");
+  const binDir = path.join(tempDir, "bin");
+  const workspaceRoot = path.join(tempDir, "workspace");
+  fs.mkdirSync(homeDir, { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.mkdirSync(workspaceRoot, { recursive: true });
+  createFakeClaudeCli(path.join(binDir, "claude"));
+
+  let mutationCounter = 0;
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: path.join(tempDir, "hub.sqlite"),
+    HOME: homeDir,
+    PATH: `${binDir}:${process.env.PATH || ""}`,
+    MCP_HTTP_BEARER_TOKEN: "provider-bridge-install-token",
+    TRICHAT_MCP_URL: "http://127.0.0.1:8787/",
+    TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
+  });
+
+  try {
+    const installed = await callTool(session.client, "provider.bridge", {
+      action: "install",
+      mutation: nextMutation("provider-bridge", "install-claude-auto", () => mutationCounter++),
+      transport: "auto",
+      workspace_root: workspaceRoot,
+      clients: ["claude-cli"],
+    });
+
+    assert.equal(installed.ok, true);
+    assert.equal(installed.installs[0].transport_used, "stdio");
+
+    const claudeConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".claude.json"), "utf8"));
+    assert.equal(claudeConfig.mcpServers?.mcplayground?.type, "stdio");
+    assert.equal(typeof claudeConfig.mcpServers?.mcplayground?.command, "string");
+    assert.ok(Array.isArray(claudeConfig.mcpServers?.mcplayground?.args));
+    assert.match(String(claudeConfig.mcpServers?.mcplayground?.args?.[0] ?? ""), /provider_stdio_bridge\.mjs$/);
+    assert.equal(claudeConfig.mcpServers?.mcplayground?.cwd, workspaceRoot);
+    assert.equal(claudeConfig.mcpServers?.mcplayground?.trust, true);
+    assert.equal(claudeConfig.mcpServers?.mcplayground?.timeout, 600000);
+    assert.equal(claudeConfig.mcpServers?.mcplayground?.env?.MCP_PROXY_HTTP_URL, "http://127.0.0.1:8787/");
+    assert.equal(typeof claudeConfig.mcpServers?.mcplayground?.env?.MCP_PROXY_STDIO_COMMAND, "string");
     assert.equal(installed.clients[0].preferred_transport, "stdio");
   } finally {
     await session.client.close().catch(() => {});

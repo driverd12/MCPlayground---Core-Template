@@ -36,9 +36,9 @@ Override with explicit `trichat_agent_ids` only when you intentionally want a di
 | Client / Provider | Connects into MCP | Ring leader can query outward | Local-only transport possible | Notes |
 | --- | --- | --- | --- | --- |
 | Codex | Yes | Yes | Yes for MCP, no for frontier model inference | Inbound via Codex MCP config; outward via `bridges/codex_bridge.py` |
-| Claude CLI | Yes | Yes | Yes for MCP transport, no for Claude model inference | Inbound via native `claude mcp add` / `add-json`; defaults to `stdio` on this host for local compatibility; outward via `bridges/claude_bridge.py`; live model use still depends on Claude auth state |
+| Claude CLI | Yes | Yes | Yes for MCP transport, no for Claude model inference | Inbound via native `claude mcp add` / `add-json`; defaults to a resilient `stdio` proxy on this host, using the MCP HTTP daemon first and a local stdio fallback when needed; outward via `bridges/claude_bridge.py`; live model use still depends on Claude auth state |
 | Cursor | Yes | Yes | Yes for MCP, no for cloud model inference | Inbound via both `~/.cursor/mcp.json` and workspace-local `.cursor/mcp.json`; outward via `bridges/cursor_bridge.py` |
-| Gemini CLI | Yes | Yes | Yes for MCP transport, no for Gemini model inference | Inbound via `~/.gemini/settings.json`; standalone `gemini` CLI binary; defaults to `stdio` for MCP reliability; outward via `bridges/gemini_bridge.py` |
+| Gemini CLI | Yes | Yes | Yes for MCP transport, no for Gemini model inference | Inbound via `~/.gemini/settings.json`; standalone `gemini` CLI binary; defaults to the same resilient `stdio` proxy pattern for MCP reliability; outward via `bridges/gemini_bridge.py` |
 | GitHub Copilot CLI | Yes | Yes | Yes for MCP transport, no for Copilot model inference | Inbound via `~/.copilot/mcp-config.json`; current official standalone CLI is `copilot`; outbound council consultation is available through `bridges/copilot_bridge.py`, with MCP servers disabled on the Copilot council prompt path because the CLI rejects the full local tool catalog shape |
 | GitHub Copilot Agent Mode / VS Code | Exportable | No | Yes for MCP transport, no for Copilot model inference | Export workspace `.vscode/mcp.json`; keep this honest as an editor-client integration |
 | ChatGPT Developer Mode | Remote-only | No | No | Requires a remote MCP server path and internet connectivity; export manifest only |
@@ -64,7 +64,7 @@ Install the locally supported client configs:
 npm run providers:install -- claude-cli cursor gemini-cli github-copilot-cli
 ```
 
-Claude CLI and Gemini CLI default to stdio MCP transport on this host for better local compatibility.
+Claude CLI and Gemini CLI default to a resilient stdio proxy on this host for better local compatibility, preferring the MCP HTTP daemon and falling back to a direct local stdio path when necessary.
 
 Codex install still uses the dedicated script:
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -15,44 +16,91 @@ async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function connectRemoteClient() {
+function readJsonArrayEnv(name) {
+  const raw = readEnv(name);
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map((entry) => String(entry)) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function connectRemoteHttpClient() {
   const baseUrl = readEnv("MCP_PROXY_HTTP_URL", readEnv("TRICHAT_MCP_URL", "http://127.0.0.1:8787/"));
   const origin = readEnv("MCP_PROXY_HTTP_ORIGIN", readEnv("TRICHAT_MCP_ORIGIN", "http://127.0.0.1"));
   const bearerToken = readEnv("MCP_PROXY_HTTP_BEARER_TOKEN", readEnv("MCP_HTTP_BEARER_TOKEN", ""));
+  const client = new Client(
+    { name: "mcplayground-provider-stdio-bridge", version: "1.0.0" },
+    { capabilities: {} }
+  );
+  const headers = {
+    Origin: origin,
+    ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
+  };
+  const transport = new StreamableHTTPClientTransport(new URL(baseUrl), {
+    requestInit: { headers },
+  });
+  await client.connect(transport);
+  return { client, transport, mode: "http", endpoint: baseUrl };
+}
+
+async function connectRemoteStdioClient() {
+  const command = readEnv("MCP_PROXY_STDIO_COMMAND");
+  const args = readJsonArrayEnv("MCP_PROXY_STDIO_ARGS");
+  if (!command) {
+    throw new Error("MCP_PROXY_STDIO_COMMAND is not configured.");
+  }
+  const cwd = readEnv("MCP_PROXY_STDIO_CWD");
+  const dbPath = readEnv("MCP_PROXY_STDIO_DB_PATH");
+  const env = {
+    ...process.env,
+    ...(dbPath ? { ANAMNESIS_HUB_DB_PATH: dbPath } : {}),
+  };
+  const client = new Client(
+    { name: "mcplayground-provider-stdio-bridge", version: "1.0.0" },
+    { capabilities: {} }
+  );
+  const transport = new StdioClientTransport({
+    command,
+    args,
+    ...(cwd ? { cwd } : {}),
+    env,
+    stderr: "pipe",
+  });
+  await client.connect(transport);
+  return { client, transport, mode: "stdio", endpoint: command };
+}
+
+async function connectRemoteClient() {
+  const preferred = readEnv("MCP_PROXY_TRANSPORT", "auto").toLowerCase();
   const maxAttempts = Number.parseInt(readEnv("MCP_PROXY_CONNECT_ATTEMPTS", "8"), 10);
   const retryDelayMs = Number.parseInt(readEnv("MCP_PROXY_CONNECT_DELAY_MS", "500"), 10);
+  const strategies =
+    preferred === "http"
+      ? [connectRemoteHttpClient]
+      : preferred === "stdio"
+        ? [connectRemoteStdioClient]
+        : [connectRemoteHttpClient, connectRemoteStdioClient];
   let lastError = null;
 
   for (let attempt = 1; attempt <= Math.max(1, maxAttempts); attempt += 1) {
-    const client = new Client(
-      { name: "mcplayground-provider-stdio-bridge", version: "1.0.0" },
-      { capabilities: {} }
-    );
-    const headers = {
-      Origin: origin,
-      ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
-    };
-    const transport = new StreamableHTTPClientTransport(new URL(baseUrl), {
-      requestInit: { headers },
-    });
-    try {
-      await client.connect(transport);
-      return { client, transport, baseUrl };
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
+    for (const connectStrategy of strategies) {
       try {
-        await transport.close();
-      } catch {}
-      try {
-        await client.close();
-      } catch {}
-      if (attempt < maxAttempts) {
-        await sleep(Math.max(100, retryDelayMs));
+        return await connectStrategy();
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
       }
+    }
+    if (attempt < maxAttempts) {
+      await sleep(Math.max(100, retryDelayMs));
     }
   }
 
-  throw lastError ?? new Error("Unable to connect provider stdio bridge to the MCP HTTP daemon.");
+  throw lastError ?? new Error("Unable to connect provider stdio bridge to an MCP upstream.");
 }
 
 async function main() {

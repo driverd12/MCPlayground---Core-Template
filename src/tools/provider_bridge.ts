@@ -615,6 +615,37 @@ function buildStdioEntry(
   };
 }
 
+function buildProviderProxyStdioEntry(
+  config: ProviderBridgeTransportConfig,
+  workspaceRoot: string,
+  includeBearerToken: boolean,
+  description: string
+) {
+  return {
+    type: "stdio" as const,
+    command: process.execPath,
+    args: [providerStdioBridgePath],
+    env: {
+      MCP_PROXY_TRANSPORT: "auto",
+      MCP_PROXY_HTTP_URL: config.url,
+      MCP_PROXY_HTTP_ORIGIN: config.origin,
+      ...(includeBearerToken && config.bearer_token
+        ? { MCP_PROXY_HTTP_BEARER_TOKEN: config.bearer_token }
+        : config.bearer_token
+          ? { MCP_PROXY_HTTP_BEARER_TOKEN: "<set MCP_HTTP_BEARER_TOKEN>" }
+          : {}),
+      MCP_PROXY_STDIO_COMMAND: config.command,
+      MCP_PROXY_STDIO_ARGS: JSON.stringify(config.args),
+      MCP_PROXY_STDIO_CWD: workspaceRoot,
+      MCP_PROXY_STDIO_DB_PATH: resolveEntryDbPath(config, workspaceRoot),
+    },
+    cwd: workspaceRoot,
+    timeout: 600000,
+    trust: true,
+    description,
+  };
+}
+
 function buildCursorOrGeminiEntry(
   config: ProviderBridgeTransportConfig,
   serverName: string,
@@ -623,13 +654,17 @@ function buildCursorOrGeminiEntry(
   return config.mode === "http" ? buildHttpEntry(config, serverName, includeBearerToken) : buildStdioEntry(config);
 }
 
-function buildClaudeCliStdioEntry(config: ProviderBridgeTransportConfig, workspaceRoot: string) {
-  return {
-    type: "stdio" as const,
-    ...buildStdioEntry(config, {
-      cwd: workspaceRoot,
-    }),
-  };
+function buildClaudeCliStdioEntry(
+  config: ProviderBridgeTransportConfig,
+  workspaceRoot: string,
+  includeBearerToken: boolean
+) {
+  return buildProviderProxyStdioEntry(
+    config,
+    workspaceRoot,
+    includeBearerToken,
+    "MCPlayground MCP HTTP proxy for Claude CLI"
+  );
 }
 
 function shellQuote(value: string) {
@@ -670,7 +705,7 @@ function buildClaudeCliInstallScript(
     "set -euo pipefail",
     `claude mcp remove -s user ${shellQuote(serverName)} >/dev/null 2>&1 || true`,
     `claude mcp add-json -s user ${shellQuote(serverName)} ${shellQuote(
-      JSON.stringify(buildClaudeCliStdioEntry(config, workspaceRoot))
+      JSON.stringify(buildClaudeCliStdioEntry(config, workspaceRoot, includeBearerToken))
     )}`,
   ].join("\n");
 }
@@ -690,24 +725,7 @@ function buildGeminiEntry(
       ...buildHttpEntry(config, serverName, includeBearerToken),
     };
   }
-  return {
-    type: "stdio" as const,
-    command: process.execPath,
-    args: [providerStdioBridgePath],
-    env: {
-      MCP_PROXY_HTTP_URL: config.url,
-      MCP_PROXY_HTTP_ORIGIN: config.origin,
-      ...(includeBearerToken && config.bearer_token
-        ? { MCP_PROXY_HTTP_BEARER_TOKEN: config.bearer_token }
-        : config.bearer_token
-          ? { MCP_PROXY_HTTP_BEARER_TOKEN: "<set MCP_HTTP_BEARER_TOKEN>" }
-          : {}),
-    },
-    cwd: workspaceRoot,
-    timeout: 600000,
-    trust: true,
-    description: "MCPlayground MCP HTTP proxy",
-  };
+  return buildProviderProxyStdioEntry(config, workspaceRoot, includeBearerToken, "MCPlayground MCP HTTP proxy");
 }
 
 function buildCopilotCliEntry(
@@ -1673,7 +1691,7 @@ function installClaudeCli(
           "-s",
           "user",
           serverName,
-          JSON.stringify(buildClaudeCliStdioEntry(config, workspaceRoot)),
+          JSON.stringify(buildClaudeCliStdioEntry(config, workspaceRoot, true)),
         ];
   const result = runCommandProbe("claude", addArgs, {
     cwd: workspaceRoot,

@@ -399,9 +399,9 @@ npm run providers:diagnose -- claude-cli gemini-cli cursor github-copilot-cli
 
 Notes:
 
-- Claude CLI now defaults to stdio MCP transport on this host for better local compatibility while still mapping to the `claude` office agent and `autonomy.ide_ingress`.
+- Claude CLI now defaults to a resilient stdio proxy on this host: it targets the MCP HTTP daemon first and falls back to a local stdio server path if the daemon is unhealthy, while still mapping to the `claude` office agent and `autonomy.ide_ingress`.
 - Claude model use still depends on Claude Code being authenticated on the host; `provider.bridge diagnose` distinguishes configured MCP install from live authenticated runtime.
-- Gemini CLI now installs with an explicit trusted stdio config, working directory, and timeout in `~/.gemini/settings.json`.
+- Gemini CLI now installs with an explicit trusted stdio proxy config, working directory, timeout, and HTTP-to-stdio fallback in `~/.gemini/settings.json`.
 - Cursor is validated as configured on this host, but runtime MCP status still has to be checked in the Cursor UI because Cursor does not expose a local MCP status CLI on this machine.
 
 ## Quick Start
@@ -669,8 +669,7 @@ npm run providers:install -- claude-cli cursor gemini-cli github-copilot-cli
 - it exports config bundles for Claude CLI, Cursor, Gemini CLI, GitHub Copilot, and Codex
 - it installs Claude CLI through the native `claude mcp add` / `add-json` path instead of editing opaque hidden formats directly
 - it installs both global and workspace-local Cursor MCP config for better editor reliability
-- it defaults Claude CLI and Gemini CLI to stdio MCP transport on this host for better local compatibility
-- it defaults Gemini CLI to stdio MCP transport for better local compatibility
+- it defaults Claude CLI and Gemini CLI to a resilient stdio proxy on this host, using the MCP HTTP daemon first and a direct stdio fallback when needed
 - it preserves `autonomy.ide_ingress` as the one canonical operator/IDE ingress path
 
 Fast STDIO connection example:
