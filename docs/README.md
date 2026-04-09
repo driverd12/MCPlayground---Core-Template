@@ -8,7 +8,7 @@ This is the centralized human-facing docs hub for MCPlayground Core Template.
 - [System Interconnects](./SYSTEM_INTERCONNECTS.md)
 - [IDE + Agent Setup Guide](./IDE_AGENT_SETUP.md)
 - [Transport Connection Guide](./CONNECT.md)
-  Quick setup now starts with `npm run bootstrap:env`, which enforces the pinned Node/npm/Python runtime before install/build.
+  Quick setup now starts with `npm run bootstrap:env:install`, which can install the pinned Node/npm/Python prerequisites for supported hosts before install/build.
 
 ## Architecture and Diagrams
 
@@ -52,7 +52,7 @@ The repo is intentionally split this way:
 - `src/`: runtime, tools, and domain-pack code
 - `bridges/`: bridge adapters for local IDE and CLI lanes
 - `scripts/`: launcher, validation, and operational helpers
-  This includes `agent_office_gui.mjs`, `agentic_suite_launch.mjs`, `bootstrap_doctor.mjs`, `open_browser.mjs`, and `platform_manifest.json` for the cross-platform office and suite bootstrap path.
+  This includes `agent_office_gui.mjs`, `agentic_suite_launch.mjs`, `bootstrap_doctor.mjs`, `bootstrap_install.mjs`, `open_browser.mjs`, and `platform_manifest.json` for the cross-platform office and suite bootstrap path.
 - `web/office/` and `ui/`: GUI and terminal operator surfaces
 
 Tool-specific companion files that remain at repo root on purpose:

@@ -20,6 +20,7 @@ flowchart LR
 
   subgraph Bootstrap["Bootstrap + Browser Helpers"]
     Doctor["bootstrap_doctor.mjs"]
+    Installer["bootstrap_install.mjs"]
     BrowserOpen["open_browser.mjs"]
     Manifest["platform_manifest.json"]
   end
@@ -64,6 +65,8 @@ flowchart LR
   SuiteLauncher --> Manifest
   CLI --> HTTP
   Doctor --> Manifest
+  Installer --> Manifest
+  Installer --> Doctor
   BrowserOpen --> Manifest
 
   Codex --> STDIO
@@ -302,8 +305,9 @@ flowchart TD
 - `scripts/agent_office_gui.mjs` is the cross-platform office launcher path for macOS, Linux, and win32. It prefers launchd on macOS when available and falls back to the detached Node HTTP runner everywhere else.
 - `Agent Office.app` and `Agentic Suite.app` are thin installed wrappers that invoke the Node launchers; they do not bypass the launcher logic or talk to the MCP HTTP listener directly.
 - `scripts/agentic_suite_launch.mjs` is the cross-platform suite/app launcher. It first ensures the office surface is available, then tries requested IDE windows, then reuses the office launcher for browser fallback, while `status` emits machine-readable readiness with next actions.
-- `scripts/bootstrap_doctor.mjs` reads `scripts/platform_manifest.json` as the bootstrap source of truth for browser detection order, launcher entrypoints, and platform capability notes.
-- `scripts/open_browser.mjs` prefers manifest-driven browser detection, including `%LOCALAPPDATA%` win32 installs, before falling back to the platform default opener.
+- `scripts/bootstrap_doctor.mjs` reads `scripts/platform_manifest.json` as the bootstrap source of truth for browser detection order, launcher entrypoints, install profiles, and platform capability notes.
+- `scripts/bootstrap_install.mjs` is the platform-aware first-run installer path used by `npm run bootstrap:env:install`; it consumes the same manifest and can install pinned Node/npm/Python/Git/tmux prerequisites for supported hosts.
+- `scripts/open_browser.mjs` now prefers the OS default browser handler first (`open`, `xdg-open`, `start`) and only falls back to named browser detection when needed, while still supporting `%LOCALAPPDATA%` and registry-backed win32 browser installs.
 - `scripts/agent_office_gui.sh` remains as a thin compatibility wrapper around the Node launcher for older shell entrypoints.
 - `scripts/agentic_suite_launch.sh` remains as a thin compatibility wrapper around the Node suite launcher for older shell entrypoints.
 - `patient.zero` does not silently grant root. Root becomes available only when:

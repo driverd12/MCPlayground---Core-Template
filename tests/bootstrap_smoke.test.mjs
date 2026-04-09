@@ -10,6 +10,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 const MANIFEST_PATH = path.join(REPO_ROOT, "scripts", "platform_manifest.json");
 const DOCTOR_PATH = path.join(REPO_ROOT, "scripts", "bootstrap_doctor.mjs");
 const BOOTSTRAP_ENV_PATH = path.join(REPO_ROOT, "scripts", "bootstrap_env.mjs");
+const BOOTSTRAP_INSTALL_PATH = path.join(REPO_ROOT, "scripts", "bootstrap_install.mjs");
 const OPEN_BROWSER_PATH = path.join(REPO_ROOT, "scripts", "open_browser.mjs");
 const OFFICE_GUI_NODE_PATH = path.join(REPO_ROOT, "scripts", "agent_office_gui.mjs");
 const AGENTIC_SUITE_NODE_PATH = path.join(REPO_ROOT, "scripts", "agentic_suite_launch.mjs");
@@ -52,6 +53,7 @@ test("platform_manifest.json is valid JSON with required structure", () => {
 
   assert.ok(manifest.launchers.office_gui, "manifest must describe the office GUI launcher");
   assert.ok(manifest.launchers.agentic_suite, "manifest must describe the agentic suite launcher");
+  assert.ok(manifest.bootstrap_install, "manifest must describe bootstrap install profiles");
 });
 
 test("platform_manifest.json required prerequisites include node, python3, git", () => {
@@ -101,6 +103,16 @@ test("platform_manifest.json browser entries for current platform preserve a bro
     foundAny || hasFallback,
     `manifest should provide either a detectable browser or a system fallback on ${currentPlatform}`
   );
+});
+
+test("platform_manifest.json prefers the system default browser before named browsers", () => {
+  const manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));
+  assert.equal(manifest.browsers.darwin?.[0]?.name, "System default");
+  assert.equal(manifest.browsers.linux?.[0]?.name, "System default");
+  assert.equal(manifest.browsers.win32?.[0]?.name, "System default");
+  assert.deepEqual(manifest.browsers.darwin?.[0]?.open_cmd, ["open"]);
+  assert.deepEqual(manifest.browsers.linux?.[0]?.open_cmd, ["xdg-open"]);
+  assert.deepEqual(manifest.browsers.win32?.[0]?.open_cmd, ["cmd.exe", "/c", "start", ""]);
 });
 
 test("platform_manifest.json win32 browser entries include program files fallbacks", () => {
@@ -297,8 +309,24 @@ test("platform_manifest.json install_hints cover all three target platforms", ()
   }
 });
 
+test("platform_manifest.json bootstrap install profiles cover the target platforms", () => {
+  const manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));
+  assert.equal(typeof manifest.bootstrap_install.darwin.manager_label, "string");
+  assert.equal(typeof manifest.bootstrap_install.win32.manager_label, "string");
+  assert.equal(typeof manifest.bootstrap_install.linux.ubuntu.manager_label, "string");
+  assert.equal(typeof manifest.bootstrap_install.linux.rocky.manager_label, "string");
+  assert.equal(typeof manifest.bootstrap_install.linux["amazon-linux"].manager_label, "string");
+  assert.equal(typeof manifest.bootstrap_install.darwin.commands.node, "string");
+  assert.equal(typeof manifest.bootstrap_install.win32.commands.git, "string");
+  assert.equal(typeof manifest.bootstrap_install.linux.ubuntu.commands.python3, "string");
+});
+
 test("package.json office GUI npm scripts use the cross-platform node launcher", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
+  assert.equal(pkg.scripts["bootstrap:env"], "node ./scripts/bootstrap_env.mjs");
+  assert.equal(pkg.scripts["bootstrap:env:install"], "node ./scripts/bootstrap_env.mjs --install-missing");
+  assert.equal(pkg.scripts["bootstrap:install"], "node ./scripts/bootstrap_install.mjs --apply");
+  assert.equal(pkg.scripts["bootstrap:install:plan"], "node ./scripts/bootstrap_install.mjs --plan");
   assert.equal(pkg.scripts["trichat:office:gui"], "node ./scripts/agent_office_gui.mjs open");
   assert.equal(pkg.scripts["trichat:office:web"], "node ./scripts/agent_office_gui.mjs open");
   assert.equal(pkg.scripts["trichat:office:web:start"], "node ./scripts/agent_office_gui.mjs start");
@@ -306,4 +334,25 @@ test("package.json office GUI npm scripts use the cross-platform node launcher",
   assert.equal(pkg.scripts["agentic:suite"], "node ./scripts/agentic_suite_launch.mjs open");
   assert.equal(pkg.scripts["agentic:suite:start"], "node ./scripts/agentic_suite_launch.mjs start");
   assert.equal(pkg.scripts["agentic:suite:status"], "node ./scripts/agentic_suite_launch.mjs status");
+});
+
+test("bootstrap_install.mjs exists and plan mode runs without crashing", () => {
+  assert.ok(fs.existsSync(BOOTSTRAP_INSTALL_PATH), "scripts/bootstrap_install.mjs must exist");
+  try {
+    const result = execFileSync(process.execPath, [BOOTSTRAP_INSTALL_PATH, "--plan", "--required-only"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      timeout: 25_000,
+      env: { ...process.env, NO_COLOR: "1" },
+    });
+    assert.ok(result.includes("[bootstrap:install]"), "plan output must include bootstrap:install markers");
+  } catch (error) {
+    if (![0, 1].includes(error.status)) {
+      throw error;
+    }
+    assert.ok(
+      String(error.stdout || "").includes("[bootstrap:install]"),
+      "plan output on partial failure must include bootstrap:install markers"
+    );
+  }
 });

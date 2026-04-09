@@ -10,6 +10,7 @@ const ROOT = resolve(__dirname, "..");
 const CHECK_ONLY = process.argv.includes("--check-only");
 const FORCE_INSTALL = process.argv.includes("--force-install");
 const FORCE_BUILD = process.argv.includes("--build");
+const INSTALL_MISSING = process.argv.includes("--install-missing");
 const IS_WIN = process.platform === "win32";
 
 function readTrimmed(filePath) {
@@ -181,7 +182,14 @@ for (const check of checks) {
 const failedChecks = checks.filter((check) => !check.ok);
 if (failedChecks.length > 0) {
   console.log("");
+  if (INSTALL_MISSING) {
+    console.log("[bootstrap:env] Installing missing pinned prerequisites before continuing.");
+    runStreaming(process.execPath, [resolve(ROOT, "scripts", "bootstrap_install.mjs"), "--apply", "--required-only"]);
+    runStreaming(process.execPath, [resolve(ROOT, "scripts", "bootstrap_env.mjs")]);
+    process.exit(0);
+  }
   console.log("[bootstrap:env] Stop: runtime prerequisites do not match the repo pins.");
+  console.log("[bootstrap:env] Next step: run `npm run bootstrap:env:install` to install the missing pinned prerequisites automatically.");
   process.exit(1);
 }
 

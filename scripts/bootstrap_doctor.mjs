@@ -199,6 +199,26 @@ function resolveWin32LocalAppDataPath(relativePath) {
   return existsSync(candidate) ? candidate : null;
 }
 
+function resolveWin32RegistryPath(registryPath) {
+  if (platform !== "win32" || typeof registryPath !== "string" || registryPath.trim().length === 0) {
+    return null;
+  }
+  const output = run(`reg query "${registryPath}" /ve`);
+  if (!output) {
+    return null;
+  }
+  const line = output
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .find((entry) => /\bREG_(SZ|EXPAND_SZ)\b/i.test(entry));
+  if (!line) {
+    return null;
+  }
+  const parts = line.split(/\s{2,}/).filter(Boolean);
+  const candidate = parts[parts.length - 1];
+  return candidate && existsSync(candidate) ? candidate : null;
+}
+
 // ── Utility: compare semver loosely (major.minor.patch) ──────────────────────
 function semverGte(actual, required) {
   if (!actual || !required) return true; // skip if we can't compare
@@ -404,6 +424,44 @@ function reportLauncherSection(label, launcherKey, fallbackEntrypoint) {
   }
 }
 
+function detectBrowserEntry(browser) {
+  if (browser.app_path && existsSync(browser.app_path)) {
+    return browser.app_path;
+  }
+  if (platform === "win32") {
+    const registryPath = resolveWin32RegistryPath(browser.registry_path);
+    if (registryPath) {
+      return registryPath;
+    }
+    const programFilesPath = resolveWin32ProgramFilesPath(browser.program_files_path);
+    if (programFilesPath) {
+      return programFilesPath;
+    }
+    const localAppDataPath = resolveWin32LocalAppDataPath(browser.local_app_data_path);
+    if (localAppDataPath) {
+      return localAppDataPath;
+    }
+  }
+  if (browser.binary) {
+    const lookup = platform === "win32" ? `where ${browser.binary}` : `which ${browser.binary}`;
+    const output = run(lookup);
+    if (output) {
+      return output.split(/\r?\n/)[0];
+    }
+  }
+  return null;
+}
+
+function bootstrapInstallSuggestion() {
+  const bootstrapProfile = platform === "linux"
+    ? manifest?.bootstrap_install?.linux?.[linuxDistribution || "default"] || manifest?.bootstrap_install?.linux?.default || null
+    : manifest?.bootstrap_install?.[platform] || null;
+  if (!bootstrapProfile) {
+    return null;
+  }
+  return "Run `npm run bootstrap:env:install` for the automated first-run installer, or `npm run bootstrap:install:plan` to preview the platform commands.";
+}
+
 write(`${c.bold}[doctor]${c.reset} Prerequisites:`);
 
 for (const item of manifest.prerequisites.required) {
@@ -420,46 +478,11 @@ const browserList = manifest.browsers[platform] || [];
 let browserFound = false;
 
 for (const browser of browserList) {
-  if (platform === "darwin") {
-    // macOS: check app_path with fs.existsSync
-    if (browser.app_path && existsSync(browser.app_path)) {
-      write(`  ${PASS} ${browser.name} ${c.dim}(${browser.app_path})${c.reset}`);
-      browserFound = true;
-      break;
-    }
-  } else if (platform === "linux") {
-    // Linux: use `which` to find binary
-    if (browser.binary) {
-      const result = run(`which ${browser.binary}`);
-      if (result) {
-        write(`  ${PASS} ${browser.name} ${c.dim}(${result})${c.reset}`);
-        browserFound = true;
-        break;
-      }
-    }
-  } else if (platform === "win32") {
-    // Windows: prefer standard install roots, then per-user LocalAppData, then PATH lookups
-    const programFilesPath = resolveWin32ProgramFilesPath(browser.program_files_path);
-    if (programFilesPath) {
-      write(`  ${PASS} ${browser.name} ${c.dim}(${programFilesPath})${c.reset}`);
-      browserFound = true;
-      break;
-    }
-    const localAppDataPath = resolveWin32LocalAppDataPath(browser.local_app_data_path);
-    if (localAppDataPath) {
-      write(`  ${PASS} ${browser.name} ${c.dim}(${localAppDataPath})${c.reset}`);
-      browserFound = true;
-      break;
-    }
-    if (browser.binary) {
-      const result = run(`where ${browser.binary}`);
-      if (result) {
-        const firstLine = result.split(/\r?\n/)[0];
-        write(`  ${PASS} ${browser.name} ${c.dim}(${firstLine})${c.reset}`);
-        browserFound = true;
-        break;
-      }
-    }
+  const detected = detectBrowserEntry(browser);
+  if (detected) {
+    write(`  ${PASS} ${browser.name} ${c.dim}(${detected})${c.reset}`);
+    browserFound = true;
+    break;
   }
 }
 
@@ -539,6 +562,10 @@ if (requiredFails === 0) {
   write(
     `${c.bold}[doctor]${c.reset} Result: ${c.red}${c.bold}not ready${c.reset} \u2014 ${requiredFails} required check${requiredFails > 1 ? "s" : ""} failed`
   );
+  const suggestion = bootstrapInstallSuggestion();
+  if (suggestion) {
+    write(`${c.dim}${suggestion}${c.reset}`);
+  }
 }
 
 write("");

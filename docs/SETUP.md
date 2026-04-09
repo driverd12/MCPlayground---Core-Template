@@ -27,17 +27,32 @@ Repo-managed version pins:
 ## 4. Bootstrap the Environment
 
 ```bash
+npm run bootstrap:env:install
+```
+
+This is the preferred first-run path. On supported macOS, Windows, Ubuntu, Rocky Linux, and Amazon Linux hosts it can install the pinned prerequisites before continuing with the normal repo bootstrap.
+
+Manual bootstrap without installer:
+
+```bash
 npm run bootstrap:env
 ```
 
 This will:
 
+- install the pinned prerequisites first when you choose `bootstrap:env:install`
 - verify the pinned Node, npm, and Python versions before continuing
 - create `.env` from `.env.example` when needed
 - create the office snapshot cache directories ahead of time
 - run `npm ci` if dependencies are missing
 - run `npm run build` if `dist/server.js` is missing
 - finish with `npm run doctor`
+
+Preview the platform install commands without executing them:
+
+```bash
+npm run bootstrap:install:plan
+```
 
 Check only:
 
@@ -144,3 +159,4 @@ For full client examples, see [IDE + Agent Setup Guide](./IDE_AGENT_SETUP.md).
 - Missing tools in client: restart client process and verify it points at `dist/server.js`.
 - Missing agentic tools: confirm `MCP_DOMAIN_PACKS` is unset or includes `agentic`; `MCP_DOMAIN_PACKS=none` disables built-ins.
 - Version mismatch on bootstrap: switch Node with `nvm use`, `asdf`, or `mise`; switch Python with `pyenv`, `asdf`, or your platform package manager, then rerun `npm run bootstrap:env`.
+- Automated first-run remediation: run `npm run bootstrap:env:install` to install the pinned runtime prerequisites for the current supported platform profile.

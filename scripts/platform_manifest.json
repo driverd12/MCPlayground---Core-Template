@@ -17,24 +17,25 @@
   "browsers": {
     "_description": "Default browser detection order per platform. First match wins.",
     "darwin": [
+      { "name": "System default", "binary": "open", "open_cmd": ["open"] },
       { "name": "Google Chrome", "app_path": "/Applications/Google Chrome.app", "open_cmd": ["open", "-a", "Google Chrome"] },
       { "name": "Microsoft Edge", "app_path": "/Applications/Microsoft Edge.app", "open_cmd": ["open", "-a", "Microsoft Edge"] },
       { "name": "Firefox", "app_path": "/Applications/Firefox.app", "open_cmd": ["open", "-a", "Firefox"] },
       { "name": "Safari", "app_path": "/Applications/Safari.app", "open_cmd": ["open", "-a", "Safari"] }
     ],
     "linux": [
+      { "name": "System default", "binary": "xdg-open", "open_cmd": ["xdg-open"] },
       { "name": "Google Chrome", "binary": "google-chrome", "open_cmd": ["google-chrome"] },
       { "name": "Google Chrome (Stable)", "binary": "google-chrome-stable", "open_cmd": ["google-chrome-stable"] },
       { "name": "Microsoft Edge", "binary": "microsoft-edge", "open_cmd": ["microsoft-edge"] },
-      { "name": "Firefox", "binary": "firefox", "open_cmd": ["firefox"] },
-      { "name": "xdg-open fallback", "binary": "xdg-open", "open_cmd": ["xdg-open"] }
+      { "name": "Firefox", "binary": "firefox", "open_cmd": ["firefox"] }
     ],
     "win32": [
+      { "name": "System default", "binary": "explorer", "open_cmd": ["cmd.exe", "/c", "start", ""] },
       { "name": "Microsoft Edge", "binary": "msedge", "registry_path": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\msedge.exe", "program_files_path": "Microsoft\\Edge\\Application\\msedge.exe", "local_app_data_path": "Microsoft\\Edge\\Application\\msedge.exe", "open_cmd": ["cmd.exe", "/c", "start", "msedge"] },
       { "name": "Google Chrome", "binary": "chrome", "registry_path": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe", "program_files_path": "Google\\Chrome\\Application\\chrome.exe", "local_app_data_path": "Google\\Chrome\\Application\\chrome.exe", "open_cmd": ["cmd.exe", "/c", "start", "chrome"] },
       { "name": "Google Chrome (Alt)", "binary": "google-chrome", "program_files_path": "Google\\Chrome\\Application\\chrome.exe", "local_app_data_path": "Google\\Chrome\\Application\\chrome.exe", "open_cmd": ["cmd.exe", "/c", "start", "chrome"] },
-      { "name": "Firefox", "binary": "firefox", "program_files_path": "Mozilla Firefox\\firefox.exe", "local_app_data_path": "Mozilla Firefox\\firefox.exe", "open_cmd": ["cmd.exe", "/c", "start", "firefox"] },
-      { "name": "System default", "binary": "explorer", "open_cmd": ["cmd.exe", "/c", "start", ""] }
+      { "name": "Firefox", "binary": "firefox", "program_files_path": "Mozilla Firefox\\firefox.exe", "local_app_data_path": "Mozilla Firefox\\firefox.exe", "open_cmd": ["cmd.exe", "/c", "start", "firefox"] }
     ]
   },
   "platforms": {
@@ -50,6 +51,100 @@
       }
     },
     "win32": { "service_manager": "none", "shell": "powershell", "node_paths": [] }
+  },
+  "bootstrap_install": {
+    "darwin": {
+      "manager_label": "Homebrew",
+      "manager_check": "brew --version",
+      "manager_hint": "Install Homebrew from https://brew.sh before running the automated bootstrap installer on macOS.",
+      "commands": {
+        "node": "brew install node@22 && brew unlink node >/dev/null 2>&1 || true && brew link --overwrite --force node@22",
+        "npm": "npm install -g npm@10.9.4 || sudo npm install -g npm@10.9.4",
+        "python3": "brew install python@3.12",
+        "git": "xcode-select --install || true",
+        "tmux": "brew install tmux",
+        "curl": null,
+        "lsof": null,
+        "ollama": "brew install ollama"
+      }
+    },
+    "linux": {
+      "default": {
+        "manager_label": "system package manager",
+        "manager_check": "sh -lc 'command -v apt-get || command -v dnf || command -v yum'",
+        "manager_hint": "Use a supported package manager (apt-get, dnf, or yum) or install the pinned runtimes manually.",
+        "commands": {
+          "node": "echo 'Install Node.js 22.x with your package manager or NodeSource, then rerun bootstrap.'",
+          "npm": "npm install -g npm@10.9.4 || sudo npm install -g npm@10.9.4",
+          "python3": "echo 'Install python3 3.12+ with your package manager, then rerun bootstrap.'",
+          "git": "echo 'Install git with your package manager, then rerun bootstrap.'",
+          "tmux": "echo 'Install tmux with your package manager if you need the full multi-agent terminal layout.'",
+          "curl": "echo 'Install curl with your package manager if it is missing.'",
+          "lsof": "echo 'Install lsof with your package manager if it is missing.'",
+          "ollama": "curl -fsSL https://ollama.ai/install.sh | sh"
+        }
+      },
+      "ubuntu": {
+        "manager_label": "apt-get",
+        "manager_check": "apt-get --version",
+        "manager_hint": "Ubuntu bootstrap install requires apt-get and sudo.",
+        "commands": {
+          "node": "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs",
+          "npm": "npm install -g npm@10.9.4 || sudo npm install -g npm@10.9.4",
+          "python3": "sudo apt-get install -y python3 python3-venv",
+          "git": "sudo apt-get install -y git",
+          "tmux": "sudo apt-get install -y tmux",
+          "curl": "sudo apt-get install -y curl",
+          "lsof": "sudo apt-get install -y lsof",
+          "ollama": "curl -fsSL https://ollama.ai/install.sh | sh"
+        }
+      },
+      "rocky": {
+        "manager_label": "dnf",
+        "manager_check": "dnf --version",
+        "manager_hint": "Rocky Linux bootstrap install requires dnf and sudo.",
+        "commands": {
+          "node": "curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash - && sudo dnf install -y nodejs",
+          "npm": "npm install -g npm@10.9.4 || sudo npm install -g npm@10.9.4",
+          "python3": "sudo dnf install -y python3",
+          "git": "sudo dnf install -y git",
+          "tmux": "sudo dnf install -y tmux",
+          "curl": "sudo dnf install -y curl",
+          "lsof": "sudo dnf install -y lsof",
+          "ollama": "curl -fsSL https://ollama.ai/install.sh | sh"
+        }
+      },
+      "amazon-linux": {
+        "manager_label": "dnf",
+        "manager_check": "dnf --version",
+        "manager_hint": "Amazon Linux bootstrap install requires dnf and sudo.",
+        "commands": {
+          "node": "curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash - && sudo dnf install -y nodejs",
+          "npm": "npm install -g npm@10.9.4 || sudo npm install -g npm@10.9.4",
+          "python3": "sudo dnf install -y python3",
+          "git": "sudo dnf install -y git",
+          "tmux": "sudo dnf install -y tmux",
+          "curl": "sudo dnf install -y curl",
+          "lsof": "sudo dnf install -y lsof",
+          "ollama": "curl -fsSL https://ollama.ai/install.sh | sh"
+        }
+      }
+    },
+    "win32": {
+      "manager_label": "winget",
+      "manager_check": "winget --version",
+      "manager_hint": "Install the Microsoft App Installer / winget before running automated Windows bootstrap installs.",
+      "commands": {
+        "node": "winget install --id OpenJS.NodeJS.LTS -e --accept-package-agreements --accept-source-agreements",
+        "npm": "npm install -g npm@10.9.4",
+        "python3": "winget install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements",
+        "git": "winget install --id Git.Git -e --accept-package-agreements --accept-source-agreements",
+        "tmux": null,
+        "curl": null,
+        "lsof": null,
+        "ollama": "winget install --id Ollama.Ollama -e --accept-package-agreements --accept-source-agreements"
+      }
+    }
   },
   "launchers": {
     "office_gui": {

@@ -54,6 +54,32 @@ function resolveWin32ProgramFilesPath(relativePath) {
   return null;
 }
 
+function resolveWin32RegistryPath(registryPath) {
+  if (process.platform !== "win32" || typeof registryPath !== "string" || registryPath.trim().length === 0) {
+    return null;
+  }
+  try {
+    const output = execFileSync("reg", ["query", registryPath, "/ve"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 3000,
+      windowsHide: true,
+    });
+    const line = String(output)
+      .split(/\r?\n/)
+      .map((entry) => entry.trim())
+      .find((entry) => /\bREG_(SZ|EXPAND_SZ)\b/i.test(entry));
+    if (!line) {
+      return null;
+    }
+    const parts = line.split(/\s{2,}/).filter(Boolean);
+    const candidate = parts[parts.length - 1];
+    return candidate && fs.existsSync(candidate) ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
 function resolveWin32LocalAppDataPath(relativePath) {
   if (process.platform !== "win32" || typeof relativePath !== "string" || relativePath.trim().length === 0) {
     return null;
@@ -70,6 +96,10 @@ function detectBrowser(candidates) {
   for (const entry of candidates) {
     if (entry.app_path && fs.existsSync(entry.app_path)) {
       return { ...entry, resolved_path: entry.app_path };
+    }
+    const registryPath = resolveWin32RegistryPath(entry.registry_path);
+    if (registryPath) {
+      return { ...entry, resolved_path: registryPath };
     }
     const programFilesPath = resolveWin32ProgramFilesPath(entry.program_files_path);
     if (programFilesPath) {
