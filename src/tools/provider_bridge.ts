@@ -253,7 +253,41 @@ function timestampForPath() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
+function allowSyncCliProbe() {
+  return !isHttpServing() || process.env.MCP_HTTP_ALLOW_SYNC_CLI_PROBES === "1";
+}
+
+function commandExistsOnPath(command: string) {
+  const hasPathSeparator = command.includes("/") || (process.platform === "win32" && /[\\/]/.test(command));
+  const candidates = hasPathSeparator
+    ? [command]
+    : String(process.env.PATH ?? "")
+        .split(path.delimiter)
+        .filter(Boolean)
+        .flatMap((dir) => {
+          if (process.platform !== "win32") {
+            return [path.join(dir, command)];
+          }
+          const extensions = String(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM")
+            .split(";")
+            .map((entry) => entry.trim())
+            .filter(Boolean);
+          return extensions.map((extension) => path.join(dir, `${command}${extension}`));
+        });
+  return candidates.some((candidate) => {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 function commandExists(command: string) {
+  if (!allowSyncCliProbe()) {
+    return commandExistsOnPath(command);
+  }
   const result = spawnSync("which", [command], {
     stdio: "ignore",
   });
@@ -261,6 +295,9 @@ function commandExists(command: string) {
 }
 
 function commandSucceeds(command: string, args: string[]) {
+  if (!allowSyncCliProbe()) {
+    return false;
+  }
   const result = spawnSync(command, args, {
     stdio: "ignore",
   });
@@ -1043,6 +1080,9 @@ function claudeInstalled(workspaceRoot: string, serverName: string) {
   const configPath = resolveClientConfigPaths(workspaceRoot).claude;
   if (jsonServerInstalled(configPath, serverName)) {
     return true;
+  }
+  if (isHttpServing() && !allowSyncCliProbe()) {
+    return false;
   }
   if (!commandExists("claude")) {
     return false;
