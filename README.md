@@ -407,10 +407,13 @@ Notes:
 ## Quick Start
 
 ```bash
-npm ci
-npm run build
+npm run bootstrap:env
 npm run start:stdio
 ```
+
+If this is your first time with MCPlayground, think of it as a local AI-agent toolbench rather than a normal app you click through manually. You bootstrap the base runtime, then your MCP-capable AI client uses the tools here to build and adapt project-specific scaffolding, status surfaces, memories, and workflows.
+
+On Windows, use the `npm run ...` scripts exactly as shown. Do not manually type bash-style environment prefixes such as `MCP_HTTP=1 node ...`; `npm run start:http` handles that in cross-platform Node code.
 
 ## Get or Update This Repo
 
@@ -419,8 +422,7 @@ Fresh clone:
 ```bash
 git clone https://github.com/driverd12/MCPlayground---Core-Template.git
 cd MCPlayground---Core-Template
-npm ci
-npm run build
+npm run bootstrap:env
 ```
 
 If you already have a local checkout:
@@ -429,8 +431,7 @@ If you already have a local checkout:
 git fetch origin
 git checkout main
 git pull --ff-only origin main
-npm ci
-npm run build
+npm run bootstrap:env
 ```
 
 Start HTTP transport:
@@ -438,6 +439,8 @@ Start HTTP transport:
 ```bash
 npm run start:http
 ```
+
+If Windows prints `'MCP_HTTP' is not recognized`, that checkout is old or a direct shell command was copied. Pull latest `main` and run the npm script above.
 
 Start pure core runtime with workflow hooks disabled:
 

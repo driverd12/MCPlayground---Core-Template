@@ -22,9 +22,7 @@ node /absolute/path/to/repo/dist/server.js
 
 Pure core without workflow hooks:
 
-```bash
-MCP_DOMAIN_PACKS=none node /absolute/path/to/repo/dist/server.js
-```
+Set `MCP_DOMAIN_PACKS=none` in the client `env` block and keep the command as `node /absolute/path/to/repo/dist/server.js`. This is more portable than prefixing the command string, especially on Windows.
 
 ### HTTP (multi-client, shared local server)
 
@@ -33,13 +31,15 @@ Use when multiple clients should share one runtime and one SQLite state.
 Start server:
 
 ```bash
-MCP_HTTP=1 MCP_HTTP_BEARER_TOKEN=<token> node /absolute/path/to/repo/dist/server.js --http --http-port 8787
+npm run start:http
 ```
 
 Client endpoint:
 
 - URL: `http://127.0.0.1:8787/`
 - Authorization: `Bearer <token>`
+
+For raw client configs, set `MCP_HTTP`, `MCP_HTTP_BEARER_TOKEN`, and any other variables in the client's JSON `env` object. Do not rely on bash-only `VAR=value command` prefixes on Windows.
 
 ## Generic MCP JSON Template (STDIO)
 

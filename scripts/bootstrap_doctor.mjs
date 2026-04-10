@@ -250,6 +250,10 @@ function checkPrereq(item, isRequired) {
       ? item.install_hint[platform]
       : null;
 
+  if (output === null && item.name === "python3" && platform === "win32") {
+    output = runFirst(["py -3 --version", "python --version", "python3 --version"]);
+  }
+
   if (output === null && item.name === "python3" && platform !== "win32") {
     output = runFirst(["/opt/homebrew/bin/python3 --version", "/usr/local/bin/python3 --version"]);
   }

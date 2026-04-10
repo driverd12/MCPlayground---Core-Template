@@ -2,6 +2,14 @@
 
 Fastest path to run locally.
 
+## What This Is
+
+MCPlayground is a local toolbench for AI agents. Most users do not operate the MCP server directly day to day; they start the runtime once, then connect an AI client such as Codex, Claude, Cursor, Gemini, or another MCP-capable client. The client uses the MCP server as its shared toolbox, memory layer, office/status surface, and domain-scaffolding workspace.
+
+The mental model is closer to a self-extending 3D printer than a finished static app: first bootstrap the base machine, then the AI agents use the MCP tools to "print" the remaining domain-specific scaffolding, bridges, and workflows needed for your project.
+
+For Windows users: prefer the `npm run ...` commands in this guide. Do not manually type POSIX-style commands such as `MCP_HTTP=1 node ...`; that syntax works in bash/zsh but fails under Windows `cmd.exe` and many npm Windows shells.
+
 ## 1. Prerequisites
 
 - Node.js `20.x` to `22.x`
@@ -103,6 +111,8 @@ HTTP:
 npm run start:http
 ```
 
+This script is cross-platform. It sets `MCP_HTTP=1` inside a Node wrapper so it works in PowerShell, `cmd.exe`, Git Bash, macOS, and Linux.
+
 ## 8. Smoke Check
 
 ```bash
@@ -112,7 +122,7 @@ npm run mvp:smoke
 Against an already-running HTTP server:
 
 ```bash
-MCP_SMOKE_TRANSPORT=http MCP_HTTP_BEARER_TOKEN=change-me ./scripts/mvp_smoke.sh
+node ./scripts/run_env.mjs MCP_SMOKE_TRANSPORT=http MCP_HTTP_BEARER_TOKEN=change-me -- node ./scripts/mvp_smoke.mjs
 ```
 
 ## 9. Launch Agent Office
@@ -153,10 +163,19 @@ node /absolute/path/to/MCPlayground---Core-Template/dist/server.js
 
 For full client examples, see [IDE + Agent Setup Guide](./IDE_AGENT_SETUP.md).
 
+## Windows Notes
+
+- Use PowerShell, Windows Terminal, Git Bash, or Cursor's integrated terminal. The recommended commands are the same: `npm run bootstrap:env`, `npm run build`, `npm run start:http`, and `npm run trichat:office:web`.
+- `npm run start:http` is the Windows-safe way to start the shared HTTP runtime. Older docs or shell snippets that start with `MCP_HTTP=1` are bash/zsh syntax, not Windows npm syntax.
+- If Python is installed as the Windows launcher (`py -3`) instead of `python3`, the repo-owned Node wrappers resolve that automatically for npm-driven Python tests and dashboard commands.
+- Native tmux shell workflows are still Unix-oriented. On Windows, the browser office surface is the primary reassurance UI; use WSL only if you specifically need tmux lanes.
+
 ## Troubleshooting
 
 - Build errors: run `npm ci` and `npm run build` again.
 - Wrapper bootstrap stops: if `npm run providers:status` or `npm run autonomy:status` says Node MCP client dependencies or `dist/server.js` are missing, run `npm run bootstrap:env` from the repo root before retrying the status command.
+- `MCP_HTTP is not recognized`: pull latest `main`, run `npm run bootstrap:env`, then use `npm run start:http` instead of manually typing `MCP_HTTP=1 node ...`.
+- npm audit warnings after `npm ci`: pull latest `main` and rerun `npm ci`; the lockfile is kept patched for known transitive HTTP stack advisories when compatible fixes are available.
 - Missing tools in client: restart client process and verify it points at `dist/server.js`.
 - Missing agentic tools: confirm `MCP_DOMAIN_PACKS` is unset or includes `agentic`; `MCP_DOMAIN_PACKS=none` disables built-ins.
 - Version mismatch on bootstrap: switch Node with `nvm use`, `asdf`, or `mise`; switch Python with `pyenv`, `asdf`, or your platform package manager, then rerun `npm run bootstrap:env`.

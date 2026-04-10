@@ -14,25 +14,29 @@ Start pure core server with workflow hooks disabled:
 npm run start:core
 ```
 
-Equivalent direct command:
+Equivalent direct command on bash/zsh:
 
 ```bash
 MCP_DOMAIN_PACKS=none node dist/server.js
 ```
+
+On Windows, prefer `npm run start:core`; it avoids shell-specific environment variable syntax.
 
 ## HTTP Transport
 
 Start core runtime over HTTP:
 
 ```bash
-MCP_HTTP=1 MCP_HTTP_BEARER_TOKEN=change-me node dist/server.js --http --http-port 8787
+npm run start:http
 ```
 
 Start HTTP with workflow hooks disabled:
 
 ```bash
-MCP_HTTP=1 MCP_HTTP_BEARER_TOKEN=change-me MCP_DOMAIN_PACKS=none node dist/server.js --http --http-port 8787
+npm run start:core:http
 ```
+
+The npm scripts are cross-platform and work from Windows `cmd.exe`, PowerShell, Git Bash, macOS, and Linux shells. If you are wiring a raw command into an MCP client, put environment variables in that client's `env` block instead of prefixing the command string.
 
 Recommended local teammate path on macOS:
 

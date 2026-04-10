@@ -22,6 +22,7 @@ flowchart LR
     Doctor["bootstrap_doctor.mjs"]
     Installer["bootstrap_install.mjs"]
     Guard["bootstrap_guard.sh"]
+    NpmEnv["run_env.mjs / run_python_tests.mjs / mvp_smoke.mjs<br/>cross-platform npm script adapter"]
     BrowserOpen["open_browser.mjs"]
     Manifest["platform_manifest.json"]
   end
@@ -66,11 +67,14 @@ flowchart LR
   SuiteLauncher --> Launcher
   SuiteLauncher --> Manifest
   CLI --> Guard
+  CLI --> NpmEnv
   Guard --> HTTP
   Doctor --> Manifest
   Guard --> Doctor
   Installer --> Manifest
   Installer --> Doctor
+  NpmEnv --> HTTP
+  NpmEnv --> STDIO
   BrowserOpen --> Manifest
 
   Codex --> STDIO

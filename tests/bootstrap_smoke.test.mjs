@@ -11,6 +11,9 @@ const MANIFEST_PATH = path.join(REPO_ROOT, "scripts", "platform_manifest.json");
 const DOCTOR_PATH = path.join(REPO_ROOT, "scripts", "bootstrap_doctor.mjs");
 const BOOTSTRAP_ENV_PATH = path.join(REPO_ROOT, "scripts", "bootstrap_env.mjs");
 const BOOTSTRAP_INSTALL_PATH = path.join(REPO_ROOT, "scripts", "bootstrap_install.mjs");
+const RUN_ENV_PATH = path.join(REPO_ROOT, "scripts", "run_env.mjs");
+const RUN_PYTHON_TESTS_PATH = path.join(REPO_ROOT, "scripts", "run_python_tests.mjs");
+const MVP_SMOKE_PATH = path.join(REPO_ROOT, "scripts", "mvp_smoke.mjs");
 const OPEN_BROWSER_PATH = path.join(REPO_ROOT, "scripts", "open_browser.mjs");
 const OFFICE_GUI_NODE_PATH = path.join(REPO_ROOT, "scripts", "agent_office_gui.mjs");
 const AGENTIC_SUITE_NODE_PATH = path.join(REPO_ROOT, "scripts", "agentic_suite_launch.mjs");
@@ -203,6 +206,12 @@ test("bootstrap_doctor.mjs exists and runs without crashing", { timeout: 30_000 
   }
 });
 
+test("bootstrap_doctor.mjs recognizes Windows Python launcher fallback", () => {
+  const doctorSource = fs.readFileSync(DOCTOR_PATH, "utf8");
+  assert.match(doctorSource, /py -3 --version/, "doctor should check the Windows Python launcher");
+  assert.match(doctorSource, /python --version/, "doctor should check python when python3 is absent");
+});
+
 test("bootstrap env pins are present and aligned with package metadata", () => {
   const packageJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
   const nvmrc = fs.readFileSync(path.join(REPO_ROOT, ".nvmrc"), "utf8").trim();
@@ -327,6 +336,12 @@ test("package.json office GUI npm scripts use the cross-platform node launcher",
   assert.equal(pkg.scripts["bootstrap:env:install"], "node ./scripts/bootstrap_env.mjs --install-missing");
   assert.equal(pkg.scripts["bootstrap:install"], "node ./scripts/bootstrap_install.mjs --apply");
   assert.equal(pkg.scripts["bootstrap:install:plan"], "node ./scripts/bootstrap_install.mjs --plan");
+  assert.equal(pkg.scripts["test:python"], "node ./scripts/run_python_tests.mjs");
+  assert.equal(pkg.scripts["mvp:smoke"], "node ./scripts/mvp_smoke.mjs");
+  assert.equal(pkg.scripts["start:http"], "node ./scripts/run_env.mjs MCP_HTTP=1 -- node dist/server.js --http --http-port 8787");
+  assert.equal(pkg.scripts["start:core"], "node ./scripts/run_env.mjs MCP_DOMAIN_PACKS=none -- node dist/server.js");
+  assert.equal(pkg.scripts["start:core:http"], "node ./scripts/run_env.mjs MCP_HTTP=1 MCP_DOMAIN_PACKS=none -- node dist/server.js --http --http-port 8787");
+  assert.equal(pkg.scripts["trichat:http"], "node ./scripts/run_env.mjs TRICHAT_MCP_TRANSPORT=http -- python3 ./scripts/trichat.py --transport http --url http://127.0.0.1:8787/ --origin http://127.0.0.1 --resume-latest --panel-on-start");
   assert.equal(pkg.scripts["trichat:office:gui"], "node ./scripts/agent_office_gui.mjs open");
   assert.equal(pkg.scripts["trichat:office:web"], "node ./scripts/agent_office_gui.mjs open");
   assert.equal(pkg.scripts["trichat:office:web:start"], "node ./scripts/agent_office_gui.mjs start");
@@ -334,6 +349,32 @@ test("package.json office GUI npm scripts use the cross-platform node launcher",
   assert.equal(pkg.scripts["agentic:suite"], "node ./scripts/agentic_suite_launch.mjs open");
   assert.equal(pkg.scripts["agentic:suite:start"], "node ./scripts/agentic_suite_launch.mjs start");
   assert.equal(pkg.scripts["agentic:suite:status"], "node ./scripts/agentic_suite_launch.mjs status");
+});
+
+test("run_env.mjs and run_python_tests.mjs are present for cross-platform npm scripts", () => {
+  assert.ok(fs.existsSync(RUN_ENV_PATH), "scripts/run_env.mjs must exist");
+  assert.ok(fs.existsSync(RUN_PYTHON_TESTS_PATH), "scripts/run_python_tests.mjs must exist");
+  assert.ok(fs.existsSync(MVP_SMOKE_PATH), "scripts/mvp_smoke.mjs must exist");
+});
+
+test("run_env.mjs applies environment assignments without shell-specific syntax", () => {
+  const output = execFileSync(
+    process.execPath,
+    [
+      RUN_ENV_PATH,
+      "MCPLAYGROUND_SMOKE_ENV=windows-safe",
+      "--",
+      "node",
+      "-e",
+      "process.stdout.write(process.env.MCPLAYGROUND_SMOKE_ENV || '')",
+    ],
+    {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      timeout: 10_000,
+    }
+  );
+  assert.equal(output, "windows-safe");
 });
 
 test("bootstrap_install.mjs exists and plan mode runs without crashing", () => {
