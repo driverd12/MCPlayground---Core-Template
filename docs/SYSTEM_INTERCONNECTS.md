@@ -21,6 +21,7 @@ flowchart LR
   subgraph Bootstrap["Bootstrap + Browser Helpers"]
     Doctor["bootstrap_doctor.mjs"]
     Installer["bootstrap_install.mjs"]
+    Guard["bootstrap_guard.sh"]
     BrowserOpen["open_browser.mjs"]
     Manifest["platform_manifest.json"]
   end
@@ -37,6 +38,7 @@ flowchart LR
 
   subgraph MCP["Local MCP Surface"]
     HTTP["HTTP transport<br/>/health /ready /office/api/* / MCP POST"]
+    SnapshotChild["Office snapshot refresh child<br/>mcp_tool_call -> stdio"]
     STDIO["STDIO transport"]
   end
 
@@ -63,8 +65,10 @@ flowchart LR
   Launcher --> Manifest
   SuiteLauncher --> Launcher
   SuiteLauncher --> Manifest
-  CLI --> HTTP
+  CLI --> Guard
+  Guard --> HTTP
   Doctor --> Manifest
+  Guard --> Doctor
   Installer --> Manifest
   Installer --> Doctor
   BrowserOpen --> Manifest
@@ -80,6 +84,8 @@ flowchart LR
   HTTP --> Registry
   HTTP --> Kernel
   HTTP --> Office
+  HTTP --> SnapshotChild
+  SnapshotChild --> STDIO
   STDIO --> Registry
   STDIO --> Kernel
   STDIO --> Office
@@ -131,6 +137,7 @@ flowchart LR
     STDIO["STDIO sessions"]
     HTTP["HTTP shared runtime"]
     Provider["provider.bridge diagnostics + install/export"]
+    Guard["bootstrap_guard.sh<br/>wrapper preflight"]
   end
 
   subgraph Server["MCP Server"]
@@ -148,6 +155,9 @@ flowchart LR
   Gemini --> STDIO
   Copilot --> STDIO
   GH --> Shell
+  Shell --> Guard
+  Guard --> HTTP
+  Guard --> STDIO
   Provider --> HTTP
   STDIO --> Registry
   HTTP --> Registry
@@ -232,10 +242,10 @@ flowchart LR
     Actions["/office/api/action<br/>ensure / maintain / tmux / patient zero"]
   end
 
-  subgraph Bridges["Live Client Bridges"]
+  subgraph Bridges["Live Client Bridges and Clients"]
     CursorBridge["Cursor bridge"]
     GeminiBridge["Gemini bridge"]
-    CopilotBridge["GitHub Copilot bridge"]
+    CopilotClient["GitHub Copilot inbound MCP client"]
     CodexLane["Codex lane"]
     ImprintLane["Local Imprint lane"]
   end
@@ -255,13 +265,12 @@ flowchart LR
 
   Provider --> CursorBridge
   Provider --> GeminiBridge
-  Provider --> CopilotBridge
+  Provider --> CopilotClient
   Sessions --> CodexLane
   Sessions --> ImprintLane
   RuntimeWorkers --> CodexLane
   RuntimeWorkers --> CursorBridge
   RuntimeWorkers --> GeminiBridge
-  RuntimeWorkers --> CopilotBridge
   RuntimeWorkers --> ImprintLane
   Router --> Provider
 ```
@@ -302,12 +311,15 @@ flowchart TD
 - `/ready` is the authoritative HTTP readiness gate for the office launcher and automation wrappers.
 - `/health` is intentionally cheap and only proves that the listener is alive.
 - `/office/api/snapshot` serves cached snapshots by default and uses explicit live refreshes sparingly to avoid saturating the daemon.
+- The launchd HTTP runner sets `MCP_HTTP_OFFICE_SNAPSHOT_REFRESH_MODE=stdio`, so office GUI snapshot refreshes run through a separate STDIO child instead of blocking the long-lived HTTP event loop during SQLite-heavy reads.
 - `scripts/agent_office_gui.mjs` is the cross-platform office launcher path for macOS, Linux, and win32. It prefers launchd on macOS when available and falls back to the detached Node HTTP runner everywhere else.
 - `Agent Office.app` and `Agentic Suite.app` are thin installed wrappers that invoke the Node launchers; they do not bypass the launcher logic or talk to the MCP HTTP listener directly.
 - `scripts/agentic_suite_launch.mjs` is the cross-platform suite/app launcher. It first ensures the office surface is available, then tries requested IDE windows, then reuses the office launcher for browser fallback, while `status` emits machine-readable readiness with next actions.
 - `scripts/bootstrap_doctor.mjs` reads `scripts/platform_manifest.json` as the bootstrap source of truth for browser detection order, launcher entrypoints, install profiles, and platform capability notes.
 - `scripts/bootstrap_install.mjs` is the platform-aware first-run installer path used by `npm run bootstrap:env:install`; it consumes the same manifest and can install pinned Node/npm/Python/Git/tmux prerequisites for supported hosts.
+- `scripts/bootstrap_guard.sh` is sourced by cold-start shell wrappers such as `provider_bridge.sh` and `autonomy_ctl.sh`. It fails early with `npm run bootstrap:env` guidance when Node MCP client dependencies or `dist/server.js` are missing, instead of leaking low-level Node import/build errors.
 - `scripts/open_browser.mjs` now prefers the OS default browser handler first (`open`, `xdg-open`, `start`) and only falls back to named browser detection when needed, while still supporting `%LOCALAPPDATA%` and registry-backed win32 browser installs.
+- GitHub Copilot is represented as an inbound MCP client surface in `provider.bridge`; it is not routed as an outbound council/model-router backend until a real outbound bridge contract exists.
 - `scripts/agent_office_gui.sh` remains as a thin compatibility wrapper around the Node launcher for older shell entrypoints.
 - `scripts/agentic_suite_launch.sh` remains as a thin compatibility wrapper around the Node suite launcher for older shell entrypoints.
 - `patient.zero` does not silently grant root. Root becomes available only when:

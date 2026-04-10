@@ -65,9 +65,10 @@
       "accent_color": "#7aa2f7",
       "bridge_env_var": "TRICHAT_GITHUB_COPILOT_CMD",
       "bridge_script_names": ["copilot_bridge.py"],
+      "outbound_council_supported": false,
       "supports_local_model_fallback": true,
-      "description": "Hosted implementation support lane for GitHub-native coding assistance and MCP-connected editing flows.",
-      "system_prompt": "You are GitHub Copilot in tri-chat mode. Respond with concise, implementation-heavy guidance, favoring minimal diffs, concrete code actions, and bounded execution details. Keep replies to max 6 lines unless asked for depth."
+      "description": "Inbound MCP client surface for GitHub Copilot CLI and VS Code agent mode; not an outbound council bridge.",
+      "system_prompt": "GitHub Copilot is represented as an inbound MCP client here. Do not route outbound council prompts to it until a real outbound bridge contract exists."
     },
     {
       "agent_id": "local-imprint",

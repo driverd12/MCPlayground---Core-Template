@@ -14,6 +14,7 @@ export type TriChatAgentDefinition = {
   accent_color?: string;
   bridge_env_var?: string;
   bridge_script_names?: string[];
+  outbound_council_supported?: boolean;
   description?: string;
   system_prompt: string;
   supports_local_model_fallback?: boolean;
@@ -101,10 +102,11 @@ const fallbackConfig: TriChatRosterConfig = {
       accent_color: "#7aa2f7",
       bridge_env_var: "TRICHAT_GITHUB_COPILOT_CMD",
       bridge_script_names: ["copilot_bridge.py"],
-      description: "Hosted implementation support lane for GitHub-native coding assistance and MCP-connected editing flows.",
+      outbound_council_supported: false,
+      description: "Inbound MCP client surface for GitHub Copilot CLI and VS Code agent mode; not an outbound council bridge.",
       supports_local_model_fallback: true,
       system_prompt:
-        "You are GitHub Copilot in tri-chat mode. Respond with concise, implementation-heavy guidance, favoring minimal diffs, concrete code actions, and bounded execution details. Keep replies to max 6 lines unless asked for depth.",
+        "GitHub Copilot is represented as an inbound MCP client here. Do not route outbound council prompts to it until a real outbound bridge contract exists.",
     },
     {
       agent_id: "local-imprint",
@@ -327,6 +329,7 @@ function sanitizeAgent(value: unknown): TriChatAgentDefinition | null {
           .map((entry) => String(entry ?? "").trim())
           .filter((entry) => entry.length > 0)
       : undefined,
+    outbound_council_supported: candidate.outbound_council_supported === false ? false : undefined,
     description: String(candidate.description ?? "").trim() || undefined,
     supports_local_model_fallback: candidate.supports_local_model_fallback !== false,
     enabled: candidate.enabled !== false,
@@ -391,7 +394,11 @@ export function getTriChatRoleLaneMap(agentIds?: readonly string[]): Record<stri
 }
 
 export function getTriChatBridgeEnvVar(agentId: string | null | undefined): string | null {
-  const resolved = getTriChatAgent(agentId)?.bridge_env_var ?? null;
+  const agent = getTriChatAgent(agentId);
+  if (agent?.outbound_council_supported === false) {
+    return null;
+  }
+  const resolved = agent?.bridge_env_var ?? null;
   if (resolved) {
     return resolved;
   }
@@ -400,6 +407,9 @@ export function getTriChatBridgeEnvVar(agentId: string | null | undefined): stri
 
 export function getTriChatBridgeCandidates(workspace: string, agentId: string): string[] {
   const agent = getTriChatAgent(agentId);
+  if (agent?.outbound_council_supported === false) {
+    return [];
+  }
   const names = agent?.bridge_script_names?.length
     ? agent.bridge_script_names
     : looksLikeDynamicSpecialistAgentId(normalizeAgentId(agentId))

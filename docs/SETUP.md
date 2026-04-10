@@ -156,7 +156,9 @@ For full client examples, see [IDE + Agent Setup Guide](./IDE_AGENT_SETUP.md).
 ## Troubleshooting
 
 - Build errors: run `npm ci` and `npm run build` again.
+- Wrapper bootstrap stops: if `npm run providers:status` or `npm run autonomy:status` says Node MCP client dependencies or `dist/server.js` are missing, run `npm run bootstrap:env` from the repo root before retrying the status command.
 - Missing tools in client: restart client process and verify it points at `dist/server.js`.
 - Missing agentic tools: confirm `MCP_DOMAIN_PACKS` is unset or includes `agentic`; `MCP_DOMAIN_PACKS=none` disables built-ins.
 - Version mismatch on bootstrap: switch Node with `nvm use`, `asdf`, or `mise`; switch Python with `pyenv`, `asdf`, or your platform package manager, then rerun `npm run bootstrap:env`.
 - Automated first-run remediation: run `npm run bootstrap:env:install` to install the pinned runtime prerequisites for the current supported platform profile.
+- Office GUI stutters or a browser reload hangs: run `npm run agents:off && npm run agents:on` to restart the launchd HTTP runner. The runner defaults office snapshot refreshes to a separate STDIO child process so cached GUI reads do not block `/health`, `/ready`, or other MCP client traffic.

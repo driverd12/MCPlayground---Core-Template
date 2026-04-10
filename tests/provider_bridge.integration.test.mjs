@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { runCommandProbe } from "../dist/tools/provider_bridge.js";
+import { getTriChatBridgeCandidates, getTriChatBridgeEnvVar } from "../dist/trichat_roster.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -114,10 +115,14 @@ test("provider.bridge reports truthful client and outbound council coverage", { 
     assert.equal(clients.get("cursor")?.outbound_council_supported, true);
     assert.equal(clients.get("cursor")?.outbound_bridge_ready, true);
     assert.equal(clients.get("gemini-cli")?.outbound_council_supported, true);
-    assert.equal(clients.get("github-copilot-cli")?.outbound_council_supported, true);
-    assert.equal(clients.get("github-copilot-cli")?.outbound_bridge_ready, true);
+    assert.equal(clients.get("github-copilot-cli")?.inbound_mcp_supported, true);
+    assert.equal(clients.get("github-copilot-cli")?.outbound_council_supported, false);
+    assert.equal(clients.get("github-copilot-cli")?.outbound_agent_id, null);
+    assert.equal(clients.get("github-copilot-cli")?.outbound_bridge_ready, false);
+    assert.equal(getTriChatBridgeEnvVar("github-copilot"), null);
+    assert.deepEqual(getTriChatBridgeCandidates(REPO_ROOT, "github-copilot"), []);
     assert.equal(clients.get("chatgpt-developer-mode")?.install_mode, "remote-only");
-  assert.equal(status.onboarding.recommended_doctor_command, "npm run bootstrap:env:check");
+    assert.equal(status.onboarding.recommended_doctor_command, "npm run bootstrap:env:check");
     assert.equal(status.onboarding.recommended_status_command, "npm run providers:status");
     const onboardingEntries = new Map(status.onboarding.entries.map((entry) => [entry.client_id, entry]));
     assert.equal(onboardingEntries.get("chatgpt-developer-mode")?.runtime_status, "remote_only");
@@ -129,12 +134,13 @@ test("provider.bridge reports truthful client and outbound council coverage", { 
     assert.ok(routerCandidates.has("claude-cli"));
     assert.ok(routerCandidates.has("cursor"));
     assert.ok(routerCandidates.has("gemini-cli"));
+    assert.equal(routerCandidates.has("github-copilot-cli"), false);
     assert.equal(routerCandidates.get("codex")?.backend.metadata.bridge_agent_id, "codex");
     assert.equal(routerCandidates.get("claude-cli")?.backend.provider, "anthropic");
     assert.equal(typeof routerCandidates.get("gemini-cli")?.eligible, "boolean");
     assert.ok(
       status.eligible_router_backends.every((entry) =>
-        ["openai", "google", "anthropic", "cursor", "github-copilot", "custom"].includes(entry.provider)
+        ["openai", "google", "anthropic", "cursor", "custom"].includes(entry.provider)
       )
     );
   } finally {

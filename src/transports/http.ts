@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { buildOfficeGuiSnapshot } from "../office_gui_snapshot.js";
 import { logEvent } from "../utils.js";
 
 export type HttpOptions = {
@@ -60,6 +61,7 @@ const autonomyCtlScript = path.join(repoRoot, "scripts", "autonomy_ctl.sh");
 const officeTmuxScript = path.join(repoRoot, "scripts", "agent_office_tmux.sh");
 const officeTmuxOpenScript = path.join(repoRoot, "scripts", "agent_office_tmux_open.sh");
 const mcpToolCallScript = path.join(repoRoot, "scripts", "mcp_tool_call.mjs");
+const stdioServerEntry = path.join(repoRoot, "dist", "server.js");
 const officeSnapshotInflight = new Map<string, Promise<OfficeSnapshotCommandResult>>();
 const officeNodeSnapshotInflight = new Map<string, Promise<{ body: string; parsed: OfficeSnapshotPayload | null }>>();
 const officeRawSnapshotInflight = new Map<string, Promise<string>>();
@@ -274,7 +276,7 @@ function officeSnapshotStaleMaxAgeSeconds() {
   if (Number.isFinite(override) && override > 0) {
     return override;
   }
-  return Math.max(30, officeSnapshotCacheMaxAgeSeconds() * 12);
+  return Math.max(900, officeSnapshotCacheMaxAgeSeconds() * 60);
 }
 
 function officeRawSnapshotCacheMaxAgeMs() {
@@ -446,13 +448,7 @@ function startOfficeNodeSnapshotRefresh(
   let pendingDirectSnapshot = officeNodeSnapshotInflight.get(inflightKey);
   if (!pendingDirectSnapshot) {
     pendingDirectSnapshot = withTimeout(
-      Promise.resolve(
-        options.officeSnapshot!({
-          threadId: input.threadId,
-          theme: input.theme,
-          forceLive: input.forceLive,
-        })
-      ),
+      readOfficeSnapshotForRefresh(options, input),
       officeSnapshotNodeTimeoutMs(),
       "office snapshot"
     )
@@ -470,6 +466,83 @@ function startOfficeNodeSnapshotRefresh(
     officeNodeSnapshotInflight.set(inflightKey, pendingDirectSnapshot);
   }
   return pendingDirectSnapshot;
+}
+
+function officeSnapshotRefreshMode() {
+  const override = String(process.env.MCP_HTTP_OFFICE_SNAPSHOT_REFRESH_MODE || "").trim().toLowerCase();
+  if (override === "stdio" || override === "external" || override === "child") {
+    return "stdio" as const;
+  }
+  return "inline" as const;
+}
+
+function officeSnapshotChildEnv() {
+  return {
+    ...process.env,
+    MCP_HTTP: "0",
+    MCP_BACKGROUND_OWNER: "0",
+    MCP_AUTONOMY_BOOTSTRAP_ON_START: "0",
+    MCP_AUTONOMY_MAINTAIN_ON_START: "0",
+  };
+}
+
+async function readOfficeSnapshotForRefresh(
+  options: HttpOptions,
+  input: { threadId: string; theme: string; forceLive: boolean }
+) {
+  if (officeSnapshotRefreshMode() === "stdio" && fs.existsSync(stdioServerEntry)) {
+    const rawArgs = {
+      thread_id: input.threadId,
+      turn_limit: 12,
+      task_limit: 24,
+      session_limit: 50,
+      event_limit: 24,
+      learning_limit: 120,
+      runtime_worker_limit: 20,
+      include_kernel: true,
+      include_learning: true,
+      include_bus: true,
+      include_adapter: true,
+      include_runtime_workers: true,
+      metadata: input.forceLive ? { source: "http.live" } : undefined,
+    };
+    const result = await runLocalCommand(
+      process.execPath,
+      [
+        mcpToolCallScript,
+        "--tool",
+        "office.snapshot",
+        "--args",
+        JSON.stringify(rawArgs),
+        "--transport",
+        "stdio",
+        "--stdio-command",
+        process.execPath,
+        "--stdio-args",
+        "dist/server.js",
+        "--cwd",
+        repoRoot,
+      ],
+      {
+        cwd: repoRoot,
+        env: officeSnapshotChildEnv(),
+        timeoutMs: officeSnapshotNodeTimeoutMs(),
+      }
+    );
+    if (result.code !== 0) {
+      throw new Error(result.stderr.trim() || `office snapshot child exited with code ${result.code}`);
+    }
+    const rawPayload = parseJsonText(result.stdout);
+    if (!rawPayload || typeof rawPayload !== "object" || Array.isArray(rawPayload)) {
+      throw new Error("office snapshot child returned a non-object payload");
+    }
+    return buildOfficeGuiSnapshot(rawPayload as Record<string, unknown>, { theme: input.theme });
+  }
+  return options.officeSnapshot!({
+    threadId: input.threadId,
+    theme: input.theme,
+    forceLive: input.forceLive,
+  });
 }
 
 export async function startHttpTransport(createServer: () => Server, options: HttpOptions) {

@@ -10,6 +10,45 @@ import test from "node:test";
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = process.cwd();
 
+test("provider bridge wrapper gives bootstrap guidance before Node dependency import errors", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-provider-wrapper-cold-"));
+  try {
+    const missingNodeModulesProbe = path.join(tempDir, "node_modules", "@modelcontextprotocol", "sdk");
+    const error = await rejectsExecFile("./scripts/provider_bridge.sh", ["status"], {
+      MCP_BOOTSTRAP_PREFLIGHT_NODE_MODULES_DIR: missingNodeModulesProbe,
+      MCP_HTTP_BEARER_TOKEN: "",
+      TRICHAT_MCP_TRANSPORT: "",
+    });
+
+    assert.match(error.stderr, /\[provider_bridge\] Stop: Node MCP client dependencies are not installed\./);
+    assert.match(error.stderr, /npm run bootstrap:env/);
+    assert.doesNotMatch(error.stderr, /ERR_MODULE_NOT_FOUND|Cannot find package/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("autonomy wrapper gives bootstrap guidance before missing dist stdio failures", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-wrapper-cold-"));
+  try {
+    const missingDistProbe = path.join(tempDir, "dist", "server.js");
+    const error = await rejectsExecFile("./scripts/autonomy_ctl.sh", ["status"], {
+      MCP_BOOTSTRAP_PREFLIGHT_DIST_SERVER: missingDistProbe,
+      MCP_HTTP_BEARER_TOKEN: "",
+      TRICHAT_MCP_URL: "http://127.0.0.1:9/",
+      TRICHAT_MCP_TRANSPORT: "",
+      TRICHAT_RING_LEADER_TRANSPORT: "",
+    });
+
+    assert.match(error.stderr, /\[autonomy_ctl\] Stop: compiled MCP server output is missing\./);
+    assert.match(error.stderr, /STDIO transport needs dist\/server\.js/);
+    assert.match(error.stderr, /npm run bootstrap:env/);
+    assert.doesNotMatch(error.stderr, /Cannot find module|ENOENT.*dist\/server\.js/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("autonomy shell wrapper ensure converges the control plane through the real script entrypoint", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-shell-"));
   const dbPath = path.join(tempDir, "hub.sqlite");
@@ -521,4 +560,17 @@ async function runShellJson(command, env) {
     maxBuffer: 8 * 1024 * 1024,
   });
   return JSON.parse(result.stdout);
+}
+
+async function rejectsExecFile(file, args, env) {
+  try {
+    await execFileAsync(file, args, {
+      cwd: REPO_ROOT,
+      env: inheritedEnv(env),
+      maxBuffer: 8 * 1024 * 1024,
+    });
+  } catch (error) {
+    return error;
+  }
+  assert.fail(`${file} ${args.join(" ")} should have failed`);
 }

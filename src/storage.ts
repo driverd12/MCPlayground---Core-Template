@@ -12500,6 +12500,7 @@ export class Storage {
     `);
 
     this.ensureIndex("idx_agent_learning_agent", "agent_learning_entries", "agent_id, updated_at DESC");
+    this.ensureIndex("idx_agent_learning_weight_updated", "agent_learning_entries", "weight DESC, updated_at DESC");
     this.ensureIndex(
       "idx_agent_learning_agent_polarity",
       "agent_learning_entries",
@@ -12602,6 +12603,8 @@ export class Storage {
     this.ensureIndex("idx_runtime_events_type_seq", "runtime_events", "event_type, event_seq DESC");
     this.ensureIndex("idx_runtime_events_entity_seq", "runtime_events", "entity_type, entity_id, event_seq DESC");
     this.ensureIndex("idx_runtime_events_agent_seq", "runtime_events", "source_agent, event_seq DESC");
+    this.ensureIndex("idx_runtime_events_created_type", "runtime_events", "created_at DESC, event_type");
+    this.ensureIndex("idx_runtime_events_created_entity", "runtime_events", "created_at DESC, entity_type");
   }
 
   private applyRuntimeWorkerSessionSchemaMigration(): void {

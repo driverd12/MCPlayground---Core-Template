@@ -19,12 +19,15 @@ esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
+source "${REPO_ROOT}/scripts/bootstrap_guard.sh"
 eval "$("${REPO_ROOT}/scripts/export_dotenv_env.sh" "${REPO_ROOT}")"
 
 TOKEN_FILE="${REPO_ROOT}/data/imprint/http_bearer_token"
 if [[ -z "${MCP_HTTP_BEARER_TOKEN:-}" && -f "${TOKEN_FILE}" ]]; then
   export MCP_HTTP_BEARER_TOKEN="$(cat "${TOKEN_FILE}")"
 fi
+
+mcplayground_require_node_mcp_client "${REPO_ROOT}" "autonomy_ctl"
 
 HTTP_URL="${TRICHAT_MCP_URL:-http://127.0.0.1:8787/}"
 HTTP_ORIGIN="${TRICHAT_MCP_ORIGIN:-http://127.0.0.1}"
@@ -320,6 +323,9 @@ NODE
 }
 
 TRANSPORT="$(resolve_transport)"
+if [[ "${TRANSPORT}" == "stdio" ]]; then
+  mcplayground_require_dist_server "${REPO_ROOT}" "autonomy_ctl"
+fi
 
 if [[ "${ACTION}" == "status" ]]; then
   READY_JSON="$(fetch_ready_json)"

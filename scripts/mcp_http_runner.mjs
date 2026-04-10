@@ -22,6 +22,7 @@ async function main() {
     ? JSON.parse(process.env.MCP_HTTP_RUNNER_ARGS)
     : ["--http", "--http-port", port];
   process.env.TRICHAT_BUS_SOCKET_PATH = busSocketPath;
+  process.env.MCP_HTTP_OFFICE_SNAPSHOT_REFRESH_MODE ||= "stdio";
   let child = null;
   let releaseLock = () => {};
   let shuttingDown = false;
