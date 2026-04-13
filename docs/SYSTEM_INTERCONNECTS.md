@@ -108,6 +108,8 @@ flowchart LR
   Local --> Secrets
 ```
 
+The Office GUI is a visibility surface for operators. Its readiness tracks the MCP HTTP surface and launcher path, not the stricter Patient Zero browser-actuation lane. Browser automation can be degraded while `/office/` remains healthy and truthful.
+
 ## 2. Layered Runtime Stack
 
 ```mermaid

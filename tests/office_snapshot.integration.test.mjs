@@ -175,6 +175,63 @@ test("office.snapshot reuses the warm office cache for dashboard-style direct re
   }
 });
 
+test("office.snapshot keeps the Office GUI launcher ready when Patient Zero browser automation is degraded", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-snapshot-office-gui-launcher-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const client = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+  });
+
+  try {
+    await callTool(client, "autonomy.bootstrap", {
+      action: "ensure",
+      mutation: nextMutation("office-snapshot-office-gui-launcher", "autonomy.bootstrap.ensure", () => mutationCounter++),
+      autostart_ring_leader: false,
+      run_immediately: false,
+    });
+
+    const storage = new Storage(dbPath);
+    storage.setDesktopControlState({
+      enabled: true,
+      allow_observe: true,
+      allow_act: true,
+      allow_listen: true,
+      capability_probe: {
+        can_observe: true,
+        can_act: false,
+        can_listen: true,
+      },
+    });
+    storage.setPatientZeroState({
+      enabled: true,
+      autonomy_enabled: true,
+      allow_observe: true,
+      allow_act: true,
+      allow_listen: true,
+      browser_app: "Safari",
+      root_shell_reason: "office.snapshot test",
+      audit_required: true,
+    });
+
+    const snapshot = await callTool(client, "office.snapshot", {
+      thread_id: "ring-leader-main",
+      metadata: { source: "dashboard.direct" },
+    });
+
+    assert.equal(snapshot.setup_diagnostics.patient_zero.browser_ready, false);
+    assert.equal(snapshot.setup_diagnostics.fallback.browser_degraded, true);
+    assert.equal(snapshot.setup_diagnostics.launchers.office_gui.ready, true);
+    assert.equal(snapshot.setup_diagnostics.launchers.office_gui.degraded, false);
+    assert.equal(snapshot.setup_diagnostics.launchers.office_gui.reassurance_surface, "browser-status");
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("office.snapshot direct reads stay storage-backed when persisted provider bridge diagnostics are stale", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-snapshot-stale-provider-bridge-"));
   const dbPath = path.join(tempDir, "hub.sqlite");

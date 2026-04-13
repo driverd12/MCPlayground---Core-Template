@@ -940,11 +940,18 @@ function summarizeLauncherReadiness(params: {
   const serviceMode = readString(platformEntry?.service_mode);
   const apps = platformEntry?.apps;
   const appLaunchEnabled = params.launcher_key === "agentic_suite" && isRecord(apps) && Object.keys(apps).length > 0;
-  const ready = supported && distributionSupported && params.core_usable;
-  const degraded = !ready || (params.browser_ready !== true && !appLaunchEnabled);
+  const ready =
+    params.launcher_key === "office_gui"
+      ? supported && distributionSupported
+      : supported && distributionSupported && params.core_usable;
+  const requiresBrowserLane = params.launcher_key === "agentic_suite" && !appLaunchEnabled;
+  const degraded =
+    params.launcher_key === "office_gui"
+      ? !ready
+      : !ready || (requiresBrowserLane && params.browser_ready !== true);
   let reassuranceSurface = "status";
   if (params.launcher_key === "office_gui") {
-    reassuranceSurface = params.browser_ready ? "browser-status" : "status";
+    reassuranceSurface = "browser-status";
   } else if (appLaunchEnabled && params.browser_ready) {
     reassuranceSurface = "apps-browser-status";
   } else if (appLaunchEnabled) {
