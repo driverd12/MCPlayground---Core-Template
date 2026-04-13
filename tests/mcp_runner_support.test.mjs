@@ -50,6 +50,22 @@ test("acquireRunnerSingletonLock reclaims a stale lock owned by a dead pid", asy
   fs.rmSync(tempRoot, { recursive: true, force: true });
 });
 
+test("acquireRunnerSingletonLock rejects a live competing owner and allows reuse after release", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-runner-live-lock-"));
+  const first = await acquireRunnerSingletonLock(tempRoot, "shared-runner", 1000);
+  assert.equal(first.ok, true);
+
+  const second = await acquireRunnerSingletonLock(tempRoot, "shared-runner", 1000);
+  assert.equal(second.ok, false);
+
+  first.release();
+
+  const third = await acquireRunnerSingletonLock(tempRoot, "shared-runner", 1000);
+  assert.equal(third.ok, true);
+  third.release();
+  fs.rmSync(tempRoot, { recursive: true, force: true });
+});
+
 test("waitForServerResourcesToClear waits for a busy TCP port to become free", async () => {
   const server = net.createServer();
   await new Promise((resolve, reject) => {

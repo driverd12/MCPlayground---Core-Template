@@ -6,7 +6,12 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { callTool, loadRunnerEnv, repoRootFromMeta } from "./mcp_runner_support.mjs";
+import {
+  acquireRunnerSingletonLock,
+  callTool,
+  loadRunnerEnv,
+  repoRootFromMeta,
+} from "./mcp_runner_support.mjs";
 
 const RECOMMENDED_MODEL = "qwen3.5:35b-a3b-coding-nvfp4";
 const DEFAULT_ENDPOINT = "http://127.0.0.1:11434";
@@ -124,6 +129,35 @@ export function summarizeCaseRuns(caseRuns) {
         ? Number((throughput.reduce((sum, value) => sum + value, 0) / throughput.length).toFixed(4))
         : null,
   };
+}
+
+export function validateModelHostCompatibility({
+  model,
+  platform = process.platform,
+  arch = process.arch,
+}) {
+  if (String(model || "").trim() !== RECOMMENDED_MODEL) {
+    return {
+      ok: true,
+      requires_apple_silicon: false,
+      reason: null,
+    };
+  }
+  const ok = platform === "darwin" && arch === "arm64";
+  return {
+    ok,
+    requires_apple_silicon: true,
+    reason: ok ? null : "The Ollama MLX preview model path is Apple Silicon only.",
+  };
+}
+
+function sanitizeLockSuffix(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "default";
 }
 
 function normalizeEndpoint(raw) {
@@ -312,6 +346,25 @@ function waitMessage(model, elapsedSeconds, maxWaitSeconds) {
   return `[ollama:mlx:postpull] Waiting for ${model} (${elapsedSeconds}s / ${maxWaitSeconds}s)`;
 }
 
+async function waitForOllamaEndpointReady(endpoint, maxWaitSeconds, intervalSeconds) {
+  const deadline = Date.now() + maxWaitSeconds * 1000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${endpoint}/api/version`, {
+        method: "GET",
+        signal: AbortSignal.timeout(Math.max(1000, intervalSeconds * 1000)),
+      });
+      if (response.ok) {
+        return true;
+      }
+    } catch {
+      // keep polling
+    }
+    await sleep(intervalSeconds * 1000);
+  }
+  return false;
+}
+
 async function waitForModelInstalled(model, maxWaitSeconds, intervalSeconds) {
   const deadline = Date.now() + maxWaitSeconds * 1000;
   let lastBucket = -1;
@@ -477,63 +530,99 @@ async function main() {
   const model =
     String(args.model || process.env.TRICHAT_OLLAMA_MODEL || RECOMMENDED_MODEL).trim() || RECOMMENDED_MODEL;
   const endpoint = normalizeEndpoint(args.endpoint || process.env.TRICHAT_OLLAMA_URL);
+  const hostCompatibility = validateModelHostCompatibility({ model });
   const reportPath =
     args.reportPath ||
     path.join(REPORT_DIR, `ollama-capability-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
 
-  ensureDirectory(REPORT_DIR);
-
-  const installedNow = parseOllamaList(runCapture("ollama", ["list"]).stdout).includes(model);
-  if (!installedNow) {
-    if (!args.wait) {
-      throw new Error(`Model is not installed yet: ${model}`);
-    }
-    const installed = await waitForModelInstalled(model, args.maxWaitSeconds, args.waitIntervalSeconds);
-    if (!installed) {
-      throw new Error(`Timed out waiting for model install: ${model}`);
-    }
+  if (!hostCompatibility.ok) {
+    throw new Error(hostCompatibility.reason);
   }
 
-  const caseRuns = await runCapabilitySoak({
-    endpoint,
-    model,
-    timeoutMs: Math.max(5_000, args.timeoutMs),
-  });
-  const summary = summarizeCaseRuns(caseRuns);
-  const report = {
-    ok: summary.failed_cases === 0,
-    generated_at: new Date().toISOString(),
-    host: {
-      hostname: os.hostname(),
-      platform: process.platform,
-      arch: process.arch,
-      cpu_count: os.cpus().length,
-      total_memory_gb: Number((os.totalmem() / 1024 / 1024 / 1024).toFixed(1)),
-    },
-    provider: "ollama",
-    model,
-    endpoint,
-    summary,
-    case_runs: caseRuns,
-    report_path: reportPath,
-  };
+  ensureDirectory(REPORT_DIR);
+  const lock = await acquireRunnerSingletonLock(
+    REPO_ROOT,
+    `ollama-postpull-${sanitizeLockSuffix(model)}`,
+    500
+  );
+  if (!lock.ok) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          ok: true,
+          skipped: true,
+          reason: "already_running",
+          model,
+        },
+        null,
+        2
+      )}\n`
+    );
+    return;
+  }
 
-  const imprint = args.skipImprint
-    ? null
-    : await runImprintPersistence({
-        model,
-        reportPath,
-        summary,
-        profileId: args.profileId,
-        skipMemory: args.skipMemory,
-      });
+  try {
+    const installedNow = parseOllamaList(runCapture("ollama", ["list"]).stdout).includes(model);
+    if (!installedNow) {
+      if (!args.wait) {
+        throw new Error(`Model is not installed yet: ${model}`);
+      }
+      const installed = await waitForModelInstalled(model, args.maxWaitSeconds, args.waitIntervalSeconds);
+      if (!installed) {
+        throw new Error(`Timed out waiting for model install: ${model}`);
+      }
+    }
 
-  const fullReport = {
-    ...report,
-    imprint,
-  };
-  writeReport(reportPath, fullReport);
-  process.stdout.write(`${JSON.stringify(fullReport, null, 2)}\n`);
+    const endpointReady = args.wait
+      ? await waitForOllamaEndpointReady(endpoint, Math.min(120, args.maxWaitSeconds), Math.min(5, args.waitIntervalSeconds))
+      : true;
+    if (!endpointReady) {
+      throw new Error(`Timed out waiting for Ollama endpoint readiness: ${endpoint}`);
+    }
+
+    const caseRuns = await runCapabilitySoak({
+      endpoint,
+      model,
+      timeoutMs: Math.max(5_000, args.timeoutMs),
+    });
+    const summary = summarizeCaseRuns(caseRuns);
+    const report = {
+      ok: summary.failed_cases === 0,
+      generated_at: new Date().toISOString(),
+      host: {
+        hostname: os.hostname(),
+        platform: process.platform,
+        arch: process.arch,
+        cpu_count: os.cpus().length,
+        total_memory_gb: Number((os.totalmem() / 1024 / 1024 / 1024).toFixed(1)),
+      },
+      provider: "ollama",
+      model,
+      endpoint,
+      summary,
+      case_runs: caseRuns,
+      report_path: reportPath,
+    };
+
+    const imprint = args.skipImprint
+      ? null
+      : await runImprintPersistence({
+          model,
+          reportPath,
+          summary,
+          profileId: args.profileId,
+          skipMemory: args.skipMemory,
+        });
+
+    const fullReport = {
+      ...report,
+      imprint,
+    };
+    writeReport(reportPath, fullReport);
+    process.stdout.write(`${JSON.stringify(fullReport, null, 2)}\n`);
+  } finally {
+    lock.release();
+  }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

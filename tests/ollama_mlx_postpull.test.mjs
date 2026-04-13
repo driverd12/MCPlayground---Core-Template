@@ -5,6 +5,7 @@ import {
   parseOllamaList,
   resolvePreferredModelOrder,
   summarizeCaseRuns,
+  validateModelHostCompatibility,
 } from "../scripts/ollama_mlx_postpull.mjs";
 
 test("parseOllamaList extracts model ids from ollama list output", () => {
@@ -39,4 +40,28 @@ test("summarizeCaseRuns computes pass rate and latency aggregates", () => {
   assert.equal(summary.best_latency_ms, 100);
   assert.equal(summary.worst_latency_ms, 220);
   assert.equal(summary.average_throughput_tps, 10);
+});
+
+test("validateModelHostCompatibility rejects the MLX preview path on non-Apple-Silicon hosts", () => {
+  const rejected = validateModelHostCompatibility({
+    model: "qwen3.5:35b-a3b-coding-nvfp4",
+    platform: "linux",
+    arch: "x64",
+  });
+  const accepted = validateModelHostCompatibility({
+    model: "qwen3.5:35b-a3b-coding-nvfp4",
+    platform: "darwin",
+    arch: "arm64",
+  });
+  const generic = validateModelHostCompatibility({
+    model: "llama3.2:3b",
+    platform: "linux",
+    arch: "x64",
+  });
+
+  assert.equal(rejected.ok, false);
+  assert.match(String(rejected.reason), /apple silicon/i);
+  assert.equal(accepted.ok, true);
+  assert.equal(generic.ok, true);
+  assert.equal(generic.requires_apple_silicon, false);
 });
