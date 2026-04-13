@@ -131,3 +131,8 @@ upsertEnv({
 
 console.log(`[ollama:mlx:preview] preferred local Ollama model -> ${RECOMMENDED_MODEL}`);
 console.log(`[ollama:mlx:preview] wrote ${ENV_PATH}`);
+
+if (String(process.env.OLLAMA_MLX_SKIP_POSTPULL || "").trim() !== "1") {
+  console.log("[ollama:mlx:preview] starting post-pull capability soak and imprint pipeline");
+  runStreaming(process.execPath, [resolve(ROOT, "scripts", "ollama_mlx_postpull.mjs"), "--model", RECOMMENDED_MODEL]);
+}

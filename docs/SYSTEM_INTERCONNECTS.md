@@ -25,6 +25,7 @@ flowchart LR
     NpmEnv["run_env.mjs / run_sh.mjs / run_python_tests.mjs / mvp_smoke.mjs<br/>cross-platform npm script adapter"]
     BrowserOpen["open_browser.mjs"]
     Manifest["platform_manifest.json"]
+    MlxPostpull["ollama_mlx_postpull.mjs<br/>post-pull soak + imprint"]
   end
 
   subgraph ClientBridges["IDE + Provider Bridges"]
@@ -76,6 +77,7 @@ flowchart LR
   NpmEnv --> HTTP
   NpmEnv --> STDIO
   BrowserOpen --> Manifest
+  MlxPostpull --> STDIO
 
   Codex --> STDIO
   Cursor --> STDIO
@@ -101,6 +103,8 @@ flowchart LR
   Local --> DB
   HTTP --> Cache
   Office --> Cache
+  MlxPostpull --> DB
+  MlxPostpull --> Cache
   Local --> Secrets
 ```
 

@@ -10,6 +10,7 @@ const smokeOrigin = process.env.MCP_SMOKE_ORIGIN || "http://127.0.0.1";
 const runId = process.env.MCP_SMOKE_RUN_ID || `smoke-${Math.floor(Date.now() / 1000)}`;
 const stdioCommand = process.env.MCP_SMOKE_STDIO_COMMAND || "node";
 const stdioArgs = (process.env.MCP_SMOKE_STDIO_ARGS || "dist/server.js").split(/\s+/).filter(Boolean);
+const defaultImprintModel = process.env.TRICHAT_IMPRINT_MODEL || process.env.TRICHAT_OLLAMA_MODEL || "llama3.2:3b";
 
 if (transportMode === "http" && !process.env.MCP_HTTP_BEARER_TOKEN) {
   process.stderr.write("error: MCP_HTTP_BEARER_TOKEN is required when MCP_SMOKE_TRANSPORT=http\n");
@@ -144,7 +145,7 @@ try {
       "Avoid stdout operational logs",
     ],
     hard_constraints: ["Do not exfiltrate local context"],
-    preferred_models: ["llama3.2:3b"],
+    preferred_models: Array.from(new Set([defaultImprintModel, "llama3.2:3b"])),
     project_roots: [process.cwd()],
     source_client: "mvp_smoke.mjs",
   });

@@ -16,6 +16,7 @@ export ANAMNESIS_IMPRINT_TITLE="${ANAMNESIS_IMPRINT_TITLE:-Dan Driver Imprint}"
 export ANAMNESIS_IMPRINT_MISSION="${ANAMNESIS_IMPRINT_MISSION:-Reduce friction between thought and execution while preserving local-first continuity.}"
 export ANAMNESIS_IMPRINT_PRINCIPLES="${ANAMNESIS_IMPRINT_PRINCIPLES:-Local-first by default|Idempotent mutations only|No stdout operational logging|Prefer deterministic execution paths}"
 export ANAMNESIS_IMPRINT_CONSTRAINTS="${ANAMNESIS_IMPRINT_CONSTRAINTS:-Do not exfiltrate local data|Use only approved local/runtime tools|Preserve tool-side safety checks}"
+export ANAMNESIS_IMPRINT_PREFERRED_MODELS="${ANAMNESIS_IMPRINT_PREFERRED_MODELS:-${TRICHAT_IMPRINT_MODEL:-${TRICHAT_OLLAMA_MODEL:-llama3.2:3b}}|llama3.2:3b}"
 
 if [[ "${IMPRINT_TRANSPORT}" == "http" ]] && [[ -z "${MCP_HTTP_BEARER_TOKEN:-}" ]]; then
   echo "error: MCP_HTTP_BEARER_TOKEN is required when IMPRINT_TRANSPORT=http" >&2
@@ -39,6 +40,14 @@ const constraints = (process.env.ANAMNESIS_IMPRINT_CONSTRAINTS ?? "")
   .split("|")
   .map((v) => v.trim())
   .filter(Boolean);
+const preferredModels = Array.from(
+  new Set(
+    (process.env.ANAMNESIS_IMPRINT_PREFERRED_MODELS ?? "")
+      .split("|")
+      .map((v) => v.trim())
+      .filter(Boolean)
+  )
+);
 
 const transport =
   transportMode === "http"
@@ -103,7 +112,7 @@ try {
     mission,
     principles: principles.length ? principles : ["Local-first continuity"],
     hard_constraints: constraints,
-    preferred_models: ["llama3.2:3b"],
+    preferred_models: preferredModels.length ? preferredModels : ["llama3.2:3b"],
     project_roots: [process.cwd()],
     source_client: "imprint_bootstrap.sh",
   });

@@ -616,6 +616,8 @@ Local Metal setup:
 - local bridges can use the MLX chat-completions endpoint when `TRICHAT_LOCAL_INFERENCE_PROVIDER=mlx` or `auto` with a healthy MLX endpoint
 - On Apple Silicon, `npm run doctor` now reports whether the host is ready for Ollama's March 30, 2026 MLX preview path. The official Ollama post calls out `qwen3.5:35b-a3b-coding-nvfp4` on Ollama `0.19+` and recommends a Mac with more than 32 GB of unified memory.
 - `npm run ollama:mlx:preview` is the guarded Apple Silicon-only setup path for that Ollama MLX preview model. It refuses to run on Linux or Windows, checks the Ollama runtime floor, pulls `qwen3.5:35b-a3b-coding-nvfp4`, and writes `TRICHAT_OLLAMA_MODEL` into `.env`.
+- After that pull completes, the same path automatically runs `scripts/ollama_mlx_postpull.mjs` to stress the local Ollama runtime, write a report under `data/imprint/reports/`, and persist the result into the local memory/imprint lane. Re-run it manually with `npm run ollama:mlx:postpull`.
+- “Imprinting” here means durable local memory, profile preferences, and bootstrap context for the control plane. It is not pretending to silently fine-tune model weights.
 
 ## Core Tool Surface
 

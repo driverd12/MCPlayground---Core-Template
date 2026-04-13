@@ -227,10 +227,12 @@ test("ollama MLX preview setup script is registered and Apple Silicon guarded", 
   const source = fs.readFileSync(scriptPath, "utf8");
 
   assert.equal(packageJson.scripts["ollama:mlx:preview"], "node ./scripts/ollama_mlx_preview_setup.mjs");
+  assert.equal(packageJson.scripts["ollama:mlx:postpull"], "node ./scripts/ollama_mlx_postpull.mjs --wait");
   assert.match(source, /process\.platform !== "darwin"/, "setup script should reject non-macOS hosts");
   assert.match(source, /process\.arch !== "arm64"/, "setup script should reject non-Apple-Silicon hosts");
   assert.match(source, /TRICHAT_OLLAMA_MODEL/, "setup script should wire the preferred local Ollama model");
   assert.match(source, /qwen3\.5:35b-a3b-coding-nvfp4/, "setup script should target the MLX preview model");
+  assert.match(source, /ollama_mlx_postpull\.mjs/, "setup script should chain into the post-pull soak pipeline");
 });
 
 test("bootstrap env pins are present and aligned with package metadata", () => {
