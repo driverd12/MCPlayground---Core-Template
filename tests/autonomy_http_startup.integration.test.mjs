@@ -8,6 +8,13 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { Storage } from "../dist/storage.js";
 import { computeEvalDependencyFingerprint } from "../dist/tools/autonomy_maintain.js";
+import {
+  fetchHttpResponse,
+  fetchHttpText,
+  postHttpJson,
+  reservePort,
+  stopChildProcess,
+} from "./test_process_helpers.mjs";
 
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = process.cwd();
@@ -41,7 +48,7 @@ test("http daemon self-converges the autonomy bootstrap on startup", async () =>
       TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
       MCP_AUTONOMY_BOOTSTRAP_ON_START: "1",
     }),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
   let stderr = "";
@@ -69,8 +76,7 @@ test("http daemon self-converges the autonomy bootstrap on startup", async () =>
     assert.equal(maintain.runtime.running, true);
     assert.equal(maintain.runtime.last_error ?? null, null);
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await stopChildProcess(child);
     await ollama.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -104,7 +110,7 @@ test("http daemon starts autonomy maintain even when bootstrap-on-start is disab
       MCP_AUTONOMY_BOOTSTRAP_ON_START: "0",
       MCP_AUTONOMY_MAINTAIN_ON_START: "1",
     }),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
   try {
@@ -117,8 +123,7 @@ test("http daemon starts autonomy maintain even when bootstrap-on-start is disab
     assert.equal(maintain.state.enabled, true);
     assert.equal(typeof maintain.state.last_run_at, "string");
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await stopChildProcess(child);
     await ollama.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -152,7 +157,7 @@ test("http daemon serves the clickable office GUI and snapshot routes on the liv
       TRICHAT_OFFICE_THEME: "night",
       TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR: officeCacheDir,
     }),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
   try {
@@ -237,8 +242,7 @@ test("http daemon serves the clickable office GUI and snapshot routes on the liv
     const cachedRawSnapshot = JSON.parse(cachedRawSnapshotResponse.body);
     assert.equal(cachedRawSnapshot.thread_id, rawSnapshot.thread_id);
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await stopChildProcess(child);
     await ollama.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -248,6 +252,7 @@ test("office action maintain returns immediately with 202 instead of blocking on
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-http-office-action-"));
   const dbPath = path.join(tempDir, "hub.sqlite");
   const busPath = path.join(tempDir, "trichat.bus.sock");
+  const officeCacheDir = path.join(tempDir, "office-cache");
   const bearerToken = "test-autonomy-http-office-action-token";
   const ollama = await startFakeOllamaServer({
     models: [{ name: "llama3.2:3b" }],
@@ -269,21 +274,14 @@ test("office action maintain returns immediately with 202 instead of blocking on
       TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
       MCP_AUTONOMY_BOOTSTRAP_ON_START: "1",
       MCP_AUTONOMY_MAINTAIN_ON_START: "1",
+      TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR: officeCacheDir,
     }),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
   try {
-    await waitForAutonomyStatus({
-      url: `http://127.0.0.1:${httpPort}/`,
-      origin: "http://127.0.0.1",
-      bearerToken,
-    });
-    await waitForAutonomyMaintainStatus({
-      url: `http://127.0.0.1:${httpPort}/`,
-      origin: "http://127.0.0.1",
-      bearerToken,
-    });
+    const startupHealth = JSON.parse(await waitForHttpText(`http://127.0.0.1:${httpPort}/health`));
+    assert.equal(startupHealth.ok, true);
 
     const startedAt = Date.now();
     const response = await postHttpJson(`http://127.0.0.1:${httpPort}/office/api/action`, {
@@ -319,8 +317,7 @@ test("office action maintain returns immediately with 202 instead of blocking on
     assert.equal(health.ok, true);
     assert.equal(health.status, "ok");
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await stopChildProcess(child);
     await ollama.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -352,7 +349,7 @@ test("/ready reflects recent critical observability documents instead of reporti
       MCP_AUTONOMY_BOOTSTRAP_ON_START: "1",
       MCP_AUTONOMY_MAINTAIN_ON_START: "1",
     }),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
   try {
@@ -416,6 +413,7 @@ test("/ready reflects recent critical observability documents instead of reporti
         env: inheritedEnv({
           MCP_HTTP_BEARER_TOKEN: bearerToken,
         }),
+        timeout: 15_000,
       }
     );
 
@@ -430,8 +428,7 @@ test("/ready reflects recent critical observability documents instead of reporti
     assert.equal(readyAfter.observability.recent_critical_count >= 1, true);
     assert.equal(readyAfter.attention.includes("observability.critical_recent"), true);
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await stopChildProcess(child);
     await ollama.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -463,7 +460,7 @@ test("/ready ignores recovered observability errors when a newer healthy documen
       MCP_AUTONOMY_BOOTSTRAP_ON_START: "1",
       MCP_AUTONOMY_MAINTAIN_ON_START: "1",
     }),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
   try {
@@ -527,6 +524,7 @@ test("/ready ignores recovered observability errors when a newer healthy documen
         env: inheritedEnv({
           MCP_HTTP_BEARER_TOKEN: bearerToken,
         }),
+        timeout: 15_000,
       }
     );
 
@@ -538,8 +536,7 @@ test("/ready ignores recovered observability errors when a newer healthy documen
     assert.equal(ready.observability.recent_error_count, 0);
     assert.equal(ready.attention.includes("observability.error_recent"), false);
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await stopChildProcess(child);
     await ollama.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -564,14 +561,58 @@ test("/ready stays green when the last accepted eval passes but the next eval is
       MCP_AUTONOMY_BOOTSTRAP_ON_START: "0",
       MCP_AUTONOMY_MAINTAIN_ON_START: "0",
     }),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
   try {
     await waitForHttpText(`http://127.0.0.1:${httpPort}/`);
+    await callHttpToolJson({
+      url: `http://127.0.0.1:${httpPort}/`,
+      origin: "http://127.0.0.1",
+      bearerToken,
+      tool: "reaction.engine",
+      args: {
+        action: "start",
+        mutation: {
+          idempotency_key: "ready-definition-drift-reaction-start",
+          side_effect_fingerprint: "ready-definition-drift-reaction-start",
+        },
+        run_immediately: false,
+      },
+    });
+    await callHttpToolJson({
+      url: `http://127.0.0.1:${httpPort}/`,
+      origin: "http://127.0.0.1",
+      bearerToken,
+      tool: "autonomy.maintain",
+      args: {
+        action: "start",
+        mutation: {
+          idempotency_key: "ready-definition-drift-maintain-start",
+          side_effect_fingerprint: "ready-definition-drift-maintain-start",
+        },
+        local_host_id: "local",
+        ensure_bootstrap: false,
+        autostart_ring_leader: false,
+        run_immediately: false,
+      },
+    });
     const storage = new Storage(dbPath);
     const suiteId = "autonomy.control-plane";
     const dependencyFingerprint = computeEvalDependencyFingerprint(storage, suiteId);
+    storage.upsertObservabilityDocument({
+      document_id: "ready-definition-drift-health",
+      index_name: "control-plane",
+      source_kind: "test",
+      source_ref: "autonomy_http_startup.integration",
+      level: "info",
+      host_id: "local",
+      service: "control-plane",
+      event_type: "healthy",
+      title: "healthy control plane",
+      body_text: "Seed healthy observability document for advisory eval drift test.",
+      tags: ["healthy"],
+    });
     storage.setAutonomyMaintainState({
       enabled: true,
       interval_seconds: 120,
@@ -601,8 +642,7 @@ test("/ready stays green when the last accepted eval passes but the next eval is
     assert.equal(ready.autonomy_maintain.eval_health.healthy, true);
     assert.equal(ready.attention.includes("autonomy_eval.unhealthy"), false);
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await stopChildProcess(child);
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
@@ -623,17 +663,61 @@ test("/ready stays green when eval drift is advisory but the last accepted score
       ANAMNESIS_HUB_DB_PATH: dbPath,
       TRICHAT_BUS_SOCKET_PATH: busPath,
       TRICHAT_RING_LEADER_AUTOSTART: "0",
-      MCP_AUTONOMY_BOOTSTRAP_ON_START: "1",
-      MCP_AUTONOMY_MAINTAIN_ON_START: "1",
+      MCP_AUTONOMY_BOOTSTRAP_ON_START: "0",
+      MCP_AUTONOMY_MAINTAIN_ON_START: "0",
     }),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
   try {
     await waitForHttpText(`http://127.0.0.1:${httpPort}/`);
+    await callHttpToolJson({
+      url: `http://127.0.0.1:${httpPort}/`,
+      origin: "http://127.0.0.1",
+      bearerToken,
+      tool: "reaction.engine",
+      args: {
+        action: "start",
+        mutation: {
+          idempotency_key: "ready-definition-drift-reaction-start",
+          side_effect_fingerprint: "ready-definition-drift-reaction-start",
+        },
+        run_immediately: false,
+      },
+    });
+    await callHttpToolJson({
+      url: `http://127.0.0.1:${httpPort}/`,
+      origin: "http://127.0.0.1",
+      bearerToken,
+      tool: "autonomy.maintain",
+      args: {
+        action: "start",
+        mutation: {
+          idempotency_key: "ready-definition-drift-maintain-start",
+          side_effect_fingerprint: "ready-definition-drift-maintain-start",
+        },
+        local_host_id: "local",
+        ensure_bootstrap: false,
+        autostart_ring_leader: false,
+        run_immediately: false,
+      },
+    });
     const storage = new Storage(dbPath);
     const suiteId = "autonomy.control-plane";
     const dependencyFingerprint = computeEvalDependencyFingerprint(storage, suiteId);
+    storage.upsertObservabilityDocument({
+      document_id: "ready-definition-drift-health",
+      index_name: "control-plane",
+      source_kind: "test",
+      source_ref: "autonomy_http_startup.integration",
+      level: "info",
+      host_id: "local",
+      service: "control-plane",
+      event_type: "healthy",
+      title: "healthy control plane",
+      body_text: "Seed healthy observability document for advisory eval drift test.",
+      tags: ["healthy"],
+    });
     storage.setAutonomyMaintainState({
       enabled: true,
       interval_seconds: 120,
@@ -684,10 +768,11 @@ test("/ready stays green when eval drift is advisory but the last accepted score
     assert.equal(readyResponse.statusCode, 200);
     assert.equal(ready.ready, true);
     assert.equal(ready.autonomy_maintain.eval_health.operational, true);
+    assert.equal(ready.autonomy_maintain.eval_health.due_by_dependency_drift, true);
     assert.equal(ready.attention.includes("autonomy_eval.unhealthy"), false);
+    assert.equal(ready.attention.includes("autonomy_eval.definition_changed"), false);
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await stopChildProcess(child);
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
@@ -715,7 +800,7 @@ test("http daemon exposes fast unauthenticated root and health routes", async ()
       MCP_AUTONOMY_BOOTSTRAP_ON_START: "0",
       MCP_AUTONOMY_MAINTAIN_ON_START: "0",
     }),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
   try {
@@ -729,8 +814,7 @@ test("http daemon exposes fast unauthenticated root and health routes", async ()
     assert.equal(health.ok, true);
     assert.equal(health.status, "ok");
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await stopChildProcess(child);
     await ollama.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -764,6 +848,7 @@ async function waitForAutonomyStatus({ url, origin, bearerToken }) {
             MCP_HTTP_BEARER_TOKEN: bearerToken,
           }),
           maxBuffer: 8 * 1024 * 1024,
+          timeout: 15_000,
         }
       );
       const parsed = JSON.parse(result.stdout);
@@ -784,7 +869,7 @@ async function waitForHttpText(url) {
   let lastError = null;
   while (Date.now() < deadline) {
     try {
-      return await fetchHttpText(url);
+      return await fetchHttpText(url, {}, { timeoutMs: 2_500 });
     } catch (error) {
       lastError = error;
     }
@@ -796,17 +881,20 @@ async function waitForHttpText(url) {
 async function waitForReadyState(url, headers = {}) {
   const deadline = Date.now() + 60000;
   let lastResponse = null;
+  let lastError = null;
   while (Date.now() < deadline) {
-    lastResponse = await fetchHttpResponse(url, headers);
     try {
+      lastResponse = await fetchHttpResponse(url, headers, { timeoutMs: 2_500 });
       const parsed = JSON.parse(lastResponse.body);
       if (lastResponse.statusCode === 200 && parsed?.ready === true) {
         return parsed;
       }
-    } catch {}
+    } catch (error) {
+      lastError = error;
+    }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error(`Timed out waiting for ready state: ${lastResponse?.body ?? "no response"}`);
+  throw lastError ?? new Error(`Timed out waiting for ready state: ${lastResponse?.body ?? "no response"}`);
 }
 
 async function waitForAutonomyMaintainStatus({ url, origin, bearerToken }) {
@@ -837,6 +925,7 @@ async function waitForAutonomyMaintainStatus({ url, origin, bearerToken }) {
             MCP_HTTP_BEARER_TOKEN: bearerToken,
           }),
           maxBuffer: 8 * 1024 * 1024,
+          timeout: 15_000,
         }
       );
       const parsed = JSON.parse(result.stdout);
@@ -850,6 +939,36 @@ async function waitForAutonomyMaintainStatus({ url, origin, bearerToken }) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw lastError ?? new Error("Timed out waiting for autonomy maintain runtime");
+}
+
+async function callHttpToolJson({ url, origin, bearerToken, tool, args }) {
+  const result = await execFileAsync(
+    "node",
+    [
+      "./scripts/mcp_tool_call.mjs",
+      "--tool",
+      tool,
+      "--args",
+      JSON.stringify(args),
+      "--transport",
+      "http",
+      "--url",
+      url,
+      "--origin",
+      origin,
+      "--cwd",
+      REPO_ROOT,
+    ],
+    {
+      cwd: REPO_ROOT,
+      env: inheritedEnv({
+        MCP_HTTP_BEARER_TOKEN: bearerToken,
+      }),
+      maxBuffer: 8 * 1024 * 1024,
+      timeout: 15_000,
+    }
+  );
+  return JSON.parse(result.stdout);
 }
 
 async function startFakeOllamaServer({ models }) {
@@ -881,18 +1000,6 @@ async function startFakeOllamaServer({ models }) {
   };
 }
 
-async function reservePort() {
-  const server = http.createServer();
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("Failed to reserve port");
-  }
-  const { port } = address;
-  await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
-  return port;
-}
-
 function inheritedEnv(extra) {
   const env = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -904,73 +1011,6 @@ function inheritedEnv(extra) {
     env[key] = value;
   }
   return env;
-}
-
-function fetchHttpText(url, headers = {}) {
-  return new Promise((resolve, reject) => {
-    http.get(url, { headers }, (response) => {
-      const chunks = [];
-      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-      response.on("end", () => {
-        const body = Buffer.concat(chunks).toString("utf8");
-        if ((response.statusCode ?? 500) >= 400) {
-          reject(new Error(`${response.statusCode} ${body}`));
-          return;
-        }
-        resolve(body);
-      });
-    }).on("error", reject);
-  });
-}
-
-function fetchHttpResponse(url, headers = {}) {
-  return new Promise((resolve, reject) => {
-    http.get(url, { headers }, (response) => {
-      const chunks = [];
-      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-      response.on("end", () => {
-        resolve({
-          statusCode: response.statusCode ?? 500,
-          headers: response.headers,
-          body: Buffer.concat(chunks).toString("utf8"),
-        });
-      });
-    }).on("error", reject);
-  });
-}
-
-function postHttpJson(url, body, headers = {}) {
-  return new Promise((resolve, reject) => {
-    const payload = JSON.stringify(body);
-    const parsed = new URL(url);
-    const request = http.request(
-      {
-        hostname: parsed.hostname,
-        port: parsed.port,
-        path: parsed.pathname + parsed.search,
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(payload),
-          ...headers,
-        },
-      },
-      (response) => {
-        const chunks = [];
-        response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-        response.on("end", () => {
-          resolve({
-            statusCode: response.statusCode ?? 500,
-            headers: response.headers,
-            body: Buffer.concat(chunks).toString("utf8"),
-          });
-        });
-      }
-    );
-    request.on("error", reject);
-    request.write(payload);
-    request.end();
-  });
 }
 
 async function fetchHttpJson(url, headers = {}) {

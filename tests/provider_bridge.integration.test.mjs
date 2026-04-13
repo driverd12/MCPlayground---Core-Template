@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
-import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,6 +9,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { runCommandProbe } from "../dist/tools/provider_bridge.js";
 import { getTriChatBridgeCandidates, getTriChatBridgeEnvVar } from "../dist/trichat_roster.js";
+import { fetchHttpText, reservePort, stopChildProcess } from "./test_process_helpers.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -825,7 +825,7 @@ test("provider.bridge over HTTP: /health stays responsive during status calls an
       MCP_AUTONOMY_BOOTSTRAP_ON_START: "0",
       MCP_AUTONOMY_MAINTAIN_ON_START: "0",
     }),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
   try {
@@ -848,6 +848,7 @@ test("provider.bridge over HTTP: /health stays responsive during status calls an
         cwd: REPO_ROOT,
         env: inheritedEnv({ MCP_HTTP_BEARER_TOKEN: bearerToken }),
         maxBuffer: 8 * 1024 * 1024,
+        timeout: 20_000,
       }
     );
 
@@ -880,53 +881,24 @@ test("provider.bridge over HTTP: /health stays responsive during status calls an
         cwd: REPO_ROOT,
         env: inheritedEnv({ MCP_HTTP_BEARER_TOKEN: bearerToken }),
         maxBuffer: 8 * 1024 * 1024,
+        timeout: 20_000,
       }
     );
     const forceLiveParsed = JSON.parse(forceLiveResult.stdout);
     assert.equal(forceLiveParsed.ok, false);
     assert.match(forceLiveParsed.error, /force_live.*not available.*HTTP/i);
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await stopChildProcess(child);
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
-
-async function reservePort() {
-  const server = http.createServer();
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("Failed to reserve port");
-  }
-  const { port } = address;
-  await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
-  return port;
-}
-
-function fetchHttpText(url, headers = {}) {
-  return new Promise((resolve, reject) => {
-    http.get(url, { headers }, (response) => {
-      const chunks = [];
-      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-      response.on("end", () => {
-        const body = Buffer.concat(chunks).toString("utf8");
-        if ((response.statusCode ?? 500) >= 400) {
-          reject(new Error(`${response.statusCode} ${body}`));
-          return;
-        }
-        resolve(body);
-      });
-    }).on("error", reject);
-  });
-}
 
 async function waitForHealth(url, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
   while (Date.now() < deadline) {
     try {
-      await fetchHttpText(url);
+      await fetchHttpText(url, {}, { timeoutMs: 2_500 });
       return;
     } catch (error) {
       lastError = error;

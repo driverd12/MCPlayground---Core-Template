@@ -1591,20 +1591,23 @@ export class Storage {
       return;
     }
     const dbSizeBytes = databaseArtifactBytes(this.dbPath);
-    if (
-      this.guardOptions.startup_quick_check_max_bytes > 0 &&
-      dbSizeBytes > this.guardOptions.startup_quick_check_max_bytes
-    ) {
+    const integrityProbe = runStartupIntegrityProbe(this.db, this.dbPath, this.guardOptions);
+    if (integrityProbe.mode === "large_db_probe") {
       writeStorageGuardLog(
-        `[storage] startup quick_check skipped: database size ${dbSizeBytes} exceeds max ${this.guardOptions.startup_quick_check_max_bytes}`
+        `[storage] startup quick_check downgraded to large-db probe: database size ${dbSizeBytes} exceeds max ${this.guardOptions.startup_quick_check_max_bytes}; ${integrityProbe.reason}`
       );
+      if (!integrityProbe.ok) {
+        this.recoverFromCorruption(
+          `large-db startup probe failed: ${integrityProbe.reason}`,
+          "large-db-startup-probe"
+        );
+      }
       return;
     }
-    const quickCheck = runQuickCheck(this.db);
-    if (quickCheck.ok) {
+    if (integrityProbe.ok) {
       return;
     }
-    this.recoverFromCorruption(`quick_check failed: ${quickCheck.reason}`, "quick-check");
+    this.recoverFromCorruption(`quick_check failed: ${integrityProbe.reason}`, "quick-check");
   }
 
   private recoverFromCorruption(reason: string, stage: string): void {
@@ -1620,12 +1623,16 @@ export class Storage {
       if (restoredFrom) {
         writeStorageGuardLog(`[storage] attempting restore from backup: ${restoredFrom}`);
         this.db = openDatabaseWithGuard(this.dbPath, this.guardOptions);
-        const postRestoreCheck = runQuickCheck(this.db);
+        const postRestoreCheck = runStartupIntegrityProbe(this.db, this.dbPath, this.guardOptions);
         if (postRestoreCheck.ok) {
-          writeStorageGuardLog(`[storage] restore succeeded with clean integrity check.`);
+          writeStorageGuardLog(
+            `[storage] restore succeeded with clean ${postRestoreCheck.mode === "large_db_probe" ? "large-db probe" : "integrity check"}.`
+          );
           return;
         }
-        writeStorageGuardLog(`[storage] restored backup still failed quick_check: ${postRestoreCheck.reason}`);
+        writeStorageGuardLog(
+          `[storage] restored backup still failed ${postRestoreCheck.mode === "large_db_probe" ? "large-db probe" : "quick_check"}: ${postRestoreCheck.reason}`
+        );
         safeCloseDatabase(this.db);
       }
     }
@@ -1653,13 +1660,6 @@ export class Storage {
       return;
     }
     const dbSizeBytes = databaseArtifactBytes(this.dbPath);
-    if (this.guardOptions.startup_backup_max_bytes > 0 && dbSizeBytes > this.guardOptions.startup_backup_max_bytes) {
-      writeStorageGuardLog(
-        `[storage] startup backup skipped: database size ${dbSizeBytes} exceeds max ${this.guardOptions.startup_backup_max_bytes}`
-      );
-      return;
-    }
-
     fs.mkdirSync(this.guardOptions.backup_dir, { recursive: true });
     const base = path.basename(this.dbPath);
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -1687,9 +1687,19 @@ export class Storage {
           );
           return;
         }
-        this.db.pragma("wal_checkpoint(FULL)");
-        this.db.exec(`VACUUM INTO '${escapedTmpPath}'`);
-        moveFileWithFallback(tmpPath, finalPath);
+        if (this.guardOptions.startup_backup_max_bytes > 0 && dbSizeBytes > this.guardOptions.startup_backup_max_bytes) {
+          try {
+            this.db.pragma("wal_checkpoint(PASSIVE)");
+          } catch {}
+          copyDatabaseArtifactsToSnapshot(this.dbPath, finalPath);
+          writeStorageGuardLog(
+            `[storage] startup backup used large-db bundle strategy: database size ${dbSizeBytes} exceeds max ${this.guardOptions.startup_backup_max_bytes}`
+          );
+        } else {
+          this.db.pragma("wal_checkpoint(FULL)");
+          this.db.exec(`VACUUM INTO '${escapedTmpPath}'`);
+          moveFileWithFallback(tmpPath, finalPath);
+        }
         pruneDatabaseBackups(this.dbPath, this.guardOptions);
       });
     } catch (error) {
@@ -14351,6 +14361,94 @@ function runQuickCheck(db: Database.Database): { ok: boolean; reason: string } {
   }
 }
 
+function runLargeDatabaseStartupProbe(db: Database.Database): { ok: boolean; reason: string } {
+  try {
+    const schemaVersion = Number(db.pragma("schema_version", { simple: true }) ?? 0);
+    const rows = db
+      .prepare(
+        `SELECT name
+         FROM sqlite_master
+         WHERE type = 'table'
+         ORDER BY name ASC
+         LIMIT 256`
+      )
+      .all() as Array<Record<string, unknown>>;
+    const tableNames = rows
+      .map((row) => String(row?.name ?? "").trim())
+      .filter(Boolean);
+    const firstObject = tableNames[0] || "none";
+    const criticalTables = [
+      "system_state",
+      "agent_sessions",
+      "tasks",
+      "runtime_worker_sessions",
+      "observability_documents",
+      "trichat_threads",
+      "trichat_messages",
+    ].filter((tableName) => tableNames.includes(tableName));
+    const probedTables: string[] = [];
+    for (const tableName of criticalTables) {
+      const result = String(db.pragma(`integrity_check(${tableName})`, { simple: true }) ?? "").trim();
+      if (result && result.toLowerCase() !== "ok") {
+        return {
+          ok: false,
+          reason: `${tableName}:${result}`,
+        };
+      }
+      probedTables.push(tableName);
+    }
+    return {
+      ok: true,
+      reason: `large-db probe ok (schema_version=${schemaVersion}, first_object=${firstObject}, probed_tables=${probedTables.join("|") || "none"})`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function runStartupIntegrityProbe(
+  db: Database.Database,
+  dbPath: string,
+  options: StorageGuardOptions
+): { ok: boolean; reason: string; mode: "quick_check" | "large_db_probe" } {
+  const dbSizeBytes = databaseArtifactBytes(dbPath);
+  if (options.startup_quick_check_max_bytes > 0 && dbSizeBytes > options.startup_quick_check_max_bytes) {
+    const probe = runLargeDatabaseStartupProbe(db);
+    return {
+      ...probe,
+      mode: "large_db_probe",
+    };
+  }
+  return {
+    ...runQuickCheck(db),
+    mode: "quick_check",
+  };
+}
+
+function probeDatabaseSnapshotIntegrity(
+  snapshotPath: string,
+  options: StorageGuardOptions
+): { ok: boolean; reason: string; mode: "quick_check" | "large_db_probe" } {
+  let db: Database.Database | null = null;
+  try {
+    db = new Database(snapshotPath, { readonly: true, fileMustExist: true });
+    return runStartupIntegrityProbe(db, snapshotPath, options);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error instanceof Error ? error.message : String(error),
+      mode: "large_db_probe",
+    };
+  } finally {
+    if (db) {
+      safeCloseDatabase(db);
+    }
+  }
+}
+
 function hasSqliteHeader(dbPath: string): boolean {
   if (!fs.existsSync(dbPath)) {
     return false;
@@ -14408,13 +14506,26 @@ function restoreLatestDatabaseBackup(dbPath: string, options: StorageGuardOption
       return rightMs - leftMs;
     });
 
-  const selected = candidates[0];
-  if (!selected) {
-    return null;
+  for (const selected of candidates) {
+    const probe = probeDatabaseSnapshotIntegrity(selected, options);
+    if (!probe.ok) {
+      writeStorageGuardLog(`[storage] skipped corrupt backup candidate ${selected}: ${probe.reason}`);
+      continue;
+    }
+    removeDatabaseArtifacts(dbPath);
+    fs.copyFileSync(selected, dbPath);
+    copyDatabaseSnapshotAuxiliaryArtifacts(selected, dbPath);
+    const restoredProbe = probeDatabaseSnapshotIntegrity(dbPath, options);
+    if (!restoredProbe.ok) {
+      writeStorageGuardLog(
+        `[storage] backup candidate ${selected} failed after restore copy: ${restoredProbe.reason}`
+      );
+      removeDatabaseArtifacts(dbPath);
+      continue;
+    }
+    return selected;
   }
-  removeDatabaseArtifacts(dbPath);
-  fs.copyFileSync(selected, dbPath);
-  return selected;
+  return null;
 }
 
 function removeDatabaseArtifacts(dbPath: string): void {
@@ -14478,6 +14589,53 @@ function classifyBackupArtifactKind(entry: string): StorageBackupArtifactKind {
     return "snapshot";
   }
   return "other";
+}
+
+function backupArtifactGroupKey(basename: string): string {
+  if (basename.endsWith(".tmp.sqlite-journal")) {
+    return basename.slice(0, -"-journal".length);
+  }
+  if (basename.endsWith(".tmp.sqlite-wal")) {
+    return basename.slice(0, -"-wal".length);
+  }
+  if (basename.endsWith(".tmp.sqlite-shm")) {
+    return basename.slice(0, -"-shm".length);
+  }
+  if (basename.endsWith(".sqlite-journal")) {
+    return basename.slice(0, -"-journal".length);
+  }
+  if (basename.endsWith(".sqlite-wal")) {
+    return basename.slice(0, -"-wal".length);
+  }
+  if (basename.endsWith(".sqlite-shm")) {
+    return basename.slice(0, -"-shm".length);
+  }
+  return basename;
+}
+
+function copyDatabaseSnapshotAuxiliaryArtifacts(snapshotPath: string, dbPath: string): void {
+  for (const suffix of ["-wal", "-shm"]) {
+    const sourcePath = `${snapshotPath}${suffix}`;
+    const targetPath = `${dbPath}${suffix}`;
+    if (fs.existsSync(sourcePath)) {
+      fs.copyFileSync(sourcePath, targetPath);
+      continue;
+    }
+    removeFileIfExists(targetPath);
+  }
+}
+
+function copyDatabaseArtifactsToSnapshot(dbPath: string, snapshotPath: string): void {
+  fs.mkdirSync(path.dirname(snapshotPath), { recursive: true });
+  fs.copyFileSync(dbPath, snapshotPath);
+  for (const suffix of ["-wal", "-shm"]) {
+    const sourcePath = `${dbPath}${suffix}`;
+    const targetPath = `${snapshotPath}${suffix}`;
+    removeFileIfExists(targetPath);
+    if (fs.existsSync(sourcePath)) {
+      fs.copyFileSync(sourcePath, targetPath);
+    }
+  }
 }
 
 function listDatabaseBackupArtifacts(dbPath: string, options: StorageGuardOptions): StorageBackupArtifactRecord[] {
@@ -14555,40 +14713,73 @@ function pruneDatabaseBackupArtifacts(
   const artifacts = listDatabaseBackupArtifacts(dbPath, options);
   const deleted: Array<{ path: string; kind: StorageBackupArtifactKind; size_bytes: number }> = [];
   const deleteArtifact = (artifact: StorageBackupArtifactRecord) => {
+    if (deleted.some((entry) => entry.path === artifact.path)) {
+      return;
+    }
     deleted.push({ path: artifact.path, kind: artifact.kind, size_bytes: artifact.size_bytes });
     if (!dryRun) {
       removeFileIfExists(artifact.path);
     }
   };
 
+  const bundleMap = new Map<string, StorageBackupArtifactRecord[]>();
+  for (const artifact of artifacts) {
+    const groupKey = backupArtifactGroupKey(artifact.basename);
+    const bucket = bundleMap.get(groupKey);
+    if (bucket) {
+      bucket.push(artifact);
+    } else {
+      bundleMap.set(groupKey, [artifact]);
+    }
+  }
   const sortedSnapshots = artifacts.filter((entry) => entry.kind === "snapshot");
+  const snapshotBundles = sortedSnapshots.map((snapshot) => {
+    const bundleArtifacts = [...(bundleMap.get(snapshot.basename) ?? [snapshot])].sort((left, right) =>
+      left.basename.localeCompare(right.basename)
+    );
+    return {
+      snapshot,
+      artifacts: bundleArtifacts,
+      size_bytes: bundleArtifacts.reduce((sum, entry) => sum + entry.size_bytes, 0),
+    };
+  });
+  const deleteBundle = (bundle: { artifacts: StorageBackupArtifactRecord[] }) => {
+    for (const artifact of bundle.artifacts) {
+      deleteArtifact(artifact);
+    }
+  };
+
   for (const artifact of artifacts) {
     if (artifact.kind === "temp" || artifact.kind === "journal" || artifact.kind === "wal" || artifact.kind === "shm") {
-      if (nowMs - artifact.mtime_ms >= tempMaxAgeMs) {
+      const bundleArtifacts = bundleMap.get(backupArtifactGroupKey(artifact.basename)) ?? [];
+      const hasSnapshotSibling = bundleArtifacts.some((entry) => entry.kind === "snapshot");
+      if (!hasSnapshotSibling && nowMs - artifact.mtime_ms >= tempMaxAgeMs) {
         deleteArtifact(artifact);
       }
     }
   }
 
-  for (const artifact of sortedSnapshots.slice(keep)) {
-    deleteArtifact(artifact);
+  for (const bundle of snapshotBundles.slice(keep)) {
+    deleteBundle(bundle);
   }
 
   if (maxTotalBytes > 0) {
-    let retainedBytes = 0;
-    for (const artifact of sortedSnapshots.slice(0, keep)) {
-      if (!deleted.some((entry) => entry.path === artifact.path)) {
-        retainedBytes += artifact.size_bytes;
+    const retainedBundles = snapshotBundles.filter(
+      (bundle) => !deleted.some((entry) => entry.path === bundle.snapshot.path)
+    );
+    let retainedBytes = retainedBundles.reduce((sum, bundle) => sum + bundle.size_bytes, 0);
+    let activeBundleCount = retainedBundles.length;
+    for (let index = retainedBundles.length - 1; index >= 0 && retainedBytes > maxTotalBytes; index -= 1) {
+      if (activeBundleCount <= 1) {
+        break;
       }
-    }
-    for (const artifact of sortedSnapshots.slice(keep)) {
-      if (deleted.some((entry) => entry.path === artifact.path)) {
+      const bundle = retainedBundles[index];
+      if (deleted.some((entry) => entry.path === bundle.snapshot.path)) {
         continue;
       }
-      retainedBytes += artifact.size_bytes;
-      if (retainedBytes > maxTotalBytes) {
-        deleteArtifact(artifact);
-      }
+      deleteBundle(bundle);
+      retainedBytes -= bundle.size_bytes;
+      activeBundleCount -= 1;
     }
   }
 

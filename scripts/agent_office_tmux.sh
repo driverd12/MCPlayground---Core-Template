@@ -25,7 +25,7 @@ need_cmd node
 need_cmd npm
 
 TOKEN_FILE="${REPO_ROOT}/data/imprint/http_bearer_token"
-if [[ -z "${MCP_HTTP_BEARER_TOKEN:-}" && -f "${TOKEN_FILE}" ]]; then
+if [[ -z "${MCP_HTTP_BEARER_TOKEN+x}" && -f "${TOKEN_FILE}" ]]; then
   export MCP_HTTP_BEARER_TOKEN="$(cat "${TOKEN_FILE}")"
 fi
 

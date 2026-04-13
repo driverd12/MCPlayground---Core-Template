@@ -1,15 +1,45 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 
 import {
   acquireRunnerSingletonLock,
+  reapRepoServerProcesses,
   resolveRunnerBusSocketPath,
   waitForServerResourcesToClear,
 } from "../scripts/mcp_runner_support.mjs";
+
+function waitFor(predicate, timeoutMs, label) {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve, reject) => {
+    const tick = () => {
+      if (predicate()) {
+        resolve();
+        return;
+      }
+      if (Date.now() >= deadline) {
+        reject(new Error(`Timed out waiting for ${label}`));
+        return;
+      }
+      setTimeout(tick, 50);
+    };
+    tick();
+  });
+}
+
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 test("resolveRunnerBusSocketPath shortens overly long repo-local socket paths", () => {
   const longRoot = path.join(
@@ -85,4 +115,158 @@ test("waitForServerResourcesToClear waits for a busy TCP port to become free", a
     intervalMs: 100,
   });
   assert.equal(result.ok, true);
+});
+
+test("reapRepoServerProcesses terminates repo-owned dist/server.js processes", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-runner-reap-"));
+  const distDir = path.join(tempRoot, "dist");
+  fs.mkdirSync(distDir, { recursive: true });
+  const childScript = path.join(distDir, "server.js");
+  const pidFile = path.join(tempRoot, "pid");
+  fs.writeFileSync(
+    childScript,
+    `
+      const fs = require("node:fs");
+      fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+      setInterval(() => {}, 1000);
+    `,
+    "utf8"
+  );
+
+  const child = spawn(process.execPath, [childScript], {
+    cwd: tempRoot,
+    stdio: "ignore",
+  });
+
+  try {
+    await waitFor(() => fs.existsSync(pidFile), 5_000, "reap child pid file");
+    const childPid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+    assert.equal(Number.isInteger(childPid), true);
+
+    const reaped = await reapRepoServerProcesses(tempRoot, {
+      excludePids: [process.pid],
+      signalWaitMs: 2_000,
+    });
+    assert.equal(reaped.some((entry) => entry.pid === childPid), true);
+    await waitFor(() => !processAlive(childPid), 5_000, "reaped child exit");
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {}
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("reapRepoServerProcesses ignores wrapper processes that only reference dist/server.js in arguments", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-runner-wrapper-ignore-"));
+  const scriptsDir = path.join(tempRoot, "scripts");
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  const wrapperScript = path.join(scriptsDir, "mcp_tool_call.mjs");
+  const pidFile = path.join(tempRoot, "wrapper.pid");
+  fs.writeFileSync(
+    wrapperScript,
+    `
+      import fs from "node:fs";
+      fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+      setInterval(() => {}, 1000);
+    `,
+    "utf8"
+  );
+
+  const child = spawn(process.execPath, [wrapperScript, "--stdio-args", "dist/server.js"], {
+    cwd: tempRoot,
+    stdio: "ignore",
+  });
+
+  try {
+    await waitFor(() => fs.existsSync(pidFile), 5_000, "wrapper pid file");
+    const wrapperPid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+    assert.equal(Number.isInteger(wrapperPid), true);
+
+    const reaped = await reapRepoServerProcesses(tempRoot, {
+      excludePids: [process.pid],
+      signalWaitMs: 500,
+    });
+    assert.equal(reaped.some((entry) => entry.pid === wrapperPid), false);
+    assert.equal(processAlive(wrapperPid), true);
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {}
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("mcp_tool_call office.snapshot falls back to cache after a bounded stdio timeout", async () => {
+  const repoRoot = process.cwd();
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-tool-call-office-snapshot-"));
+  const cacheDir = path.join(tempRoot, "cache");
+  const webCacheDir = path.join(cacheDir, "web");
+  const hangScript = path.join(tempRoot, "hang-server.mjs");
+  const pidFile = path.join(tempRoot, "hang.pid");
+  fs.mkdirSync(webCacheDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(webCacheDir, "thread-ring-leader-main--theme-night.json"),
+    JSON.stringify({
+      thread_id: "ring-leader-main",
+      theme: "night",
+      fetched_at: Date.now() / 1000,
+      agents: [{ agent: { agent_id: "gemini" }, state: "sleeping" }],
+      summary: {},
+      rooms: {},
+      errors: [],
+      cache: { hit: true, key: "office.snapshot:ring-leader-main" },
+    }),
+    "utf8"
+  );
+  fs.writeFileSync(
+    hangScript,
+    `
+      import fs from "node:fs";
+      fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+      setInterval(() => {}, 1000);
+    `,
+    "utf8"
+  );
+
+  const stdout = execFileSync(
+    process.execPath,
+    [
+      path.join(repoRoot, "scripts", "mcp_tool_call.mjs"),
+      "--tool",
+      "office.snapshot",
+      "--args",
+      JSON.stringify({ thread_id: "ring-leader-main", theme: "night" }),
+      "--transport",
+      "stdio",
+      "--stdio-command",
+      process.execPath,
+      "--stdio-args",
+      hangScript,
+      "--cwd",
+      repoRoot,
+      "--timeout-ms",
+      "250",
+    ],
+    {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR: cacheDir,
+      },
+      encoding: "utf8",
+      timeout: 10_000,
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+
+  const parsed = JSON.parse(stdout);
+  assert.equal(parsed.thread_id, "ring-leader-main");
+  assert.equal(parsed.agents[0].state, "sleeping");
+  assert.equal(parsed.cache.hit, true);
+
+  await waitFor(() => fs.existsSync(pidFile), 5_000, "hang child pid file");
+  const hangPid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+  await waitFor(() => !processAlive(hangPid), 5_000, "timed out stdio child exit");
+  fs.rmSync(tempRoot, { recursive: true, force: true });
 });

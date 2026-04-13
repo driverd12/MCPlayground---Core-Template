@@ -1,8 +1,96 @@
 #!/usr/bin/env node
+import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+
+function officeSnapshotCacheToken(value, fallback) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+  return normalized || fallback;
+}
+
+function officeSnapshotCacheDir(cwd) {
+  const override = String(process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR || "").trim();
+  const baseDir = override ? path.resolve(override) : path.join(cwd, "data", "imprint", "office_snapshot_cache");
+  return path.join(baseDir, "web");
+}
+
+function officeSnapshotCachePath(cwd, threadId, theme) {
+  return path.join(
+    officeSnapshotCacheDir(cwd),
+    `thread-${officeSnapshotCacheToken(threadId, "ring-leader-main")}--theme-${officeSnapshotCacheToken(theme, "night")}.json`
+  );
+}
+
+function officeSnapshotLatestCachePath(cwd, theme) {
+  return path.join(
+    officeSnapshotCacheDir(cwd),
+    `latest--theme-${officeSnapshotCacheToken(theme, "night")}.json`
+  );
+}
+
+function officeSnapshotStaleMaxAgeSeconds() {
+  const override = Number(process.env.TRICHAT_OFFICE_SNAPSHOT_STALE_MAX_AGE_SECONDS || "");
+  if (Number.isFinite(override) && override > 0) {
+    return override;
+  }
+  return 900;
+}
+
+function defaultTimeoutMsForTool(transport, tool) {
+  if (tool === "office.snapshot") {
+    return transport === "http" ? 10_000 : 12_000;
+  }
+  return transport === "http" ? 15_000 : 60_000;
+}
+
+function readCachedOfficeSnapshot(cwd, args) {
+  const theme = String(args?.theme || process.env.TRICHAT_OFFICE_THEME || "night").trim() || "night";
+  const threadId = String(args?.thread_id || "").trim();
+  const candidates = threadId
+    ? [officeSnapshotCachePath(cwd, threadId, theme), officeSnapshotLatestCachePath(cwd, theme)]
+    : [officeSnapshotLatestCachePath(cwd, theme)];
+  const nowSeconds = Date.now() / 1000;
+  for (const candidate of candidates) {
+    try {
+      if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) {
+        continue;
+      }
+      const parsed = JSON.parse(fs.readFileSync(candidate, "utf8"));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        continue;
+      }
+      const fetchedAt = typeof parsed.fetched_at === "number" ? parsed.fetched_at : Number(parsed.fetched_at || 0);
+      if (!Number.isFinite(fetchedAt) || fetchedAt <= 0) {
+        continue;
+      }
+      const ageSeconds = Math.max(0, nowSeconds - fetchedAt);
+      if (ageSeconds > officeSnapshotStaleMaxAgeSeconds()) {
+        continue;
+      }
+      return parsed;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function writeJsonAndExit(value) {
+  fs.writeSync(process.stdout.fd, `${JSON.stringify(value, null, 2)}\n`);
+  process.exit(0);
+}
+
+function writeErrorAndExit(message) {
+  fs.writeSync(process.stderr.fd, `${message}\n`);
+  process.exit(1);
+}
 
 function parseArgs(argv) {
   const out = {
@@ -53,7 +141,7 @@ function parseArgs(argv) {
   }
 
   if (!Number.isFinite(out.timeoutMs) || out.timeoutMs <= 0) {
-    out.timeoutMs = out.transport === "http" ? 15000 : 60000;
+    out.timeoutMs = defaultTimeoutMsForTool(out.transport, out.tool);
   }
 
   if (!Number.isFinite(out.maxAttempts) || out.maxAttempts <= 0) {
@@ -95,6 +183,43 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function terminatePid(pid, options = {}) {
+  const termWaitMs = Number.isFinite(options.termWaitMs) ? Math.max(0, options.termWaitMs) : 500;
+  const killWaitMs = Number.isFinite(options.killWaitMs) ? Math.max(0, options.killWaitMs) : 500;
+  if (!pidAlive(pid)) {
+    return;
+  }
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {}
+  const termDeadline = Date.now() + termWaitMs;
+  while (Date.now() < termDeadline && pidAlive(pid)) {
+    await sleep(50);
+  }
+  if (!pidAlive(pid)) {
+    return;
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {}
+  const killDeadline = Date.now() + killWaitMs;
+  while (Date.now() < killDeadline && pidAlive(pid)) {
+    await sleep(50);
+  }
+}
+
 function withTimeout(promise, timeoutMs, label) {
   return Promise.race([
     promise,
@@ -134,10 +259,24 @@ async function invokeToolOnce(options, args) {
     }
     return asJson(text);
   } finally {
+    const transportProcess = transport && typeof transport === "object" ? transport._process : null;
+    const transportPid = Number.parseInt(String(transportProcess?.pid ?? ""), 10);
+    if (options.transport === "stdio") {
+      await terminatePid(transportPid, { termWaitMs: 500, killWaitMs: 1000 });
+    }
     await Promise.race([
       client.close().catch(() => {}),
-      new Promise((resolve) => setTimeout(resolve, 750)),
+      new Promise((resolve) => setTimeout(resolve, options.transport === "stdio" ? 1500 : 750)),
     ]);
+    if (typeof transport.close === "function") {
+      await Promise.race([
+        transport.close().catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, options.transport === "stdio" ? 1500 : 750)),
+      ]);
+    }
+    if (pidAlive(transportPid)) {
+      await terminatePid(transportPid, { termWaitMs: 250, killWaitMs: 500 });
+    }
   }
 }
 
@@ -155,14 +294,22 @@ async function main() {
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       const parsed = await invokeToolOnce(options, args);
-      process.stdout.write(`${JSON.stringify(parsed, null, 2)}\n`);
-      return;
+      writeJsonAndExit(parsed);
     } catch (error) {
       lastError = error;
+      if (options.transport === "stdio" && options.tool === "office.snapshot" && isRetryableHttpError(error)) {
+        break;
+      }
       if (options.transport !== "http" || attempt >= maxAttempts || !isRetryableHttpError(error)) {
         throw error;
       }
       await sleep(Math.min(2000, 200 * attempt));
+    }
+  }
+  if (options.tool === "office.snapshot") {
+    const cachedSnapshot = readCachedOfficeSnapshot(options.cwd, args);
+    if (cachedSnapshot) {
+      writeJsonAndExit(cachedSnapshot);
     }
   }
   throw lastError ?? new Error("Tool invocation failed");
@@ -211,6 +358,5 @@ function createHttpTransport(options) {
 }
 
 main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
+  writeErrorAndExit(error instanceof Error ? error.message : String(error));
 });

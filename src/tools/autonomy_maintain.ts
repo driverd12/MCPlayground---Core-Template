@@ -1429,6 +1429,70 @@ async function buildStatus(
   };
 }
 
+function buildFastStatus(
+  storage: Storage,
+  input: Pick<
+    AutonomyMaintainInput,
+    | "local_host_id"
+    | "enable_self_drive"
+    | "self_drive_cooldown_seconds"
+    | "eval_suite_id"
+    | "run_eval_if_due"
+    | "eval_interval_seconds"
+    | "minimum_eval_score"
+    | "interval_seconds"
+    | "learning_review_interval_seconds"
+  >,
+  stateOverride?: AutonomyMaintainStateRecord | null
+) {
+  const rawState = stateOverride ?? storage.getAutonomyMaintainState() ?? buildDefaultState(input);
+  let runtime = buildEffectiveRuntimeStatus(buildRuntimeStatus(), rawState);
+  const state =
+    rawState.enabled === false && runtime.running === true
+      ? {
+          ...rawState,
+          enabled: true,
+          last_run_at: rawState.last_run_at ?? readString(runtime.last_tick_at) ?? readString(runtime.started_at),
+        }
+      : rawState;
+  if (runtime.running !== true && state.enabled === true && !readString(runtime.last_error) && !readString(state.last_error)) {
+    runtime = {
+      ...runtime,
+      local_running: runtime.running,
+      inferred_running: true,
+      running: true,
+      started_at: readString(runtime.started_at) ?? state.last_run_at ?? state.updated_at ?? null,
+      last_tick_at: readString(runtime.last_tick_at) ?? state.last_run_at ?? null,
+    };
+  }
+  const evalHealth = buildEvalHealth(state, {
+    ...input,
+    current_dependency_fingerprint: computeEvalDependencyFingerprint(storage, input.eval_suite_id),
+  });
+  const lastRunAgeSeconds = isoAgeSeconds(state.last_run_at);
+  const learningReviewAgeSeconds = isoAgeSeconds(state.last_learning_review_at);
+  const due = {
+    stale:
+      startupGraceActive(runtime, state.interval_seconds) !== true &&
+      lastRunAgeSeconds > Math.max(state.interval_seconds * 3, 300),
+    learning_review: learningReviewAgeSeconds > state.learning_review_interval_seconds,
+    eval: evalHealth.due,
+  };
+  return {
+    state: {
+      enabled: state.enabled !== false,
+      last_run_at: state.last_run_at,
+      last_error: state.last_error,
+    },
+    runtime,
+    due,
+    eval_health: evalHealth,
+    attention: [...new Set((state.last_attention ?? []).map((entry) => String(entry ?? "").trim()).filter(Boolean))],
+    fast: true,
+    source: "autonomy.maintain.fast_status",
+  };
+}
+
 async function executeAutonomyMaintainPass(
   storage: Storage,
   invokeTool: InvokeTool,
@@ -2889,6 +2953,9 @@ export async function autonomyMaintain(
   input: AutonomyMaintainInput
 ) {
   if (input.action === "status") {
+    if (input.fast === true) {
+      return buildFastStatus(storage, input);
+    }
     return buildStatus(storage, invokeTool, input);
   }
 
@@ -2954,6 +3021,7 @@ export async function autonomyMaintain(
           });
         } else {
           const current = storage.getAutonomyMaintainState() ?? buildDefaultState(input);
+          const startedAt = autonomyMaintainRuntime.started_at ?? new Date().toISOString();
           storage.setAutonomyMaintainState({
             enabled: true,
             local_host_id: autonomyMaintainRuntime.config.local_host_id,
@@ -2965,7 +3033,7 @@ export async function autonomyMaintain(
             eval_interval_seconds: autonomyMaintainRuntime.config.eval_interval_seconds,
             eval_suite_id: autonomyMaintainRuntime.config.eval_suite_id,
             minimum_eval_score: autonomyMaintainRuntime.config.minimum_eval_score,
-            last_run_at: current.last_run_at,
+            last_run_at: current.last_run_at ?? startedAt,
             last_bootstrap_ready_at: current.last_bootstrap_ready_at,
             last_goal_autorun_daemon_at: current.last_goal_autorun_daemon_at,
             last_tmux_maintained_at: current.last_tmux_maintained_at,
@@ -2987,12 +3055,16 @@ export async function autonomyMaintain(
             last_error: current.last_error,
           });
         }
+        const status =
+          input.fast === true && input.run_immediately === false
+            ? buildFastStatus(storage, input)
+            : await buildStatus(storage, invokeTool, input);
         return {
           ok: true,
           started: !wasRunning,
           updated: wasRunning,
           initial_tick: initialTick,
-          status: await buildStatus(storage, invokeTool, input),
+          status,
         };
       }
 

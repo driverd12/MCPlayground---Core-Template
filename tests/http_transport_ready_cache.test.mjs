@@ -363,6 +363,98 @@ test("/office/api/snapshot does not serve a stale GUI cache when a direct node r
   }
 });
 
+test("/office/api/snapshot serves an expired cache immediately when refresh cannot complete in time", { concurrency: false }, async () => {
+  const previousCacheDir = process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR;
+  const previousRefreshSeconds = process.env.TRICHAT_OFFICE_REFRESH_SECONDS;
+  const previousCacheMaxAge = process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_MAX_AGE_SECONDS;
+  const previousStaleMaxAge = process.env.TRICHAT_OFFICE_SNAPSHOT_STALE_MAX_AGE_SECONDS;
+  const tempCacheDir = await mkdtemp(path.join(os.tmpdir(), "mcp-office-expired-cache-"));
+  process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR = tempCacheDir;
+  process.env.TRICHAT_OFFICE_REFRESH_SECONDS = "2";
+  process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_MAX_AGE_SECONDS = "2";
+  process.env.TRICHAT_OFFICE_SNAPSHOT_STALE_MAX_AGE_SECONDS = "10";
+
+  const webCacheDir = path.join(tempCacheDir, "web");
+  await mkdir(webCacheDir, { recursive: true });
+  const expiredPayload = {
+    thread_id: "ring-leader-main",
+    theme: "night",
+    fetched_at: Date.now() / 1000 - 3600,
+    agents: [{ agent: { agent_id: "expired-ring-leader" }, state: "sleeping" }],
+    summary: {},
+    rooms: {},
+    errors: [],
+  };
+  for (const cacheFile of ["latest--theme-night.json", "thread-ring-leader-main--theme-night.json"]) {
+    await writeFile(officeHttpCachePath(tempCacheDir, cacheFile), JSON.stringify(expiredPayload), "utf8");
+  }
+
+  const port = await reservePort();
+  const server = await startHttpTransport(
+    () =>
+      new Server(
+        {
+          name: "http-office-expired-cache-test",
+          version: "1.0.0",
+        },
+        {
+          capabilities: {
+            tools: {},
+          },
+        }
+      ),
+    {
+      host: "127.0.0.1",
+      port,
+      allowedOrigins: ["http://127.0.0.1"],
+      bearerToken: "office-expired-cache-token",
+      officeSnapshot: async () => {
+        await new Promise(() => {});
+      },
+    }
+  );
+
+  try {
+    const response = await fetchHttpJsonResponse(port, "/office/api/snapshot");
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers["x-office-snapshot-source"], "cache-expired-refreshing");
+    assert.equal(response.headers["x-office-refresh-state"], "pending");
+    assert.equal(response.headers["x-office-snapshot-stale"], "true");
+    assert.equal(response.body.agents[0].agent.agent_id, "expired-ring-leader");
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+    if (previousCacheDir === undefined) {
+      delete process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR;
+    } else {
+      process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR = previousCacheDir;
+    }
+    if (previousRefreshSeconds === undefined) {
+      delete process.env.TRICHAT_OFFICE_REFRESH_SECONDS;
+    } else {
+      process.env.TRICHAT_OFFICE_REFRESH_SECONDS = previousRefreshSeconds;
+    }
+    if (previousCacheMaxAge === undefined) {
+      delete process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_MAX_AGE_SECONDS;
+    } else {
+      process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_MAX_AGE_SECONDS = previousCacheMaxAge;
+    }
+    if (previousStaleMaxAge === undefined) {
+      delete process.env.TRICHAT_OFFICE_SNAPSHOT_STALE_MAX_AGE_SECONDS;
+    } else {
+      process.env.TRICHAT_OFFICE_SNAPSHOT_STALE_MAX_AGE_SECONDS = previousStaleMaxAge;
+    }
+    await rm(tempCacheDir, { recursive: true, force: true });
+  }
+});
+
 test("/office/api/snapshot ignores dashboard cache files and uses the web cache lane only", { concurrency: false }, async () => {
   const previousCacheDir = process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR;
   const tempCacheDir = await mkdtemp(path.join(os.tmpdir(), "mcp-office-cache-lanes-"));

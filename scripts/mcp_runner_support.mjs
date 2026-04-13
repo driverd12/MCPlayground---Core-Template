@@ -16,7 +16,7 @@ export function repoRootFromMeta(importMetaUrl) {
 export function loadRunnerEnv(repoRoot) {
   dotenv.config({ path: path.join(repoRoot, ".env") });
   const tokenFile = path.join(repoRoot, "data", "imprint", "http_bearer_token");
-  if (!process.env.MCP_HTTP_BEARER_TOKEN && fs.existsSync(tokenFile)) {
+  if (!("MCP_HTTP_BEARER_TOKEN" in process.env) && fs.existsSync(tokenFile)) {
     process.env.MCP_HTTP_BEARER_TOKEN = fs.readFileSync(tokenFile, "utf8").trim();
   }
   if (!process.env.TRICHAT_BUS_SOCKET_PATH) {
@@ -158,6 +158,140 @@ function processAlive(pid) {
   } catch {
     return false;
   }
+}
+
+function commandExists(name) {
+  try {
+    execFileSync(process.platform === "win32" ? "where" : "which", [String(name)], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function readProcessCwd(pid) {
+  if (!commandExists("lsof")) {
+    return null;
+  }
+  try {
+    const output = execFileSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const pathLine = output
+      .split(/\r?\n/)
+      .map((entry) => entry.trim())
+      .find((entry) => entry.startsWith("n"));
+    return pathLine ? pathLine.slice(1) : null;
+  } catch {
+    return null;
+  }
+}
+
+function repoServerCommandMatch(command, repoRoot, cwd) {
+  const normalized = String(command || "").trim();
+  if (!normalized) {
+    return false;
+  }
+  if (/scripts\/mcp_tool_call\.mjs(?:\s|$)/.test(normalized)) {
+    return false;
+  }
+  const absoluteServerPath = path.join(repoRoot, "dist", "server.js");
+  const absolutePattern = escapeRegExp(absoluteServerPath);
+  const serverCommandPattern = new RegExp(
+    `^(?:.+?\\bnode(?:\\.exe)?|node(?:\\.exe)?)(?:\\s+--[^\\s]+(?:=[^\\s]+)?)*\\s+(?:${absolutePattern}|(?:\\.\\/)?dist/server\\.js)(?:\\s|$)`
+  );
+  if (!serverCommandPattern.test(normalized)) {
+    return false;
+  }
+  return normalized.includes(absoluteServerPath) || cwd === repoRoot;
+}
+
+export function listRepoServerProcesses(repoRoot) {
+  let output = "";
+  const absoluteServerPath = path.join(repoRoot, "dist", "server.js");
+  try {
+    output = execFileSync("ps", ["-Ao", "pid=,ppid=,command="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return [];
+  }
+  const matches = [];
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    const match = line.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (!match) {
+      continue;
+    }
+    const pid = Number.parseInt(match[1], 10);
+    const ppid = Number.parseInt(match[2], 10);
+    const command = match[3] || "";
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+      continue;
+    }
+    const referencesAbsolute = command.includes(absoluteServerPath);
+    const referencesRelative = /(^|\s)(?:\.\/)?dist\/server\.js(?:\s|$)/.test(command);
+    if (!referencesAbsolute && !referencesRelative) {
+      continue;
+    }
+    const cwd = referencesAbsolute ? null : readProcessCwd(pid);
+    if (!repoServerCommandMatch(command, repoRoot, cwd)) {
+      continue;
+    }
+    matches.push({ pid, ppid, command, cwd });
+  }
+  return matches;
+}
+
+export async function reapRepoServerProcesses(repoRoot, options = {}) {
+  const exclude = new Set(
+    Array.isArray(options.excludePids)
+      ? options.excludePids.filter((entry) => Number.isInteger(entry) && entry > 0)
+      : []
+  );
+  const signalWaitMs = parseIntValue(options.signalWaitMs, 1500, 100, 30_000);
+  const orphanOnly = parseBoolean(options.orphanOnly, false);
+  const found = listRepoServerProcesses(repoRoot).filter((entry) => {
+    if (exclude.has(entry.pid)) {
+      return false;
+    }
+    if (!orphanOnly) {
+      return true;
+    }
+    return !Number.isInteger(entry.ppid) || entry.ppid <= 1 || !processAlive(entry.ppid);
+  });
+  const reaped = [];
+  for (const entry of found) {
+    if (!processAlive(entry.pid)) {
+      continue;
+    }
+    try {
+      process.kill(entry.pid, "SIGTERM");
+    } catch {}
+    const deadline = Date.now() + signalWaitMs;
+    while (Date.now() < deadline && processAlive(entry.pid)) {
+      await sleep(100);
+    }
+    if (processAlive(entry.pid)) {
+      try {
+        process.kill(entry.pid, "SIGKILL");
+      } catch {}
+    }
+    reaped.push(entry);
+  }
+  return reaped;
 }
 
 async function probeTcpPortState(host, port) {

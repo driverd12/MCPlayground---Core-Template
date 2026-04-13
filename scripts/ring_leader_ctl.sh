@@ -16,7 +16,7 @@ cd "${REPO_ROOT}"
 eval "$("${REPO_ROOT}/scripts/export_dotenv_env.sh" "${REPO_ROOT}")"
 
 TOKEN_FILE="${REPO_ROOT}/data/imprint/http_bearer_token"
-if [[ -z "${MCP_HTTP_BEARER_TOKEN:-}" && -f "${TOKEN_FILE}" ]]; then
+if [[ -z "${MCP_HTTP_BEARER_TOKEN+x}" && -f "${TOKEN_FILE}" ]]; then
   export MCP_HTTP_BEARER_TOKEN="$(cat "${TOKEN_FILE}")"
 fi
 
@@ -79,7 +79,7 @@ ensure_autonomy_entry() {
   fi
   local attempt=1
   while [[ "${attempt}" -le "${attempts}" ]]; do
-    if "${REPO_ROOT}/scripts/autonomy_ctl.sh" ensure >/dev/null 2>&1; then
+    if TRICHAT_RING_LEADER_AUTOSTART=0 "${REPO_ROOT}/scripts/autonomy_ctl.sh" ensure >/dev/null 2>&1; then
       return 0
     fi
     if [[ "${attempt}" -lt "${attempts}" ]]; then

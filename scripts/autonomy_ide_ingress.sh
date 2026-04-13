@@ -139,7 +139,7 @@ cd "${REPO_ROOT}"
 eval "$("${REPO_ROOT}/scripts/export_dotenv_env.sh" "${REPO_ROOT}")"
 
 TOKEN_FILE="${REPO_ROOT}/data/imprint/http_bearer_token"
-if [[ -z "${MCP_HTTP_BEARER_TOKEN:-}" && -f "${TOKEN_FILE}" ]]; then
+if [[ -z "${MCP_HTTP_BEARER_TOKEN+x}" && -f "${TOKEN_FILE}" ]]; then
   export MCP_HTTP_BEARER_TOKEN="$(cat "${TOKEN_FILE}")"
 fi
 
@@ -278,4 +278,58 @@ node ./scripts/mcp_tool_call.mjs \
   --origin "${TRICHAT_MCP_ORIGIN:-http://127.0.0.1}" \
   --stdio-command "${TRICHAT_MCP_STDIO_COMMAND:-node}" \
   --stdio-args "${TRICHAT_MCP_STDIO_ARGS:-dist/server.js}" \
-  --cwd "${REPO_ROOT}"
+  --cwd "${REPO_ROOT}" | node --input-type=module -e '
+import fs from "node:fs";
+
+function summarizeRecord(value, keys) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value;
+  const summary = {};
+  for (const key of keys) {
+    if (record[key] !== undefined) {
+      summary[key] = record[key];
+    }
+  }
+  return Object.keys(summary).length > 0 ? summary : null;
+}
+
+function summarizeAutonomy(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value;
+  return {
+    ok: record.ok === true,
+    goal: summarizeRecord(record.goal, ["goal_id", "title", "status"]),
+    plan: summarizeRecord(record.plan, ["plan_id", "title", "status"]),
+    execution: summarizeRecord(record.execution, ["ok", "dry_run", "continued", "status"]),
+    goal_autorun_daemon: summarizeRecord(record.goal_autorun_daemon, ["action", "status"]),
+    next_action: record.next_action ?? null,
+  };
+}
+
+const raw = fs.readFileSync(0, "utf8").trim();
+const parsed = JSON.parse(raw);
+const payload = {
+  ok: parsed.ok === true,
+  title: parsed.title ?? null,
+  source: parsed.source ?? null,
+  session_id: parsed.session_id ?? null,
+  thread_id: parsed.thread_id ?? null,
+  thread_title: parsed.thread_title ?? null,
+  effective_trichat_agent_ids: Array.isArray(parsed.effective_trichat_agent_ids)
+    ? parsed.effective_trichat_agent_ids
+    : [],
+  transcript: summarizeRecord(parsed.transcript, ["ok", "session_id", "entry_id"]),
+  thread: summarizeRecord(parsed.thread, ["ok", "thread_id", "title", "status"]),
+  message: summarizeRecord(parsed.message, ["ok", "thread_id", "message_id", "role", "agent_id"]),
+  turn: summarizeRecord(parsed.turn, ["ok", "thread_id", "turn_id", "status", "user_message_id"]),
+  memory: summarizeRecord(parsed.memory, ["ok", "note_id", "trust_tier"]),
+  event: summarizeRecord(parsed.event, ["ok", "event_id", "event_type", "status", "entity_id"]),
+  autonomy: summarizeAutonomy(parsed.autonomy),
+};
+
+process.stdout.write(`${JSON.stringify(payload)}\n`);
+'

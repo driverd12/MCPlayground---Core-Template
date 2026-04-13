@@ -7,6 +7,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { Storage } from "../dist/storage.js";
+import { fetchHttpResponse, reservePort, stopChildProcess } from "./test_process_helpers.mjs";
 
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = process.cwd();
@@ -71,7 +72,10 @@ test("autonomy shell wrapper ensure converges the control plane through the real
       TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
       TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
       TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+      TRICHAT_RING_LEADER_READY_TIMEOUT_SECONDS: "5",
       TRICHAT_RING_LEADER_TRANSPORT: "stdio",
+      AUTONOMY_ENSURE_MAX_ATTEMPTS: "1",
+      AUTONOMY_ENSURE_READY_TIMEOUT_SECONDS: "5",
       MCP_HTTP_BEARER_TOKEN: "",
     });
 
@@ -242,7 +246,7 @@ test("agents_switch status returns bounded JSON over the live HTTP control plane
       MCP_AUTONOMY_MAINTAIN_ON_START: "1",
       AGENTS_STATUS_TIMEOUT_SECONDS: "4",
     }),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
   try {
@@ -271,8 +275,7 @@ test("agents_switch status returns bounded JSON over the live HTTP control plane
     assert.equal(typeof status.autonomy_runtime, "object");
     assert.equal(typeof status.auto_snapshot_runtime, "object");
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await stopChildProcess(child);
     await ollama.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -305,7 +308,7 @@ test("autonomy status preserves degraded /ready payloads instead of falling back
       MCP_AUTONOMY_MAINTAIN_ON_START: "1",
       AGENTS_STATUS_TIMEOUT_SECONDS: "4",
     }),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
   try {
@@ -355,8 +358,7 @@ test("autonomy status preserves degraded /ready payloads instead of falling back
     assert.equal(status.maintain?.source, "ready");
     assert.equal(status.maintain?.eval_health?.below_threshold, true);
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await stopChildProcess(child);
     await ollama.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -496,7 +498,7 @@ test("autonomy ingress shell wrapper records continuity and launches real backgr
       TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
       TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
     }),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
   try {
@@ -511,6 +513,8 @@ test("autonomy ingress shell wrapper records continuity and launches real backgr
       TRICHAT_MCP_URL: `http://127.0.0.1:${httpPort}/`,
       TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
       MCP_HTTP_BEARER_TOKEN: bearerToken,
+      AUTONOMY_ENSURE_MAX_ATTEMPTS: "1",
+      AUTONOMY_ENSURE_READY_TIMEOUT_SECONDS: "5",
     });
 
     const ingress = await runShellJson(
@@ -538,8 +542,7 @@ test("autonomy ingress shell wrapper records continuity and launches real backgr
     assert.equal(ingress.autonomy.execution.dry_run ?? true, true);
     assert.equal(ingress.autonomy.goal.title, "Shell ingress objective");
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", () => resolve()));
+    await stopChildProcess(child);
     await ollama.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -574,18 +577,6 @@ async function startFakeOllamaServer({ models }) {
   };
 }
 
-async function reservePort() {
-  const server = http.createServer();
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("Failed to reserve port");
-  }
-  const { port } = address;
-  await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
-  return port;
-}
-
 async function waitForAutonomyStatus({ url, origin, bearerToken }) {
   const deadline = Date.now() + 60000;
   let lastError = null;
@@ -614,6 +605,7 @@ async function waitForAutonomyStatus({ url, origin, bearerToken }) {
             MCP_HTTP_BEARER_TOKEN: bearerToken,
           }),
           maxBuffer: 8 * 1024 * 1024,
+          timeout: 15_000,
         }
       );
       const parsed = JSON.parse(result.stdout);
@@ -652,24 +644,34 @@ async function runShellJson(command, env) {
     cwd: REPO_ROOT,
     env,
     maxBuffer: 8 * 1024 * 1024,
+    timeout: 240_000,
   });
-  return JSON.parse(result.stdout);
+  return parseShellJson(result.stdout);
 }
 
-function fetchHttpResponse(url, headers = {}) {
-  return new Promise((resolve, reject) => {
-    http.get(url, { headers }, (response) => {
-      const chunks = [];
-      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-      response.on("end", () => {
-        resolve({
-          statusCode: response.statusCode ?? 500,
-          headers: response.headers,
-          body: Buffer.concat(chunks).toString("utf8"),
-        });
-      });
-    }).on("error", reject);
-  });
+function parseShellJson(stdout) {
+  const text = String(stdout || "").trim();
+  if (!text) {
+    throw new Error("Expected JSON output but stdout was empty.");
+  }
+  try {
+    return JSON.parse(text);
+  } catch (originalError) {
+    const lines = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const candidate = lines[index];
+      if (!candidate.startsWith("{") && !candidate.startsWith("[")) {
+        continue;
+      }
+      try {
+        return JSON.parse(candidate);
+      } catch {}
+    }
+    throw originalError;
+  }
 }
 
 async function rejectsExecFile(file, args, env) {
@@ -678,6 +680,7 @@ async function rejectsExecFile(file, args, env) {
       cwd: REPO_ROOT,
       env: inheritedEnv(env),
       maxBuffer: 8 * 1024 * 1024,
+      timeout: 15_000,
     });
   } catch (error) {
     return error;

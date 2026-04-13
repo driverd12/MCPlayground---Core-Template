@@ -8,6 +8,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { buildOfficeGuiSnapshot } from "../office_gui_snapshot.js";
+import { getAutonomyMaintainRuntimeStatus } from "../tools/autonomy_maintain.js";
 import { logEvent } from "../utils.js";
 
 export type HttpOptions = {
@@ -16,6 +17,7 @@ export type HttpOptions = {
   allowedOrigins: string[];
   bearerToken: string | null;
   healthSnapshot?: () => unknown | Promise<unknown>;
+  autonomyMaintainSnapshot?: () => { enabled: boolean; runtime_running: boolean } | Promise<{ enabled: boolean; runtime_running: boolean }>;
   officeSnapshot?: (input: { threadId: string; theme: string; forceLive?: boolean }) => unknown | Promise<unknown>;
   officeRawSnapshot?: (input: { threadId: string; theme: string }) => unknown | Promise<unknown>;
 };
@@ -71,6 +73,7 @@ const officeRawSnapshotCache = new Map<string, { body: string; capturedAt: numbe
 let lastReadySnapshotCache: ReadySnapshotCacheEntry | null = null;
 let readySnapshotInflight: Promise<{ payload: ReadySnapshotPayload; source: "live" | "cache-fallback" | "cache-stale" | "error" | "default" }> | null =
   null;
+let officeSnapshotCachePurgeInflight: Promise<void> | null = null;
 
 function resetOfficeSnapshotRuntimeState() {
   officeSnapshotInflight.clear();
@@ -92,7 +95,7 @@ function officeSnapshotNodeTimeoutMs() {
   if (Number.isFinite(override) && override >= 50) {
     return Math.min(60_000, Math.max(50, Math.round(override)));
   }
-  return 8_000;
+  return 5_000;
 }
 
 function officeRawSnapshotNodeTimeoutMs() {
@@ -100,7 +103,7 @@ function officeRawSnapshotNodeTimeoutMs() {
   if (Number.isFinite(override) && override >= 50) {
     return Math.min(60_000, Math.max(50, Math.round(override)));
   }
-  return 8_000;
+  return 4_000;
 }
 
 function readySnapshotCacheMaxAgeMs() {
@@ -308,14 +311,19 @@ function readOfficeRawSnapshotCache(inflightKey: string) {
 function readOfficeSnapshotCache(
   theme: string,
   requestedThreadId: string | null,
-  options?: { allowStale?: boolean }
+  options?: { allowStale?: boolean; allowExpired?: boolean }
 ) {
   const candidates = requestedThreadId
     ? [officeSnapshotCachePath(requestedThreadId, theme)]
     : [officeSnapshotLatestCachePath(theme)];
   const nowSeconds = Date.now() / 1000;
   const freshMaxAgeSeconds = officeSnapshotCacheMaxAgeSeconds();
-  const maxAgeSeconds = options?.allowStale ? officeSnapshotStaleMaxAgeSeconds() : freshMaxAgeSeconds;
+  const staleMaxAgeSeconds = officeSnapshotStaleMaxAgeSeconds();
+  const maxAgeSeconds = options?.allowExpired
+    ? Number.POSITIVE_INFINITY
+    : options?.allowStale
+      ? staleMaxAgeSeconds
+      : freshMaxAgeSeconds;
   for (const candidate of candidates) {
     try {
       if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) {
@@ -350,6 +358,7 @@ function readOfficeSnapshotCache(
         ageSeconds,
         threadId: payloadThreadId,
         stale: ageSeconds > freshMaxAgeSeconds,
+        expired: ageSeconds > staleMaxAgeSeconds,
       };
     } catch {
       continue;
@@ -407,20 +416,31 @@ function invalidateOfficeSnapshotCaches() {
   lastReadySnapshotCache = null;
   readySnapshotInflight = null;
   resetOfficeSnapshotRuntimeState();
-  const cacheDir = officeSnapshotCacheDir();
-  try {
-    if (!fs.existsSync(cacheDir) || !fs.statSync(cacheDir).isDirectory()) {
-      return;
-    }
-    for (const entry of fs.readdirSync(cacheDir)) {
-      if (!entry.endsWith(".json")) {
-        continue;
-      }
-      fs.rmSync(path.join(cacheDir, entry), { force: true });
-    }
-  } catch {
-    // Snapshot cache invalidation is best-effort only.
+  scheduleOfficeSnapshotCachePurge();
+}
+
+function scheduleOfficeSnapshotCachePurge() {
+  if (officeSnapshotCachePurgeInflight) {
+    return;
   }
+  officeSnapshotCachePurgeInflight = Promise.resolve()
+    .then(() => new Promise((resolve) => setTimeout(resolve, 0)))
+    .then(async () => {
+      const cacheDir = officeSnapshotCacheDir();
+      try {
+        const entries = await fs.promises.readdir(cacheDir, { withFileTypes: true });
+        await Promise.all(
+          entries
+            .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+            .map((entry) => fs.promises.rm(path.join(cacheDir, entry.name), { force: true }))
+        );
+      } catch {
+        // Snapshot cache invalidation is best-effort only.
+      }
+    })
+    .finally(() => {
+      officeSnapshotCachePurgeInflight = null;
+    });
 }
 
 function sendCachedOfficeSnapshot(
@@ -819,18 +839,30 @@ function runLocalCommand(
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
     let timedOut = false;
+    let forceKillTimer: NodeJS.Timeout | null = null;
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
+      forceKillTimer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {}
+      }, 1000);
     }, options?.timeoutMs ?? 30000);
     child.stdout.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
     child.stderr.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
     child.on("error", (error) => {
       clearTimeout(timer);
+      if (forceKillTimer) {
+        clearTimeout(forceKillTimer);
+      }
       reject(error);
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (forceKillTimer) {
+        clearTimeout(forceKillTimer);
+      }
       const stdout = Buffer.concat(stdoutChunks).toString("utf8");
       const stderr = Buffer.concat(stderrChunks).toString("utf8");
       if (timedOut) {
@@ -1102,7 +1134,11 @@ async function maybeHandleOfficeRequest(
     }
     if (options.officeSnapshot) {
       const cachedSnapshot = readOfficeSnapshotCache(theme, requestedThreadId || null, { allowStale: true });
-      const freshCachedSnapshot = cachedSnapshot && !cachedSnapshot.stale ? cachedSnapshot : null;
+      const expiredCachedSnapshot = cachedSnapshot
+        ? null
+        : readOfficeSnapshotCache(theme, requestedThreadId || null, { allowStale: true, allowExpired: true });
+      const freshestCachedSnapshot = cachedSnapshot ?? expiredCachedSnapshot;
+      const freshCachedSnapshot = freshestCachedSnapshot && !freshestCachedSnapshot.stale ? freshestCachedSnapshot : null;
       if (forceLive && !explicitForceLive && freshCachedSnapshot && freshCachedSnapshot.ageSeconds <= officeSnapshotLiveThrottleSeconds()) {
         sendCachedOfficeSnapshot(res, "cache-throttled-live", freshCachedSnapshot);
         return true;
@@ -1123,6 +1159,17 @@ async function maybeHandleOfficeRequest(
         );
         return true;
       }
+      if (expiredCachedSnapshot) {
+        startOfficeNodeSnapshotRefresh(inflightKey, options, {
+          threadId: effectiveThreadId,
+          theme,
+          forceLive,
+        }).catch(() => {
+          // Keep serving the last truthful expired snapshot until a fresher refresh succeeds.
+        });
+        sendCachedOfficeSnapshot(res, "cache-expired-refreshing", expiredCachedSnapshot, "pending");
+        return true;
+      }
       try {
         const pendingDirectSnapshot = startOfficeNodeSnapshotRefresh(inflightKey, options, {
           threadId: effectiveThreadId,
@@ -1133,11 +1180,17 @@ async function maybeHandleOfficeRequest(
         const directAgents = Array.isArray(directParsed?.agents) ? directParsed.agents.length : 0;
         const directErrors = Array.isArray(directParsed?.errors) ? directParsed.errors.length : 0;
         if (directErrors > 0) {
-          const cachedSnapshot = readOfficeSnapshotCache(theme, requestedThreadId || null, { allowStale: true });
-          const cachedPayload = cachedSnapshot ? parseOfficeSnapshotPayload(cachedSnapshot.body) : null;
+          const fallbackSnapshot =
+            readOfficeSnapshotCache(theme, requestedThreadId || null, { allowStale: true }) ??
+            readOfficeSnapshotCache(theme, requestedThreadId || null, { allowStale: true, allowExpired: true });
+          const cachedPayload = fallbackSnapshot ? parseOfficeSnapshotPayload(fallbackSnapshot.body) : null;
           const cachedAgents = Array.isArray(cachedPayload?.agents) ? cachedPayload.agents.length : 0;
-          if (cachedSnapshot && cachedAgents > directAgents) {
-            sendCachedOfficeSnapshot(res, "cache-fallback", cachedSnapshot);
+          if (fallbackSnapshot && cachedAgents > directAgents) {
+            sendCachedOfficeSnapshot(
+              res,
+              fallbackSnapshot.expired ? "cache-expired-fallback" : "cache-fallback",
+              fallbackSnapshot
+            );
             return true;
           }
         }
@@ -1147,9 +1200,15 @@ async function maybeHandleOfficeRequest(
         res.end(directBody);
         return true;
       } catch (error) {
-        const cachedSnapshot = readOfficeSnapshotCache(theme, requestedThreadId || null, { allowStale: true });
-        if (cachedSnapshot) {
-          sendCachedOfficeSnapshot(res, "cache-fallback", cachedSnapshot);
+        const fallbackSnapshot =
+          readOfficeSnapshotCache(theme, requestedThreadId || null, { allowStale: true }) ??
+          readOfficeSnapshotCache(theme, requestedThreadId || null, { allowStale: true, allowExpired: true });
+        if (fallbackSnapshot) {
+          sendCachedOfficeSnapshot(
+            res,
+            fallbackSnapshot.expired ? "cache-expired-fallback" : "cache-fallback",
+            fallbackSnapshot
+          );
           return true;
         }
         sendJson(res, 500, {
@@ -1233,6 +1292,26 @@ async function maybeHandleOfficeRequest(
       });
       return true;
     } else if (action === "maintain") {
+      const autonomyRuntime = getAutonomyMaintainRuntimeStatus();
+      const maintainSnapshot = options.autonomyMaintainSnapshot
+        ? await Promise.resolve(options.autonomyMaintainSnapshot())
+        : null;
+      const maintainAlreadyRunning =
+        autonomyRuntime.running === true ||
+        maintainSnapshot?.runtime_running === true ||
+        maintainSnapshot?.enabled === true;
+      if (maintainAlreadyRunning) {
+        invalidateOfficeSnapshotCaches();
+        sendJson(res, 202, {
+          ok: true,
+          action,
+          accepted: true,
+          already_running: true,
+          status: "already_running",
+          started_at: autonomyRuntime.started_at ?? new Date().toISOString(),
+        });
+        return true;
+      }
       const started = runOfficeActionInBackground(action, autonomyCtlScript, ["maintain"], {
         cwd: repoRoot,
         env: officeEnv(origin),

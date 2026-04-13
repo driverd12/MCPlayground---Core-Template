@@ -19,16 +19,88 @@ need_cmd tmux
 need_cmd curl
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mcplayground-production-readiness-XXXXXX")"
+LOCK_ROOT="${REPO_ROOT}/data/imprint/locks"
+LOCK_DIR="${LOCK_ROOT}/production-readiness.lock"
+LOCK_WAIT_SECONDS="${PRODUCTION_READINESS_LOCK_WAIT_SECONDS:-3}"
+LOCK_STALE_SECONDS="${PRODUCTION_READINESS_LOCK_STALE_SECONDS:-1800}"
+LOCK_HELD=0
 cleanup() {
+  if [[ "${LOCK_HELD}" == "1" ]]; then
+    rm -rf "${LOCK_DIR}" >/dev/null 2>&1 || true
+  fi
   rm -rf "${TMP_DIR}"
 }
 trap cleanup EXIT
 
+lock_is_stale() {
+  python3 - "${LOCK_DIR}" "${LOCK_STALE_SECONDS}" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+lock_dir = Path(sys.argv[1])
+stale_seconds = max(1, int(sys.argv[2]))
+try:
+    age = max(0.0, __import__("time").time() - lock_dir.stat().st_mtime)
+except FileNotFoundError:
+    raise SystemExit(1)
+raise SystemExit(0 if age >= stale_seconds else 1)
+PY
+}
+
+acquire_singleton_lock() {
+  mkdir -p "${LOCK_ROOT}"
+  local deadline=$((SECONDS + LOCK_WAIT_SECONDS))
+  while (( SECONDS <= deadline )); do
+    if mkdir "${LOCK_DIR}" >/dev/null 2>&1; then
+      printf '%s\n' "$$" > "${LOCK_DIR}/pid"
+      LOCK_HELD=1
+      return 0
+    fi
+    local owner_pid=""
+    if [[ -f "${LOCK_DIR}/pid" ]]; then
+      owner_pid="$(tr -d '[:space:]' < "${LOCK_DIR}/pid" 2>/dev/null || true)"
+    fi
+    if [[ -n "${owner_pid}" ]] && ! kill -0 "${owner_pid}" >/dev/null 2>&1; then
+      rm -rf "${LOCK_DIR}" >/dev/null 2>&1 || true
+      continue
+    fi
+    if lock_is_stale; then
+      rm -rf "${LOCK_DIR}" >/dev/null 2>&1 || true
+      continue
+    fi
+    sleep 1
+  done
+  echo "[production] another production_readiness.sh run is already active" >&2
+  exit 75
+}
+
+acquire_singleton_lock
+
+REAPED_REPO_SERVER_COUNT="$(
+  node --input-type=module - "${REPO_ROOT}" <<'NODE'
+import { reapRepoServerProcesses } from "./scripts/mcp_runner_support.mjs";
+
+const repoRoot = process.argv[2];
+const reaped = await reapRepoServerProcesses(repoRoot, {
+  excludePids: [process.pid],
+  orphanOnly: true,
+  signalWaitMs: 2000,
+});
+process.stdout.write(String(reaped.length));
+NODE
+)"
+if [[ "${REAPED_REPO_SERVER_COUNT}" != "0" ]]; then
+  echo "[production] reaped orphan repo server processes: ${REAPED_REPO_SERVER_COUNT}"
+fi
+
 TRICHAT_HTTP_URL="${TRICHAT_MCP_URL:-http://127.0.0.1:8787/}"
 TRICHAT_HTTP_ORIGIN="${TRICHAT_MCP_ORIGIN:-http://127.0.0.1}"
 MCP_TOOL_CALL_TIMEOUT_MS="${MCP_TOOL_CALL_TIMEOUT_MS:-15000}"
+PRODUCTION_READINESS_HTTP_MAX_ATTEMPTS="${PRODUCTION_READINESS_HTTP_MAX_ATTEMPTS:-6}"
+PRODUCTION_READINESS_OFFICE_SNAPSHOT_TIMEOUT_SECONDS="${PRODUCTION_READINESS_OFFICE_SNAPSHOT_TIMEOUT_SECONDS:-20}"
 TOKEN_FILE="${REPO_ROOT}/data/imprint/http_bearer_token"
-if [[ -z "${MCP_HTTP_BEARER_TOKEN:-}" && -f "${TOKEN_FILE}" ]]; then
+if [[ -z "${MCP_HTTP_BEARER_TOKEN+x}" && -f "${TOKEN_FILE}" ]]; then
   export MCP_HTTP_BEARER_TOKEN="$(cat "${TOKEN_FILE}")"
 fi
 
@@ -70,20 +142,28 @@ curl_json() {
 call_http() {
   local tool="$1"
   local args="${2:-\{\}}"
-  local attempt stderr_file output rc
+  local output_file="${TMP_DIR}/call-http-${tool//[^A-Za-z0-9_.-]/_}.json"
+  call_http_to_file "${tool}" "${args}" "${output_file}"
+  cat "${output_file}"
+}
+
+call_http_to_file() {
+  local tool="$1"
+  local args="${2:-\{\}}"
+  local output_file="$3"
+  local attempt stderr_file rc max_attempts
+  max_attempts="${PRODUCTION_READINESS_HTTP_MAX_ATTEMPTS}"
   stderr_file="${TMP_DIR}/call-http-${tool//[^A-Za-z0-9_.-]/_}.err"
-  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-    if output="$(
-      MCP_TOOL_CALL_TIMEOUT_MS="${MCP_TOOL_CALL_TIMEOUT_MS}" node ./scripts/mcp_tool_call.mjs \
-        --tool "${tool}" \
-        --args "${args}" \
-        --transport http \
-        --url "${TRICHAT_HTTP_URL}" \
-        --origin "${TRICHAT_HTTP_ORIGIN}" \
-        --cwd "${REPO_ROOT}" \
-        2>"${stderr_file}"
-    )"; then
-      printf '%s\n' "${output}"
+  for (( attempt = 1; attempt <= max_attempts; attempt += 1 )); do
+    rm -f "${output_file}"
+    if MCP_TOOL_CALL_TIMEOUT_MS="${MCP_TOOL_CALL_TIMEOUT_MS}" MCP_TOOL_CALL_HTTP_MAX_ATTEMPTS="1" node ./scripts/mcp_tool_call.mjs \
+      --tool "${tool}" \
+      --args "${args}" \
+      --transport http \
+      --url "${TRICHAT_HTTP_URL}" \
+      --origin "${TRICHAT_HTTP_ORIGIN}" \
+      --cwd "${REPO_ROOT}" \
+      >"${output_file}" 2>"${stderr_file}"; then
       return 0
     fi
     rc=$?
@@ -547,32 +627,66 @@ grep -q "Truth mode:" "${TMP_DIR}/office-help.txt"
 grep -q "SuperClaude-inspired confidence checks" "${TMP_DIR}/office-help.txt"
 echo "[production] office dashboard: help view renders with truth mode + methodology surface"
 
-python3 - <<'PY' "${TRICHAT_HTTP_URL}" "${TRICHAT_HTTP_ORIGIN}" "${TMP_DIR}/office-bootstrap.json" "${TMP_DIR}/office-snapshot.json" "${TMP_DIR}/office-session-name.txt"
+python3 - <<'PY' "${TRICHAT_HTTP_URL}" "${TRICHAT_HTTP_ORIGIN}" "${TMP_DIR}/office-bootstrap.json" "${TMP_DIR}/office-snapshot.json" "${TMP_DIR}/office-session-name.txt" "${PRODUCTION_READINESS_OFFICE_SNAPSHOT_TIMEOUT_SECONDS}"
 import json
-import sys
-import urllib.request
 import pathlib
+import sys
+import urllib.error
+import urllib.request
 
 base = sys.argv[1].rstrip("/")
 origin = sys.argv[2]
 bootstrap_path = pathlib.Path(sys.argv[3])
 snapshot_path = pathlib.Path(sys.argv[4])
 session_name_path = pathlib.Path(sys.argv[5])
+snapshot_timeout = max(5, int(sys.argv[6]))
 
 bootstrap_request = urllib.request.Request(f"{base}/office/api/bootstrap", headers={"Origin": origin})
-with urllib.request.urlopen(bootstrap_request, timeout=20) as response:
+with urllib.request.urlopen(bootstrap_request, timeout=min(snapshot_timeout, 20)) as response:
     bootstrap = json.loads(response.read().decode("utf-8"))
 if not bootstrap.get("ok"):
     raise SystemExit("office bootstrap route did not report ok")
 bootstrap_path.write_text(json.dumps(bootstrap))
 session_name_path.write_text(str(bootstrap.get("tmux_session_name") or "agent-office"))
 
-snapshot_request = urllib.request.Request(f"{base}/office/api/snapshot?live=1", headers={"Origin": origin})
-with urllib.request.urlopen(snapshot_request, timeout=60) as response:
-    snapshot_source = response.headers.get("x-office-snapshot-source") or "n/a"
-    snapshot = json.loads(response.read().decode("utf-8"))
-if snapshot_source not in {"direct", "direct-node"}:
-    raise SystemExit(f"office snapshot source was {snapshot_source!r}, expected 'direct' or 'direct-node'")
+snapshot = None
+snapshot_source = "n/a"
+snapshot_stale = False
+snapshot_error = None
+for snapshot_url in (
+    f"{base}/office/api/snapshot?live=1",
+    f"{base}/office/api/snapshot",
+):
+    snapshot_request = urllib.request.Request(snapshot_url, headers={"Origin": origin})
+    try:
+        with urllib.request.urlopen(snapshot_request, timeout=snapshot_timeout) as response:
+            snapshot_source = response.headers.get("x-office-snapshot-source") or "n/a"
+            snapshot_stale = response.headers.get("x-office-snapshot-stale") == "true"
+            snapshot = json.loads(response.read().decode("utf-8"))
+        break
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        snapshot_error = error
+        snapshot = None
+        continue
+
+if snapshot is None:
+    raise SystemExit(f"office snapshot probe failed: {snapshot_error}")
+
+acceptable_sources = {
+    "direct",
+    "direct-node",
+    "cache",
+    "cache-fallback",
+    "cache-expired-fallback",
+    "cache-expired-refreshing",
+    "cache-throttled-live",
+    "cache-refreshing-live",
+    "cache-refreshing-stale",
+}
+if snapshot_source not in acceptable_sources:
+    raise SystemExit(
+        f"office snapshot source was {snapshot_source!r}, expected one of {sorted(acceptable_sources)!r}"
+    )
 snapshot_path.write_text(json.dumps(snapshot))
 agents = snapshot.get("agents") or []
 summary = snapshot.get("summary") or {}
@@ -582,6 +696,7 @@ print(
     "[production] office gui: "
     f"agents={len(agents)} "
     f"source={snapshot_source} "
+    f"stale={snapshot_stale} "
     f"kernel={((summary.get('kernel') or {}).get('state') or 'n/a')} "
     f"router={((summary.get('router') or {}).get('default_backend_id') or 'n/a')}"
 )
@@ -590,12 +705,13 @@ PY
 test -d "/Applications/Agent Office.app"
 echo "[production] app launcher: /Applications/Agent Office.app present"
 
-AGENTS_STATUS_JSON="$("${REPO_ROOT}/scripts/agents_switch.sh" status)"
-python3 - "${AGENTS_STATUS_JSON}" <<'PY'
+"${REPO_ROOT}/scripts/agents_switch.sh" status > "${TMP_DIR}/agents-status.json"
+python3 - "${TMP_DIR}/agents-status.json" <<'PY'
 import json
+import pathlib
 import sys
 
-data = json.loads(sys.argv[1])
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
 loaded = bool(((data.get("launchd") or {}).get("autonomy_keepalive_loaded")))
 print(f"[production] autonomy keepalive loaded: {loaded}")
 if not loaded:

@@ -106,6 +106,35 @@ function buildMemoryContent(input: {
   return lines.join("\n");
 }
 
+function summarizeResultRecord(value: unknown, keys: string[]) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (record[key] !== undefined) {
+      summary[key] = record[key];
+    }
+  }
+  return Object.keys(summary).length > 0 ? summary : null;
+}
+
+function summarizeAutonomyIngressAutonomy(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    ok: record.ok === true,
+    goal: summarizeResultRecord(record.goal, ["goal_id", "title", "status"]),
+    plan: summarizeResultRecord(record.plan, ["plan_id", "title", "status"]),
+    execution: summarizeResultRecord(record.execution, ["ok", "dry_run", "continued", "status"]),
+    goal_autorun_daemon: summarizeResultRecord(record.goal_autorun_daemon, ["action", "status"]),
+    next_action: record.next_action ?? null,
+  };
+}
+
 function stampIngressAutonomyState(
   storage: Storage,
   input: {
@@ -378,13 +407,13 @@ export async function autonomyIdeIngress(
         effective_trichat_agent_ids: effectiveTriChatAgentIds,
         thread_id: threadId,
         thread_title: threadId ? threadTitle : null,
-        transcript,
-        thread,
-        message,
-        turn,
-        memory,
-        event,
-        autonomy,
+        transcript: summarizeResultRecord(transcript, ["ok", "session_id", "entry_id"]),
+        thread: summarizeResultRecord(thread, ["ok", "thread_id", "title", "status"]),
+        message: summarizeResultRecord(message, ["ok", "thread_id", "message_id", "role", "agent_id"]),
+        turn: summarizeResultRecord(turn, ["ok", "thread_id", "turn_id", "status", "user_message_id"]),
+        memory: summarizeResultRecord(memory, ["ok", "note_id", "trust_tier"]),
+        event: summarizeResultRecord(event, ["ok", "event_id", "event_type", "status", "entity_id"]),
+        autonomy: summarizeAutonomyIngressAutonomy(autonomy),
       };
     },
   });

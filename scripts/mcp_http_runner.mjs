@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   acquireRunnerSingletonLock,
   loadRunnerEnv,
+  reapRepoServerProcesses,
   repoRootFromMeta,
   resolveRunnerBusSocketPath,
   waitForServerResourcesToClear,
@@ -90,6 +91,14 @@ async function main() {
   process.on("SIGTERM", () => {
     void shutdown(143, "SIGTERM");
   });
+
+  const reaped = await reapRepoServerProcesses(repoRoot, {
+    excludePids: [process.pid],
+    signalWaitMs: 2000,
+  });
+  if (reaped.length > 0) {
+    process.stderr.write(`[mcp.http.runner] reaped ${reaped.length} orphan repo server process(es) before startup\n`);
+  }
 
   const cleared = await waitForServerResourcesToClear({
     host,

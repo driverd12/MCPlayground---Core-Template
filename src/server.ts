@@ -3303,8 +3303,6 @@ function buildHttpHealthSnapshot() {
   }
   if (!evalHealth.operational) {
     attention.push("autonomy_eval.unhealthy");
-  } else if (evalHealth.due_by_dependency_drift) {
-    attention.push("autonomy_eval.definition_changed");
   } else if (evalHealth.due_by_age) {
     attention.push("autonomy_eval.overdue");
   }
@@ -3393,8 +3391,15 @@ async function main() {
   const maintainOnStart = parseBooleanEnv(process.env.MCP_AUTONOMY_MAINTAIN_ON_START, true);
   const maintainRunImmediatelyOnStart = parseBooleanEnv(
     process.env.MCP_AUTONOMY_MAINTAIN_RUN_IMMEDIATELY_ON_START,
-    httpEnabled
+    false
   );
+  const startupConvergenceDelayMs = (() => {
+    const parsed = Number.parseInt(String(process.env.MCP_AUTONOMY_STARTUP_CONVERGENCE_DELAY_MS ?? "").trim(), 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return Math.min(60_000, parsed);
+    }
+    return httpEnabled ? 5_000 : 0;
+  })();
   const startupNonce = `${Date.now()}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
 
   const runStartupConvergence = async () => {
@@ -3507,6 +3512,14 @@ async function main() {
       allowedOrigins,
       bearerToken: process.env.MCP_HTTP_BEARER_TOKEN ?? null,
       healthSnapshot: buildHttpHealthSnapshot,
+      autonomyMaintainSnapshot: () => {
+        const autonomyState = storage.getAutonomyMaintainState();
+        const autonomyRuntime = getAutonomyMaintainRuntimeStatus();
+        return {
+          enabled: autonomyState?.enabled === true,
+          runtime_running: autonomyRuntime.running === true,
+        };
+      },
       officeSnapshot: ({ threadId, theme, forceLive }) =>
         buildOfficeGuiSnapshot(
           officeSnapshot(storage, {
@@ -3543,7 +3556,14 @@ async function main() {
           metadata: { source: "http.raw" },
         }),
     });
-    void runStartupConvergence();
+    if (startupConvergenceDelayMs > 0) {
+      const timer = setTimeout(() => {
+        void runStartupConvergence();
+      }, startupConvergenceDelayMs);
+      timer.unref?.();
+    } else {
+      void runStartupConvergence();
+    }
   } else {
     await startStdioTransport(createServerInstance());
     startWarmCacheStartupPrefetch(storage);

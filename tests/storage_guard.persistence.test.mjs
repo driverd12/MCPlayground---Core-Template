@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import Database from "better-sqlite3";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -89,7 +90,70 @@ test("storage guard restores from startup backup when db header is corrupted", a
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
-test("storage guard skips startup backup when the database exceeds the startup size threshold", async () => {
+test("storage guard skips a corrupt latest backup and restores the newest healthy backup", async () => {
+  const testId = `${Date.now()}-restore-skip-corrupt`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-storage-guard-restore-skip-corrupt-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const marker = `storage-guard-healthy-backup-${testId}`;
+  let mutationCounter = 0;
+
+  const sessionOne = await openClient(dbPath, {});
+  try {
+    await callTool(sessionOne.client, "memory.append", {
+      mutation: nextMutation(testId, "memory.append", () => mutationCounter++),
+      content: marker,
+      keywords: ["storage", "guard", "healthy-backup"],
+    });
+  } finally {
+    await sessionOne.client.close().catch(() => {});
+  }
+
+  const sessionTwo = await openClient(dbPath, {});
+  try {
+    const health = await callTool(sessionTwo.client, "health.storage", {});
+    assert.equal(health.ok, true);
+  } finally {
+    await sessionTwo.client.close().catch(() => {});
+  }
+
+  const backupDir = path.join(tempDir, "backups");
+  const healthyBackup = fs
+    .readdirSync(backupDir)
+    .filter((entry) => entry.startsWith("hub.sqlite.") && entry.endsWith(".sqlite"))
+    .map((entry) => path.join(backupDir, entry))
+    .sort((left, right) => fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs)[0];
+  assert.ok(healthyBackup);
+
+  const corruptBackup = path.join(backupDir, "hub.sqlite.9999-12-31T23-59-59-999Z.sqlite");
+  fs.copyFileSync(healthyBackup, corruptBackup);
+  const fd = fs.openSync(corruptBackup, "r+");
+  try {
+    const patch = Buffer.from("corrupt-backup-payload");
+    fs.writeSync(fd, patch, 0, patch.length, 4096);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const future = new Date("2099-01-01T00:00:00.000Z");
+  fs.utimesSync(corruptBackup, future, future);
+
+  fs.writeFileSync(dbPath, "<script>corrupted html payload</script>\n", "utf8");
+
+  const sessionThree = await openClient(dbPath, {});
+  try {
+    const restored = await callTool(sessionThree.client, "memory.search", {
+      query: marker,
+      limit: 10,
+    });
+    assert.ok(Array.isArray(restored));
+    assert.ok(restored.some((entry) => String(entry.content ?? "").includes(marker)));
+  } finally {
+    await sessionThree.client.close().catch(() => {});
+  }
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("storage guard creates a large-db bundle backup when the database exceeds the vacuum snapshot threshold", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-storage-guard-skip-backup-"));
   const dbPath = path.join(tempDir, "hub.sqlite");
 
@@ -105,12 +169,12 @@ test("storage guard skips startup backup when the database exceeds the startup s
 
   const backupDir = path.join(tempDir, "backups");
   const backups = fs.existsSync(backupDir) ? fs.readdirSync(backupDir) : [];
-  assert.equal(backups.length, 0);
+  assert.ok(backups.some((entry) => entry.startsWith("hub.sqlite.") && entry.endsWith(".sqlite")));
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
-test("storage guard skips startup quick_check when the database exceeds the startup size threshold", async () => {
+test("storage guard downgrades startup quick_check to a large-db probe when the database exceeds the startup size threshold", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-storage-guard-skip-quick-check-"));
   const dbPath = path.join(tempDir, "hub.sqlite");
 
@@ -153,7 +217,79 @@ test("storage guard skips startup quick_check when the database exceeds the star
     }
   }
 
-  assert.match(capturedStderr, /startup quick_check skipped/i);
+  assert.match(capturedStderr, /startup quick_check downgraded to large-db probe/i);
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("storage guard large-db probe quarantines and recovers when a critical startup table probe fails", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-storage-guard-large-probe-recover-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+
+  const initial = await openClient(dbPath, {
+    ANAMNESIS_HUB_STARTUP_BACKUP: "0",
+  });
+  try {
+    const health = await callTool(initial.client, "health.storage", {});
+    assert.equal(health.ok, true);
+  } finally {
+    await initial.client.close().catch(() => {});
+  }
+
+  const originalQuickCheckMax = process.env.ANAMNESIS_HUB_RUN_QUICK_CHECK_MAX_BYTES;
+  const originalStartupBackup = process.env.ANAMNESIS_HUB_STARTUP_BACKUP;
+  const originalAllowFresh = process.env.ANAMNESIS_HUB_ALLOW_FRESH_DB_ON_CORRUPTION;
+  const originalPragma = Database.prototype.pragma;
+  const originalStderrWrite = process.stderr.write.bind(process.stderr);
+  let capturedStderr = "";
+  let injectedFailure = false;
+
+  process.env.ANAMNESIS_HUB_RUN_QUICK_CHECK_MAX_BYTES = "1";
+  process.env.ANAMNESIS_HUB_STARTUP_BACKUP = "0";
+  process.env.ANAMNESIS_HUB_ALLOW_FRESH_DB_ON_CORRUPTION = "1";
+  process.stderr.write = (chunk, encoding, callback) => {
+    capturedStderr += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    return originalStderrWrite(chunk, encoding, callback);
+  };
+  Database.prototype.pragma = function patchedPragma(source, options) {
+    if (!injectedFailure && String(source).includes("integrity_check(agent_sessions)")) {
+      injectedFailure = true;
+      return "database disk image is malformed";
+    }
+    return originalPragma.call(this, source, options);
+  };
+
+  const storage = new Storage(dbPath);
+  try {
+    storage.init();
+    assert.equal(injectedFailure, true);
+    assert.ok(storage.getSchemaVersion() >= 1);
+  } finally {
+    storage["db"]?.close?.();
+    Database.prototype.pragma = originalPragma;
+    process.stderr.write = originalStderrWrite;
+    if (originalQuickCheckMax === undefined) {
+      delete process.env.ANAMNESIS_HUB_RUN_QUICK_CHECK_MAX_BYTES;
+    } else {
+      process.env.ANAMNESIS_HUB_RUN_QUICK_CHECK_MAX_BYTES = originalQuickCheckMax;
+    }
+    if (originalStartupBackup === undefined) {
+      delete process.env.ANAMNESIS_HUB_STARTUP_BACKUP;
+    } else {
+      process.env.ANAMNESIS_HUB_STARTUP_BACKUP = originalStartupBackup;
+    }
+    if (originalAllowFresh === undefined) {
+      delete process.env.ANAMNESIS_HUB_ALLOW_FRESH_DB_ON_CORRUPTION;
+    } else {
+      process.env.ANAMNESIS_HUB_ALLOW_FRESH_DB_ON_CORRUPTION = originalAllowFresh;
+    }
+  }
+
+  assert.match(capturedStderr, /large-db startup probe failed/i);
+  assert.match(capturedStderr, /initialized fresh empty database/i);
+  const quarantineDir = path.join(tempDir, "corrupt");
+  const quarantined = fs.existsSync(quarantineDir) ? fs.readdirSync(quarantineDir) : [];
+  assert.ok(quarantined.some((entry) => entry.startsWith("hub.sqlite.") && entry.endsWith(".large-db-startup-probe")));
 
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
