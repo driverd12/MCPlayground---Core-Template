@@ -629,7 +629,7 @@ Local Metal setup:
 
 Core runtime tools include:
 
-- Memory and continuity: `memory.*`, `transcript.*`, `who_knows`, `knowledge.query`, `retrieval.hybrid`
+- Memory and continuity: `memory.*` including `memory.reflection_capture` for externally grounded episodic reflections, `transcript.*`, `who_knows`, `knowledge.query`, `retrieval.hybrid`
 - Governance and safety: `policy.evaluate`, `preflight.check`, `postflight.verify`, `mutation.check`
 - Durable execution: `run.*`, `task.*`, `lock.*`
 - Permanent regression capture: `golden.case_capture` turns research, incidents, and traces into verified golden cases that can seed future benchmark/eval fixtures.

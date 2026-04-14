@@ -24,6 +24,7 @@ test("server starts with default agentic workflow hooks and exposes core + TriCh
     const names = new Set(tools.map((tool) => tool.name));
 
     assert.equal(names.has("memory.append"), true);
+    assert.equal(names.has("memory.reflection_capture"), true);
     assert.equal(names.has("goal.create"), true);
     assert.equal(names.has("goal.autorun"), true);
     assert.equal(names.has("goal.autorun_daemon"), true);

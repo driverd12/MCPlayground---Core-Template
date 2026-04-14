@@ -54,7 +54,16 @@ import {
   summarizeAgentLearning,
 } from "./tools/agent_learning.js";
 import { dispatchAutorunSchema } from "./tools/dispatch.js";
-import { appendMemory, getMemory, memoryAppendSchema, memoryGetSchema, memorySearchSchema, searchMemory } from "./tools/memory.js";
+import {
+  appendMemory,
+  captureReflectionMemory,
+  getMemory,
+  memoryAppendSchema,
+  memoryGetSchema,
+  memoryReflectionCaptureSchema,
+  memorySearchSchema,
+  searchMemory,
+} from "./tools/memory.js";
 import {
   applyTranscriptRetention,
   autoSquishControl,
@@ -1955,6 +1964,20 @@ registerTool("memory.append", "Append distilled long-term memory content.", memo
     payload: input,
     execute: () => appendMemory(storage, input),
   })
+);
+
+registerTool(
+  "memory.reflection_capture",
+  "Capture externally grounded episodic reflection memory from tool or environment feedback.",
+  memoryReflectionCaptureSchema,
+  (input) =>
+    runIdempotentMutation({
+      storage,
+      tool_name: "memory.reflection_capture",
+      mutation: input.mutation,
+      payload: input,
+      execute: () => captureReflectionMemory(storage, input),
+    })
 );
 
 registerTool("memory.search", "Search long-term memory using lexical matching.", memorySearchSchema, (input) =>
