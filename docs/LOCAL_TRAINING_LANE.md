@@ -10,6 +10,7 @@ npm run local:training:bootstrap
 npm run local:training:prepare
 npm run local:training:train
 npm run local:training:promote
+npm run local:training:integrate
 ```
 
 ## What `prepare` Writes
@@ -58,6 +59,15 @@ The registry entry is appended to `data/training/model_registry.json` with:
 - A passing gate records the candidate as `adapter_registered`, writes a durable registration artifact, and records explicit router/Ollama integration blockers instead of pretending the adapter is live.
 - A failing gate records the candidate as `adapter_rejected` with a durable report and leaves the current runtime untouched.
 
+## Integration Command
+
+`npm run local:training:integrate` reads the accepted registration artifact and turns it into a real local backend.
+
+- On Apple Silicon, the preferred path is now a managed `mlx_lm.server --adapter-path ...` launchd lane.
+- When the accepted adapter family is compatible with Ollama's documented adapter import path, the same command can export an Ollama companion model from the trained Safetensors base-model directory plus the adapter directory.
+- The integration step updates `.env`, verifies the live backend, runs bounded bootstrap and maintain refreshes, and only then records the adapter as live.
+- The integration step does not silently make the new backend the router default. Reachable and default are separate decisions.
+
 ## Truthfulness Rules
 
 - `training_intent.weights_modified` remains `false` during `prepare`
@@ -65,12 +75,14 @@ The registry entry is appended to `data/training/model_registry.json` with:
 - `safe_promotion_metadata.allowed_now` remains `false` until adapter artifacts exist and the gate is green
 - missing train commands or missing evidence are surfaced as readiness blockers instead of being treated as success
 - a red promotion gate does not block training execution; it blocks later promotion and route cutover
-- `adapter_registered` does not mean "served live". It means "accepted by the bounded gate and recorded as eligible for future integration work."
+- `adapter_registered` does not mean "served live". It means "accepted by the bounded gate and recorded as eligible for integration work."
+- `adapter_served_mlx` means the accepted adapter is reachable through the managed MLX runtime.
+- `adapter_exported_ollama` means the accepted adapter was exported into a local Ollama companion model and verified.
 
 ## Next Best Target
 
-The next bounded implementation step after `promote` is to add an adapter-aware deployment lane that:
+The next bounded implementation step after `integrate` is explicit cutover policy:
 
-- serves the accepted adapter through a real MLX runtime path or exports it into an Ollama-compatible path
-- proves that route integration uses a real reachable backend instead of metadata-only registration
-- keeps rollback and live-route cutover explicit instead of optimistic
+- decide whether the newly reachable backend should become router-default or remain a non-primary companion
+- keep rollback and live-route cutover explicit instead of optimistic
+- continue benchmarking the accepted adapter against the incumbent local default before any default-route switch

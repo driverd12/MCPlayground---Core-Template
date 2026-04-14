@@ -47,6 +47,7 @@ MLX_HOST="${MLX_HOST#http://}"
 MLX_HOST="${MLX_HOST#https://}"
 MLX_PYTHON="${TRICHAT_MLX_PYTHON:-}"
 MLX_MODEL="${TRICHAT_MLX_MODEL:-}"
+MLX_ADAPTER_PATH="${TRICHAT_MLX_ADAPTER_PATH:-}"
 NODE_BIN="$(command -v node || true)"
 if [[ -z "${NODE_BIN}" ]]; then
   echo "error: node not found in PATH" >&2
@@ -367,6 +368,12 @@ cat >"${KEEPALIVE_PLIST}" <<PLIST
 PLIST
 
 if [[ "${MLX_SERVER_ENABLED}" == "1" && -n "${MLX_PYTHON}" && -n "${MLX_MODEL}" ]]; then
+MLX_ADAPTER_ARGUMENTS=""
+if [[ -n "${MLX_ADAPTER_PATH}" ]]; then
+  MLX_ADAPTER_ARGUMENTS="
+      <string>--adapter-path</string>
+      <string>${MLX_ADAPTER_PATH}</string>"
+fi
 cat >"${MLX_PLIST}" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -382,6 +389,7 @@ cat >"${MLX_PLIST}" <<PLIST
       <string>mlx_lm.server</string>
       <string>--model</string>
       <string>${MLX_MODEL}</string>
+${MLX_ADAPTER_ARGUMENTS}
       <string>--host</string>
       <string>${MLX_HOST}</string>
       <string>--port</string>

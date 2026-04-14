@@ -28,6 +28,7 @@ flowchart LR
     Manifest["platform_manifest.json"]
     MlxPostpull["ollama_mlx_postpull.mjs<br/>post-pull soak + imprint"]
     TrainLane["local_adapter_lane.mjs<br/>trainer bootstrap + corpus + registry + rollback prep"]
+    IntegrateLane["local_adapter_integrate.mjs<br/>MLX serve or Ollama export + live verification"]
   end
 
   subgraph ClientBridges["IDE + Provider Bridges"]

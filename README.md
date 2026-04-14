@@ -602,6 +602,9 @@ Key variables:
 - `TRICHAT_IMPRINT_MODEL` / `TRICHAT_OLLAMA_URL` control the local imprint lane
 - `TRICHAT_LOCAL_INFERENCE_PROVIDER` selects `auto`, `ollama`, or `mlx` for the local bridge lane
 - `TRICHAT_MLX_PYTHON` / `TRICHAT_MLX_MODEL` / `TRICHAT_MLX_ENDPOINT` define the optional Metal-backed MLX lane
+- `TRICHAT_MLX_ADAPTER_PATH` turns the managed MLX lane into an adapter-backed `mlx_lm.server`
+- `TRICHAT_LOCAL_ADAPTER_REGISTRATION_PATH` / `TRICHAT_LOCAL_ADAPTER_ACTIVE_PROVIDER` record which accepted adapter is currently integrated and whether it is active through `mlx` or `ollama`
+- `TRICHAT_LOCAL_ADAPTER_OLLAMA_MODEL` records the exported Ollama companion model name when the active integration target is `ollama`
 - `TRICHAT_MLX_SERVER_ENABLED=1` enables a managed local `mlx_lm.server` launch agent; leave it `0` to keep MLX installed but not auto-served
 - `TRICHAT_BRIDGE_TIMEOUT_SECONDS` bound per-bridge request time
 - `TRICHAT_BRIDGE_MAX_RETRIES` / `TRICHAT_BRIDGE_RETRY_BASE_MS` control wrapper-level transient retry behavior
@@ -618,7 +621,8 @@ Local Metal setup:
 - `npm run ollama:mlx:preview` is the guarded Apple Silicon-only setup path for that Ollama MLX preview model. It refuses to run on Linux or Windows, checks the Ollama runtime floor, and pulls `qwen3.5:35b-a3b-coding-nvfp4`. It does not cut the active local model over until the post-pull gate passes.
 - After that pull completes, the same path automatically runs `scripts/ollama_mlx_postpull.mjs` to stress the local Ollama runtime, run the default local benchmark/eval gate, inspect router readiness plus rollback viability, and write a report under `data/imprint/reports/`. Only a fully green gate will cut the active local model over; otherwise the runner records the blockers and leaves the current default untouched. Re-run it manually with `npm run ollama:mlx:postpull`. The runner is single-instance per model, so duplicate manual starts now exit cleanly instead of piling up background waiters.
 - `npm run local:training:bootstrap` reuses the repo’s `.venv-mlx` setup path and gives the adapter lane a real local trainer backend on Apple Silicon instead of leaving it in a permanent “missing module” state.
-- `npm run local:training:prepare` + `npm run local:training:train` + `npm run local:training:promote` now form a truthful bounded training lane: prepare curates the packet, train runs an MLX LoRA pass against a trainable companion model, and promote runs the repo's benchmark/eval gate so the adapter is either rejected or registered before any future router/Ollama integration work.
+- `npm run local:training:prepare` + `npm run local:training:train` + `npm run local:training:promote` + `npm run local:training:integrate` now form a truthful bounded training lane: prepare curates the packet, train runs an MLX LoRA pass against a trainable companion model, promote runs the repo's benchmark/eval gate so the adapter is either rejected or registered, and integrate materializes the accepted candidate as a real MLX backend or an Ollama companion model.
+- On this Apple Silicon host, the current Qwen companion adapter is served through MLX because `mlx_lm.server` supports `--adapter-path`. Ollama companion export remains a real path for supported adapter families, but Ollama's documented adapter import support is narrower than the MLX training surface, so not every accepted adapter will be exportable there.
 - “Imprinting” here means durable local memory, profile preferences, and bootstrap context for the control plane. It is not pretending to silently fine-tune model weights.
 
 ## Core Tool Surface

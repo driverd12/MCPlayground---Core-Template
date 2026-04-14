@@ -268,6 +268,103 @@ test("autonomy.bootstrap seeds eligible provider-bridge backends into the model 
   }
 });
 
+test("autonomy.bootstrap persists an integrated MLX adapter backend from the registration record", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-bootstrap-mlx-adapter-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const registrationPath = path.join(tempDir, "registered-adapter.json");
+  const ollama = await startFakeOllamaServer({
+    models: [{ name: "llama3.2:3b" }],
+  });
+  const mlxServer = http.createServer((req, res) => {
+    if (req.url === "/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "not found" }));
+  });
+  await new Promise((resolve) => mlxServer.listen(0, "127.0.0.1", resolve));
+  const mlxAddress = mlxServer.address();
+  assert.ok(mlxAddress && typeof mlxAddress !== "string");
+  const mlxEndpoint = `http://127.0.0.1:${mlxAddress.port}`;
+  fs.writeFileSync(
+    registrationPath,
+    `${JSON.stringify(
+      {
+        decision: {
+          status: "registered",
+          accepted: true,
+          integration_consideration: {
+            router: {
+              planned_backend: {
+                backend_id: "mlx-adapter-local-adapter-sample",
+                provider: "mlx",
+                model_id: "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit",
+                tags: ["local", "mlx", "adapter", "candidate", "apple-silicon"],
+                metadata: {
+                  candidate_id: "local-adapter-sample",
+                  adapter_path: "/tmp/adapter",
+                  companion_for_runtime_model: "qwen3.5:35b-a3b-coding-nvfp4",
+                  serving_status: "integrated",
+                },
+              },
+            },
+          },
+        },
+        integration_result: {
+          status: "adapter_served_mlx",
+        },
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  let mutationCounter = 0;
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+    TRICHAT_OLLAMA_URL: ollama.url,
+    TRICHAT_MLX_SERVER_ENABLED: "1",
+    TRICHAT_MLX_MODEL: "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit",
+    TRICHAT_MLX_ENDPOINT: mlxEndpoint,
+    TRICHAT_MLX_PYTHON: "/tmp/python",
+    TRICHAT_LOCAL_ADAPTER_REGISTRATION_PATH: registrationPath,
+    TRICHAT_LOCAL_ADAPTER_ACTIVE_PROVIDER: "mlx",
+    TRICHAT_RING_LEADER_AUTOSTART: "1",
+    TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+    TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+    TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+  });
+
+  try {
+    const ensured = await callTool(session.client, "autonomy.bootstrap", {
+      action: "ensure",
+      mutation: nextMutation("autonomy-bootstrap-mlx-adapter", "ensure", () => mutationCounter++),
+      probe_ollama_url: ollama.url,
+      autostart_ring_leader: true,
+      run_immediately: false,
+    });
+    assert.equal(ensured.ok, true);
+
+    const router = await callTool(session.client, "model.router", { action: "status" });
+    const backend = router.state.backends.find((entry) => entry.backend_id === "mlx-adapter-local-adapter-sample");
+    assert.ok(backend);
+    assert.equal(backend.provider, "mlx");
+    assert.ok(backend.tags.includes("adapter"));
+    assert.equal(backend.metadata.candidate_id, "local-adapter-sample");
+    assert.equal(backend.metadata.local_adapter_active_provider, "mlx");
+    assert.equal(backend.metadata.local_adapter_integration_status, "adapter_served_mlx");
+  } finally {
+    await session.client.close().catch(() => {});
+    await ollama.close();
+    await new Promise((resolve, reject) => mlxServer.close((error) => (error ? reject(error) : resolve())));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("autonomy.bootstrap keeps an existing local default when a later bootstrap pass only sees remote bridge backends", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-bootstrap-sticky-local-default-"));
   const dbPath = path.join(tempDir, "hub.sqlite");

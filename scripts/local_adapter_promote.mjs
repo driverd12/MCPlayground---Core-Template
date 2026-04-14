@@ -85,6 +85,14 @@ function shortHash(value) {
   return crypto.createHash("sha256").update(String(value || "")).digest("hex").slice(0, 12);
 }
 
+function readString(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function createMutation(candidateId, step, counter) {
   const id = `${candidateId}:${step}:${counter.value++}`;
   return {
@@ -202,33 +210,115 @@ export function buildIntegrationConsideration(manifest, decision) {
   const accepted = decision?.status === "registered";
   const trainingTarget = manifest?.training_target && typeof manifest.training_target === "object" ? manifest.training_target : {};
   const adapterPath = String(manifest?.training_result?.adapter_path || "").trim() || null;
+  const targetModelRef =
+    readString(trainingTarget.resolved_model_ref) ||
+    readString(trainingTarget.requested_model_ref) ||
+    readString(trainingTarget.resolved_model_path);
+  const targetModelPath = readString(trainingTarget.resolved_model_path);
+  const architecture = detectAdapterArchitecture(manifest);
+  const ollamaArchitectureSupported =
+    architecture !== null && ["llama", "mistral", "mixtral", "gemma"].includes(architecture);
+  const hostIsAppleSilicon = manifest?.host?.platform === "darwin" && manifest?.host?.arch === "arm64";
+  const mlxEligible =
+    accepted && hostIsAppleSilicon && manifest?.trainer?.trainer_ready === true && Boolean(adapterPath) && Boolean(targetModelRef);
+  const ollamaEligible =
+    accepted &&
+    ollamaArchitectureSupported &&
+    Boolean(adapterPath) &&
+    Boolean(targetModelPath);
+  const recommendedTarget = mlxEligible ? "mlx" : ollamaEligible ? "ollama" : null;
+  const candidateId = String(manifest?.candidate_id || "candidate");
+  const ollamaCompanionModel = buildOllamaCompanionName(manifest);
   return {
+    recommended_target: accepted ? recommendedTarget : null,
     router: {
-      eligible: accepted,
+      eligible: mlxEligible,
       live_ready: false,
-      blockers: accepted ? ["mlx_adapter_serving_path_not_implemented"] : ["candidate_not_registered"],
+      blockers: accepted
+        ? mlxEligible
+          ? ["mlx_integration_pending"]
+          : [
+              ...(hostIsAppleSilicon ? [] : ["mlx_host_not_apple_silicon"]),
+              ...(manifest?.trainer?.trainer_ready === true ? [] : ["mlx_trainer_unavailable"]),
+              ...(adapterPath ? [] : ["adapter_artifacts_missing"]),
+              ...(targetModelRef ? [] : ["mlx_base_model_missing"]),
+            ]
+        : ["candidate_not_registered"],
       planned_backend: {
-        backend_id: `mlx-adapter-${sanitizeSlug(manifest?.candidate_id, "candidate")}`.slice(0, 96),
+        backend_id: `mlx-adapter-${sanitizeSlug(candidateId, "candidate")}`.slice(0, 96),
         provider: "mlx",
-        model_id: String(trainingTarget.requested_model_ref || manifest?.base_model || "unknown"),
+        model_id: String(targetModelRef || manifest?.base_model || "unknown"),
         locality: "local",
         host_id: "local",
         tags: ["local", "mlx", "adapter", "candidate", "apple-silicon"],
         metadata: {
-          candidate_id: manifest?.candidate_id ?? null,
+          candidate_id: candidateId,
           adapter_path: adapterPath,
           companion_for_runtime_model: manifest?.base_model ?? null,
-          serving_status: "not_integrated",
+          training_target_model_path: targetModelPath,
+          serving_status: mlxEligible ? "integration_pending" : "blocked",
         },
       },
     },
     ollama: {
-      eligible: accepted,
+      eligible: ollamaEligible,
       live_ready: false,
-      blockers: accepted ? ["ollama_adapter_export_not_implemented"] : ["candidate_not_registered"],
+      blockers: accepted
+        ? ollamaEligible
+          ? ["ollama_export_pending"]
+          : [
+              ...(adapterPath ? [] : ["adapter_artifacts_missing"]),
+              ...(targetModelPath ? [] : ["ollama_base_model_path_missing"]),
+              ...(architecture === null ? ["ollama_adapter_architecture_unknown"] : []),
+              ...(architecture !== null && !ollamaArchitectureSupported
+                ? [`ollama_adapter_architecture_unsupported:${architecture}`]
+                : []),
+            ]
+        : ["candidate_not_registered"],
       target_runtime_model: manifest?.base_model ?? null,
+      planned_backend: {
+        backend_id: `ollama-adapter-${sanitizeSlug(candidateId, "candidate")}`.slice(0, 96),
+        provider: "ollama",
+        model_id: ollamaCompanionModel,
+        locality: "local",
+        host_id: "local",
+        tags: ["local", "ollama", "adapter", "candidate", "companion"],
+        metadata: {
+          candidate_id: candidateId,
+          adapter_path: adapterPath,
+          source_model_path: targetModelPath,
+          companion_for_runtime_model: manifest?.base_model ?? null,
+          export_status: ollamaEligible ? "pending" : "blocked",
+        },
+      },
     },
   };
+}
+
+export function buildOllamaCompanionName(manifest) {
+  const slug = sanitizeSlug(manifest?.candidate_id, "candidate");
+  return `mcp-${slug.slice(0, 48)}-${shortHash(slug)}`;
+}
+
+export function detectAdapterArchitecture(manifest) {
+  const haystack = [
+    manifest?.training_target?.resolved_model_ref,
+    manifest?.training_target?.requested_model_ref,
+    manifest?.training_target?.resolved_model_path,
+    manifest?.base_model,
+  ]
+    .map((entry) => String(entry || "").toLowerCase())
+    .join(" ");
+  if (!haystack) {
+    return null;
+  }
+  if (haystack.includes("mixtral")) return "mixtral";
+  if (haystack.includes("mistral")) return "mistral";
+  if (haystack.includes("llama")) return "llama";
+  if (haystack.includes("gemma")) return "gemma";
+  if (haystack.includes("qwen")) return "qwen";
+  if (haystack.includes("phi")) return "phi";
+  return null;
 }
 
 export function decidePromotion({ manifest, report, evalRun }) {
@@ -410,7 +500,7 @@ async function main() {
     };
     manifest.status = decision.accepted ? "adapter_registered" : "adapter_rejected";
     manifest.next_action = decision.accepted
-      ? "Implement an explicit MLX adapter serving or Ollama export path, then run a bounded integration pass before live cutover."
+      ? "Run `npm run local:training:integrate` to materialize the accepted adapter as a real MLX backend or Ollama companion before any live cutover."
       : "Inspect the promotion report, adjust the corpus or trainer, and rerun `npm run local:training:train` plus `npm run local:training:promote`.";
     writeJson(manifestPath, manifest);
 

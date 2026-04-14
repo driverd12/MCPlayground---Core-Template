@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { z } from "zod";
@@ -146,6 +147,63 @@ function sanitizeId(value: string) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+function readString(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function readJsonFileSafe(filePath: string) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function loadActiveLocalAdapterRegistration() {
+  const registrationPath = readString(process.env.TRICHAT_LOCAL_ADAPTER_REGISTRATION_PATH);
+  const activeProvider = readString(process.env.TRICHAT_LOCAL_ADAPTER_ACTIVE_PROVIDER)?.toLowerCase() ?? null;
+  const activeOllamaModel = readString(process.env.TRICHAT_LOCAL_ADAPTER_OLLAMA_MODEL);
+  if (!registrationPath || !activeProvider || !fs.existsSync(registrationPath)) {
+    return null;
+  }
+  const payload = readJsonFileSafe(registrationPath);
+  if (!isRecord(payload) || !isRecord(payload.decision) || payload.decision.status !== "registered") {
+    return null;
+  }
+  return {
+    registration_path: registrationPath,
+    active_provider: activeProvider,
+    active_ollama_model: activeOllamaModel,
+    payload,
+  };
+}
+
+function plannedAdapterBackendForProvider(
+  activeAdapter: ReturnType<typeof loadActiveLocalAdapterRegistration>,
+  provider: "mlx" | "ollama"
+) {
+  const decision =
+    activeAdapter && isRecord(activeAdapter.payload) && isRecord(activeAdapter.payload.decision)
+      ? activeAdapter.payload.decision
+      : null;
+  const integrationConsideration = decision?.integration_consideration;
+  if (!activeAdapter || !isRecord(integrationConsideration)) {
+    return null;
+  }
+  const branch =
+    provider === "mlx"
+      ? integrationConsideration.router
+      : integrationConsideration.ollama;
+  if (!isRecord(branch) || !isRecord(branch.planned_backend)) {
+    return null;
+  }
+  return branch.planned_backend;
 }
 
 function commandSucceeds(command: string, args: string[] = []) {
@@ -340,6 +398,11 @@ async function detectBackends(
     return input.backend_overrides;
   }
   const discovered: BackendCandidate[] = [];
+  const activeAdapter = loadActiveLocalAdapterRegistration();
+  const plannedMlxAdapterBackend =
+    activeAdapter?.active_provider === "mlx" ? plannedAdapterBackendForProvider(activeAdapter, "mlx") : null;
+  const plannedOllamaAdapterBackend =
+    activeAdapter?.active_provider === "ollama" ? plannedAdapterBackendForProvider(activeAdapter, "ollama") : null;
   const preferredOllamaModel = String(process.env.TRICHAT_OLLAMA_MODEL || "").trim();
   const ollamaUrl = String(input.probe_ollama_url || process.env.TRICHAT_OLLAMA_URL || "http://127.0.0.1:11434").trim();
   const ollamaIsLocal = localBackendLocality(ollamaUrl) === "local" || isLoopbackUrl(ollamaUrl);
@@ -363,8 +426,12 @@ async function detectBackends(
     .slice(0, 4);
   for (const modelName of orderedModelNames) {
     const locality = localBackendLocality(ollamaUrl);
+    const isActiveAdapterModel =
+      activeAdapter?.active_provider === "ollama" &&
+      (modelName === readString(plannedOllamaAdapterBackend?.model_id) || modelName === activeAdapter.active_ollama_model);
+    const plannedBackend = isActiveAdapterModel ? plannedOllamaAdapterBackend : null;
     discovered.push({
-      backend_id: `ollama-${sanitizeId(modelName)}`,
+      backend_id: readString(plannedBackend?.backend_id) || `ollama-${sanitizeId(modelName)}`,
       provider: "ollama",
       model_id: modelName,
       endpoint: ollamaUrl,
@@ -382,6 +449,7 @@ async function detectBackends(
               ]
             : []),
           ...(preferredOllamaModel && modelName === preferredOllamaModel ? ["primary"] : []),
+          ...normalizeStringArray(plannedBackend?.tags),
         ]),
       ],
       capabilities: {
@@ -405,6 +473,17 @@ async function detectBackends(
                 swap_used_gb: localProfile.swap_used_gb,
               }
             : undefined,
+        ...(isRecord(plannedBackend?.metadata) ? plannedBackend.metadata : {}),
+        ...(isActiveAdapterModel
+          ? {
+              local_adapter_registration_path: activeAdapter?.registration_path,
+              local_adapter_active_provider: activeAdapter?.active_provider,
+              local_adapter_integration_status:
+                activeAdapter?.payload?.integration_result && isRecord(activeAdapter.payload.integration_result)
+                  ? activeAdapter.payload.integration_result.status
+                  : null,
+            }
+          : {}),
       },
     });
   }
@@ -413,7 +492,7 @@ async function detectBackends(
   const mlxHealth = mlxEndpoint ? await fetchJsonWithTimeout(`${mlxEndpoint}/health`, {}, 3000) : null;
   if (mlxModel && localProfile?.mlx_available && mlxEndpoint && mlxHealth) {
     discovered.push({
-      backend_id: `mlx-${sanitizeId(mlxModel)}`,
+      backend_id: readString(plannedMlxAdapterBackend?.backend_id) || `mlx-${sanitizeId(mlxModel)}`,
       provider: "mlx",
       model_id: mlxModel,
       endpoint: mlxEndpoint,
@@ -425,6 +504,7 @@ async function detectBackends(
         "gpu",
         ...(localProfile.gpu_api ? [localProfile.gpu_api] : []),
         ...(localProfile.accelerator_kind === "apple-metal" ? ["apple-silicon", "unified-memory"] : []),
+        ...normalizeStringArray(plannedMlxAdapterBackend?.tags),
       ],
       capabilities: {
         task_kinds: ["planning", "coding", "research", "verification", "chat", "tool_use"],
@@ -451,6 +531,17 @@ async function detectBackends(
           mlx_python: localProfile.mlx_python,
           mlx_endpoint: mlxEndpoint,
         },
+        ...(isRecord(plannedMlxAdapterBackend?.metadata) ? plannedMlxAdapterBackend.metadata : {}),
+        ...(activeAdapter?.active_provider === "mlx"
+          ? {
+              local_adapter_registration_path: activeAdapter.registration_path,
+              local_adapter_active_provider: activeAdapter.active_provider,
+              local_adapter_integration_status:
+                activeAdapter.payload?.integration_result && isRecord(activeAdapter.payload.integration_result)
+                  ? activeAdapter.payload.integration_result.status
+                  : null,
+            }
+          : {}),
       },
     });
   }

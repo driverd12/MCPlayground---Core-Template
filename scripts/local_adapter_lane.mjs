@@ -371,6 +371,32 @@ export function detectPromotionCommand() {
   };
 }
 
+export function detectIntegrationCommand() {
+  const packageJson = readPackageJson();
+  const scripts = packageJson && typeof packageJson === "object" ? packageJson.scripts || {} : {};
+  const scripted = String(scripts["local:training:integrate"] || "").trim();
+  if (scripted) {
+    return {
+      available: true,
+      command: "npm run local:training:integrate",
+      source: "package.json",
+    };
+  }
+  const scriptPath = path.join(REPO_ROOT, "scripts", "local_adapter_integrate.mjs");
+  if (fs.existsSync(scriptPath)) {
+    return {
+      available: true,
+      command: "node ./scripts/local_adapter_integrate.mjs",
+      source: "scripts/local_adapter_integrate.mjs",
+    };
+  }
+  return {
+    available: false,
+    command: null,
+    source: null,
+  };
+}
+
 export function detectAdapterArtifacts(runDir) {
   const present = [];
   const missing = [];
@@ -700,12 +726,14 @@ function statusLane() {
   const latestRun = Array.isArray(registry.runs) && registry.runs.length > 0 ? registry.runs[0] : null;
   const trainingCommand = detectTrainingCommand();
   const promotionCommand = detectPromotionCommand();
+  const integrationCommand = detectIntegrationCommand();
   return {
     ok: true,
     current_model: currentModel(),
     trainer,
     training_command: trainingCommand,
     promotion_command: promotionCommand,
+    integration_command: integrationCommand,
     latest_run: latestRun,
     training_root: TRAINING_ROOT,
     registry_path: REGISTRY_PATH,
@@ -716,9 +744,13 @@ function statusLane() {
         : latestRun?.status === "prepared_blocked" && latestRun?.readiness_blockers?.length === 0
           ? "Run the bounded local adapter trainer against the prepared packet."
           : latestRun?.status === "adapter_trained_unpromoted" && promotionCommand.available
-            ? "Run the bounded local adapter promotion gate before treating this candidate as router-eligible."
-            : latestRun?.status === "adapter_registered"
-              ? "Implement an explicit MLX adapter serving or export path before live router or Ollama cutover."
+          ? "Run the bounded local adapter promotion gate before treating this candidate as router-eligible."
+            : latestRun?.status === "adapter_registered" && integrationCommand.available
+              ? "Run the bounded integration command so the accepted adapter becomes a real MLX backend or Ollama companion."
+              : latestRun?.status === "adapter_registered"
+                ? "Wire a bounded integration command so the accepted adapter becomes a real MLX backend or Ollama companion."
+                : latestRun?.status === "adapter_served_mlx" || latestRun?.status === "adapter_exported_ollama"
+                  ? "The accepted adapter is live as a reachable local backend; only change router defaults if a separate cutover is desired."
               : latestRun?.status === "adapter_rejected"
                 ? "Tune the corpus or training parameters, then rerun prepare, train, and promote."
                 : latestRun?.readiness_blockers?.includes?.("training.command_unwired")

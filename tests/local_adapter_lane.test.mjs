@@ -10,6 +10,9 @@ import {
   curateCorpusRecords,
   detectTrainerAvailability,
   detectAdapterArtifacts,
+  detectIntegrationCommand,
+  detectPromotionCommand,
+  detectTrainingCommand,
   resolveTrainerPython,
   splitCuratedCorpus,
 } from "../scripts/local_adapter_lane.mjs";
@@ -157,4 +160,10 @@ test("detectAdapterArtifacts only reports full artifact presence when config, we
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("training lane commands are all discoverable from the current repo wiring", () => {
+  assert.equal(detectTrainingCommand().available, true);
+  assert.equal(detectPromotionCommand().available, true);
+  assert.equal(detectIntegrationCommand().available, true);
 });

@@ -612,6 +612,14 @@ function reportLocalTrainingSection() {
     recommendedMissing++;
     write(`  ${WARN} ${c.yellow}local adapter promotion gate is not wired yet${c.reset}`);
   }
+  if (payload.integration_command?.available === true) {
+    write(
+      `  ${PASS} integration command ${c.dim}(${payload.integration_command.command}${payload.integration_command?.source ? ` via ${payload.integration_command.source}` : ""})${c.reset}`
+    );
+  } else {
+    recommendedMissing++;
+    write(`  ${WARN} ${c.yellow}local adapter integration command is not wired yet${c.reset}`);
+  }
   if (payload.latest_run?.manifest_path) {
     write(`  ${PASS} prepared corpus ${c.dim}(${payload.latest_run.manifest_path})${c.reset}`);
     if (payload.latest_run?.status) {
