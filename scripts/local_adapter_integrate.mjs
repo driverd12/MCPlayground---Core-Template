@@ -388,8 +388,7 @@ function updateRegistry(manifest, manifestPath, updates) {
 }
 
 export function resolveIntegrationTarget(manifest, registration, forcedTarget = "auto") {
-  const consideration =
-    registration?.decision?.integration_consideration || buildIntegrationConsideration(manifest, { status: "registered" });
+  const consideration = buildIntegrationConsideration(manifest, { status: "registered" });
   const recommended =
     readString(consideration?.recommended_target) ||
     (consideration?.router?.eligible === true
@@ -783,6 +782,7 @@ async function main() {
       "The accepted adapter is now a reachable local backend. Keep it non-primary until a separate cutover decision is made.";
     writeJson(manifestPath, manifest);
 
+    registration.decision.integration_consideration = buildIntegrationConsideration(manifest, { status: "registered" });
     registration.integration_result = result;
     registration.decision.integration_consideration.router.live_ready =
       decision.target === "mlx" ? true : registration.decision.integration_consideration.router.live_ready;
@@ -795,7 +795,11 @@ async function main() {
       registration.decision.integration_consideration.ollama.blockers = [];
       registration.decision.integration_consideration.ollama.planned_backend.metadata.export_status = "integrated";
     }
+    if (manifest.promotion_result && typeof manifest.promotion_result === "object") {
+      manifest.promotion_result.integration_consideration = registration.decision.integration_consideration;
+    }
     writeJson(registrationPath, registration);
+    writeJson(manifestPath, manifest);
 
     updateRegistry(manifest, manifestPath, {
       status: manifest.status,
