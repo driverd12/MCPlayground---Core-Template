@@ -151,6 +151,39 @@ test("runAutonomyKeepaliveOnce releases singleton lock after retryable HTTP fall
   assert.equal(result.transport_fallback_from, "http");
 });
 
+test("runAutonomyKeepaliveOnce normalizes attention-only maintain results to successful keepalive output", async () => {
+  const result = await runAutonomyKeepaliveOnce({
+    repoRoot: process.cwd(),
+    transport: "stdio",
+    env: {},
+    now: 1710000000200,
+    pid: 2222,
+    acquireLockFn: async () => ({
+      ok: true,
+      release: () => {},
+    }),
+    callToolFn: () => ({
+      ok: false,
+      actions: ["eval.autonomy.control-plane.below_threshold"],
+      status: {
+        bootstrap: { self_start_ready: true },
+        state: { enabled: true },
+        runtime: { running: true },
+        goal_autorun_daemon: { running: true },
+      },
+      eval: {
+        executed: true,
+        ok: false,
+        aggregate_metric_value: 50,
+      },
+    }),
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.health_ok, false);
+  assert.equal(result.attention_only, true);
+  assert.equal(result.eval?.aggregate_metric_value, 50);
+});
+
 test("waitForServerResourcesToClear waits for a busy TCP port to become free", async () => {
   const server = net.createServer();
   await new Promise((resolve, reject) => {

@@ -12,12 +12,14 @@ MCP_LABEL="com.mcplayground.mcp.server"
 AUTO_LABEL="com.mcplayground.imprint.autosnapshot"
 WORKER_LABEL="com.mcplayground.imprint.inboxworker"
 KEEPALIVE_LABEL="com.mcplayground.autonomy.keepalive"
+WATCHDOG_LABEL="com.mcplayground.local-adapter.watchdog"
 MLX_LABEL="com.mcplayground.mlx.server"
 
 MCP_PLIST="${LAUNCH_DIR}/${MCP_LABEL}.plist"
 AUTO_PLIST="${LAUNCH_DIR}/${AUTO_LABEL}.plist"
 WORKER_PLIST="${LAUNCH_DIR}/${WORKER_LABEL}.plist"
 KEEPALIVE_PLIST="${LAUNCH_DIR}/${KEEPALIVE_LABEL}.plist"
+WATCHDOG_PLIST="${LAUNCH_DIR}/${WATCHDOG_LABEL}.plist"
 MLX_PLIST="${LAUNCH_DIR}/${MLX_LABEL}.plist"
 LEGACY_BUS_SOCKET_PATH="${REPO_ROOT}/data/trichat.bus.sock"
 BUS_SOCKET_DIGEST="$(printf '%s' "${REPO_ROOT}" | shasum -a 256 | cut -c1-12)"
@@ -39,6 +41,10 @@ INBOX_BATCH_SIZE="${ANAMNESIS_INBOX_BATCH_SIZE:-3}"
 INBOX_LEASE_SECONDS="${ANAMNESIS_INBOX_LEASE_SECONDS:-300}"
 INBOX_HEARTBEAT_INTERVAL="${ANAMNESIS_INBOX_HEARTBEAT_INTERVAL:-30}"
 AUTONOMY_KEEPALIVE_INTERVAL="${AUTONOMY_KEEPALIVE_INTERVAL_SECONDS:-120}"
+LOCAL_ADAPTER_WATCHDOG_INTERVAL="${LOCAL_ADAPTER_WATCHDOG_INTERVAL_SECONDS:-1800}"
+LOCAL_ADAPTER_WATCHDOG_MAX_AGE="${LOCAL_ADAPTER_WATCHDOG_MAX_SOAK_AGE_MINUTES:-240}"
+LOCAL_ADAPTER_WATCHDOG_SOAK_CYCLES="${LOCAL_ADAPTER_WATCHDOG_SOAK_CYCLES:-1}"
+LOCAL_ADAPTER_WATCHDOG_SOAK_INTERVAL="${LOCAL_ADAPTER_WATCHDOG_SOAK_INTERVAL_SECONDS:-0}"
 MLX_SERVER_ENABLED="${TRICHAT_MLX_SERVER_ENABLED:-0}"
 MLX_ENDPOINT="${TRICHAT_MLX_ENDPOINT:-http://127.0.0.1:8788}"
 MLX_PORT="${MLX_ENDPOINT##*:}"
@@ -367,6 +373,61 @@ cat >"${KEEPALIVE_PLIST}" <<PLIST
 </plist>
 PLIST
 
+cat >"${WATCHDOG_PLIST}" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>${WATCHDOG_LABEL}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>${NODE_BIN}</string>
+      <string>${REPO_ROOT}/scripts/local_adapter_watchdog.mjs</string>
+      <string>--transport</string>
+      <string>http</string>
+      <string>--max-soak-age-minutes</string>
+      <string>${LOCAL_ADAPTER_WATCHDOG_MAX_AGE}</string>
+      <string>--cycles</string>
+      <string>${LOCAL_ADAPTER_WATCHDOG_SOAK_CYCLES}</string>
+      <string>--interval-seconds</string>
+      <string>${LOCAL_ADAPTER_WATCHDOG_SOAK_INTERVAL}</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>${REPO_ROOT}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>${PATH}</string>
+      <key>MCP_HTTP_BEARER_TOKEN</key>
+      <string>${HTTP_BEARER_TOKEN}</string>
+      <key>TRICHAT_MCP_URL</key>
+      <string>http://127.0.0.1:${MCP_HTTP_PORT:-8787}/</string>
+      <key>TRICHAT_MCP_ORIGIN</key>
+      <string>http://127.0.0.1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>${LOCAL_ADAPTER_WATCHDOG_INTERVAL}</integer>
+
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/local-adapter-watchdog.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/local-adapter-watchdog.err.log</string>
+  </dict>
+</plist>
+PLIST
+
 if [[ "${MLX_SERVER_ENABLED}" == "1" && -n "${MLX_PYTHON}" && -n "${MLX_MODEL}" ]]; then
 MLX_ADAPTER_ARGUMENTS=""
 if [[ -n "${MLX_ADAPTER_PATH}" ]]; then
@@ -429,7 +490,7 @@ else
   rm -f "${MLX_PLIST}" >/dev/null 2>&1 || true
 fi
 
-chmod 644 "${MCP_PLIST}" "${AUTO_PLIST}" "${WORKER_PLIST}" "${KEEPALIVE_PLIST}"
+chmod 644 "${MCP_PLIST}" "${AUTO_PLIST}" "${WORKER_PLIST}" "${KEEPALIVE_PLIST}" "${WATCHDOG_PLIST}"
 if [[ -f "${MLX_PLIST}" ]]; then
   chmod 644 "${MLX_PLIST}"
 fi
@@ -440,6 +501,7 @@ reset_launch_agent "${MCP_PLIST}" "${MCP_LABEL}"
 reset_launch_agent "${AUTO_PLIST}" "${AUTO_LABEL}"
 reset_launch_agent "${WORKER_PLIST}" "${WORKER_LABEL}"
 reset_launch_agent "${KEEPALIVE_PLIST}" "${KEEPALIVE_LABEL}"
+reset_launch_agent "${WATCHDOG_PLIST}" "${WATCHDOG_LABEL}"
 if [[ -f "${MLX_PLIST}" ]]; then
   reset_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
 fi
@@ -452,6 +514,7 @@ wait_for_mcp_http
 launchctl bootstrap "${DOMAIN}" "${AUTO_PLIST}"
 launchctl bootstrap "${DOMAIN}" "${WORKER_PLIST}"
 launchctl bootstrap "${DOMAIN}" "${KEEPALIVE_PLIST}"
+launchctl bootstrap "${DOMAIN}" "${WATCHDOG_PLIST}"
 if [[ -f "${MLX_PLIST}" ]]; then
   launchctl bootstrap "${DOMAIN}" "${MLX_PLIST}"
 fi
@@ -459,6 +522,7 @@ fi
 launchctl enable "${DOMAIN}/${AUTO_LABEL}" >/dev/null 2>&1 || true
 launchctl enable "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
 launchctl enable "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
+launchctl enable "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
 if [[ -f "${MLX_PLIST}" ]]; then
   launchctl enable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
 fi
@@ -466,6 +530,7 @@ fi
 launchctl kickstart -k "${DOMAIN}/${AUTO_LABEL}" >/dev/null 2>&1 || true
 launchctl kickstart -k "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
 launchctl kickstart -k "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
+launchctl kickstart -k "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
 if [[ -f "${MLX_PLIST}" ]]; then
   launchctl kickstart -k "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
 fi
@@ -475,6 +540,7 @@ echo "- ${MCP_PLIST}" >&2
 echo "- ${AUTO_PLIST}" >&2
 echo "- ${WORKER_PLIST}" >&2
 echo "- ${KEEPALIVE_PLIST}" >&2
+echo "- ${WATCHDOG_PLIST}" >&2
 if [[ -f "${MLX_PLIST}" ]]; then
 echo "- ${MLX_PLIST}" >&2
 fi
@@ -486,6 +552,7 @@ echo "  \"mcp_label\": \"${MCP_LABEL}\"," >&2
 echo "  \"auto_snapshot_label\": \"${AUTO_LABEL}\"," >&2
 echo "  \"worker_label\": \"${WORKER_LABEL}\"," >&2
 echo "  \"keepalive_label\": \"${KEEPALIVE_LABEL}\"," >&2
+echo "  \"watchdog_label\": \"${WATCHDOG_LABEL}\"," >&2
 echo "  \"mlx_label\": \"${MLX_LABEL}\"," >&2
 echo "  \"mcp_port\": ${MCP_PORT}," >&2
 echo "  \"http_token_file\": \"${TOKEN_FILE}\"" >&2

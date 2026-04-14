@@ -49,6 +49,46 @@ function isMutationInProgressError(error) {
   return /mutation key is already in progress/i.test(message);
 }
 
+function shouldNormalizeAttentionResult(result) {
+  if (!result || typeof result !== "object" || Array.isArray(result) || result.ok !== false) {
+    return false;
+  }
+  const status = result.status;
+  if (!status || typeof status !== "object" || Array.isArray(status)) {
+    return false;
+  }
+  const bootstrap = status.bootstrap;
+  const state = status.state;
+  const runtime = status.runtime;
+  const goalAutorun = status.goal_autorun_daemon;
+  return (
+    bootstrap &&
+    typeof bootstrap === "object" &&
+    bootstrap.self_start_ready === true &&
+    state &&
+    typeof state === "object" &&
+    state.enabled === true &&
+    runtime &&
+    typeof runtime === "object" &&
+    runtime.running === true &&
+    goalAutorun &&
+    typeof goalAutorun === "object" &&
+    goalAutorun.running === true
+  );
+}
+
+function normalizeKeepaliveResult(result) {
+  if (!shouldNormalizeAttentionResult(result)) {
+    return result;
+  }
+  return {
+    ...result,
+    ok: true,
+    health_ok: false,
+    attention_only: true,
+  };
+}
+
 export async function runAutonomyKeepaliveOnce({
   repoRoot,
   transport,
@@ -151,7 +191,7 @@ export async function runAutonomyKeepaliveOnce({
       }
     }
 
-    return result;
+    return normalizeKeepaliveResult(result);
   } finally {
     release();
   }

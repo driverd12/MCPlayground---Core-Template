@@ -296,6 +296,7 @@ test("agents_switch on repairs disabled launchd services across a simulated rest
     "com.mcplayground.imprint.autosnapshot",
     "com.mcplayground.imprint.inboxworker",
     "com.mcplayground.autonomy.keepalive",
+    "com.mcplayground.local-adapter.watchdog",
   ];
 
   fs.mkdirSync(fakeBin, { recursive: true });
@@ -416,6 +417,10 @@ esac
     assert.equal(status.launchd.autonomy_keepalive_loaded, true);
     assert.equal(status.launchd.autonomy_keepalive_disabled, false);
     assert.equal(status.launchd.autonomy_keepalive_operational, true);
+    assert.equal(status.switches.local_adapter_watchdog, true);
+    assert.equal(status.launchd.local_adapter_watchdog_loaded, true);
+    assert.equal(status.launchd.local_adapter_watchdog_disabled, false);
+    assert.equal(status.launchd.local_adapter_watchdog_operational, true);
     assert.equal(status.switches.mcp_server, true);
 
     for (const label of labels) {
@@ -430,6 +435,9 @@ esac
     assert.equal(status.switches.autonomy_keepalive, true);
     assert.equal(status.launchd.autonomy_keepalive_disabled, false);
     assert.equal(status.launchd.autonomy_keepalive_operational, true);
+    assert.equal(status.switches.local_adapter_watchdog, true);
+    assert.equal(status.launchd.local_adapter_watchdog_disabled, false);
+    assert.equal(status.launchd.local_adapter_watchdog_operational, true);
     assert.equal(status.launchd.mcp_operational, true);
 
     const launchLog = fs.readFileSync(launchctlLog, "utf8");
@@ -442,11 +450,25 @@ esac
     const keepaliveBootstrapIndex = launchLog.indexOf(
       `launchctl bootstrap gui/${process.getuid()} ${path.join(launchDir, "com.mcplayground.autonomy.keepalive.plist")}`
     );
+    const watchdogEnableIndex = launchLog.indexOf(
+      `launchctl enable gui/${process.getuid()}/com.mcplayground.local-adapter.watchdog`
+    );
+    const watchdogServiceBootoutIndex = launchLog.indexOf(
+      `launchctl bootout gui/${process.getuid()}/com.mcplayground.local-adapter.watchdog`
+    );
+    const watchdogBootstrapIndex = launchLog.indexOf(
+      `launchctl bootstrap gui/${process.getuid()} ${path.join(launchDir, "com.mcplayground.local-adapter.watchdog.plist")}`
+    );
     assert.notEqual(keepaliveEnableIndex, -1);
     assert.notEqual(keepaliveServiceBootoutIndex, -1);
     assert.notEqual(keepaliveBootstrapIndex, -1);
+    assert.notEqual(watchdogEnableIndex, -1);
+    assert.notEqual(watchdogServiceBootoutIndex, -1);
+    assert.notEqual(watchdogBootstrapIndex, -1);
     assert.ok(keepaliveEnableIndex < keepaliveBootstrapIndex);
     assert.ok(keepaliveServiceBootoutIndex < keepaliveBootstrapIndex);
+    assert.ok(watchdogEnableIndex < watchdogBootstrapIndex);
+    assert.ok(watchdogServiceBootoutIndex < watchdogBootstrapIndex);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -574,6 +596,10 @@ printf '{"ok":true,"ready":true}\\n'
     path.join(launchDir, "com.mcplayground.imprint.autosnapshot.plist"),
     "utf8"
   );
+  const watchdogPlist = fs.readFileSync(
+    path.join(launchDir, "com.mcplayground.local-adapter.watchdog.plist"),
+    "utf8"
+  );
   const mcpPlist = fs.readFileSync(
     path.join(launchDir, "com.mcplayground.mcp.server.plist"),
     "utf8"
@@ -589,6 +615,16 @@ printf '{"ok":true,"ready":true}\\n'
   assert.doesNotMatch(keepalivePlist, /autonomy_keepalive\.sh/);
   assert.match(keepalivePlist, /<key>AUTONOMY_KEEPALIVE_HTTP_READY_TIMEOUT_MS<\/key>\s*<string>60000<\/string>/);
   assert.match(keepalivePlist, /<key>AUTONOMY_KEEPALIVE_TOOL_TIMEOUT_MS<\/key>\s*<string>180000<\/string>/);
+  assert.match(watchdogPlist, /<string>.*node.*<\/string>/);
+  assert.match(
+    watchdogPlist,
+    new RegExp(
+      `<string>${escapeRegExp(path.join(REPO_ROOT, "scripts", "local_adapter_watchdog.mjs"))}<\\/string>`
+    )
+  );
+  assert.match(watchdogPlist, /<string>--transport<\/string>\s*<string>http<\/string>/);
+  assert.match(watchdogPlist, /<string>--max-soak-age-minutes<\/string>\s*<string>240<\/string>/);
+  assert.match(watchdogPlist, /<string>--cycles<\/string>\s*<string>1<\/string>/);
 
   assert.match(autosnapshotPlist, /<string>.*node.*<\/string>/);
   assert.match(

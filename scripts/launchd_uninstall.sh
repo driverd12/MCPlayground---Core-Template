@@ -9,12 +9,14 @@ MCP_LABEL="com.mcplayground.mcp.server"
 AUTO_LABEL="com.mcplayground.imprint.autosnapshot"
 WORKER_LABEL="com.mcplayground.imprint.inboxworker"
 KEEPALIVE_LABEL="com.mcplayground.autonomy.keepalive"
+WATCHDOG_LABEL="com.mcplayground.local-adapter.watchdog"
 MLX_LABEL="com.mcplayground.mlx.server"
 
 MCP_PLIST="${LAUNCH_DIR}/${MCP_LABEL}.plist"
 AUTO_PLIST="${LAUNCH_DIR}/${AUTO_LABEL}.plist"
 WORKER_PLIST="${LAUNCH_DIR}/${WORKER_LABEL}.plist"
 KEEPALIVE_PLIST="${LAUNCH_DIR}/${KEEPALIVE_LABEL}.plist"
+WATCHDOG_PLIST="${LAUNCH_DIR}/${WATCHDOG_LABEL}.plist"
 MLX_PLIST="${LAUNCH_DIR}/${MLX_LABEL}.plist"
 
 bootout_service_target() {
@@ -39,6 +41,7 @@ remove_launch_agent "${MCP_PLIST}" "${MCP_LABEL}"
 remove_launch_agent "${AUTO_PLIST}" "${AUTO_LABEL}"
 remove_launch_agent "${WORKER_PLIST}" "${WORKER_LABEL}"
 remove_launch_agent "${KEEPALIVE_PLIST}" "${KEEPALIVE_LABEL}"
+remove_launch_agent "${WATCHDOG_PLIST}" "${WATCHDOG_LABEL}"
 remove_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
 
-echo "{\"ok\":true,\"removed\":[\"${MCP_LABEL}\",\"${AUTO_LABEL}\",\"${WORKER_LABEL}\",\"${KEEPALIVE_LABEL}\",\"${MLX_LABEL}\"]}" >&2
+echo "{\"ok\":true,\"removed\":[\"${MCP_LABEL}\",\"${AUTO_LABEL}\",\"${WORKER_LABEL}\",\"${KEEPALIVE_LABEL}\",\"${WATCHDOG_LABEL}\",\"${MLX_LABEL}\"]}" >&2

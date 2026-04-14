@@ -139,7 +139,7 @@ wait_for_bootstrap_self_start_ready() {
     fi
     sleep 1
   done
-  return 0
+  return 1
 }
 
 bootstrap_already_ready() {
@@ -154,6 +154,20 @@ bootstrap_already_ready() {
     status_json="$(bootstrap_status_stdio 2>/dev/null || true)"
   fi
   [[ -n "${status_json}" ]] && status_reports_self_start_ready "${status_json}"
+}
+
+current_bootstrap_status_json() {
+  local ready_json="" status_json=""
+  ready_json="$(fetch_ready_json)"
+  if [[ -n "${ready_json}" ]]; then
+    status_json="$(bootstrap_status_http 2>/dev/null || true)"
+    if [[ -z "${status_json}" ]]; then
+      status_json="$(bootstrap_status_from_ready_json "${ready_json}" 2>/dev/null || true)"
+    fi
+  else
+    status_json="$(bootstrap_status_stdio 2>/dev/null || true)"
+  fi
+  printf '%s' "${status_json}"
 }
 
 parse_csv_arg() {
@@ -478,6 +492,8 @@ ensure_autonomy_entry() {
   local quiet="${1:-1}"
   local args_json
   local bootstrap_result=""
+  local bootstrap_stderr=""
+  local bootstrap_failed=0
   args_json="$(node --input-type=module - \
     "${AUTONOMY_BOOTSTRAP_RUN_IMMEDIATELY:-0}" \
     "${TRICHAT_RING_LEADER_AUTOSTART:-1}" \
@@ -510,13 +526,44 @@ process.stdout.write(
 );
 NODE
 )"
-  if [[ "${quiet}" == "1" ]]; then
-    call_tool_json_retry_on_timeout autonomy.bootstrap "${args_json}" "${AUTONOMY_ENSURE_MAX_ATTEMPTS:-3}" >/dev/null
+  local stdout_file stderr_file
+  stdout_file="$(mktemp)"
+  stderr_file="$(mktemp)"
+  if call_tool_json_retry_on_timeout autonomy.bootstrap "${args_json}" "${AUTONOMY_ENSURE_MAX_ATTEMPTS:-3}" >"${stdout_file}" 2>"${stderr_file}"; then
+    if [[ "${quiet}" != "1" ]]; then
+      bootstrap_result="$(cat "${stdout_file}")"
+    fi
   else
-    bootstrap_result="$(call_tool_json_retry_on_timeout autonomy.bootstrap "${args_json}" "${AUTONOMY_ENSURE_MAX_ATTEMPTS:-3}")"
+    bootstrap_failed=1
+    bootstrap_stderr="$(cat "${stderr_file}")"
   fi
+  rm -f "${stdout_file}" "${stderr_file}"
   start_maintain_entry 1 0 0
   wait_for_bootstrap_self_start_ready
+  if (( bootstrap_failed )); then
+    local recovered_status=""
+    recovered_status="$(current_bootstrap_status_json)"
+    if [[ -n "${recovered_status}" ]] && status_reports_self_start_ready "${recovered_status}"; then
+      if [[ "${quiet}" != "1" ]]; then
+        bootstrap_result="$(node --input-type=module - "${recovered_status}" "${bootstrap_stderr}" <<'NODE'
+const status = JSON.parse(process.argv[2] || "{}");
+const warning = String(process.argv[3] || "").trim();
+process.stdout.write(
+  JSON.stringify({
+    ok: true,
+    recovered: true,
+    warning: warning || null,
+    status,
+  })
+);
+NODE
+)"
+      fi
+    else
+      printf '%s\n' "${bootstrap_stderr}" >&2
+      return 1
+    fi
+  fi
   if [[ "${quiet}" != "1" ]]; then
     printf '%s\n' "${bootstrap_result}"
   fi

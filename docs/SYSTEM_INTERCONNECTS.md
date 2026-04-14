@@ -125,7 +125,7 @@ The Office GUI is a visibility surface for operators. Its readiness tracks the M
 
 Patient Zero full authority is also gated by macOS-owned permissions. The repo now exposes that explicitly through `macos_authority_audit.mjs` instead of implying that an armed banner bypasses Accessibility, Screen Recording, microphone/listen-lane consent, Full Disk Access, or the `mcagent` root-helper + secret path.
 
-The local adapter lane is now split into seven explicit phases: `prepare -> train -> promote -> integrate -> cutover -> soak -> watchdog`. `Integrate` makes a candidate reachable; `cutover` is the separate router-default switch with post-cutover verification and rollback; `soak` is the bounded confidence pass that keeps comparing the new primary against the rollback path before you trust it as a settled default; `watchdog` is the lightweight freshness-enforcement path that reruns soak automatically when that proof gets stale.
+The local adapter lane is now split into seven explicit phases: `prepare -> train -> promote -> integrate -> cutover -> soak -> watchdog`. `Integrate` makes a candidate reachable; `cutover` is the separate router-default switch with post-cutover verification and rollback; `soak` is the bounded confidence pass that keeps comparing the new primary against the rollback path before you trust it as a settled default; `watchdog` is the lightweight freshness-enforcement path that reruns soak automatically when that proof gets stale. On macOS, that watchdog now has a dedicated launchd agent, so the freshness contract survives login churn and machine restarts instead of depending on an interactive shell.
 
 ## 2. Layered Runtime Stack
 

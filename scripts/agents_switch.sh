@@ -14,11 +14,13 @@ MCP_LABEL="com.mcplayground.mcp.server"
 AUTO_LABEL="com.mcplayground.imprint.autosnapshot"
 WORKER_LABEL="com.mcplayground.imprint.inboxworker"
 KEEPALIVE_LABEL="com.mcplayground.autonomy.keepalive"
+WATCHDOG_LABEL="com.mcplayground.local-adapter.watchdog"
 MLX_LABEL="com.mcplayground.mlx.server"
 MCP_PLIST="${LAUNCH_DIR}/${MCP_LABEL}.plist"
 AUTO_PLIST="${LAUNCH_DIR}/${AUTO_LABEL}.plist"
 WORKER_PLIST="${LAUNCH_DIR}/${WORKER_LABEL}.plist"
 KEEPALIVE_PLIST="${LAUNCH_DIR}/${KEEPALIVE_LABEL}.plist"
+WATCHDOG_PLIST="${LAUNCH_DIR}/${WATCHDOG_LABEL}.plist"
 MLX_PLIST="${LAUNCH_DIR}/${MLX_LABEL}.plist"
 GUI_FALLBACK_SESSION="mcplayground-http"
 TOKEN_FILE="${REPO_ROOT}/data/imprint/http_bearer_token"
@@ -260,13 +262,14 @@ wait_for_mcp_http() {
 
 case "${ACTION}" in
   on)
-    if [[ ! -f "${MCP_PLIST}" || ! -f "${AUTO_PLIST}" || ! -f "${WORKER_PLIST}" || ! -f "${KEEPALIVE_PLIST}" || ( "${TRICHAT_MLX_SERVER_ENABLED:-0}" == "1" && ! -f "${MLX_PLIST}" ) ]]; then
+    if [[ ! -f "${MCP_PLIST}" || ! -f "${AUTO_PLIST}" || ! -f "${WORKER_PLIST}" || ! -f "${KEEPALIVE_PLIST}" || ! -f "${WATCHDOG_PLIST}" || ( "${TRICHAT_MLX_SERVER_ENABLED:-0}" == "1" && ! -f "${MLX_PLIST}" ) ]]; then
       "${REPO_ROOT}/scripts/launchd_install.sh"
     else
       launchctl enable "${DOMAIN}/${MCP_LABEL}" >/dev/null 2>&1 || true
       launchctl enable "${DOMAIN}/${AUTO_LABEL}" >/dev/null 2>&1 || true
       launchctl enable "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
       launchctl enable "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
+      launchctl enable "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
       if [[ -f "${MLX_PLIST}" ]]; then
         launchctl enable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
       fi
@@ -274,6 +277,7 @@ case "${ACTION}" in
       reset_launch_agent "${AUTO_PLIST}" "${AUTO_LABEL}"
       reset_launch_agent "${WORKER_PLIST}" "${WORKER_LABEL}"
       reset_launch_agent "${KEEPALIVE_PLIST}" "${KEEPALIVE_LABEL}"
+      reset_launch_agent "${WATCHDOG_PLIST}" "${WATCHDOG_LABEL}"
       reset_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
       clear_repo_http_runtime
       bootstrap_if_exists "${MCP_PLIST}"
@@ -282,10 +286,12 @@ case "${ACTION}" in
       bootstrap_if_exists "${AUTO_PLIST}"
       bootstrap_if_exists "${WORKER_PLIST}"
       bootstrap_if_exists "${KEEPALIVE_PLIST}"
+      bootstrap_if_exists "${WATCHDOG_PLIST}"
       bootstrap_if_exists "${MLX_PLIST}"
       launchctl kickstart -k "${DOMAIN}/${AUTO_LABEL}" >/dev/null 2>&1 || true
       launchctl kickstart -k "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
       launchctl kickstart -k "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
+      launchctl kickstart -k "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
       if [[ -f "${MLX_PLIST}" ]]; then
         launchctl kickstart -k "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
       fi
@@ -297,11 +303,13 @@ case "${ACTION}" in
     reset_launch_agent "${WORKER_PLIST}" "${WORKER_LABEL}"
     reset_launch_agent "${AUTO_PLIST}" "${AUTO_LABEL}"
     reset_launch_agent "${MCP_PLIST}" "${MCP_LABEL}"
+    reset_launch_agent "${WATCHDOG_PLIST}" "${WATCHDOG_LABEL}"
     reset_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
     launchctl disable "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
     launchctl disable "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
     launchctl disable "${DOMAIN}/${AUTO_LABEL}" >/dev/null 2>&1 || true
     launchctl disable "${DOMAIN}/${MCP_LABEL}" >/dev/null 2>&1 || true
+    launchctl disable "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
     launchctl disable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
     ;;
   status)
@@ -322,21 +330,25 @@ MCP_RUNNING=false
 AUTO_AGENT_LOADED=false
 WORKER_AGENT_LOADED=false
 KEEPALIVE_AGENT_LOADED=false
+WATCHDOG_AGENT_LOADED=false
 MLX_AGENT_LOADED=false
 MCP_DISABLED=false
 AUTO_AGENT_DISABLED=false
 WORKER_AGENT_DISABLED=false
 KEEPALIVE_AGENT_DISABLED=false
+WATCHDOG_AGENT_DISABLED=false
 MLX_AGENT_DISABLED=false
 if is_loaded "${MCP_LABEL}"; then MCP_RUNNING=true; fi
 if is_loaded "${AUTO_LABEL}"; then AUTO_AGENT_LOADED=true; fi
 if is_loaded "${WORKER_LABEL}"; then WORKER_AGENT_LOADED=true; fi
 if is_loaded "${KEEPALIVE_LABEL}"; then KEEPALIVE_AGENT_LOADED=true; fi
+if is_loaded "${WATCHDOG_LABEL}"; then WATCHDOG_AGENT_LOADED=true; fi
 if is_loaded "${MLX_LABEL}"; then MLX_AGENT_LOADED=true; fi
 if is_disabled "${MCP_LABEL}"; then MCP_DISABLED=true; fi
 if is_disabled "${AUTO_LABEL}"; then AUTO_AGENT_DISABLED=true; fi
 if is_disabled "${WORKER_LABEL}"; then WORKER_AGENT_DISABLED=true; fi
 if is_disabled "${KEEPALIVE_LABEL}"; then KEEPALIVE_AGENT_DISABLED=true; fi
+if is_disabled "${WATCHDOG_LABEL}"; then WATCHDOG_AGENT_DISABLED=true; fi
 if is_disabled "${MLX_LABEL}"; then MLX_AGENT_DISABLED=true; fi
 
 AUTO_SNAPSHOT_STATUS="{}"
@@ -377,6 +389,9 @@ node --input-type=module - <<'NODE' \
 "${KEEPALIVE_LABEL}" \
 "${KEEPALIVE_AGENT_LOADED}" \
 "${KEEPALIVE_AGENT_DISABLED}" \
+"${WATCHDOG_LABEL}" \
+"${WATCHDOG_AGENT_LOADED}" \
+"${WATCHDOG_AGENT_DISABLED}" \
 "${MLX_LABEL}" \
 "${MLX_AGENT_LOADED}" \
 "${MLX_AGENT_DISABLED}" \
@@ -384,6 +399,7 @@ node --input-type=module - <<'NODE' \
 "${AUTO_PLIST}" \
 "${WORKER_PLIST}" \
 "${KEEPALIVE_PLIST}" \
+"${WATCHDOG_PLIST}" \
 "${MLX_PLIST}" \
 "${AUTO_SNAPSHOT_STATUS}" \
 "${AUTONOMY_STATUS}"
@@ -402,6 +418,9 @@ const [
   keepaliveLabel,
   keepaliveAgentLoaded,
   keepaliveAgentDisabled,
+  watchdogLabel,
+  watchdogAgentLoaded,
+  watchdogAgentDisabled,
   mlxLabel,
   mlxAgentLoaded,
   mlxAgentDisabled,
@@ -409,6 +428,7 @@ const [
   autoPlist,
   workerPlist,
   keepalivePlist,
+  watchdogPlist,
   mlxPlist,
   autoSnapshotStatusRaw,
   autonomyStatusRaw,
@@ -437,6 +457,7 @@ const payload = {
     auto_snapshot: autoAgentLoaded === 'true' && autoAgentDisabled !== 'true',
     inbox_worker: workerAgentLoaded === 'true' && workerAgentDisabled !== 'true',
     autonomy_keepalive: keepaliveAgentLoaded === 'true' && keepaliveAgentDisabled !== 'true',
+    local_adapter_watchdog: watchdogAgentLoaded === 'true' && watchdogAgentDisabled !== 'true',
     mlx_server: mlxAgentLoaded === 'true' && mlxAgentDisabled !== 'true',
   },
   launchd: {
@@ -460,6 +481,11 @@ const payload = {
     autonomy_keepalive_disabled: keepaliveAgentDisabled === 'true',
     autonomy_keepalive_operational: keepaliveAgentLoaded === 'true' && keepaliveAgentDisabled !== 'true',
     autonomy_keepalive_plist: keepalivePlist,
+    local_adapter_watchdog_label: watchdogLabel,
+    local_adapter_watchdog_loaded: watchdogAgentLoaded === 'true',
+    local_adapter_watchdog_disabled: watchdogAgentDisabled === 'true',
+    local_adapter_watchdog_operational: watchdogAgentLoaded === 'true' && watchdogAgentDisabled !== 'true',
+    local_adapter_watchdog_plist: watchdogPlist,
     mlx_label: mlxLabel,
     mlx_loaded: mlxAgentLoaded === 'true',
     mlx_disabled: mlxAgentDisabled === 'true',

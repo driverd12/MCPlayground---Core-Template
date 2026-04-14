@@ -19,6 +19,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 eval "$("${REPO_ROOT}/scripts/export_dotenv_env.sh" "${REPO_ROOT}")"
 
+if [[ "${ACTION}" == "maintain" ]]; then
+  exec node "${REPO_ROOT}/scripts/autonomy_keepalive_runner.mjs"
+fi
+
 TRANSPORT="${AUTONOMY_BOOTSTRAP_TRANSPORT:-${TRICHAT_RING_LEADER_TRANSPORT:-}}"
 if [[ -z "${TRANSPORT}" ]]; then
   if [[ -n "${MCP_HTTP_BEARER_TOKEN:-}" ]]; then
