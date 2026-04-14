@@ -632,6 +632,7 @@ Core runtime tools include:
 - Memory and continuity: `memory.*`, `transcript.*`, `who_knows`, `knowledge.query`, `retrieval.hybrid`
 - Governance and safety: `policy.evaluate`, `preflight.check`, `postflight.verify`, `mutation.check`
 - Durable execution: `run.*`, `task.*`, `lock.*`
+- Permanent regression capture: `golden.case_capture` turns research, incidents, and traces into verified golden cases that can seed future benchmark/eval fixtures.
 - Agentic kernel: `goal.*` including `goal.execute`, `goal.autorun`, and `goal.autorun_daemon`, `kernel.summary`, `plan.*`, `artifact.*`, `experiment.*`, `event.*`, `agent.session.*`, `dispatch.autorun`
 - Workflow methodology: `playbook.*` including `playbook.run`, `pack.hooks.list`, `pack.plan.generate`, `pack.verify.run`
 - Decision and incident logging: `adr.create`, `decision.link`, `incident.*`

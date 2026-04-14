@@ -48,6 +48,7 @@ test("server starts with default agentic workflow hooks and exposes core + TriCh
     assert.equal(names.has("artifact.list"), true);
     assert.equal(names.has("artifact.link"), true);
     assert.equal(names.has("artifact.bundle"), true);
+    assert.equal(names.has("golden.case_capture"), true);
     assert.equal(names.has("experiment.create"), true);
     assert.equal(names.has("experiment.get"), true);
     assert.equal(names.has("experiment.list"), true);

@@ -197,6 +197,7 @@ import { simulateWorkflow, simulateWorkflowSchema } from "./tools/simulate.js";
 import { healthPolicy, healthPolicySchema, healthStorage, healthStorageSchema, healthTools, healthToolsSchema } from "./tools/health.js";
 import { storageBackups, storageBackupsSchema } from "./tools/storage_maintenance.js";
 import { incidentOpen, incidentOpenSchema, incidentTimeline, incidentTimelineSchema } from "./tools/incident.js";
+import { goldenCaseCapture, goldenCaseCaptureSchema } from "./tools/golden_case.js";
 import { queryPlan, queryPlanSchema } from "./tools/query_plan.js";
 import { migrationStatus, migrationStatusSchema } from "./tools/migration.js";
 import { runIdempotentMutation } from "./tools/mutation.js";
@@ -3160,6 +3161,13 @@ registerTool("incident.open", "Create a local incident record with opening timel
 
 registerTool("incident.timeline", "Read incident timeline events.", incidentTimelineSchema, (input) =>
   incidentTimeline(storage, input)
+);
+
+registerTool(
+  "golden.case_capture",
+  "Capture a durable golden case from research, failures, or traces and optionally seed a benchmark case.",
+  goldenCaseCaptureSchema,
+  (input) => goldenCaseCapture(storage, input)
 );
 
 registerTool("query.plan", "Produce a confidence-scored query plan with evidence citations.", queryPlanSchema, (input) =>
