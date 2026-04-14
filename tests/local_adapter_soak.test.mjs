@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { resolvePrimarySoakCandidate } from "../scripts/local_adapter_soak.mjs";
+import {
+  buildSoakHeuristicConfig,
+  evaluateSoakRollbackHeuristics,
+  resolvePrimarySoakCandidate,
+} from "../scripts/local_adapter_soak.mjs";
 
 function sampleManifest(status = "adapter_primary_mlx") {
   return {
@@ -10,6 +14,8 @@ function sampleManifest(status = "adapter_primary_mlx") {
     promotion_result: {
       eval_suite_id: "local-adapter-eval-suite",
       benchmark_suite_id: "local-adapter-benchmark-suite",
+      reward_score: 82,
+      baseline_score: 76,
     },
     integration_result: {
       target: status.includes("ollama") ? "ollama" : "mlx",
@@ -61,4 +67,57 @@ test("resolvePrimarySoakCandidate returns the active primary backend and rollbac
   assert.equal(candidate.backend_id, "mlx-adapter-local-adapter-sample");
   assert.equal(candidate.previous_default_backend_id, "ollama-qwen3-5-35b-a3b-coding-nvfp4");
   assert.equal(candidate.eval_suite_id, "local-adapter-eval-suite");
+  assert.equal(candidate.benchmark_suite_id, "local-adapter-benchmark-suite");
+  assert.equal(candidate.promotion_reward_score, 82);
+  assert.equal(candidate.baseline_score, 76);
+});
+
+test("buildSoakHeuristicConfig returns bounded defaults", () => {
+  const config = buildSoakHeuristicConfig({});
+  assert.deepEqual(config, {
+    max_reward_regression_vs_accepted: 5,
+    min_reward_delta_vs_baseline: 0,
+    max_consecutive_soft_regressions: 2,
+  });
+});
+
+test("evaluateSoakRollbackHeuristics requests rollback on severe reward regression", () => {
+  const heuristics = evaluateSoakRollbackHeuristics({
+    cycleResults: [
+      {
+        cycle: 1,
+        benchmark_metric_value: 74,
+      },
+    ],
+    promotionRewardScore: 82,
+    baselineScore: 76,
+    config: buildSoakHeuristicConfig({}),
+  });
+  assert.equal(heuristics.rollback_required, true);
+  assert.ok(heuristics.reasons.includes("reward_regressed_from_accepted_score"));
+  assert.ok(heuristics.reasons.includes("reward_below_baseline_contract"));
+});
+
+test("evaluateSoakRollbackHeuristics tolerates one soft regression but trips on repeated regressions", () => {
+  const config = buildSoakHeuristicConfig({});
+  const first = evaluateSoakRollbackHeuristics({
+    cycleResults: [{ cycle: 1, benchmark_metric_value: 81 }],
+    promotionRewardScore: 82,
+    baselineScore: 76,
+    config,
+  });
+  assert.equal(first.rollback_required, false);
+  assert.equal(first.metrics.consecutive_soft_regressions, 1);
+
+  const second = evaluateSoakRollbackHeuristics({
+    cycleResults: [
+      { cycle: 1, benchmark_metric_value: 81 },
+      { cycle: 2, benchmark_metric_value: 81 },
+    ],
+    promotionRewardScore: 82,
+    baselineScore: 76,
+    config,
+  });
+  assert.equal(second.rollback_required, true);
+  assert.ok(second.reasons.includes("consecutive_soft_regressions_exceeded"));
 });

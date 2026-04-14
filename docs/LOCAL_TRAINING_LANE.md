@@ -84,7 +84,8 @@ The registry entry is appended to `data/training/model_registry.json` with:
 `npm run local:training:soak` is the bounded comparative confidence pass for the new primary backend.
 
 - It only runs after the adapter is already the active router default.
-- It reruns the eval suite and route verification for several cycles, using the recorded rollback backend as the recovery target.
+- It reruns the benchmark suite, eval suite, and route verification for several cycles, using the recorded rollback backend as the recovery target.
+- It compares each cycle's reward score against the accepted promotion score and the stored baseline contract, then trips deterministic rollback if a severe regression or repeated soft regressions appear.
 - If any cycle fails, it restores the previous router default immediately and records the rollback in both the manifest and the registration artifact.
 - If every cycle passes, it records a green primary-soak result without changing the rollback path silently.
 

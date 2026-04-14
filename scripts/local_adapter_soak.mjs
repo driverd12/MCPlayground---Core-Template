@@ -92,6 +92,10 @@ function readString(value) {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function readNumber(value) {
+  return Number.isFinite(value) ? Number(value) : null;
+}
+
 function latestManifestPath() {
   const registry = readJson(REGISTRY_PATH);
   const latest = Array.isArray(registry?.runs) ? registry.runs[0] : null;
@@ -252,9 +256,99 @@ export function resolvePrimarySoakCandidate(manifest, registration) {
     readString(manifest?.cutover_result?.previous_default_backend_id) ||
     readString(registration?.cutover_result?.previous_default_backend_id) ||
     null;
+  const promotionRewardScore = readNumber(manifest?.promotion_result?.reward_score);
+  const baselineScore = readNumber(manifest?.promotion_result?.baseline_score);
   return {
     ...candidate,
     previous_default_backend_id: previousDefaultBackendId,
+    promotion_reward_score: promotionRewardScore,
+    baseline_score: baselineScore,
+  };
+}
+
+export function buildSoakHeuristicConfig(manifest) {
+  const contract =
+    manifest?.primary_soak_contract && typeof manifest.primary_soak_contract === "object"
+      ? manifest.primary_soak_contract
+      : {};
+  const maxRewardRegression =
+    Number.isFinite(contract.max_reward_regression_vs_accepted) && Number(contract.max_reward_regression_vs_accepted) >= 0
+      ? Number(contract.max_reward_regression_vs_accepted)
+      : 5;
+  const minDeltaVsBaseline =
+    Number.isFinite(contract.min_reward_delta_vs_baseline) ? Number(contract.min_reward_delta_vs_baseline) : 0;
+  const maxConsecutiveSoftRegressions =
+    Number.isFinite(contract.max_consecutive_soft_regressions) && Number(contract.max_consecutive_soft_regressions) >= 1
+      ? Math.min(5, Math.max(1, Number(contract.max_consecutive_soft_regressions)))
+      : 2;
+  return {
+    max_reward_regression_vs_accepted: maxRewardRegression,
+    min_reward_delta_vs_baseline: minDeltaVsBaseline,
+    max_consecutive_soft_regressions: maxConsecutiveSoftRegressions,
+  };
+}
+
+function isSoftRegressionEntry(entry, { promotionRewardScore, baselineScore }) {
+  const reward = readNumber(entry?.benchmark_metric_value);
+  if (reward === null) {
+    return false;
+  }
+  if (promotionRewardScore !== null && reward < promotionRewardScore) {
+    return true;
+  }
+  if (baselineScore !== null && reward < baselineScore) {
+    return true;
+  }
+  return false;
+}
+
+export function evaluateSoakRollbackHeuristics({ cycleResults, promotionRewardScore, baselineScore, config }) {
+  const latest = Array.isArray(cycleResults) && cycleResults.length > 0 ? cycleResults[cycleResults.length - 1] : null;
+  if (!latest) {
+    return {
+      rollback_required: false,
+      reasons: [],
+      metrics: {
+        benchmark_metric_value: null,
+        reward_regression_vs_accepted: null,
+        reward_delta_vs_baseline: null,
+        consecutive_soft_regressions: 0,
+      },
+    };
+  }
+
+  const reward = readNumber(latest.benchmark_metric_value);
+  const regressionVsAccepted = reward !== null && promotionRewardScore !== null ? Number((promotionRewardScore - reward).toFixed(2)) : null;
+  const deltaVsBaseline = reward !== null && baselineScore !== null ? Number((reward - baselineScore).toFixed(2)) : null;
+
+  let consecutiveSoftRegressions = 0;
+  for (let index = cycleResults.length - 1; index >= 0; index -= 1) {
+    if (!isSoftRegressionEntry(cycleResults[index], { promotionRewardScore, baselineScore })) {
+      break;
+    }
+    consecutiveSoftRegressions += 1;
+  }
+
+  const reasons = [];
+  if (regressionVsAccepted !== null && regressionVsAccepted > config.max_reward_regression_vs_accepted) {
+    reasons.push("reward_regressed_from_accepted_score");
+  }
+  if (deltaVsBaseline !== null && deltaVsBaseline < config.min_reward_delta_vs_baseline) {
+    reasons.push("reward_below_baseline_contract");
+  }
+  if (consecutiveSoftRegressions >= config.max_consecutive_soft_regressions) {
+    reasons.push("consecutive_soft_regressions_exceeded");
+  }
+
+  return {
+    rollback_required: reasons.length > 0,
+    reasons,
+    metrics: {
+      benchmark_metric_value: reward,
+      reward_regression_vs_accepted: regressionVsAccepted,
+      reward_delta_vs_baseline: deltaVsBaseline,
+      consecutive_soft_regressions: consecutiveSoftRegressions,
+    },
   };
 }
 
@@ -294,6 +388,7 @@ async function main() {
     const transport =
       args.transport === "http" ? "http" : args.transport === "stdio" ? "stdio" : resolveTransport(REPO_ROOT);
     const mutationCounter = { value: 0 };
+    const heuristicConfig = buildSoakHeuristicConfig(manifest);
     const previousEnv = readEnvSnapshot(["TRICHAT_OLLAMA_MODEL", "TRICHAT_LOCAL_INFERENCE_PROVIDER"]);
     const previousTimeout = process.env.MCP_TOOL_CALL_TIMEOUT_MS;
     const desiredTimeoutMs = transport === "http" ? 90000 : 150000;
@@ -308,6 +403,15 @@ async function main() {
     try {
       for (let index = 0; index < args.cycles; index += 1) {
         try {
+          const benchmarkResult = callTool(REPO_ROOT, {
+            tool: "benchmark.run",
+            args: {
+              mutation: createMutation(manifest.candidate_id, `cycle-${index + 1}-benchmark`, mutationCounter),
+              suite_id: candidate.benchmark_suite_id,
+              candidate_label: candidate.backend_id,
+            },
+            transport,
+          });
           const evalResult = callTool(REPO_ROOT, {
             tool: "eval.run",
             args: {
@@ -342,14 +446,24 @@ async function main() {
             evalResult,
             bootstrapStatus,
           });
-          cycles.push({
+          const cycleEntry = {
             cycle: index + 1,
             evaluated_at: new Date().toISOString(),
+            benchmark_run_id: benchmarkResult?.run_id ?? null,
+            benchmark_metric_value: readNumber(benchmarkResult?.aggregate_metric_value),
             eval_run_id: evalResult?.run_id ?? null,
             aggregate_metric_value: evalResult?.aggregate_metric_value ?? null,
             verification: verification.verification,
+          };
+          cycles.push(cycleEntry);
+          const heuristics = evaluateSoakRollbackHeuristics({
+            cycleResults: cycles,
+            promotionRewardScore: candidate.promotion_reward_score,
+            baselineScore: candidate.baseline_score,
+            config: heuristicConfig,
           });
-          if (!verification.ok) {
+          cycleEntry.heuristics = heuristics;
+          if (benchmarkResult?.ok !== true || !verification.ok || heuristics.rollback_required) {
             soakPassed = false;
             rollback = rollbackRouterDefault({
               previousDefaultBackendId: candidate.previous_default_backend_id,
@@ -374,6 +488,8 @@ async function main() {
           cycles.push({
             cycle: index + 1,
             evaluated_at: new Date().toISOString(),
+            benchmark_run_id: null,
+            benchmark_metric_value: null,
             eval_run_id: null,
             aggregate_metric_value: null,
             verification: {
@@ -417,6 +533,7 @@ async function main() {
       completed_at: new Date().toISOString(),
       candidate_backend_id: candidate.backend_id,
       previous_default_backend_id: candidate.previous_default_backend_id,
+      heuristic_contract: heuristicConfig,
       cycle_results: cycles,
       rollback,
     };
