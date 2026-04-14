@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   parseOllamaList,
   resolvePreferredModelOrder,
+  shouldPromoteModel,
   summarizeCaseRuns,
   validateModelHostCompatibility,
 } from "../scripts/ollama_mlx_postpull.mjs";
@@ -64,4 +65,28 @@ test("validateModelHostCompatibility rejects the MLX preview path on non-Apple-S
   assert.equal(accepted.ok, true);
   assert.equal(generic.ok, true);
   assert.equal(generic.requires_apple_silicon, false);
+});
+
+test("shouldPromoteModel only promotes fully passing capability soaks", () => {
+  assert.equal(
+    shouldPromoteModel({
+      total_cases: 5,
+      failed_cases: 0,
+    }),
+    true
+  );
+  assert.equal(
+    shouldPromoteModel({
+      total_cases: 5,
+      failed_cases: 1,
+    }),
+    false
+  );
+  assert.equal(
+    shouldPromoteModel({
+      total_cases: 0,
+      failed_cases: 0,
+    }),
+    false
+  );
 });

@@ -94,6 +94,9 @@ MCP_DOMAIN_PACKS=none
 
 ```bash
 npm run doctor
+npm run doctor:macos:authority   # macOS only; explicit Patient Zero authority audit
+npm run local:training:status
+npm run local:training:bootstrap # Apple Silicon only; installs repo-local MLX trainer modules
 npm test
 ```
 
@@ -182,12 +185,15 @@ For full client examples, see [IDE + Agent Setup Guide](./IDE_AGENT_SETUP.md).
 - Version mismatch on bootstrap: switch Node with `nvm use`, `asdf`, or `mise`; switch Python with `pyenv`, `asdf`, or your platform package manager, then rerun `npm run bootstrap:env`.
 - Automated first-run remediation: run `npm run bootstrap:env:install` to install the pinned runtime prerequisites for the current supported platform profile.
 - Office GUI stutters or a browser reload hangs: run `npm run agents:off && npm run agents:on` to restart the launchd HTTP runner. The runner defaults office snapshot refreshes to a separate STDIO child process so cached GUI reads do not block `/health`, `/ready`, or other MCP client traffic.
+- Launchd feels wedged after a reboot, login churn, or repo move: `npm run agents:on` now clears both plist-bound and label-bound launchctl state before re-bootstrap, and `./scripts/agents_switch.sh status` plus `npm run production:doctor` now flag disabled keepalive agents instead of treating them as healthy.
 - Office GUI vs Patient Zero browser lane: the `/office/` operator surface is a general visibility UI and should stay launchable whenever the MCP HTTP surface is healthy, even if Patient Zero browser automation is degraded. Treat those as separate signals.
 - `mcp_tool_call` and office snapshots: `office.snapshot` now uses a shorter bounded timeout and falls back to the local office snapshot cache instead of hanging for a full minute when the direct stdio path is overloaded. When the last truthful cache is older than the normal stale window, the HTTP office route still serves it as explicitly expired state while a background refresh runs.
 - `npm run production:doctor` is singleton-scoped now. If another readiness run is already active, the second invocation exits instead of stacking more long-lived probe processes on top of the first.
 - `npm run production:doctor` also reaps orphan repo-owned `dist/server.js` workers before probing, so stale stdio children do not accumulate and distort the Office or readiness surfaces.
 - Large SQLite startup strategy: once the hub DB grows past the small-startup thresholds, startup no longer silently skips integrity and backup work. It downgrades to a lightweight large-DB probe and writes a recoverable bundle snapshot of the main database plus any WAL/SHM artifacts.
 - Apple Silicon Ollama MLX preview: the March 30, 2026 Ollama MLX announcement uses `qwen3.5:35b-a3b-coding-nvfp4` on Ollama `0.19+` and recommends more than 32 GB of unified memory. `npm run doctor` now reports whether the local Mac clears those gates before you spend time pulling the model.
-- Apple Silicon-only setup path: run `npm run ollama:mlx:preview` after upgrading Ollama. The command refuses to run on Linux or Windows and updates `.env` to prefer the pulled `qwen3.5:35b-a3b-coding-nvfp4` model for local Ollama routing.
-- After that pull completes, the repo automatically runs a post-pull soak and imprint cycle. It writes a capability report into `data/imprint/reports/`, updates the default imprint profile to prefer the active local Ollama model, snapshots the result, and appends a distilled memory entry. Re-run that manually with `npm run ollama:mlx:postpull`. The runner is single-instance per model and skips duplicate starts cleanly.
-- This is an operator-visible knowledge/bootstrap path, not a hidden weight fine-tune. The durable state lives in the local MCP memory/imprint layer so other local agents can reuse it truthfully.
+- Apple Silicon-only setup path: run `npm run ollama:mlx:preview` after upgrading Ollama. The command refuses to run on Linux or Windows and only pulls the candidate model. It does not cut the router over immediately.
+- After that pull completes, the repo automatically runs a post-pull soak and imprint cycle. It writes a capability report into `data/imprint/reports/`, updates imprint preferences, snapshots the result, and appends a distilled memory entry. Re-run that manually with `npm run ollama:mlx:postpull`. The runner is single-instance per model and only promotes the candidate into `.env` when the capability soak passes every required case.
+- macOS authority audit: run `npm run doctor:macos:authority` before treating Patient Zero as full-authority-ready. It audits the active console session, Accessibility, Screen Recording, Full Disk Access visibility, and the `mcagent` root helper path. It does not bypass OS prompts; it makes them explicit.
+- Local adapter lane: run `npm run local:training:bootstrap` on Apple Silicon to install the repo-local MLX trainer backend into `.venv-mlx`, then run `npm run local:training:prepare` to curate a local plain-text corpus from imprint snapshots, transcript evidence, and local capability reports into `data/training/local_adapter_lane/`, plus a registry entry in `data/training/model_registry.json`. This is adapter/training preparation, rollback tracking, and eval gating scaffolding; it does not pretend a LoRA run happened if the trainer or eval gate is missing.
+- This remains an operator-visible knowledge/bootstrap path, not a hidden weight fine-tune. The durable state lives in the local MCP memory/imprint layer so other local agents can reuse it truthfully, and the new training lane only claims what it actually prepared.

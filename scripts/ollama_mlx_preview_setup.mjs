@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 
 import os from "node:os";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
-const ENV_PATH = resolve(ROOT, ".env");
 const RECOMMENDED_MODEL = "qwen3.5:35b-a3b-coding-nvfp4";
 const MIN_OLLAMA_VERSION = "0.19.0";
 const MIN_RECOMMENDED_MEMORY_GB = 32;
@@ -67,31 +66,6 @@ function runStreaming(command, args) {
   }
 }
 
-function upsertEnv(updates) {
-  const existingLines = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, "utf8").split(/\r?\n/) : [];
-  const seen = new Set();
-  const output = [];
-  for (const line of existingLines) {
-    if (!line || line.trim().startsWith("#") || !line.includes("=")) {
-      output.push(line);
-      continue;
-    }
-    const key = line.split("=", 1)[0].trim();
-    if (Object.prototype.hasOwnProperty.call(updates, key)) {
-      output.push(`${key}=${updates[key]}`);
-      seen.add(key);
-    } else {
-      output.push(line);
-    }
-  }
-  for (const [key, value] of Object.entries(updates)) {
-    if (!seen.has(key)) {
-      output.push(`${key}=${value}`);
-    }
-  }
-  writeFileSync(ENV_PATH, `${output.filter((line, index, arr) => !(index === arr.length - 1 && line === "")).join("\n")}\n`);
-}
-
 if (process.platform !== "darwin" || process.arch !== "arm64") {
   console.error("[ollama:mlx:preview] Stop: this setup path is Apple Silicon only.");
   console.error("[ollama:mlx:preview] Use standard Ollama models on Linux/Windows, or the separate repo MLX lane where supported.");
@@ -124,15 +98,12 @@ if (totalMemoryGb <= MIN_RECOMMENDED_MEMORY_GB) {
 console.log(`[ollama:mlx:preview] Pulling ${RECOMMENDED_MODEL}`);
 runStreaming("ollama", ["pull", RECOMMENDED_MODEL]);
 
-upsertEnv({
-  TRICHAT_OLLAMA_MODEL: RECOMMENDED_MODEL,
-  TRICHAT_LOCAL_INFERENCE_PROVIDER: "auto",
-});
-
-console.log(`[ollama:mlx:preview] preferred local Ollama model -> ${RECOMMENDED_MODEL}`);
-console.log(`[ollama:mlx:preview] wrote ${ENV_PATH}`);
+console.log(`[ollama:mlx:preview] pull complete for ${RECOMMENDED_MODEL}`);
+console.log("[ollama:mlx:preview] model promotion is now gated behind the post-pull capability soak");
 
 if (String(process.env.OLLAMA_MLX_SKIP_POSTPULL || "").trim() !== "1") {
   console.log("[ollama:mlx:preview] starting post-pull capability soak and imprint pipeline");
   runStreaming(process.execPath, [resolve(ROOT, "scripts", "ollama_mlx_postpull.mjs"), "--model", RECOMMENDED_MODEL]);
+} else {
+  console.log("[ollama:mlx:preview] post-pull gate was skipped; the active local model was not changed");
 }

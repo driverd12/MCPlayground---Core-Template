@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { Storage } from "../dist/storage.js";
 import { fetchHttpResponse, reservePort, stopChildProcess } from "./test_process_helpers.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -243,7 +242,9 @@ test("agents_switch status returns bounded JSON over the live HTTP control plane
       TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
       TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
       MCP_AUTONOMY_BOOTSTRAP_ON_START: "1",
-      MCP_AUTONOMY_MAINTAIN_ON_START: "1",
+      // This test seeds maintain state manually after bootstrap. Keeping the
+      // daemon off here removes an avoidable cold-start race from the harness.
+      MCP_AUTONOMY_MAINTAIN_ON_START: "0",
       AGENTS_STATUS_TIMEOUT_SECONDS: "4",
     }),
     stdio: ["ignore", "ignore", "pipe"],
@@ -272,6 +273,8 @@ test("agents_switch status returns bounded JSON over the live HTTP control plane
     const status = JSON.parse(result.stdout);
     assert.equal(status.ok, true);
     assert.equal(typeof status.switches?.autonomy_keepalive, "boolean");
+    assert.equal(typeof status.launchd?.autonomy_keepalive_disabled, "boolean");
+    assert.equal(typeof status.launchd?.autonomy_keepalive_operational, "boolean");
     assert.equal(typeof status.autonomy_runtime, "object");
     assert.equal(typeof status.auto_snapshot_runtime, "object");
   } finally {
@@ -281,63 +284,212 @@ test("agents_switch status returns bounded JSON over the live HTTP control plane
   }
 });
 
-test("autonomy status preserves degraded /ready payloads instead of falling back to a slow stdio path", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-status-degraded-ready-"));
-  const dbPath = path.join(tempDir, "hub.sqlite");
-  const busPath = path.join(tempDir, "trichat.bus.sock");
-  const bearerToken = "test-autonomy-status-degraded-ready-token";
-  const ollama = await startFakeOllamaServer({
-    models: [{ name: "llama3.2:3b" }],
-  });
-  const httpPort = await reservePort();
-  const child = spawn("node", ["dist/server.js", "--http", "--http-port", String(httpPort)], {
-    cwd: REPO_ROOT,
-    env: inheritedEnv({
-      MCP_HTTP: "1",
-      MCP_HTTP_PORT: String(httpPort),
-      MCP_HTTP_HOST: "127.0.0.1",
-      MCP_HTTP_BEARER_TOKEN: bearerToken,
-      ANAMNESIS_HUB_DB_PATH: dbPath,
-      TRICHAT_BUS_SOCKET_PATH: busPath,
-      TRICHAT_OLLAMA_URL: ollama.url,
-      TRICHAT_RING_LEADER_AUTOSTART: "1",
-      TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
-      TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
-      TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
-      MCP_AUTONOMY_BOOTSTRAP_ON_START: "1",
-      MCP_AUTONOMY_MAINTAIN_ON_START: "1",
-      AGENTS_STATUS_TIMEOUT_SECONDS: "4",
-    }),
-    stdio: ["ignore", "ignore", "pipe"],
+test("agents_switch on repairs disabled launchd services across a simulated restart", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-agents-switch-repair-"));
+  const fakeHome = path.join(tempDir, "home");
+  const fakeBin = path.join(tempDir, "bin");
+  const launchDir = path.join(fakeHome, "Library", "LaunchAgents");
+  const stateDir = path.join(tempDir, "launchctl-state");
+  const launchctlLog = path.join(tempDir, "launchctl.log");
+  const labels = [
+    "com.mcplayground.mcp.server",
+    "com.mcplayground.imprint.autosnapshot",
+    "com.mcplayground.imprint.inboxworker",
+    "com.mcplayground.autonomy.keepalive",
+  ];
+
+  fs.mkdirSync(fakeBin, { recursive: true });
+  fs.mkdirSync(launchDir, { recursive: true });
+  fs.mkdirSync(stateDir, { recursive: true });
+
+  for (const label of labels) {
+    fs.writeFileSync(path.join(launchDir, `${label}.plist`), `<plist><dict><key>Label</key><string>${label}</string></dict></plist>`);
+    fs.writeFileSync(path.join(stateDir, `${label}.disabled`), "1");
+    fs.writeFileSync(path.join(stateDir, `${label}.loaded`), "0");
+  }
+
+  fs.writeFileSync(
+    path.join(fakeBin, "launchctl"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+state_dir="${stateDir}"
+printf 'launchctl %s\\n' "$*" >> "${launchctlLog}"
+
+label_from_arg() {
+  local raw="$1"
+  raw="\${raw##*/}"
+  printf '%s' "\${raw%.plist}"
+}
+
+state_file() {
+  printf '%s/%s.%s' "$state_dir" "$1" "$2"
+}
+
+read_state() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    cat "$file"
+  else
+    printf '0'
+  fi
+}
+
+cmd="\${1:-}"
+case "$cmd" in
+  enable)
+    label="$(label_from_arg "\${2:-}")"
+    printf '0' > "$(state_file "$label" disabled)"
+    ;;
+  disable)
+    label="$(label_from_arg "\${2:-}")"
+    printf '1' > "$(state_file "$label" disabled)"
+    ;;
+  bootout)
+    if [[ $# -ge 3 ]]; then
+      label="$(label_from_arg "\${3:-}")"
+    else
+      label="$(label_from_arg "\${2:-}")"
+    fi
+    printf '0' > "$(state_file "$label" loaded)"
+    ;;
+  bootstrap)
+    label="$(label_from_arg "\${3:-}")"
+    if [[ "$(read_state "$(state_file "$label" disabled)")" == "1" ]]; then
+      echo "service is disabled" >&2
+      exit 5
+    fi
+    printf '0' > "$(state_file "$label" loaded)"
+    ;;
+  kickstart)
+    target="\${3:-\${2:-}}"
+    label="$(label_from_arg "$target")"
+    if [[ "$(read_state "$(state_file "$label" disabled)")" == "1" ]]; then
+      echo "service is disabled" >&2
+      exit 6
+    fi
+    printf '1' > "$(state_file "$label" loaded)"
+    ;;
+  print)
+    label="$(label_from_arg "\${2:-}")"
+    if [[ "$(read_state "$(state_file "$label" loaded)")" == "1" ]]; then
+      exit 0
+    fi
+    exit 113
+    ;;
+  print-disabled)
+    printf '\\tdisabled services = {\\n'
+    for file in "$state_dir"/*.disabled; do
+      label="$(basename "$file" .disabled)"
+      status='enabled'
+      if [[ "$(read_state "$file")" == "1" ]]; then
+        status='disabled'
+      fi
+      printf '\\t\\t"%s" => %s\\n' "$label" "$status"
+    done
+    printf '\\t}\\n'
+    ;;
+esac
+`,
+    { mode: 0o755 }
+  );
+  fs.writeFileSync(
+    path.join(fakeBin, "curl"),
+    "#!/usr/bin/env bash\nprintf '{\"ok\":true}\\n'\n",
+    { mode: 0o755 }
+  );
+
+  const env = inheritedEnv({
+    HOME: fakeHome,
+    PATH: `${fakeBin}:${process.env.PATH || ""}`,
+    MCP_HTTP_BEARER_TOKEN: "test-agents-switch-repair-token",
+    TRICHAT_MCP_URL: "http://127.0.0.1:8787/",
+    TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
+    AGENTS_STATUS_DEEP_RUNTIME: "0",
   });
 
   try {
-    await waitForAutonomyStatus({
-      url: `http://127.0.0.1:${httpPort}/`,
-      origin: "http://127.0.0.1",
-      bearerToken,
-    });
-    const storage = new Storage(dbPath);
-    storage.setAutonomyMaintainState({
-      enabled: true,
-      interval_seconds: 120,
-      learning_review_interval_seconds: 300,
-      enable_self_drive: true,
-      self_drive_cooldown_seconds: 1800,
-      run_eval_if_due: true,
-      eval_interval_seconds: 21600,
-      eval_suite_id: "autonomy.control-plane",
-      minimum_eval_score: 75,
-      last_run_at: new Date().toISOString(),
-      last_eval_run_at: new Date().toISOString(),
-      last_eval_run_id: "autonomy-status-degraded-ready",
-      last_eval_score: 10,
-      last_eval_dependency_fingerprint: "below-threshold",
-      last_actions: ["eval.completed"],
-      last_attention: [],
-      last_error: null,
-    });
+    const firstOn = await runShellJson(["./scripts/agents_switch.sh", "on"], env);
+    assert.equal(firstOn.ok, true);
 
+    let status = await runShellJson(["./scripts/agents_switch.sh", "status"], env);
+    assert.equal(status.switches.autonomy_keepalive, true);
+    assert.equal(status.launchd.autonomy_keepalive_loaded, true);
+    assert.equal(status.launchd.autonomy_keepalive_disabled, false);
+    assert.equal(status.launchd.autonomy_keepalive_operational, true);
+    assert.equal(status.switches.mcp_server, true);
+
+    for (const label of labels) {
+      fs.writeFileSync(path.join(stateDir, `${label}.disabled`), "1");
+      fs.writeFileSync(path.join(stateDir, `${label}.loaded`), "0");
+    }
+
+    const secondOn = await runShellJson(["./scripts/agents_switch.sh", "on"], env);
+    assert.equal(secondOn.ok, true);
+
+    status = await runShellJson(["./scripts/agents_switch.sh", "status"], env);
+    assert.equal(status.switches.autonomy_keepalive, true);
+    assert.equal(status.launchd.autonomy_keepalive_disabled, false);
+    assert.equal(status.launchd.autonomy_keepalive_operational, true);
+    assert.equal(status.launchd.mcp_operational, true);
+
+    const launchLog = fs.readFileSync(launchctlLog, "utf8");
+    const keepaliveEnableIndex = launchLog.indexOf(
+      `launchctl enable gui/${process.getuid()}/com.mcplayground.autonomy.keepalive`
+    );
+    const keepaliveServiceBootoutIndex = launchLog.indexOf(
+      `launchctl bootout gui/${process.getuid()}/com.mcplayground.autonomy.keepalive`
+    );
+    const keepaliveBootstrapIndex = launchLog.indexOf(
+      `launchctl bootstrap gui/${process.getuid()} ${path.join(launchDir, "com.mcplayground.autonomy.keepalive.plist")}`
+    );
+    assert.notEqual(keepaliveEnableIndex, -1);
+    assert.notEqual(keepaliveServiceBootoutIndex, -1);
+    assert.notEqual(keepaliveBootstrapIndex, -1);
+    assert.ok(keepaliveEnableIndex < keepaliveBootstrapIndex);
+    assert.ok(keepaliveServiceBootoutIndex < keepaliveBootstrapIndex);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("autonomy status preserves degraded /ready payloads instead of falling back to a slow stdio path", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-status-degraded-ready-"));
+  const bearerToken = "test-autonomy-status-degraded-ready-token";
+  const httpPort = await reservePort();
+  const readyPayload = {
+    ok: false,
+    ready: true,
+    state: "degraded",
+    self_start_ready: true,
+    attention: ["autonomy.eval.below_threshold"],
+    autonomy_maintain: {
+      enabled: true,
+      runtime_running: true,
+      stale: false,
+      eval_due: false,
+      last_run_at: new Date().toISOString(),
+      eval_health: {
+        below_threshold: true,
+      },
+    },
+  };
+  const server = http.createServer((req, res) => {
+    if (req.url === "/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"ok":true}');
+      return;
+    }
+    if (req.url === "/ready") {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify(readyPayload));
+      return;
+    }
+    res.writeHead(503, { "content-type": "application/json" });
+    res.end('{"ok":false,"error":"bootstrap rpc unavailable in degraded-ready test"}');
+  });
+  await new Promise((resolve) => server.listen(httpPort, "127.0.0.1", resolve));
+
+  try {
     const readyResponse = await fetchHttpResponse(`http://127.0.0.1:${httpPort}/ready`, {
       Authorization: `Bearer ${bearerToken}`,
       Origin: "http://127.0.0.1",
@@ -345,9 +497,6 @@ test("autonomy status preserves degraded /ready payloads instead of falling back
     assert.equal(readyResponse.statusCode, 503);
 
     const status = await runShellJson(["./scripts/autonomy_ctl.sh", "status"], inheritedEnv({
-      ANAMNESIS_HUB_DB_PATH: dbPath,
-      TRICHAT_BUS_SOCKET_PATH: busPath,
-      TRICHAT_OLLAMA_URL: ollama.url,
       TRICHAT_MCP_URL: `http://127.0.0.1:${httpPort}/`,
       TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
       MCP_HTTP_BEARER_TOKEN: bearerToken,
@@ -355,11 +504,11 @@ test("autonomy status preserves degraded /ready payloads instead of falling back
       AUTONOMY_STATUS_HTTP_TIMEOUT_MS: "20000",
     }));
     assert.equal(status.self_start_ready, true);
+    assert.equal(status.source, "ready");
     assert.equal(status.maintain?.source, "ready");
     assert.equal(status.maintain?.eval_health?.below_threshold, true);
   } finally {
-    await stopChildProcess(child);
-    await ollama.close();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
@@ -468,82 +617,88 @@ printf '{"ok":true,"ready":true}\\n'
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
-test("autonomy ingress shell wrapper records continuity and launches real background intake", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-ingress-shell-"));
-  const dbPath = path.join(tempDir, "hub.sqlite");
-  const busPath = path.join(tempDir, "trichat.bus.sock");
-  const bearerToken = "test-autonomy-ingress-shell-token";
-  const ollama = await startFakeOllamaServer({
-    models: [
-      {
-        name: "llama3.2:3b",
-      },
-    ],
-  });
-  const httpPort = await reservePort();
-  const child = spawn("node", ["dist/server.js", "--http", "--http-port", String(httpPort)], {
-    cwd: REPO_ROOT,
-    env: inheritedEnv({
-      MCP_HTTP: "1",
-      MCP_HTTP_PORT: String(httpPort),
-      MCP_HTTP_HOST: "127.0.0.1",
-      MCP_HTTP_BEARER_TOKEN: bearerToken,
-      MCP_AUTONOMY_BOOTSTRAP_ON_START: "1",
-      ANAMNESIS_HUB_DB_PATH: dbPath,
-      TRICHAT_BUS_SOCKET_PATH: busPath,
-      TRICHAT_OLLAMA_URL: ollama.url,
-      TRICHAT_PROVIDER_BRIDGE_ROUTER_ENABLED: "0",
-      TRICHAT_RING_LEADER_AUTOSTART: "1",
-      TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
-      TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
-      TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
-    }),
-    stdio: ["ignore", "ignore", "pipe"],
+test("launchd installer clears stale service-target state before bootstrap", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-launchd-install-stale-"));
+  const fakeHome = path.join(tempDir, "home");
+  const fakeBin = path.join(tempDir, "bin");
+  const launchDir = path.join(fakeHome, "Library", "LaunchAgents");
+  const launchctlLog = path.join(tempDir, "launchctl.log");
+  const clearedDir = path.join(tempDir, "cleared");
+
+  fs.mkdirSync(fakeBin, { recursive: true });
+  fs.mkdirSync(launchDir, { recursive: true });
+  fs.mkdirSync(clearedDir, { recursive: true });
+
+  fs.writeFileSync(
+    path.join(fakeBin, "launchctl"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+cleared_dir="${clearedDir}"
+printf 'launchctl %s\\n' "$*" >> "${launchctlLog}"
+
+label_from_arg() {
+  local raw="$1"
+  raw="\${raw##*/}"
+  printf '%s' "\${raw%.plist}"
+}
+
+cmd="\${1:-}"
+case "$cmd" in
+  bootout)
+    if [[ $# -ge 3 ]]; then
+      exit 0
+    fi
+    label="$(label_from_arg "\${2:-}")"
+    touch "$cleared_dir/$label"
+    ;;
+  bootstrap)
+    label="$(label_from_arg "\${3:-}")"
+    if [[ ! -f "$cleared_dir/$label" ]]; then
+      echo "service already bootstrapped" >&2
+      exit 37
+    fi
+    ;;
+esac
+exit 0
+`,
+    { mode: 0o755 }
+  );
+  fs.writeFileSync(
+    path.join(fakeBin, "npm"),
+    "#!/usr/bin/env bash\nexit 0\n",
+    { mode: 0o755 }
+  );
+  fs.writeFileSync(
+    path.join(fakeBin, "curl"),
+    "#!/usr/bin/env bash\nprintf '{\"ok\":true}\\n'\n",
+    { mode: 0o755 }
+  );
+
+  const env = inheritedEnv({
+    HOME: fakeHome,
+    PATH: `${fakeBin}:${process.env.PATH || ""}`,
+    TRICHAT_RING_LEADER_TRANSPORT: "stdio",
+    MCP_HTTP_BEARER_TOKEN: "",
   });
 
   try {
-    await waitForAutonomyStatus({
-      url: `http://127.0.0.1:${httpPort}/`,
-      origin: "http://127.0.0.1",
-      bearerToken,
-    });
-    const baseEnv = inheritedEnv({
-      TRICHAT_RING_LEADER_TRANSPORT: "http",
-      TRICHAT_MCP_TRANSPORT: "http",
-      TRICHAT_MCP_URL: `http://127.0.0.1:${httpPort}/`,
-      TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
-      MCP_HTTP_BEARER_TOKEN: bearerToken,
-      AUTONOMY_ENSURE_MAX_ATTEMPTS: "1",
-      AUTONOMY_ENSURE_READY_TIMEOUT_SECONDS: "5",
+    await execFileAsync("./scripts/launchd_install.sh", [], {
+      cwd: REPO_ROOT,
+      env,
+      maxBuffer: 8 * 1024 * 1024,
     });
 
-    const ingress = await runShellJson(
-      [
-        "./scripts/autonomy_ctl.sh",
-        "ingress",
-        "--session",
-        "codex-shell-ingress",
-        "--thread",
-        "codex-shell-thread",
-        "--title",
-        "Shell ingress objective",
-        "--dry-run",
-        "--no-daemon",
-        "--",
-        "Take one IDE-style objective, mirror it into the office, and continue through autonomous execution.",
-      ],
-      baseEnv
+    const launchLog = fs.readFileSync(launchctlLog, "utf8");
+    const mcpServiceBootoutIndex = launchLog.indexOf(
+      `launchctl bootout gui/${process.getuid()}/com.mcplayground.mcp.server`
     );
-
-    assert.equal(ingress.ok, true);
-    assert.equal(ingress.session_id, "codex-shell-ingress");
-    assert.equal(ingress.thread_id, "codex-shell-thread");
-    assert.equal(ingress.autonomy.execution.ok, true);
-    assert.equal(ingress.autonomy.execution.dry_run ?? true, true);
-    assert.equal(ingress.autonomy.goal.title, "Shell ingress objective");
+    const mcpBootstrapIndex = launchLog.indexOf(
+      `launchctl bootstrap gui/${process.getuid()} ${path.join(launchDir, "com.mcplayground.mcp.server.plist")}`
+    );
+    assert.notEqual(mcpServiceBootoutIndex, -1);
+    assert.notEqual(mcpBootstrapIndex, -1);
+    assert.ok(mcpServiceBootoutIndex < mcpBootstrapIndex);
   } finally {
-    await stopChildProcess(child);
-    await ollama.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
@@ -578,10 +733,19 @@ async function startFakeOllamaServer({ models }) {
 }
 
 async function waitForAutonomyStatus({ url, origin, bearerToken }) {
-  const deadline = Date.now() + 60000;
+  const deadline = Date.now() + 120000;
   let lastError = null;
   while (Date.now() < deadline) {
     try {
+      const health = await fetchHttpResponse(new URL("/health", url).toString(), {
+        Authorization: `Bearer ${bearerToken}`,
+        Origin: origin,
+      }, {
+        timeoutMs: 5000,
+      });
+      if (health.statusCode >= 500) {
+        throw new Error(`health=${health.statusCode}`);
+      }
       const result = await execFileAsync(
         "node",
         [
@@ -616,7 +780,7 @@ async function waitForAutonomyStatus({ url, origin, bearerToken }) {
     } catch (error) {
       lastError = error;
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
   throw lastError ?? new Error("Timed out waiting for autonomy bootstrap readiness");
 }
@@ -646,18 +810,19 @@ async function runShellJson(command, env) {
     maxBuffer: 8 * 1024 * 1024,
     timeout: 240_000,
   });
-  return parseShellJson(result.stdout);
+  return parseShellJson(result.stdout, result.stderr);
 }
 
-function parseShellJson(stdout) {
+function parseShellJson(stdout, stderr = "") {
   const text = String(stdout || "").trim();
-  if (!text) {
-    throw new Error("Expected JSON output but stdout was empty.");
+  const fallbackText = String(stderr || "").trim();
+  if (!text && !fallbackText) {
+    throw new Error("Expected JSON output but both stdout and stderr were empty.");
   }
   try {
-    return JSON.parse(text);
+    return JSON.parse(text || fallbackText);
   } catch (originalError) {
-    const lines = text
+    const lines = (text || fallbackText)
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean);

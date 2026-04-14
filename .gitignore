@@ -17,10 +17,12 @@ data/recovery-*/
 data/hub.from_wal.*
 data/trichat.bus.sock
 data/imprint/
+data/training/
 data/exports/
 coverage/
 __pycache__/
 .vscode/mcp.json
 .cursor/mcp.json
+.venv-mlx/
 server.log
 BREADCRUMBS.md

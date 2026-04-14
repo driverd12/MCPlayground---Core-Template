@@ -20,12 +20,14 @@ flowchart LR
 
   subgraph Bootstrap["Bootstrap + Browser Helpers"]
     Doctor["bootstrap_doctor.mjs"]
+    Authority["macos_authority_audit.mjs"]
     Installer["bootstrap_install.mjs"]
     Guard["bootstrap_guard.sh"]
     NpmEnv["run_env.mjs / run_sh.mjs / run_python_tests.mjs / mvp_smoke.mjs<br/>cross-platform npm script adapter"]
     BrowserOpen["open_browser.mjs"]
     Manifest["platform_manifest.json"]
     MlxPostpull["ollama_mlx_postpull.mjs<br/>post-pull soak + imprint"]
+    TrainLane["local_adapter_lane.mjs<br/>trainer bootstrap + corpus + registry + rollback prep"]
   end
 
   subgraph ClientBridges["IDE + Provider Bridges"]
@@ -71,6 +73,7 @@ flowchart LR
   CLI --> NpmEnv
   Guard --> HTTP
   Doctor --> Manifest
+  Doctor --> Authority
   Guard --> Doctor
   Installer --> Manifest
   Installer --> Doctor
@@ -78,6 +81,8 @@ flowchart LR
   NpmEnv --> STDIO
   BrowserOpen --> Manifest
   MlxPostpull --> STDIO
+  TrainLane --> Cache
+  TrainLane --> DB
 
   Codex --> STDIO
   Cursor --> STDIO
@@ -106,9 +111,12 @@ flowchart LR
   MlxPostpull --> DB
   MlxPostpull --> Cache
   Local --> Secrets
+  Authority --> Secrets
 ```
 
 The Office GUI is a visibility surface for operators. Its readiness tracks the MCP HTTP surface and launcher path, not the stricter Patient Zero browser-actuation lane. Browser automation can be degraded while `/office/` remains healthy and truthful.
+
+Patient Zero full authority is also gated by macOS-owned permissions. The repo now exposes that explicitly through `macos_authority_audit.mjs` instead of implying that an armed banner bypasses Accessibility, Screen Recording, Full Disk Access, or the `mcagent` root-helper path.
 
 ## 2. Layered Runtime Stack
 

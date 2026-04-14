@@ -230,9 +230,22 @@ test("ollama MLX preview setup script is registered and Apple Silicon guarded", 
   assert.equal(packageJson.scripts["ollama:mlx:postpull"], "node ./scripts/ollama_mlx_postpull.mjs --wait");
   assert.match(source, /process\.platform !== "darwin"/, "setup script should reject non-macOS hosts");
   assert.match(source, /process\.arch !== "arm64"/, "setup script should reject non-Apple-Silicon hosts");
-  assert.match(source, /TRICHAT_OLLAMA_MODEL/, "setup script should wire the preferred local Ollama model");
+  assert.doesNotMatch(source, /TRICHAT_OLLAMA_MODEL/, "setup script should not promote the model before the post-pull gate");
   assert.match(source, /qwen3\.5:35b-a3b-coding-nvfp4/, "setup script should target the MLX preview model");
   assert.match(source, /ollama_mlx_postpull\.mjs/, "setup script should chain into the post-pull soak pipeline");
+});
+
+test("doctor and package expose the macOS authority audit and local training lane", () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
+  const doctorSource = fs.readFileSync(DOCTOR_PATH, "utf8");
+
+  assert.equal(packageJson.scripts["doctor:macos:authority"], "node ./scripts/macos_authority_audit.mjs");
+  assert.equal(packageJson.scripts["local:training:status"], "node ./scripts/local_adapter_lane.mjs status");
+  assert.equal(packageJson.scripts["local:training:bootstrap"], "node ./scripts/local_adapter_lane.mjs bootstrap");
+  assert.equal(packageJson.scripts["local:training:prepare"], "node ./scripts/local_adapter_lane.mjs prepare");
+  assert.match(doctorSource, /macOS Authority:/, "doctor should surface a macOS authority section");
+  assert.match(doctorSource, /Local Training Lane:/, "doctor should surface the local training lane");
+  assert.match(doctorSource, /Provider Bridges:/, "doctor should surface provider bridge readiness");
 });
 
 test("bootstrap env pins are present and aligned with package metadata", () => {

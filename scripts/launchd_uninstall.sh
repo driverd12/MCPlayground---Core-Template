@@ -17,36 +17,28 @@ WORKER_PLIST="${LAUNCH_DIR}/${WORKER_LABEL}.plist"
 KEEPALIVE_PLIST="${LAUNCH_DIR}/${KEEPALIVE_LABEL}.plist"
 MLX_PLIST="${LAUNCH_DIR}/${MLX_LABEL}.plist"
 
+bootout_service_target() {
+  local label="$1"
+  launchctl bootout "${DOMAIN}/${label}" >/dev/null 2>&1 || true
+}
+
+remove_launch_agent() {
+  local plist="$1"
+  local label="$2"
+  if [[ -f "${plist}" ]]; then
+    launchctl bootout "${DOMAIN}" "${plist}" >/dev/null 2>&1 || true
+  fi
+  bootout_service_target "${label}"
+  launchctl disable "${DOMAIN}/${label}" >/dev/null 2>&1 || true
+  rm -f "${plist}" >/dev/null 2>&1 || true
+}
+
 "${REPO_ROOT}/scripts/imprint_auto_snapshot_ctl.sh" stop >/dev/null 2>&1 || true
 
-if [[ -f "${MCP_PLIST}" ]]; then
-  launchctl bootout "${DOMAIN}" "${MCP_PLIST}" >/dev/null 2>&1 || true
-  launchctl disable "${DOMAIN}/${MCP_LABEL}" >/dev/null 2>&1 || true
-  rm -f "${MCP_PLIST}"
-fi
-
-if [[ -f "${AUTO_PLIST}" ]]; then
-  launchctl bootout "${DOMAIN}" "${AUTO_PLIST}" >/dev/null 2>&1 || true
-  launchctl disable "${DOMAIN}/${AUTO_LABEL}" >/dev/null 2>&1 || true
-  rm -f "${AUTO_PLIST}"
-fi
-
-if [[ -f "${WORKER_PLIST}" ]]; then
-  launchctl bootout "${DOMAIN}" "${WORKER_PLIST}" >/dev/null 2>&1 || true
-  launchctl disable "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
-  rm -f "${WORKER_PLIST}"
-fi
-
-if [[ -f "${KEEPALIVE_PLIST}" ]]; then
-  launchctl bootout "${DOMAIN}" "${KEEPALIVE_PLIST}" >/dev/null 2>&1 || true
-  launchctl disable "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
-  rm -f "${KEEPALIVE_PLIST}"
-fi
-
-if [[ -f "${MLX_PLIST}" ]]; then
-  launchctl bootout "${DOMAIN}" "${MLX_PLIST}" >/dev/null 2>&1 || true
-  launchctl disable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
-  rm -f "${MLX_PLIST}"
-fi
+remove_launch_agent "${MCP_PLIST}" "${MCP_LABEL}"
+remove_launch_agent "${AUTO_PLIST}" "${AUTO_LABEL}"
+remove_launch_agent "${WORKER_PLIST}" "${WORKER_LABEL}"
+remove_launch_agent "${KEEPALIVE_PLIST}" "${KEEPALIVE_LABEL}"
+remove_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
 
 echo "{\"ok\":true,\"removed\":[\"${MCP_LABEL}\",\"${AUTO_LABEL}\",\"${WORKER_LABEL}\",\"${KEEPALIVE_LABEL}\",\"${MLX_LABEL}\"]}" >&2

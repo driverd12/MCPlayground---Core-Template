@@ -712,9 +712,19 @@ import pathlib
 import sys
 
 data = json.loads(pathlib.Path(sys.argv[1]).read_text())
-loaded = bool(((data.get("launchd") or {}).get("autonomy_keepalive_loaded")))
-print(f"[production] autonomy keepalive loaded: {loaded}")
-if not loaded:
+launchd = data.get("launchd") or {}
+loaded = bool(launchd.get("autonomy_keepalive_loaded"))
+disabled = bool(launchd.get("autonomy_keepalive_disabled"))
+operational = bool(launchd.get("autonomy_keepalive_operational"))
+print(
+    "[production] autonomy keepalive: "
+    f"loaded={loaded} "
+    f"disabled={disabled} "
+    f"operational={operational}"
+)
+if not operational:
+    if disabled:
+        raise SystemExit("launchd autonomy keepalive agent is disabled")
     raise SystemExit("launchd autonomy keepalive agent is not loaded")
 PY
 

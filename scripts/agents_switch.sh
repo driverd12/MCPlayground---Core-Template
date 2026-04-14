@@ -26,9 +26,43 @@ if [[ -z "${MCP_HTTP_BEARER_TOKEN+x}" && -f "${TOKEN_FILE}" ]]; then
   export MCP_HTTP_BEARER_TOKEN="$(cat "${TOKEN_FILE}")"
 fi
 
+DISABLED_SERVICES_RAW=""
+
 is_loaded() {
   local label="$1"
   launchctl print "${DOMAIN}/${label}" >/dev/null 2>&1
+}
+
+capture_disabled_services() {
+  if [[ -z "${DISABLED_SERVICES_RAW}" ]]; then
+    DISABLED_SERVICES_RAW="$(launchctl print-disabled "${DOMAIN}" 2>/dev/null || true)"
+  fi
+  printf '%s' "${DISABLED_SERVICES_RAW}"
+}
+
+is_disabled() {
+  local label="$1"
+  local disabled_services_raw
+  disabled_services_raw="$(capture_disabled_services)"
+  [[ -n "${disabled_services_raw}" ]] || return 1
+  LAUNCHCTL_DISABLED_SERVICES="${disabled_services_raw}" python3 - "${label}" <<'PY'
+import os
+import re
+import sys
+
+label = sys.argv[1]
+raw = os.environ.get("LAUNCHCTL_DISABLED_SERVICES", "")
+pattern = re.compile(r'"([^"]+)"\s*=>\s*(disabled|enabled)')
+
+for line in raw.splitlines():
+    match = pattern.search(line)
+    if not match:
+        continue
+    if match.group(1) == label:
+        raise SystemExit(0 if match.group(2) == "disabled" else 1)
+
+raise SystemExit(1)
+PY
 }
 
 capture_status_json() {
@@ -155,6 +189,19 @@ bootout_if_exists() {
   fi
 }
 
+bootout_service_target() {
+  local label="$1"
+  launchctl bootout "${DOMAIN}/${label}" >/dev/null 2>&1 || true
+}
+
+reset_launch_agent() {
+  local plist="$1"
+  local label="$2"
+  bootout_if_exists "${plist}"
+  # Clear stale launchctl entries keyed by label so restart recovery does not depend on the old plist path.
+  bootout_service_target "${label}"
+}
+
 bootstrap_if_exists() {
   local plist="$1"
   if [[ -f "${plist}" ]]; then
@@ -223,11 +270,11 @@ case "${ACTION}" in
       if [[ -f "${MLX_PLIST}" ]]; then
         launchctl enable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
       fi
-      bootout_if_exists "${MCP_PLIST}"
-      bootout_if_exists "${AUTO_PLIST}"
-      bootout_if_exists "${WORKER_PLIST}"
-      bootout_if_exists "${KEEPALIVE_PLIST}"
-      bootout_if_exists "${MLX_PLIST}"
+      reset_launch_agent "${MCP_PLIST}" "${MCP_LABEL}"
+      reset_launch_agent "${AUTO_PLIST}" "${AUTO_LABEL}"
+      reset_launch_agent "${WORKER_PLIST}" "${WORKER_LABEL}"
+      reset_launch_agent "${KEEPALIVE_PLIST}" "${KEEPALIVE_LABEL}"
+      reset_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
       clear_repo_http_runtime
       bootstrap_if_exists "${MCP_PLIST}"
       launchctl kickstart -k "${DOMAIN}/${MCP_LABEL}" >/dev/null 2>&1 || true
@@ -246,11 +293,16 @@ case "${ACTION}" in
     ;;
   off)
     "${REPO_ROOT}/scripts/imprint_auto_snapshot_ctl.sh" stop >/dev/null 2>&1 || true
-    bootout_if_exists "${KEEPALIVE_PLIST}"
-    bootout_if_exists "${WORKER_PLIST}"
-    bootout_if_exists "${AUTO_PLIST}"
-    bootout_if_exists "${MCP_PLIST}"
-    bootout_if_exists "${MLX_PLIST}"
+    reset_launch_agent "${KEEPALIVE_PLIST}" "${KEEPALIVE_LABEL}"
+    reset_launch_agent "${WORKER_PLIST}" "${WORKER_LABEL}"
+    reset_launch_agent "${AUTO_PLIST}" "${AUTO_LABEL}"
+    reset_launch_agent "${MCP_PLIST}" "${MCP_LABEL}"
+    reset_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
+    launchctl disable "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
+    launchctl disable "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
+    launchctl disable "${DOMAIN}/${AUTO_LABEL}" >/dev/null 2>&1 || true
+    launchctl disable "${DOMAIN}/${MCP_LABEL}" >/dev/null 2>&1 || true
+    launchctl disable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
     ;;
   status)
     ;;
@@ -271,11 +323,21 @@ AUTO_AGENT_LOADED=false
 WORKER_AGENT_LOADED=false
 KEEPALIVE_AGENT_LOADED=false
 MLX_AGENT_LOADED=false
+MCP_DISABLED=false
+AUTO_AGENT_DISABLED=false
+WORKER_AGENT_DISABLED=false
+KEEPALIVE_AGENT_DISABLED=false
+MLX_AGENT_DISABLED=false
 if is_loaded "${MCP_LABEL}"; then MCP_RUNNING=true; fi
 if is_loaded "${AUTO_LABEL}"; then AUTO_AGENT_LOADED=true; fi
 if is_loaded "${WORKER_LABEL}"; then WORKER_AGENT_LOADED=true; fi
 if is_loaded "${KEEPALIVE_LABEL}"; then KEEPALIVE_AGENT_LOADED=true; fi
 if is_loaded "${MLX_LABEL}"; then MLX_AGENT_LOADED=true; fi
+if is_disabled "${MCP_LABEL}"; then MCP_DISABLED=true; fi
+if is_disabled "${AUTO_LABEL}"; then AUTO_AGENT_DISABLED=true; fi
+if is_disabled "${WORKER_LABEL}"; then WORKER_AGENT_DISABLED=true; fi
+if is_disabled "${KEEPALIVE_LABEL}"; then KEEPALIVE_AGENT_DISABLED=true; fi
+if is_disabled "${MLX_LABEL}"; then MLX_AGENT_DISABLED=true; fi
 
 AUTO_SNAPSHOT_STATUS="{}"
 AUTONOMY_STATUS="{}"
@@ -304,15 +366,20 @@ node --input-type=module - <<'NODE' \
 "${ACTION}" \
 "${DOMAIN}" \
 "${MCP_LABEL}" \
-"${AUTO_LABEL}" \
 "${MCP_RUNNING}" \
+"${MCP_DISABLED}" \
+"${AUTO_LABEL}" \
 "${AUTO_AGENT_LOADED}" \
+"${AUTO_AGENT_DISABLED}" \
 "${WORKER_LABEL}" \
 "${WORKER_AGENT_LOADED}" \
+"${WORKER_AGENT_DISABLED}" \
 "${KEEPALIVE_LABEL}" \
 "${KEEPALIVE_AGENT_LOADED}" \
+"${KEEPALIVE_AGENT_DISABLED}" \
 "${MLX_LABEL}" \
 "${MLX_AGENT_LOADED}" \
+"${MLX_AGENT_DISABLED}" \
 "${MCP_PLIST}" \
 "${AUTO_PLIST}" \
 "${WORKER_PLIST}" \
@@ -324,15 +391,20 @@ const [
   action,
   domain,
   mcpLabel,
-  autoLabel,
   mcpRunning,
+  mcpDisabled,
+  autoLabel,
   autoAgentLoaded,
+  autoAgentDisabled,
   workerLabel,
   workerAgentLoaded,
+  workerAgentDisabled,
   keepaliveLabel,
   keepaliveAgentLoaded,
+  keepaliveAgentDisabled,
   mlxLabel,
   mlxAgentLoaded,
+  mlxAgentDisabled,
   mcpPlist,
   autoPlist,
   workerPlist,
@@ -361,27 +433,37 @@ const payload = {
   action,
   domain,
   switches: {
-    mcp_server: mcpRunning === 'true',
-    auto_snapshot: autoAgentLoaded === 'true',
-    inbox_worker: workerAgentLoaded === 'true',
-    autonomy_keepalive: keepaliveAgentLoaded === 'true',
-    mlx_server: mlxAgentLoaded === 'true',
+    mcp_server: mcpRunning === 'true' && mcpDisabled !== 'true',
+    auto_snapshot: autoAgentLoaded === 'true' && autoAgentDisabled !== 'true',
+    inbox_worker: workerAgentLoaded === 'true' && workerAgentDisabled !== 'true',
+    autonomy_keepalive: keepaliveAgentLoaded === 'true' && keepaliveAgentDisabled !== 'true',
+    mlx_server: mlxAgentLoaded === 'true' && mlxAgentDisabled !== 'true',
   },
   launchd: {
     mcp_label: mcpLabel,
     mcp_loaded: mcpRunning === 'true',
+    mcp_disabled: mcpDisabled === 'true',
+    mcp_operational: mcpRunning === 'true' && mcpDisabled !== 'true',
     mcp_plist: mcpPlist,
     auto_snapshot_label: autoLabel,
     auto_snapshot_agent_loaded: autoAgentLoaded === 'true',
+    auto_snapshot_disabled: autoAgentDisabled === 'true',
+    auto_snapshot_operational: autoAgentLoaded === 'true' && autoAgentDisabled !== 'true',
     auto_snapshot_plist: autoPlist,
     inbox_worker_label: workerLabel,
     inbox_worker_loaded: workerAgentLoaded === 'true',
+    inbox_worker_disabled: workerAgentDisabled === 'true',
+    inbox_worker_operational: workerAgentLoaded === 'true' && workerAgentDisabled !== 'true',
     inbox_worker_plist: workerPlist,
     autonomy_keepalive_label: keepaliveLabel,
     autonomy_keepalive_loaded: keepaliveAgentLoaded === 'true',
+    autonomy_keepalive_disabled: keepaliveAgentDisabled === 'true',
+    autonomy_keepalive_operational: keepaliveAgentLoaded === 'true' && keepaliveAgentDisabled !== 'true',
     autonomy_keepalive_plist: keepalivePlist,
     mlx_label: mlxLabel,
     mlx_loaded: mlxAgentLoaded === 'true',
+    mlx_disabled: mlxAgentDisabled === 'true',
+    mlx_operational: mlxAgentLoaded === 'true' && mlxAgentDisabled !== 'true',
     mlx_plist: mlxPlist,
   },
   auto_snapshot_runtime: autoSnapshotStatus,

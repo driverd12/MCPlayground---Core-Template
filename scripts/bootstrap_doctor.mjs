@@ -509,6 +509,133 @@ function bootstrapInstallSuggestion() {
   return "Run `npm run bootstrap:env:install` for the automated first-run installer, or `npm run bootstrap:install:plan` to preview the platform commands.";
 }
 
+function runJsonScript(scriptPath, args = []) {
+  try {
+    const stdout = execFileSync(process.execPath, [scriptPath, ...args], {
+      cwd: ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 8 * 1024 * 1024,
+      timeout: 15000,
+    });
+    return JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+}
+
+function runJsonCommand(command, args = [], timeout = 15000) {
+  try {
+    const stdout = execFileSync(command, args, {
+      cwd: ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 8 * 1024 * 1024,
+      timeout,
+    });
+    return JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+}
+
+function reportMacosAuthoritySection() {
+  if (platform !== "darwin") {
+    return;
+  }
+  write(`${c.bold}[doctor]${c.reset} macOS Authority:`);
+  const payload = runJsonScript(resolve(ROOT, "scripts", "macos_authority_audit.mjs"), ["--json"]);
+  if (!payload) {
+    recommendedMissing++;
+    write(`  ${WARN} ${c.yellow}authority audit unavailable — run \`npm run doctor:macos:authority\` directly${c.reset}`);
+    return;
+  }
+  const checks = payload.checks || {};
+  const render = (label, check, successStatus) => {
+    const ok = check?.status === successStatus;
+    const icon = ok ? PASS : WARN;
+    const color = ok ? c.dim : c.yellow;
+    write(`  ${icon} ${label} ${color}(${check?.status || "unknown"} — ${check?.detail || "no detail"})${c.reset}`);
+  };
+  render("console session", checks.console_session, "ready");
+  render("Accessibility", checks.accessibility, "granted");
+  render("Screen Recording", checks.screen_recording, "granted");
+  render("Full Disk Access", checks.full_disk_access, "granted");
+  render("mcagent root helper", checks.root_helper, "ready");
+  if (!payload.ready_for_patient_zero_full_authority) {
+    recommendedMissing++;
+    write(
+      `  ${WARN} ${c.yellow}Patient Zero full-authority prerequisites are not fully satisfied (${(payload.blockers || []).join(", ") || "unknown blocker"})${c.reset}`
+    );
+  } else {
+    write(`  ${PASS} Patient Zero full-authority prerequisites ${c.dim}(audited and ready)${c.reset}`);
+  }
+}
+
+function reportLocalTrainingSection() {
+  write(`${c.bold}[doctor]${c.reset} Local Training Lane:`);
+  const payload = runJsonScript(resolve(ROOT, "scripts", "local_adapter_lane.mjs"), ["status"]);
+  if (!payload) {
+    recommendedMissing++;
+    write(`  ${WARN} ${c.yellow}local adapter lane status unavailable — run \`npm run local:training:status\`${c.reset}`);
+    return;
+  }
+  write(`  ${PASS} active model ${c.dim}(${payload.current_model || "unknown"})${c.reset}`);
+  const trainerReady = payload.trainer?.trainer_ready === true;
+  if (trainerReady) {
+    write(
+      `  ${PASS} trainer backend ${c.dim}(${payload.trainer.backend}${payload.trainer?.python_path ? ` via ${payload.trainer.python_path}` : ""})${c.reset}`
+    );
+  } else {
+    recommendedMissing++;
+    write(
+      `  ${WARN} ${c.yellow}trainer backend unavailable (${payload.trainer?.detail || "install mlx + mlx_lm for local adapter work"})${c.reset}`
+    );
+    write(`  ${c.dim}Bootstrap path: run \`npm run local:training:bootstrap\` on this Apple Silicon host.${c.reset}`);
+  }
+  if (payload.latest_run?.manifest_path) {
+    write(`  ${PASS} prepared corpus ${c.dim}(${payload.latest_run.manifest_path})${c.reset}`);
+  } else {
+    recommendedMissing++;
+    write(`  ${WARN} ${c.yellow}no prepared local adapter corpus yet — run \`npm run local:training:prepare\`${c.reset}`);
+  }
+}
+
+function reportProviderBridgeSection() {
+  write(`${c.bold}[doctor]${c.reset} Provider Bridges:`);
+  const payload = runJsonCommand(process.execPath, [
+    resolve(ROOT, "scripts", "run_sh.mjs"),
+    resolve(ROOT, "scripts", "provider_bridge.sh"),
+    "status",
+  ]);
+  if (!payload) {
+    recommendedMissing++;
+    write(`  ${WARN} ${c.yellow}provider bridge status unavailable — run \`npm run providers:status\`${c.reset}`);
+    return;
+  }
+  const onboarding = payload.onboarding || {};
+  const readyCount = Number.isFinite(onboarding.ready_count) ? onboarding.ready_count : 0;
+  const actionRequired = Number.isFinite(onboarding.action_required_count) ? onboarding.action_required_count : 0;
+  const runtimeChecks = Number.isFinite(onboarding.needs_runtime_verification_count)
+    ? onboarding.needs_runtime_verification_count
+    : 0;
+  const stale = onboarding.stale_runtime_checks === true;
+  write(`  ${PASS} ready clients ${c.dim}(${readyCount})${c.reset}`);
+  if (actionRequired > 0) {
+    recommendedMissing++;
+    write(
+      `  ${WARN} ${c.yellow}clients still need action (${actionRequired}; runtime verification missing for ${runtimeChecks})${c.reset}`
+    );
+    write(`  ${c.dim}Next path: run \`npm run providers:diagnose -- <client-id>\` for any bridge you expect to be live.${c.reset}`);
+  } else {
+    write(`  ${PASS} configured provider bridges ${c.dim}(all verified)${c.reset}`);
+  }
+  if (stale) {
+    recommendedMissing++;
+    write(`  ${WARN} ${c.yellow}provider bridge diagnostics are stale${c.reset}`);
+  }
+}
+
 write(`${c.bold}[doctor]${c.reset} Prerequisites:`);
 
 for (const item of manifest.prerequisites.required) {
@@ -519,6 +646,7 @@ for (const item of manifest.prerequisites.recommended) {
 }
 
 reportAppleSiliconMlxAdvisory();
+reportMacosAuthoritySection();
 
 // ── Browser detection ────────────────────────────────────────────────────────
 write(`${c.bold}[doctor]${c.reset} Browser:`);
@@ -595,6 +723,8 @@ if (bearerTokenExists) {
 // ── Launcher checks ──────────────────────────────────────────────────────────
 reportLauncherSection("Office GUI Launcher", "office_gui", "node ./scripts/agent_office_gui.mjs");
 reportLauncherSection("Agentic Suite Launcher", "agentic_suite", "node ./scripts/agentic_suite_launch.mjs");
+reportLocalTrainingSection();
+reportProviderBridgeSection();
 
 // ── Summary ──────────────────────────────────────────────────────────────────
 write("");

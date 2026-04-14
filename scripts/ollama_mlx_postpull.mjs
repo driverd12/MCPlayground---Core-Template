@@ -23,6 +23,7 @@ const DEFAULT_PROFILE_ID = process.env.ANAMNESIS_IMPRINT_PROFILE_ID || "default"
 const REPO_ROOT = repoRootFromMeta(import.meta.url);
 const DIST_SERVER_PATH = path.join(REPO_ROOT, "dist", "server.js");
 const REPORT_DIR = path.join(REPO_ROOT, "data", "imprint", "reports");
+const ENV_PATH = path.join(REPO_ROOT, ".env");
 
 function parseArgs(argv) {
   const args = {
@@ -129,6 +130,10 @@ export function summarizeCaseRuns(caseRuns) {
         ? Number((throughput.reduce((sum, value) => sum + value, 0) / throughput.length).toFixed(4))
         : null,
   };
+}
+
+export function shouldPromoteModel(summary) {
+  return Boolean(summary && summary.total_cases > 0 && summary.failed_cases === 0);
 }
 
 export function validateModelHostCompatibility({
@@ -413,8 +418,78 @@ function writeReport(reportPath, payload) {
   fs.writeFileSync(reportPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
+function readEnvValue(key) {
+  try {
+    const lines = fs.readFileSync(ENV_PATH, "utf8").split(/\r?\n/);
+    for (const line of lines) {
+      if (!line || line.trim().startsWith("#") || !line.includes("=")) {
+        continue;
+      }
+      const [rawKey, ...rest] = line.split("=");
+      if (String(rawKey || "").trim() === key) {
+        return rest.join("=").trim() || null;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function upsertEnv(updates) {
+  const existingLines = fs.existsSync(ENV_PATH) ? fs.readFileSync(ENV_PATH, "utf8").split(/\r?\n/) : [];
+  const seen = new Set();
+  const output = [];
+  for (const line of existingLines) {
+    if (!line || line.trim().startsWith("#") || !line.includes("=")) {
+      output.push(line);
+      continue;
+    }
+    const key = line.split("=", 1)[0].trim();
+    if (Object.prototype.hasOwnProperty.call(updates, key)) {
+      output.push(`${key}=${updates[key]}`);
+      seen.add(key);
+    } else {
+      output.push(line);
+    }
+  }
+  for (const [key, value] of Object.entries(updates)) {
+    if (!seen.has(key)) {
+      output.push(`${key}=${value}`);
+    }
+  }
+  fs.writeFileSync(
+    ENV_PATH,
+    `${output.filter((line, index, arr) => !(index === arr.length - 1 && line === "")).join("\n")}\n`,
+    "utf8"
+  );
+}
+
+function applyCutoverDecision(model, summary) {
+  const previousModel = String(
+    readEnvValue("TRICHAT_OLLAMA_MODEL") || process.env.TRICHAT_OLLAMA_MODEL || ""
+  ).trim() || null;
+  const promote = shouldPromoteModel(summary);
+  if (promote) {
+    upsertEnv({
+      TRICHAT_OLLAMA_MODEL: model,
+      TRICHAT_LOCAL_INFERENCE_PROVIDER: "auto",
+    });
+  }
+  return {
+    attempted: true,
+    promoted: promote,
+    previous_model: previousModel,
+    active_model: promote ? model : previousModel,
+    reason: promote
+      ? "Capability soak passed all required cases; promoted model into the local router default."
+      : "Capability soak did not fully pass; kept the previously active model as the router default.",
+  };
+}
+
 async function runImprintPersistence({
   model,
+  primaryPreferredModel,
   reportPath,
   summary,
   profileId,
@@ -428,7 +503,10 @@ async function runImprintPersistence({
     args: { profile_id: profileId },
     transport: "stdio",
   });
-  const preferredModels = resolvePreferredModelOrder(model, existingProfile.profile?.preferred_models ?? []);
+  const preferredModels = resolvePreferredModelOrder(
+    primaryPreferredModel,
+    [model, ...(existingProfile.profile?.preferred_models ?? [])]
+  );
   const profile = callTool(REPO_ROOT, {
     tool: "imprint.profile_set",
     args: {
@@ -586,6 +664,7 @@ async function main() {
       timeoutMs: Math.max(5_000, args.timeoutMs),
     });
     const summary = summarizeCaseRuns(caseRuns);
+    const cutover = applyCutoverDecision(model, summary);
     const report = {
       ok: summary.failed_cases === 0,
       generated_at: new Date().toISOString(),
@@ -600,6 +679,7 @@ async function main() {
       model,
       endpoint,
       summary,
+      cutover,
       case_runs: caseRuns,
       report_path: reportPath,
     };
@@ -608,6 +688,7 @@ async function main() {
       ? null
       : await runImprintPersistence({
           model,
+          primaryPreferredModel: cutover.promoted ? model : cutover.previous_model || model,
           reportPath,
           summary,
           profileId: args.profileId,

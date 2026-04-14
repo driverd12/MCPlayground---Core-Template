@@ -95,6 +95,23 @@ bootstrap_status_http() {
       --cwd "${REPO_ROOT}"
 }
 
+bootstrap_status_from_ready_json() {
+  local ready_json="${1:-}"
+  python3 - "${ready_json}" <<'PY'
+import json
+import sys
+
+ready = json.loads(sys.argv[1] or "{}")
+payload = {
+    "self_start_ready": bool(ready.get("ready")),
+    "status": ready.get("state") or ("ready" if ready.get("ready") else "degraded"),
+    "repairs_needed": ready.get("attention") or [],
+    "source": "ready",
+}
+print(json.dumps(payload))
+PY
+}
+
 status_reports_self_start_ready() {
   local status_json="${1:-}"
   python3 - "${status_json}" <<'PY'
@@ -123,6 +140,20 @@ wait_for_bootstrap_self_start_ready() {
     sleep 1
   done
   return 0
+}
+
+bootstrap_already_ready() {
+  local ready_json="" status_json=""
+  ready_json="$(fetch_ready_json)"
+  if [[ -n "${ready_json}" ]]; then
+    status_json="$(bootstrap_status_http 2>/dev/null || true)"
+    if [[ -z "${status_json}" ]]; then
+      status_json="$(bootstrap_status_from_ready_json "${ready_json}" 2>/dev/null || true)"
+    fi
+  else
+    status_json="$(bootstrap_status_stdio 2>/dev/null || true)"
+  fi
+  [[ -n "${status_json}" ]] && status_reports_self_start_ready "${status_json}"
 }
 
 parse_csv_arg() {
@@ -557,7 +588,9 @@ fi
 if [[ "${ACTION}" == "status" ]]; then
   READY_JSON="$(fetch_ready_json)"
   if [[ -n "${READY_JSON}" ]]; then
-    BOOTSTRAP_STATUS="$(bootstrap_status_http)"
+    if ! BOOTSTRAP_STATUS="$(bootstrap_status_http 2>/dev/null)"; then
+      BOOTSTRAP_STATUS="$(bootstrap_status_from_ready_json "${READY_JSON}")"
+    fi
   else
     BOOTSTRAP_STATUS="$(bootstrap_status_stdio)"
   fi
@@ -633,6 +666,8 @@ if [[ "${ACTION}" == "maintain" ]]; then
   exit 0
 fi
 
-ensure_autonomy_entry 1
+if ! bootstrap_already_ready; then
+  ensure_autonomy_entry 1
+fi
 
 exec "${REPO_ROOT}/scripts/autonomy_ide_ingress.sh" --no-ensure "$@"

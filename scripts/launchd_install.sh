@@ -80,6 +80,22 @@ chmod 600 "${TOKEN_FILE}" >/dev/null 2>&1 || true
 
 mkdir -p "${LAUNCH_DIR}" "${LOG_DIR}" "$(dirname "${BUS_SOCKET_PATH}")"
 
+bootout_service_target() {
+  local label="$1"
+  launchctl bootout "${DOMAIN}/${label}" >/dev/null 2>&1 || true
+}
+
+reset_launch_agent() {
+  local plist="$1"
+  local label="$2"
+  launchctl enable "${DOMAIN}/${label}" >/dev/null 2>&1 || true
+  if [[ -f "${plist}" ]]; then
+    launchctl bootout "${DOMAIN}" "${plist}" >/dev/null 2>&1 || true
+  fi
+  # Clear stale launchctl entries keyed only by service label so bootstrap can rebind cleanly after restarts.
+  bootout_service_target "${label}"
+}
+
 wait_for_mcp_http() {
   local url="http://${MCP_HOST}:${MCP_PORT}/health"
   local deadline=$((SECONDS + 30))
@@ -400,7 +416,7 @@ cat >"${MLX_PLIST}" <<PLIST
 </plist>
 PLIST
 else
-  launchctl bootout "${DOMAIN}" "${MLX_PLIST}" >/dev/null 2>&1 || true
+  reset_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
   launchctl disable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
   rm -f "${MLX_PLIST}" >/dev/null 2>&1 || true
 fi
@@ -412,12 +428,12 @@ fi
 
 npm run build >/dev/null
 
-launchctl bootout "${DOMAIN}" "${MCP_PLIST}" >/dev/null 2>&1 || true
-launchctl bootout "${DOMAIN}" "${AUTO_PLIST}" >/dev/null 2>&1 || true
-launchctl bootout "${DOMAIN}" "${WORKER_PLIST}" >/dev/null 2>&1 || true
-launchctl bootout "${DOMAIN}" "${KEEPALIVE_PLIST}" >/dev/null 2>&1 || true
+reset_launch_agent "${MCP_PLIST}" "${MCP_LABEL}"
+reset_launch_agent "${AUTO_PLIST}" "${AUTO_LABEL}"
+reset_launch_agent "${WORKER_PLIST}" "${WORKER_LABEL}"
+reset_launch_agent "${KEEPALIVE_PLIST}" "${KEEPALIVE_LABEL}"
 if [[ -f "${MLX_PLIST}" ]]; then
-  launchctl bootout "${DOMAIN}" "${MLX_PLIST}" >/dev/null 2>&1 || true
+  reset_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
 fi
 
 launchctl bootstrap "${DOMAIN}" "${MCP_PLIST}"
