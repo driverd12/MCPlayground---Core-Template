@@ -246,12 +246,14 @@ test("doctor and package expose the macOS authority audit and local training lan
   assert.equal(packageJson.scripts["local:training:train"], "node ./scripts/local_adapter_train.mjs");
   assert.equal(packageJson.scripts["local:training:promote"], "node ./scripts/local_adapter_promote.mjs");
   assert.equal(packageJson.scripts["local:training:integrate"], "node ./scripts/local_adapter_integrate.mjs");
+  assert.equal(packageJson.scripts["local:training:cutover"], "node ./scripts/local_adapter_cutover.mjs");
   assert.match(doctorSource, /macOS Authority:/, "doctor should surface a macOS authority section");
   assert.match(doctorSource, /Local Training Lane:/, "doctor should surface the local training lane");
   assert.match(doctorSource, /Provider Bridges:/, "doctor should surface provider bridge readiness");
   assert.match(doctorSource, /training command/i, "doctor should surface the local training command state");
   assert.match(doctorSource, /promotion command/i, "doctor should surface the local training promotion command state");
   assert.match(doctorSource, /integration command/i, "doctor should surface the local training integration command state");
+  assert.match(doctorSource, /cutover command/i, "doctor should surface the local training cutover command state");
 });
 
 test("bootstrap env pins are present and aligned with package metadata", () => {

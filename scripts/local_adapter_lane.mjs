@@ -397,6 +397,32 @@ export function detectIntegrationCommand() {
   };
 }
 
+export function detectCutoverCommand() {
+  const packageJson = readPackageJson();
+  const scripts = packageJson && typeof packageJson === "object" ? packageJson.scripts || {} : {};
+  const scripted = String(scripts["local:training:cutover"] || "").trim();
+  if (scripted) {
+    return {
+      available: true,
+      command: "npm run local:training:cutover",
+      source: "package.json",
+    };
+  }
+  const scriptPath = path.join(REPO_ROOT, "scripts", "local_adapter_cutover.mjs");
+  if (fs.existsSync(scriptPath)) {
+    return {
+      available: true,
+      command: "node ./scripts/local_adapter_cutover.mjs",
+      source: "scripts/local_adapter_cutover.mjs",
+    };
+  }
+  return {
+    available: false,
+    command: null,
+    source: null,
+  };
+}
+
 export function detectAdapterArtifacts(runDir) {
   const present = [];
   const missing = [];
@@ -727,6 +753,7 @@ function statusLane() {
   const trainingCommand = detectTrainingCommand();
   const promotionCommand = detectPromotionCommand();
   const integrationCommand = detectIntegrationCommand();
+  const cutoverCommand = detectCutoverCommand();
   return {
     ok: true,
     current_model: currentModel(),
@@ -734,6 +761,7 @@ function statusLane() {
     training_command: trainingCommand,
     promotion_command: promotionCommand,
     integration_command: integrationCommand,
+    cutover_command: cutoverCommand,
     latest_run: latestRun,
     training_root: TRAINING_ROOT,
     registry_path: REGISTRY_PATH,
@@ -750,7 +778,11 @@ function statusLane() {
               : latestRun?.status === "adapter_registered"
                 ? "Wire a bounded integration command so the accepted adapter becomes a real MLX backend or Ollama companion."
                 : latestRun?.status === "adapter_served_mlx" || latestRun?.status === "adapter_exported_ollama"
-                  ? "The accepted adapter is live as a reachable local backend; only change router defaults if a separate cutover is desired."
+                  ? cutoverCommand.available
+                    ? "The accepted adapter is live as a reachable local backend; run the bounded cutover command if you want it to become router-default."
+                    : "The accepted adapter is live as a reachable local backend; wire an explicit cutover command before making it router-default."
+                : latestRun?.status === "adapter_primary_mlx" || latestRun?.status === "adapter_primary_ollama"
+                  ? "The accepted adapter is the active router default; keep benchmarking it against the prior default and roll back if it regresses."
               : latestRun?.status === "adapter_rejected"
                 ? "Tune the corpus or training parameters, then rerun prepare, train, and promote."
                 : latestRun?.readiness_blockers?.includes?.("training.command_unwired")

@@ -11,6 +11,7 @@ npm run local:training:prepare
 npm run local:training:train
 npm run local:training:promote
 npm run local:training:integrate
+npm run local:training:cutover
 ```
 
 ## What `prepare` Writes
@@ -68,6 +69,15 @@ The registry entry is appended to `data/training/model_registry.json` with:
 - The integration step updates `.env`, verifies the live backend, runs bounded bootstrap and maintain refreshes, and only then records the adapter as live.
 - The integration step does not silently make the new backend the router default. Reachable and default are separate decisions.
 
+## Cutover Command
+
+`npm run local:training:cutover` is the explicit router-default switch for an already integrated adapter.
+
+- It refuses to run until the adapter is already reachable as `adapter_served_mlx` or `adapter_exported_ollama`.
+- It reruns the adapter's eval suite before cutover, switches `model.router.default_backend_id`, runs a bounded maintain refresh, reruns the eval gate, verifies route selection, and rolls back to the previous default if any post-cutover check fails.
+- On Ollama companion cutover, it also aligns `.env` with the promoted companion model so CLI-driven local inference does not drift from the router default.
+- On success, the lane records `adapter_primary_mlx` or `adapter_primary_ollama`.
+
 ## Truthfulness Rules
 
 - `training_intent.weights_modified` remains `false` during `prepare`
@@ -81,8 +91,8 @@ The registry entry is appended to `data/training/model_registry.json` with:
 
 ## Next Best Target
 
-The next bounded implementation step after `integrate` is explicit cutover policy:
+The next bounded implementation step after `cutover` is comparative soak coverage:
 
-- decide whether the newly reachable backend should become router-default or remain a non-primary companion
-- keep rollback and live-route cutover explicit instead of optimistic
-- continue benchmarking the accepted adapter against the incumbent local default before any default-route switch
+- keep benchmarking the new primary backend against the prior default
+- add longer-lived router/office/autonomy soak runs before calling the new primary fully production-stable
+- keep rollback explicit instead of allowing silent drift

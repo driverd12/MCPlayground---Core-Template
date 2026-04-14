@@ -119,6 +119,8 @@ The Office GUI is a visibility surface for operators. Its readiness tracks the M
 
 Patient Zero full authority is also gated by macOS-owned permissions. The repo now exposes that explicitly through `macos_authority_audit.mjs` instead of implying that an armed banner bypasses Accessibility, Screen Recording, microphone/listen-lane consent, Full Disk Access, or the `mcagent` root-helper + secret path.
 
+The local adapter lane is now split into five explicit phases: `prepare -> train -> promote -> integrate -> cutover`. `Integrate` makes a candidate reachable; `cutover` is the separate router-default switch with post-cutover verification and rollback.
+
 ## 2. Layered Runtime Stack
 
 ```mermaid

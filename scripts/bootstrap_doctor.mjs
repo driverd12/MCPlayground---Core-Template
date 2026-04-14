@@ -620,6 +620,14 @@ function reportLocalTrainingSection() {
     recommendedMissing++;
     write(`  ${WARN} ${c.yellow}local adapter integration command is not wired yet${c.reset}`);
   }
+  if (payload.cutover_command?.available === true) {
+    write(
+      `  ${PASS} cutover command ${c.dim}(${payload.cutover_command.command}${payload.cutover_command?.source ? ` via ${payload.cutover_command.source}` : ""})${c.reset}`
+    );
+  } else {
+    recommendedMissing++;
+    write(`  ${WARN} ${c.yellow}local adapter cutover command is not wired yet${c.reset}`);
+  }
   if (payload.latest_run?.manifest_path) {
     write(`  ${PASS} prepared corpus ${c.dim}(${payload.latest_run.manifest_path})${c.reset}`);
     if (payload.latest_run?.status) {

@@ -10,6 +10,7 @@ import {
   curateCorpusRecords,
   detectTrainerAvailability,
   detectAdapterArtifacts,
+  detectCutoverCommand,
   detectIntegrationCommand,
   detectPromotionCommand,
   detectTrainingCommand,
@@ -166,4 +167,5 @@ test("training lane commands are all discoverable from the current repo wiring",
   assert.equal(detectTrainingCommand().available, true);
   assert.equal(detectPromotionCommand().available, true);
   assert.equal(detectIntegrationCommand().available, true);
+  assert.equal(detectCutoverCommand().available, true);
 });
