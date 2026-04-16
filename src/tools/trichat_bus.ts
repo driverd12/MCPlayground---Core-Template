@@ -150,27 +150,48 @@ export class TriChatBusRuntime {
     if (!fs.existsSync(socketPath)) {
       return "absent";
     }
+    try {
+      const stat = fs.lstatSync(socketPath);
+      if (!stat.isSocket()) {
+        return "stale";
+      }
+    } catch {
+      return "unknown";
+    }
     const script = [
-      "import os, socket, sys",
-      "socket_path = sys.argv[1]",
-      "if not os.path.exists(socket_path):",
-      "    raise SystemExit(3)",
-      "client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)",
-      "client.settimeout(0.25)",
-      "try:",
-      "    client.connect(socket_path)",
-      "except FileNotFoundError:",
-      "    raise SystemExit(3)",
-      "except OSError as error:",
-      "    if getattr(error, 'errno', None) in {2, 61, 111}:",
-      "        raise SystemExit(2)",
-      "    raise SystemExit(1)",
-      "else:",
-      "    raise SystemExit(0)",
-      "finally:",
-      "    client.close()",
+      "const fs = require('node:fs');",
+      "const net = require('node:net');",
+      "const socketPath = process.argv[1];",
+      "if (!fs.existsSync(socketPath)) {",
+      "  process.exit(3);",
+      "}",
+      "const socket = net.createConnection({ path: socketPath });",
+      "let settled = false;",
+      "const finalize = (code) => {",
+      "  if (settled) {",
+      "    return;",
+      "  }",
+      "  settled = true;",
+      "  try {",
+      "    socket.destroy();",
+      "  } catch {}",
+      "  process.exit(code);",
+      "};",
+      "const timer = setTimeout(() => finalize(1), 250);",
+      "if (typeof timer.unref === 'function') {",
+      "  timer.unref();",
+      "}",
+      "socket.once('connect', () => finalize(0));",
+      "socket.once('error', (error) => {",
+      "  const code = error && typeof error === 'object' ? String(error.code || '') : '';",
+      "  if (code === 'ENOENT' || code === 'ECONNREFUSED' || code === 'ENOTSOCK') {",
+      "    finalize(2);",
+      "    return;",
+      "  }",
+      "  finalize(1);",
+      "});",
     ].join("\n");
-    const result = spawnSync("python3", ["-c", script, socketPath], {
+    const result = spawnSync(process.execPath, ["-e", script, socketPath], {
       encoding: "utf8",
       timeout: 1000,
     });
@@ -278,9 +299,23 @@ export class TriChatBusRuntime {
         this.server = null;
       }
       if (/EADDRINUSE/i.test(message)) {
-        this.lastError = null;
+        const socketState = this.probeSocketPathState();
+        if (socketState === "stale") {
+          this.safeUnlinkSocketPath();
+          this.lastError = null;
+          this.scheduleStartRetry(250);
+          console.warn(`[trichat.bus] stale socket recovered; retrying bind on ${this.socketPath}`);
+          return;
+        }
+        if (socketState === "active") {
+          this.lastError = null;
+          this.scheduleStartRetry();
+          console.warn(`[trichat.bus] socket busy; retrying bind on ${this.socketPath}`);
+          return;
+        }
+        this.lastError = `socket bind blocked (EADDRINUSE; socket_state=${socketState})`;
         this.scheduleStartRetry();
-        console.warn(`[trichat.bus] socket busy; retrying bind on ${this.socketPath}`);
+        console.warn(`[trichat.bus] socket busy with uncertain state (${socketState}); retrying bind on ${this.socketPath}`);
         return;
       }
       this.lastError = message;

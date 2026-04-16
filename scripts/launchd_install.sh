@@ -13,6 +13,7 @@ AUTO_LABEL="com.mcplayground.imprint.autosnapshot"
 WORKER_LABEL="com.mcplayground.imprint.inboxworker"
 KEEPALIVE_LABEL="com.mcplayground.autonomy.keepalive"
 WATCHDOG_LABEL="com.mcplayground.local-adapter.watchdog"
+OFFICE_GUI_LABEL="com.mcplayground.agent-office.gui.watch"
 MLX_LABEL="com.mcplayground.mlx.server"
 
 MCP_PLIST="${LAUNCH_DIR}/${MCP_LABEL}.plist"
@@ -20,6 +21,7 @@ AUTO_PLIST="${LAUNCH_DIR}/${AUTO_LABEL}.plist"
 WORKER_PLIST="${LAUNCH_DIR}/${WORKER_LABEL}.plist"
 KEEPALIVE_PLIST="${LAUNCH_DIR}/${KEEPALIVE_LABEL}.plist"
 WATCHDOG_PLIST="${LAUNCH_DIR}/${WATCHDOG_LABEL}.plist"
+OFFICE_GUI_PLIST="${LAUNCH_DIR}/${OFFICE_GUI_LABEL}.plist"
 MLX_PLIST="${LAUNCH_DIR}/${MLX_LABEL}.plist"
 LEGACY_BUS_SOCKET_PATH="${REPO_ROOT}/data/trichat.bus.sock"
 BUS_SOCKET_DIGEST="$(printf '%s' "${REPO_ROOT}" | shasum -a 256 | cut -c1-12)"
@@ -45,6 +47,7 @@ LOCAL_ADAPTER_WATCHDOG_INTERVAL="${LOCAL_ADAPTER_WATCHDOG_INTERVAL_SECONDS:-1800
 LOCAL_ADAPTER_WATCHDOG_MAX_AGE="${LOCAL_ADAPTER_WATCHDOG_MAX_SOAK_AGE_MINUTES:-240}"
 LOCAL_ADAPTER_WATCHDOG_SOAK_CYCLES="${LOCAL_ADAPTER_WATCHDOG_SOAK_CYCLES:-1}"
 LOCAL_ADAPTER_WATCHDOG_SOAK_INTERVAL="${LOCAL_ADAPTER_WATCHDOG_SOAK_INTERVAL_SECONDS:-0}"
+AGENT_OFFICE_GUI_WATCH_INTERVAL_MS="${AGENT_OFFICE_GUI_WATCH_INTERVAL_MS:-10000}"
 MLX_SERVER_ENABLED="${TRICHAT_MLX_SERVER_ENABLED:-0}"
 MLX_ENDPOINT="${TRICHAT_MLX_ENDPOINT:-http://127.0.0.1:8788}"
 MLX_PORT="${MLX_ENDPOINT##*:}"
@@ -339,7 +342,7 @@ cat >"${KEEPALIVE_PLIST}" <<PLIST
 
     <key>EnvironmentVariables</key>
     <dict>
-      <key>PATH</key>
+    <key>PATH</key>
       <string>${PATH}</string>
       <key>MCP_HTTP_BEARER_TOKEN</key>
       <string>${HTTP_BEARER_TOKEN}</string>
@@ -428,6 +431,57 @@ cat >"${WATCHDOG_PLIST}" <<PLIST
 </plist>
 PLIST
 
+cat >"${OFFICE_GUI_PLIST}" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>${OFFICE_GUI_LABEL}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>${NODE_BIN}</string>
+      <string>${REPO_ROOT}/scripts/agent_office_gui.mjs</string>
+      <string>watch</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>${REPO_ROOT}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>${PATH}</string>
+      <key>MCP_HTTP_BEARER_TOKEN</key>
+      <string>${HTTP_BEARER_TOKEN}</string>
+      <key>MCP_HTTP_HOST</key>
+      <string>${MCP_HOST}</string>
+      <key>MCP_HTTP_PORT</key>
+      <string>${MCP_PORT}</string>
+      <key>TRICHAT_MCP_URL</key>
+      <string>http://${MCP_HOST}:${MCP_PORT}/</string>
+      <key>TRICHAT_MCP_ORIGIN</key>
+      <string>http://127.0.0.1</string>
+      <key>AGENT_OFFICE_GUI_WATCH_INTERVAL_MS</key>
+      <string>${AGENT_OFFICE_GUI_WATCH_INTERVAL_MS}</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/agent-office-gui.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/agent-office-gui.err.log</string>
+  </dict>
+</plist>
+PLIST
+
 if [[ "${MLX_SERVER_ENABLED}" == "1" && -n "${MLX_PYTHON}" && -n "${MLX_MODEL}" ]]; then
 MLX_ADAPTER_ARGUMENTS=""
 if [[ -n "${MLX_ADAPTER_PATH}" ]]; then
@@ -491,6 +545,7 @@ else
 fi
 
 chmod 644 "${MCP_PLIST}" "${AUTO_PLIST}" "${WORKER_PLIST}" "${KEEPALIVE_PLIST}" "${WATCHDOG_PLIST}"
+chmod 644 "${OFFICE_GUI_PLIST}"
 if [[ -f "${MLX_PLIST}" ]]; then
   chmod 644 "${MLX_PLIST}"
 fi
@@ -502,6 +557,7 @@ reset_launch_agent "${AUTO_PLIST}" "${AUTO_LABEL}"
 reset_launch_agent "${WORKER_PLIST}" "${WORKER_LABEL}"
 reset_launch_agent "${KEEPALIVE_PLIST}" "${KEEPALIVE_LABEL}"
 reset_launch_agent "${WATCHDOG_PLIST}" "${WATCHDOG_LABEL}"
+reset_launch_agent "${OFFICE_GUI_PLIST}" "${OFFICE_GUI_LABEL}"
 if [[ -f "${MLX_PLIST}" ]]; then
   reset_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
 fi
@@ -515,6 +571,7 @@ launchctl bootstrap "${DOMAIN}" "${AUTO_PLIST}"
 launchctl bootstrap "${DOMAIN}" "${WORKER_PLIST}"
 launchctl bootstrap "${DOMAIN}" "${KEEPALIVE_PLIST}"
 launchctl bootstrap "${DOMAIN}" "${WATCHDOG_PLIST}"
+launchctl bootstrap "${DOMAIN}" "${OFFICE_GUI_PLIST}"
 if [[ -f "${MLX_PLIST}" ]]; then
   launchctl bootstrap "${DOMAIN}" "${MLX_PLIST}"
 fi
@@ -523,6 +580,7 @@ launchctl enable "${DOMAIN}/${AUTO_LABEL}" >/dev/null 2>&1 || true
 launchctl enable "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
 launchctl enable "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
 launchctl enable "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
+launchctl enable "${DOMAIN}/${OFFICE_GUI_LABEL}" >/dev/null 2>&1 || true
 if [[ -f "${MLX_PLIST}" ]]; then
   launchctl enable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
 fi
@@ -531,6 +589,7 @@ launchctl kickstart -k "${DOMAIN}/${AUTO_LABEL}" >/dev/null 2>&1 || true
 launchctl kickstart -k "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
 launchctl kickstart -k "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
 launchctl kickstart -k "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
+launchctl kickstart -k "${DOMAIN}/${OFFICE_GUI_LABEL}" >/dev/null 2>&1 || true
 if [[ -f "${MLX_PLIST}" ]]; then
   launchctl kickstart -k "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
 fi
@@ -541,6 +600,7 @@ echo "- ${AUTO_PLIST}" >&2
 echo "- ${WORKER_PLIST}" >&2
 echo "- ${KEEPALIVE_PLIST}" >&2
 echo "- ${WATCHDOG_PLIST}" >&2
+echo "- ${OFFICE_GUI_PLIST}" >&2
 if [[ -f "${MLX_PLIST}" ]]; then
 echo "- ${MLX_PLIST}" >&2
 fi
@@ -553,6 +613,7 @@ echo "  \"auto_snapshot_label\": \"${AUTO_LABEL}\"," >&2
 echo "  \"worker_label\": \"${WORKER_LABEL}\"," >&2
 echo "  \"keepalive_label\": \"${KEEPALIVE_LABEL}\"," >&2
 echo "  \"watchdog_label\": \"${WATCHDOG_LABEL}\"," >&2
+echo "  \"office_gui_label\": \"${OFFICE_GUI_LABEL}\"," >&2
 echo "  \"mlx_label\": \"${MLX_LABEL}\"," >&2
 echo "  \"mcp_port\": ${MCP_PORT}," >&2
 echo "  \"http_token_file\": \"${TOKEN_FILE}\"" >&2

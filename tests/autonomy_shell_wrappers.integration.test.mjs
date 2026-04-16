@@ -739,6 +739,195 @@ exit 0
   }
 });
 
+test("agents_switch status marks stale repo-bound plists as non-operational", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-agents-switch-stale-status-"));
+  const fakeHome = path.join(tempDir, "home");
+  const fakeBin = path.join(tempDir, "bin");
+  const launchDir = path.join(fakeHome, "Library", "LaunchAgents");
+  const staleRoot = path.join(tempDir, "old-workspace");
+  const labels = [
+    "com.mcplayground.mcp.server",
+    "com.mcplayground.imprint.autosnapshot",
+    "com.mcplayground.imprint.inboxworker",
+    "com.mcplayground.autonomy.keepalive",
+    "com.mcplayground.local-adapter.watchdog",
+  ];
+
+  fs.mkdirSync(fakeBin, { recursive: true });
+  fs.mkdirSync(launchDir, { recursive: true });
+  fs.mkdirSync(staleRoot, { recursive: true });
+
+  for (const label of labels) {
+    fs.writeFileSync(
+      path.join(launchDir, `${label}.plist`),
+      `<plist><dict><key>Label</key><string>${label}</string><key>WorkingDirectory</key><string>${staleRoot}</string></dict></plist>`
+    );
+  }
+
+  fs.writeFileSync(
+    path.join(fakeBin, "launchctl"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+
+label_from_arg() {
+  local raw="$1"
+  raw="\${raw##*/}"
+  printf '%s' "\${raw%.plist}"
+}
+
+case "\${1:-}" in
+  print)
+    exit 0
+    ;;
+  print-disabled)
+    printf '\\tdisabled services = {\\n'
+    for label in ${labels.map((label) => JSON.stringify(label)).join(" ")}; do
+      printf '\\t\\t"%s" => enabled\\n' "$label"
+    done
+    printf '\\t}\\n'
+    ;;
+esac
+
+exit 0
+`,
+    { mode: 0o755 }
+  );
+  fs.writeFileSync(
+    path.join(fakeBin, "curl"),
+    "#!/usr/bin/env bash\nprintf '{\"ok\":true}\\n'\n",
+    { mode: 0o755 }
+  );
+
+  const env = inheritedEnv({
+    HOME: fakeHome,
+    PATH: `${fakeBin}:${process.env.PATH || ""}`,
+    MCP_HTTP_BEARER_TOKEN: "test-agents-switch-stale-status-token",
+    TRICHAT_MCP_URL: "http://127.0.0.1:8787/",
+    TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
+    AGENTS_STATUS_DEEP_RUNTIME: "0",
+  });
+
+  try {
+    const status = await runShellJson(["./scripts/agents_switch.sh", "status"], env);
+    assert.equal(status.launchd.mcp_loaded, true);
+    assert.equal(status.launchd.mcp_plist_current, false);
+    assert.equal(status.launchd.mcp_operational, false);
+    assert.equal(status.launchd.autonomy_keepalive_loaded, true);
+    assert.equal(status.launchd.autonomy_keepalive_plist_current, false);
+    assert.equal(status.launchd.autonomy_keepalive_operational, false);
+    assert.equal(status.switches.mcp_server, false);
+    assert.equal(status.switches.autonomy_keepalive, false);
+    assert.equal(status.switches.local_adapter_watchdog, false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("agents_switch on rewrites stale repo-bound plists before restart repair", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-agents-switch-stale-repair-"));
+  const fakeHome = path.join(tempDir, "home");
+  const fakeBin = path.join(tempDir, "bin");
+  const launchDir = path.join(fakeHome, "Library", "LaunchAgents");
+  const launchctlLog = path.join(tempDir, "launchctl.log");
+  const staleRoot = path.join(tempDir, "old-workspace");
+  const labels = [
+    "com.mcplayground.mcp.server",
+    "com.mcplayground.imprint.autosnapshot",
+    "com.mcplayground.imprint.inboxworker",
+    "com.mcplayground.autonomy.keepalive",
+    "com.mcplayground.local-adapter.watchdog",
+  ];
+
+  fs.mkdirSync(fakeBin, { recursive: true });
+  fs.mkdirSync(launchDir, { recursive: true });
+  fs.mkdirSync(staleRoot, { recursive: true });
+
+  for (const label of labels) {
+    fs.writeFileSync(
+      path.join(launchDir, `${label}.plist`),
+      `<plist><dict><key>Label</key><string>${label}</string><key>WorkingDirectory</key><string>${staleRoot}</string></dict></plist>`
+    );
+  }
+
+  fs.writeFileSync(
+    path.join(fakeBin, "launchctl"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf 'launchctl %s\\n' "$*" >> "${launchctlLog}"
+
+case "\${1:-}" in
+  print)
+    exit 0
+    ;;
+  print-disabled)
+    printf '\\tdisabled services = {\\n'
+    for label in ${labels.map((label) => JSON.stringify(label)).join(" ")}; do
+      printf '\\t\\t"%s" => enabled\\n' "$label"
+    done
+    printf '\\t}\\n'
+    ;;
+esac
+
+exit 0
+`,
+    { mode: 0o755 }
+  );
+  fs.writeFileSync(
+    path.join(fakeBin, "npm"),
+    "#!/usr/bin/env bash\nexit 0\n",
+    { mode: 0o755 }
+  );
+  fs.writeFileSync(
+    path.join(fakeBin, "curl"),
+    "#!/usr/bin/env bash\nprintf '{\"ok\":true}\\n'\n",
+    { mode: 0o755 }
+  );
+
+  const env = inheritedEnv({
+    HOME: fakeHome,
+    PATH: `${fakeBin}:${process.env.PATH || ""}`,
+    MCP_HTTP_BEARER_TOKEN: "",
+    TRICHAT_RING_LEADER_TRANSPORT: "stdio",
+    TRICHAT_MCP_URL: "http://127.0.0.1:8787/",
+    TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
+    AGENTS_STATUS_DEEP_RUNTIME: "0",
+  });
+
+  try {
+    const repaired = await runShellJson(["./scripts/agents_switch.sh", "on"], env);
+    assert.equal(repaired.ok, true);
+    assert.equal(repaired.launchd.mcp_plist_current, true);
+    assert.equal(repaired.launchd.autonomy_keepalive_plist_current, true);
+    assert.equal(repaired.launchd.local_adapter_watchdog_plist_current, true);
+    assert.equal(repaired.switches.mcp_server, true);
+    assert.equal(repaired.switches.autonomy_keepalive, true);
+    assert.equal(repaired.switches.local_adapter_watchdog, true);
+
+    const keepalivePlist = fs.readFileSync(
+      path.join(launchDir, "com.mcplayground.autonomy.keepalive.plist"),
+      "utf8"
+    );
+    assert.match(keepalivePlist, new RegExp(escapeRegExp(REPO_ROOT)));
+    assert.doesNotMatch(keepalivePlist, new RegExp(escapeRegExp(staleRoot)));
+
+    const launchLog = fs.readFileSync(launchctlLog, "utf8");
+    assert.match(
+      launchLog,
+      new RegExp(
+        `launchctl bootstrap gui/${process.getuid()} ${escapeRegExp(path.join(launchDir, "com.mcplayground.mcp.server.plist"))}`
+      )
+    );
+    assert.match(
+      launchLog,
+      new RegExp(
+        `launchctl bootstrap gui/${process.getuid()} ${escapeRegExp(path.join(launchDir, "com.mcplayground.autonomy.keepalive.plist"))}`
+      )
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function startFakeOllamaServer({ models }) {
   const server = http.createServer((req, res) => {
     if (req.url === "/api/tags") {

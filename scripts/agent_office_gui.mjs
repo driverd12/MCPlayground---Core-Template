@@ -27,6 +27,10 @@ const PID_FILE = path.join(PID_DIR, "agent-office-http-runner.pid");
 const RUNNER_SCRIPT = path.join(REPO_ROOT, "scripts", "mcp_http_runner.mjs");
 const OPEN_BROWSER_SCRIPT = path.join(REPO_ROOT, "scripts", "open_browser.mjs");
 const AGENTS_SWITCH_SCRIPT = path.join(REPO_ROOT, "scripts", "agents_switch.sh");
+const WATCH_INTERVAL_MS = (() => {
+  const configuredIntervalMs = Number.parseInt(process.env.AGENT_OFFICE_GUI_WATCH_INTERVAL_MS || "10000", 10);
+  return Number.isFinite(configuredIntervalMs) && configuredIntervalMs > 0 ? configuredIntervalMs : 10000;
+})();
 
 function isLocalHostTarget() {
   return ["127.0.0.1", "localhost", "::1"].includes(String(MCP_HOST).toLowerCase());
@@ -89,10 +93,13 @@ async function healthOk() {
   });
 }
 
-async function readyOkOnce() {
+async function readyOk() {
   const token = String(process.env.MCP_HTTP_BEARER_TOKEN || "").trim();
   if (!token) {
-    return false;
+    return await fetchOk(new URL("ready", TRICHAT_HTTP_URL), {
+      headers: { Origin: TRICHAT_HTTP_ORIGIN },
+      timeoutMs: 12000,
+    });
   }
   return await fetchOk(new URL("ready", TRICHAT_HTTP_URL), {
     headers: {
@@ -103,23 +110,13 @@ async function readyOkOnce() {
   });
 }
 
-async function readyOk() {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    if (await readyOkOnce()) {
-      return true;
-    }
-    if (attempt < 2) {
-      await sleep(1000);
-    }
-  }
-  return false;
-}
-
-async function launchableOk() {
-  if (String(process.env.MCP_HTTP_BEARER_TOKEN || "").trim()) {
-    return await readyOk();
-  }
-  return await healthOk();
+async function officePageOk() {
+  return await fetchOk(new URL("office/", TRICHAT_HTTP_URL), {
+    headers: {
+      Origin: TRICHAT_HTTP_ORIGIN,
+    },
+    timeoutMs: 5000,
+  });
 }
 
 async function listenerOk() {
@@ -233,9 +230,20 @@ async function ensureHttp() {
   return await waitForLaunchable(30000);
 }
 
-async function detectMode({ health, listener, ready }) {
+async function launchableOk() {
+  const token = String(process.env.MCP_HTTP_BEARER_TOKEN || "").trim();
+  if (!token) {
+    return await healthOk();
+  }
+  return await readyOk();
+}
+
+async function detectMode({ health, listener, ready, officeReady }) {
   const runnerPid = clearRunnerPidIfStale();
   if (ready) {
+    if (officeReady) {
+      return "service";
+    }
     if (runnerPid && pidAlive(runnerPid)) {
       return "runner";
     }
@@ -254,9 +262,14 @@ async function detectMode({ health, listener, ready }) {
 }
 
 async function printStatus() {
-  const [rawHealth, listener, ready] = await Promise.all([healthOk(), listenerOk(), readyOk()]);
+  const [rawHealth, listener, ready, officeReady] = await Promise.all([
+    healthOk(),
+    listenerOk(),
+    readyOk(),
+    officePageOk(),
+  ]);
   const health = rawHealth || ready;
-  const mode = await detectMode({ health, listener, ready });
+  const mode = await detectMode({ health, listener, ready, officeReady });
   const launchable = String(process.env.MCP_HTTP_BEARER_TOKEN || "").trim() ? ready : health;
   process.stdout.write(
     `${JSON.stringify(
@@ -266,6 +279,7 @@ async function printStatus() {
         health,
         listener,
         ready,
+        office_ready: officeReady,
         launchable,
         url: GUI_URL,
         platform: process.platform,
@@ -290,16 +304,34 @@ async function openBrowser() {
   }
 }
 
+async function runWatchMode() {
+  process.stdout.write(
+    `Agent Office GUI watcher started for ${TRICHAT_HTTP_URL}. health and office surface will be kept warm every ${WATCH_INTERVAL_MS}ms.\n`
+  );
+  while (true) {
+    await ensureHttp();
+    await officePageOk();
+    await sleep(WATCH_INTERVAL_MS);
+  }
+}
+
 async function main() {
-  if (!["start", "open", "status"].includes(ACTION)) {
-    process.stderr.write("usage: agent_office_gui.mjs [open|start|status]\n");
+  if (!["open", "start", "status", "watch"].includes(ACTION)) {
+    process.stderr.write("usage: agent_office_gui.mjs [open|start|status|watch]\n");
     process.exit(2);
     return;
   }
+
   if (ACTION === "status") {
     await printStatus();
     return;
   }
+
+  if (ACTION === "watch") {
+    await runWatchMode();
+    return;
+  }
+
   if (!(await ensureHttp())) {
     const remoteNote = isLocalHostTarget()
       ? ""
@@ -310,6 +342,7 @@ async function main() {
     process.exit(1);
     return;
   }
+
   if (ACTION === "start") {
     process.stdout.write(`Agent Office ready at ${GUI_URL}\n`);
     return;

@@ -11354,6 +11354,7 @@ export class Storage {
     heartbeat_interval_seconds?: number;
     last_heartbeat_at?: string | null;
     last_observation_at?: string | null;
+    last_screenshot_at?: string | null;
     last_action_at?: string | null;
     last_listen_at?: string | null;
     last_frontmost_app?: string | null;
@@ -11376,6 +11377,8 @@ export class Storage {
         last_heartbeat_at: params.last_heartbeat_at === undefined ? existing.last_heartbeat_at : params.last_heartbeat_at,
         last_observation_at:
           params.last_observation_at === undefined ? existing.last_observation_at : params.last_observation_at,
+        last_screenshot_at:
+          params.last_screenshot_at === undefined ? existing.last_screenshot_at : params.last_screenshot_at,
         last_action_at: params.last_action_at === undefined ? existing.last_action_at : params.last_action_at,
         last_listen_at: params.last_listen_at === undefined ? existing.last_listen_at : params.last_listen_at,
         last_frontmost_app:
@@ -11409,6 +11412,7 @@ export class Storage {
           heartbeat_interval_seconds: normalized.heartbeat_interval_seconds,
           last_heartbeat_at: normalized.last_heartbeat_at,
           last_observation_at: normalized.last_observation_at,
+          last_screenshot_at: normalized.last_screenshot_at,
           last_action_at: normalized.last_action_at,
           last_listen_at: normalized.last_listen_at,
           last_frontmost_app: normalized.last_frontmost_app,

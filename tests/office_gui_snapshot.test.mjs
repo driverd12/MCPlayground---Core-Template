@@ -67,6 +67,46 @@ test("office gui snapshot reflects provider heartbeat states and self-drive summ
           ],
         },
       },
+      workbench: {
+        focus_area: "queue",
+        status: "ready",
+        headline: "Turn pending work into owned execution.",
+        queue: {
+          running: 0,
+          pending: 2,
+          failed: 1,
+          completed: 5,
+          running_tasks: [],
+          pending_tasks: [{ task_id: "task-1", objective: "Clarify the pending slice", priority: 80 }],
+          failed_tasks: [{ task_id: "task-failed-1", objective: "Repair the failed slice", priority: 90, last_error: "tool timeout" }],
+        },
+        blockers: [
+          {
+            kind: "failed_tasks",
+            title: "1 failed task",
+            detail: "Recover or requeue failed tasks before expanding the queue.",
+            remediation: {
+              label: "Retry Failed Tasks",
+              action: "retry_failed_tasks",
+              payload: { task_ids: ["task-failed-1"] },
+            },
+          },
+        ],
+        next_actions: [{ label: "Drain pending queue", detail: "2 pending tasks waiting for ownership." }],
+        suggested_objectives: [
+          {
+            title: "Own the next queued task",
+            objective: "Take the top pending task and convert it into an owned execution slice.",
+            risk: "medium",
+            mode: "recommend",
+            why: "Queue depth is already visible.",
+          },
+        ],
+        quick_actions: {
+          retry_failed_tasks: true,
+          recover_expired_tasks: false,
+        },
+      },
     },
     { theme: "dark" }
   );
@@ -80,6 +120,13 @@ test("office gui snapshot reflects provider heartbeat states and self-drive summ
   assert.equal(snapshot.summary.provider_bridge.connected_count, 2);
   assert.equal(snapshot.summary.maintain.self_drive_enabled, true);
   assert.equal(snapshot.summary.maintain.self_drive_last_goal_id, "goal-self-drive-1");
+  assert.equal(snapshot.summary.workbench.focus_area, "queue");
+  assert.equal(snapshot.summary.workbench.suggested_objective_count, 1);
+  assert.equal(snapshot.workbench.queue.pending, 2);
+  assert.equal(snapshot.workbench.queue.failed_tasks.length, 1);
+  assert.equal(snapshot.workbench.quick_actions.retry_failed_tasks, true);
+  assert.equal(snapshot.workbench.blockers[0].remediation.action, "retry_failed_tasks");
+  assert.equal(snapshot.workbench.suggested_objectives[0].title, "Own the next queued task");
 });
 
 test("office gui snapshot surfaces control-plane rollup signals", () => {
@@ -345,6 +392,241 @@ test("office gui snapshot marks Patient Zero full authority only when autonomy a
   assert.equal(snapshot.summary.patient_zero.toolkit.bridge_runtime_ready_count, 0);
   assert.equal(snapshot.summary.control_plane.patient_zero_autonomous_control_enabled, true);
   assert.equal(snapshot.summary.control_plane.patient_zero_full_control_authority, true);
+});
+
+test("office gui snapshot fails closed when Patient Zero reports explicit authority blockers", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    {
+      roster: {
+        active_agent_ids: ["ring-leader"],
+        agents: [{ agent_id: "ring-leader", display_name: "Ring Leader", coordination_tier: "lead", role_lane: "ops" }],
+      },
+      workboard: {},
+      tmux: {},
+      task_summary: { counts: {} },
+      task_running: {},
+      task_pending: {},
+      agent_sessions: { sessions: [] },
+      adapter: {},
+      bus_tail: {},
+      trichat_summary: {},
+      learning: {},
+      autopilot: {
+        state: {
+          config: {
+            execute_enabled: true,
+          },
+        },
+      },
+      runtime_workers: { summary: {}, sessions: [] },
+      kernel: {
+        overview: {},
+        worker_fabric: { hosts: [] },
+        model_router: { backends: [] },
+        runtime_workers: {},
+        autonomy_maintain: {},
+        reaction_engine: {},
+        observability: {},
+        swarm: {},
+        workflow_exports: {},
+        desktop_control: {
+          summary: {
+            enabled: true,
+            stale: false,
+            observe_ready: true,
+            act_ready: true,
+            listen_ready: true,
+          },
+        },
+        patient_zero: {
+          summary: {
+            enabled: true,
+            posture: "armed",
+            severity: "critical",
+            permission_profile: "high_risk",
+            browser_app: "Safari",
+            browser_ready: true,
+            root_shell_enabled: true,
+            root_shell_reason: "Privileged root lane ready via mcagent.",
+            autonomy_enabled: true,
+            authority_blockers: ["macos_authority_full_disk_access"],
+          },
+        },
+        privileged_access: {
+          summary: {
+            root_execution_ready: true,
+            credential_verified: true,
+            account: "mcagent",
+            target_user: "root",
+            patient_zero_armed: true,
+            secret_present: true,
+            helper_ready: true,
+            blockers: [],
+          },
+        },
+      },
+      patient_zero: {
+        report: {
+          full_control_authority: true,
+          authority_blockers: ["macos_authority_full_disk_access"],
+          activity_summary: [],
+        },
+        autonomy_control: {
+          toolkit: {
+            bridge_agents: [{ agent_id: "codex", armed: true }],
+            local_agents: [{ agent_id: "local-imprint", armed: true }],
+            terminal_commands: [{ command: "gh", armed: true }],
+            bridge_toolkit_ready: false,
+            bridge_runtime_ready_count: 0,
+            local_agent_spawn_ready: true,
+            terminal_toolkit_ready: true,
+            imprint_ready: true,
+            github_cli_ready: true,
+          },
+        },
+      },
+      autonomy_maintain: {
+        state: {},
+        runtime: {},
+        due: {},
+        self_drive: {
+          enabled: true,
+        },
+      },
+      provider_bridge: {
+        diagnostics: {
+          generated_at: "2026-04-01T17:00:00.000Z",
+          cached: true,
+          diagnostics: [],
+        },
+      },
+    },
+    { theme: "dark" }
+  );
+
+  assert.equal(snapshot.summary.patient_zero.full_control_authority, false);
+  assert.deepEqual(snapshot.summary.patient_zero.authority_blockers, ["macos_authority_full_disk_access"]);
+  assert.equal(snapshot.summary.control_plane.patient_zero_full_control_authority, false);
+});
+
+test("office gui snapshot fails closed when macOS authority audit says not ready even without blocker arrays", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    {
+      roster: {
+        active_agent_ids: ["ring-leader"],
+        agents: [{ agent_id: "ring-leader", display_name: "Ring Leader", coordination_tier: "lead", role_lane: "ops" }],
+      },
+      workboard: {},
+      tmux: {},
+      task_summary: { counts: {} },
+      task_running: {},
+      task_pending: {},
+      agent_sessions: { sessions: [] },
+      adapter: {},
+      bus_tail: {},
+      trichat_summary: {},
+      learning: {},
+      autopilot: {
+        state: {
+          config: {
+            execute_enabled: true,
+          },
+        },
+      },
+      runtime_workers: { summary: {}, sessions: [] },
+      kernel: {
+        overview: {},
+        worker_fabric: { hosts: [] },
+        model_router: { backends: [] },
+        runtime_workers: {},
+        autonomy_maintain: {},
+        reaction_engine: {},
+        observability: {},
+        swarm: {},
+        workflow_exports: {},
+        desktop_control: {
+          summary: {
+            enabled: true,
+            stale: false,
+            observe_ready: true,
+            act_ready: true,
+            listen_ready: true,
+          },
+        },
+        patient_zero: {
+          summary: {
+            enabled: true,
+            posture: "armed",
+            severity: "critical",
+            permission_profile: "high_risk",
+            browser_app: "Safari",
+            browser_ready: true,
+            root_shell_enabled: true,
+            root_shell_reason: "Privileged root lane ready via mcagent.",
+            autonomy_enabled: true,
+            macos_authority_audit_status: "blocked",
+            macos_authority_ready: false,
+          },
+        },
+        privileged_access: {
+          summary: {
+            root_execution_ready: true,
+            credential_verified: true,
+            account: "mcagent",
+            target_user: "root",
+            patient_zero_armed: true,
+            secret_present: true,
+            helper_ready: true,
+            blockers: [],
+          },
+        },
+      },
+      patient_zero: {
+        report: {
+          full_control_authority: true,
+          authority_blockers: [],
+          macos_authority_audit: {
+            status: "blocked",
+            ready_for_patient_zero_full_authority: false,
+          },
+          activity_summary: [],
+        },
+        autonomy_control: {
+          toolkit: {
+            bridge_agents: [{ agent_id: "codex", armed: true }],
+            local_agents: [{ agent_id: "local-imprint", armed: true }],
+            terminal_commands: [{ command: "gh", armed: true }],
+            bridge_toolkit_ready: false,
+            bridge_runtime_ready_count: 0,
+            local_agent_spawn_ready: true,
+            terminal_toolkit_ready: true,
+            imprint_ready: true,
+            github_cli_ready: true,
+          },
+        },
+      },
+      autonomy_maintain: {
+        state: {},
+        runtime: {},
+        due: {},
+        self_drive: {
+          enabled: true,
+        },
+      },
+      provider_bridge: {
+        diagnostics: {
+          generated_at: "2026-04-01T17:00:00.000Z",
+          cached: true,
+          diagnostics: [],
+        },
+      },
+    },
+    { theme: "dark" }
+  );
+
+  assert.equal(snapshot.summary.patient_zero.full_control_authority, false);
+  assert.equal(snapshot.summary.patient_zero.macos_authority_ready, false);
+  assert.equal(snapshot.summary.patient_zero.macos_authority_audit_status, "blocked");
 });
 
 test("office gui snapshot exposes live autopilot execution posture and council state", () => {

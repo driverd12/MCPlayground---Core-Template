@@ -1,3 +1,8 @@
+import fs from "node:fs";
+import path from "node:path";
+import process from "node:process";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { summarizeDesktopControlState } from "../desktop_control_plane.js";
 import { summarizePatientZeroState } from "../patient_zero_plane.js";
@@ -62,6 +67,148 @@ function ageSeconds(value: string | null | undefined) {
   return Math.max(0, (Date.now() - parsed) / 1000);
 }
 
+function hasIsoTimestamp(value: unknown) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  return Number.isFinite(Date.parse(value));
+}
+
+function normalizeStringArray(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return [...new Set(value.map((entry) => String(entry ?? "").trim()).filter(Boolean))];
+}
+
+function normalizeAuthorityChecks(value: unknown) {
+  const checks = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const normalized: Record<string, { status: string; detail: string | null }> = {};
+  for (const [key, raw] of Object.entries(checks)) {
+    const entry = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    normalized[key] = {
+      status: String(entry.status ?? "unknown").trim() || "unknown",
+      detail: typeof entry.detail === "string" && entry.detail.trim() ? entry.detail.trim() : null,
+    };
+  }
+  return normalized;
+}
+
+function buildMacosAuthorityAuditUnavailable(detail: string): MacosAuthorityAuditSnapshot {
+  return {
+    source: "macos_authority_audit",
+    generated_at: new Date().toISOString(),
+    applicable: process.platform === "darwin",
+    platform: process.platform,
+    status: process.platform === "darwin" ? "unavailable" : "skipped",
+    ready_for_patient_zero_full_authority: process.platform !== "darwin",
+    blockers: process.platform === "darwin" ? ["audit_unavailable"] : [],
+    checks: {},
+    detail,
+  };
+}
+
+function normalizeMacosAuthorityAudit(raw: unknown): MacosAuthorityAuditSnapshot {
+  const payload = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const platform = typeof payload.platform === "string" && payload.platform.trim() ? payload.platform.trim() : process.platform;
+  const skipped = payload.skipped === true || String(payload.reason ?? "").trim() === "not_macos" || platform !== "darwin";
+  const checks = normalizeAuthorityChecks(payload.checks);
+  if (skipped) {
+    return {
+      source: "macos_authority_audit",
+      generated_at:
+        typeof payload.generated_at === "string" && payload.generated_at.trim() ? payload.generated_at : new Date().toISOString(),
+      applicable: false,
+      platform,
+      status: "skipped",
+      ready_for_patient_zero_full_authority: true,
+      blockers: [],
+      checks,
+      detail: String(payload.reason ?? "not_macos").trim() || "not_macos",
+    };
+  }
+  const ready = payload.ready_for_patient_zero_full_authority === true;
+  const blockers = ready ? [] : normalizeStringArray(payload.blockers);
+  return {
+    source: "macos_authority_audit",
+    generated_at:
+      typeof payload.generated_at === "string" && payload.generated_at.trim() ? payload.generated_at : new Date().toISOString(),
+    applicable: true,
+    platform,
+    status: ready ? "ready" : "blocked",
+    ready_for_patient_zero_full_authority: ready,
+    blockers: blockers.length > 0 ? blockers : ready ? [] : ["authority_unverified"],
+    checks,
+    detail: ready
+      ? "macOS authority prerequisites are fully satisfied."
+      : blockers.length > 0
+        ? `macOS authority audit blockers=${blockers.join(", ")}`
+        : "macOS authority audit reported not-ready without explicit blockers.",
+  };
+}
+
+function readMacosAuthorityAuditOverride() {
+  const raw = process.env.MCP_PATIENT_ZERO_AUTHORITY_AUDIT_JSON;
+  if (!raw) {
+    return null;
+  }
+  try {
+    return normalizeMacosAuthorityAudit(JSON.parse(raw));
+  } catch (error) {
+    return buildMacosAuthorityAuditUnavailable(
+      `failed to parse MCP_PATIENT_ZERO_AUTHORITY_AUDIT_JSON: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
+function readMacosAuthorityAudit() {
+  const override = readMacosAuthorityAuditOverride();
+  if (override) {
+    return override;
+  }
+  if (process.platform !== "darwin") {
+    return normalizeMacosAuthorityAudit({ skipped: true, reason: "not_macos", platform: process.platform });
+  }
+  const now = Date.now();
+  if (macosAuthorityAuditCache && macosAuthorityAuditCache.expires_at_ms > now) {
+    return macosAuthorityAuditCache.value;
+  }
+  if (!fs.existsSync(MACOS_AUTHORITY_AUDIT_SCRIPT_PATH)) {
+    const unavailable = buildMacosAuthorityAuditUnavailable(`authority audit script missing at ${MACOS_AUTHORITY_AUDIT_SCRIPT_PATH}`);
+    macosAuthorityAuditCache = {
+      expires_at_ms: now + MACOS_AUTHORITY_AUDIT_CACHE_TTL_MS,
+      value: unavailable,
+    };
+    return unavailable;
+  }
+  const result = spawnSync(process.execPath, [MACOS_AUTHORITY_AUDIT_SCRIPT_PATH, "--json"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    timeout: 15_000,
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  let normalized: MacosAuthorityAuditSnapshot;
+  if (result.status === 0 && String(result.stdout || "").trim()) {
+    try {
+      normalized = normalizeMacosAuthorityAudit(JSON.parse(String(result.stdout || "")));
+    } catch (error) {
+      normalized = buildMacosAuthorityAuditUnavailable(
+        `failed to parse macos_authority_audit output: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  } else {
+    const stderr = String(result.stderr || "").trim();
+    const spawnError = result.error ? String(result.error.message ?? result.error) : "";
+    normalized = buildMacosAuthorityAuditUnavailable(stderr || spawnError || "macos_authority_audit execution failed");
+  }
+  macosAuthorityAuditCache = {
+    expires_at_ms: now + MACOS_AUTHORITY_AUDIT_CACHE_TTL_MS,
+    value: normalized,
+  };
+  return normalized;
+}
+
 const PATIENT_ZERO_TERMINAL_TOOLKIT = ["codex", "claude", "cursor", "gemini", "gh"] as const;
 const PATIENT_ZERO_TERMINAL_ALLOWLIST = PATIENT_ZERO_TERMINAL_TOOLKIT.map((entry) => `${entry}`);
 const PATIENT_ZERO_BRIDGE_AGENT_IDS = ["codex", "claude", "cursor", "gemini", "github-copilot"] as const;
@@ -77,6 +224,34 @@ const PATIENT_ZERO_LOCAL_AGENT_IDS = [
 const PATIENT_ZERO_SPECIALIST_AGENT_IDS = [
   ...new Set([...PATIENT_ZERO_BRIDGE_AGENT_IDS, ...PATIENT_ZERO_LOCAL_AGENT_IDS, ...getTriChatActiveAgentIds()].filter(Boolean)),
 ];
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const MACOS_AUTHORITY_AUDIT_SCRIPT_PATH = path.join(REPO_ROOT, "scripts", "macos_authority_audit.mjs");
+const MACOS_AUTHORITY_AUDIT_CACHE_TTL_MS = 120_000;
+
+type MacosAuthorityAuditSnapshot = {
+  source: "macos_authority_audit";
+  generated_at: string;
+  applicable: boolean;
+  platform: string;
+  status: "ready" | "blocked" | "skipped" | "unavailable";
+  ready_for_patient_zero_full_authority: boolean;
+  blockers: string[];
+  checks: Record<
+    string,
+    {
+      status: string;
+      detail: string | null;
+    }
+  >;
+  detail: string;
+};
+
+let macosAuthorityAuditCache:
+  | {
+      expires_at_ms: number;
+      value: MacosAuthorityAuditSnapshot;
+    }
+  | null = null;
 
 function deriveMutation(base: { idempotency_key: string; side_effect_fingerprint: string }, phase: string) {
   const safePhase = phase.replace(/[^a-z0-9._:-]+/gi, "-");
@@ -213,6 +388,70 @@ function buildAutonomyControlStatus(storage: Storage) {
       github_cli_ready: commandAllowlist.some((entry) => entry === "gh" || entry === "gh "),
     },
     autonomous_control_enabled: autonomyCoreReady,
+  };
+}
+
+function evaluateFullControlAuthority(params: {
+  summary: ReturnType<typeof summarizePatientZeroState>;
+  desktopState: ReturnType<Storage["getDesktopControlState"]>;
+  desktopSummary: ReturnType<typeof summarizeDesktopControlState>;
+  autonomyControlEnabled: boolean;
+  macosAuthorityAudit: MacosAuthorityAuditSnapshot;
+}) {
+  const desktopLaneHealthy = !params.desktopState.last_error;
+  const proofs = {
+    screen_recording_proven:
+      params.desktopSummary.screen_recording_proven === true ||
+      (desktopLaneHealthy && hasIsoTimestamp(params.desktopState.last_screenshot_at)),
+    accessibility_actuation_proven:
+      params.desktopSummary.accessibility_actuation_proven === true ||
+      (desktopLaneHealthy && hasIsoTimestamp(params.desktopState.last_action_at)),
+    microphone_listen_proven:
+      params.desktopSummary.microphone_listen_proven === true ||
+      (desktopLaneHealthy && hasIsoTimestamp(params.desktopState.last_listen_at)),
+    macos_authority_audit_ready: params.macosAuthorityAudit.ready_for_patient_zero_full_authority,
+    macos_authority_audit_status: params.macosAuthorityAudit.status,
+  };
+  const blockers: string[] = [];
+  if (!params.summary.enabled) {
+    blockers.push("patient_zero_disarmed");
+  }
+  if (!params.summary.observe_ready) {
+    blockers.push("desktop_observe_lane_not_ready");
+  }
+  if (!params.summary.act_ready) {
+    blockers.push("desktop_act_lane_not_ready");
+  }
+  if (!params.summary.listen_ready) {
+    blockers.push("desktop_listen_lane_not_ready");
+  }
+  if (!proofs.screen_recording_proven) {
+    blockers.push("screen_recording_unproven");
+  }
+  if (!proofs.accessibility_actuation_proven) {
+    blockers.push("accessibility_actuation_unproven");
+  }
+  if (!proofs.microphone_listen_proven) {
+    blockers.push("microphone_listen_unproven");
+  }
+  if (!params.summary.browser_ready) {
+    blockers.push("browser_lane_not_ready");
+  }
+  if (!params.summary.root_shell_enabled) {
+    blockers.push("root_shell_not_ready");
+  }
+  if (!params.autonomyControlEnabled) {
+    blockers.push("autonomy_control_not_ready");
+  }
+  if (params.macosAuthorityAudit.applicable && !params.macosAuthorityAudit.ready_for_patient_zero_full_authority) {
+    for (const blocker of params.macosAuthorityAudit.blockers) {
+      blockers.push(`macos_authority_${blocker}`);
+    }
+  }
+  return {
+    full_control_authority: blockers.length === 0,
+    blockers,
+    proofs,
   };
 }
 
@@ -415,20 +654,21 @@ async function syncAutonomyControl(
   return warnings;
 }
 
-export function buildPatientZeroReport(storage: Storage) {
+export function buildPatientZeroReport(storage: Storage, macosAuthorityAudit = readMacosAuthorityAudit()) {
   const state = storage.getPatientZeroState();
   const desktopState = storage.getDesktopControlState();
+  const desktopSummary = summarizeDesktopControlState(desktopState);
   const privilegedAccess = buildPrivilegedAccessStatus(storage);
   const summary = summarizePatientZeroState(state, desktopState, privilegedAccess.summary as Record<string, unknown>);
   const autonomyControl = buildAutonomyControlStatus(storage);
-  const fullControlAuthority =
-    summary.enabled &&
-    summary.observe_ready &&
-    summary.act_ready &&
-    summary.listen_ready &&
-    summary.browser_ready &&
-    summary.root_shell_enabled &&
-    autonomyControl.autonomous_control_enabled;
+  const authority = evaluateFullControlAuthority({
+    summary,
+    desktopState,
+    desktopSummary,
+    autonomyControlEnabled: autonomyControl.autonomous_control_enabled,
+    macosAuthorityAudit,
+  });
+  const fullControlAuthority = authority.full_control_authority;
   const since = startOfTodayIso();
   const events = storage.listRuntimeEvents({ since, limit: 8 });
   const eventSummary = storage.summarizeRuntimeEvents({ since });
@@ -470,7 +710,7 @@ export function buildPatientZeroReport(storage: Storage) {
     "Keep the local control plane truthful, bounded, and ready for the next delegated objective.";
   const concern =
     !fullControlAuthority && summary.enabled
-      ? `Full-control posture is armed, but autonomy=${autonomyControl.autonomous_control_enabled ? "ready" : "not-ready"}, local-tooling=${autonomyControl.toolkit.local_agent_spawn_ready && autonomyControl.toolkit.terminal_toolkit_ready ? "ready" : "not-ready"}, bridge-runtime=${autonomyControl.toolkit.bridge_toolkit_ready ? "ready" : autonomyControl.toolkit.bridge_runtime_known ? "partial" : "unknown"}, and root=${summary.root_shell_enabled ? "ready" : "not-ready"}.`
+      ? `Full-control posture is armed, but blockers=${authority.blockers.join(", ")}.`
       : todayErrorCount > 0
       ? `Recent runtime errors detected today: ${todayErrorCount} event(s).`
       : desktopState.last_error
@@ -492,6 +732,9 @@ export function buildPatientZeroReport(storage: Storage) {
     desire,
     autonomous_control_enabled: autonomyControl.autonomous_control_enabled,
     full_control_authority: fullControlAuthority,
+    authority_blockers: authority.blockers,
+    authority_proofs: authority.proofs,
+    macos_authority_audit: macosAuthorityAudit,
     toolkit: autonomyControl.toolkit,
     activity_count: events.length,
     activity_summary: recentActivity,
@@ -526,30 +769,37 @@ function recordPatientZeroEvent(
 function buildPayload(storage: Storage) {
   const state = storage.getPatientZeroState();
   const desktopState = storage.getDesktopControlState();
+  const desktopSummary = summarizeDesktopControlState(desktopState);
   const privilegedAccess = buildPrivilegedAccessStatus(storage);
   const autonomyControl = buildAutonomyControlStatus(storage);
   const summary = summarizePatientZeroState(state, desktopState, privilegedAccess.summary as Record<string, unknown>);
+  const macosAuthorityAudit = readMacosAuthorityAudit();
+  const authority = evaluateFullControlAuthority({
+    summary,
+    desktopState,
+    desktopSummary,
+    autonomyControlEnabled: autonomyControl.autonomous_control_enabled,
+    macosAuthorityAudit,
+  });
   return {
     state,
     summary: {
       ...summary,
       autonomous_control_enabled: autonomyControl.autonomous_control_enabled,
-      full_control_authority:
-        summary.enabled &&
-        summary.observe_ready &&
-        summary.act_ready &&
-        summary.listen_ready &&
-        summary.browser_ready &&
-        summary.root_shell_enabled &&
-        autonomyControl.autonomous_control_enabled,
+      full_control_authority: authority.full_control_authority,
+      authority_blockers: authority.blockers,
+      authority_proofs: authority.proofs,
+      macos_authority_audit_status: macosAuthorityAudit.status,
+      macos_authority_ready: macosAuthorityAudit.ready_for_patient_zero_full_authority,
     },
     desktop_control: {
       state: desktopState,
-      summary: summarizeDesktopControlState(desktopState),
+      summary: desktopSummary,
     },
     autonomy_control: autonomyControl,
     privileged_access: privilegedAccess,
-    report: buildPatientZeroReport(storage),
+    report: buildPatientZeroReport(storage, macosAuthorityAudit),
+    macos_authority_audit: macosAuthorityAudit,
     source: "patient.zero",
   };
 }

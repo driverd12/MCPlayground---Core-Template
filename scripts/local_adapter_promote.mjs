@@ -6,6 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { assertPreparedDataset } from "./local_adapter_lane.mjs";
 import {
   acquireRunnerSingletonLock,
   callTool,
@@ -386,6 +387,7 @@ async function main() {
   if (manifest?.training_intent?.executed !== true) {
     throw new Error("The selected manifest has not executed a local adapter training run yet.");
   }
+  const datasetAudit = assertPreparedDataset(manifest);
   const promotionDir = path.join(runDir, "promotion");
   const rewardFilePath = path.join(promotionDir, "reward.txt");
   const reportPath = path.join(promotionDir, "eval_report.json");
@@ -462,6 +464,7 @@ async function main() {
       decided_at: new Date().toISOString(),
       manifest_path: manifestPath,
       candidate_id: manifest.candidate_id,
+      dataset_integrity: datasetAudit.actual || manifest?.corpus?.integrity || null,
       decision,
       benchmark_suite_id: benchmarkSuite.suite_id,
       eval_suite_id: evalSuite.suite_id,
@@ -485,6 +488,7 @@ async function main() {
       baseline_score: decision.baseline_score,
       delta_score: decision.delta_score,
       blockers: decision.blockers,
+      dataset_integrity: datasetAudit.actual || manifest?.corpus?.integrity || null,
       registration_path: registrationPath,
       integration_consideration: decision.integration_consideration,
     };

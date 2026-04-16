@@ -90,6 +90,7 @@
     "doctor:bootstrap": "node ./scripts/bootstrap_doctor.mjs",
     "doctor:macos:authority": "node ./scripts/macos_authority_audit.mjs",
     "local:training:status": "node ./scripts/local_adapter_lane.mjs status",
+    "local:training:verify": "node ./scripts/local_adapter_lane.mjs verify",
     "local:training:bootstrap": "node ./scripts/local_adapter_lane.mjs bootstrap",
     "local:training:prepare": "node ./scripts/local_adapter_lane.mjs prepare",
     "local:training:train": "node ./scripts/local_adapter_train.mjs",

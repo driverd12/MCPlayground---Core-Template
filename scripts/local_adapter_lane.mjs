@@ -20,9 +20,23 @@ const DEFAULT_BENCHMARK_SUITE_ID = "autonomy.smoke.local";
 const DEFAULT_EVAL_SUITE_ID = "autonomy.control-plane";
 const REGISTRY_SCHEMA_VERSION = "training.model_registry.v2";
 const MANIFEST_SCHEMA_VERSION = "local_training_packet.v2";
+const DATASET_INTEGRITY_CONTRACT_VERSION = "local_training_packet.dataset_integrity.v1";
 const DEFAULT_EVAL_FRACTION = 0.2;
 const MIN_CORPUS_CHAR_COUNT = 20;
 const MIN_CORPUS_WORD_COUNT = 4;
+const TRAINING_STATUS_RANK = {
+  prepared_blocked: 1,
+  training_ready: 1,
+  training_failed: 2,
+  adapter_trained_unpromoted: 2,
+  adapter_rejected: 3,
+  adapter_registered: 3,
+  adapter_served_mlx: 4,
+  adapter_exported_ollama: 4,
+  adapter_primary_mlx: 5,
+  adapter_primary_ollama: 5,
+  rollback_restored: 5,
+};
 const EXPECTED_ADAPTER_ARTIFACTS = [
   {
     artifact: "adapter_config",
@@ -109,6 +123,14 @@ function readJson(filePath) {
   }
 }
 
+function readString(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function readPackageJson() {
   return readJson(path.join(REPO_ROOT, "package.json")) || {};
 }
@@ -147,6 +169,272 @@ function sourceTypeCounts(records) {
     counts[sourceType] = (counts[sourceType] ?? 0) + 1;
   }
   return counts;
+}
+
+function stableHash(parts = []) {
+  return crypto.createHash("sha256").update(parts.join("\n")).digest("hex");
+}
+
+function canonicalDatasetRow(record) {
+  const text = typeof record?.text === "string" ? record.text : "";
+  const normalizedText = normalizeCorpusText(text);
+  const sourceType = String(record?.source_type || "unknown").trim() || "unknown";
+  const recordId = readString(record?.record_id);
+  const fingerprint = readString(record?.fingerprint) || (normalizedText ? fingerprintText(normalizedText.toLowerCase()) : null);
+  return {
+    record_id: recordId,
+    fingerprint,
+    source_type: sourceType,
+    source_id: record?.source_id ?? null,
+    text,
+  };
+}
+
+function duplicateCount(values = []) {
+  const seen = new Set();
+  let duplicates = 0;
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+    if (seen.has(value)) {
+      duplicates += 1;
+      continue;
+    }
+    seen.add(value);
+  }
+  return duplicates;
+}
+
+function setDifference(left = new Set(), right = new Set()) {
+  const values = [];
+  for (const entry of left) {
+    if (!right.has(entry)) {
+      values.push(entry);
+    }
+  }
+  return values;
+}
+
+function setIntersection(left = new Set(), right = new Set()) {
+  const values = [];
+  for (const entry of left) {
+    if (right.has(entry)) {
+      values.push(entry);
+    }
+  }
+  return values;
+}
+
+function summarizeDatasetRows(records = []) {
+  const canonicalRows = [...(Array.isArray(records) ? records : [])].map(canonicalDatasetRow);
+  const recordIds = canonicalRows.map((entry) => entry.record_id).filter(Boolean);
+  const fingerprints = canonicalRows.map((entry) => entry.fingerprint).filter(Boolean);
+  return {
+    canonical_rows: canonicalRows,
+    record_ids: recordIds,
+    record_id_set: new Set(recordIds),
+    duplicate_record_id_count: duplicateCount(recordIds),
+    duplicate_fingerprint_count: duplicateCount(fingerprints),
+    invalid_row_count: canonicalRows.filter((entry) => !entry.record_id || !entry.fingerprint || !normalizeCorpusText(entry.text)).length,
+    row_sha256: stableHash(canonicalRows.map((entry) => JSON.stringify(entry))),
+    membership_sha256: stableHash([...new Set(recordIds)].sort()),
+  };
+}
+
+function readJsonlRecords(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return {
+      ok: false,
+      file_path: filePath || null,
+      missing: true,
+      rows: [],
+      error: "missing",
+    };
+  }
+  try {
+    const rows = fs
+      .readFileSync(filePath, "utf8")
+      .split(/\r?\n/)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry) => JSON.parse(entry));
+    return {
+      ok: true,
+      file_path: filePath,
+      missing: false,
+      rows,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      file_path: filePath,
+      missing: false,
+      rows: [],
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export function buildDatasetIntegrity({ corpusRecords = [], trainRecords = [], evalRecords = [] } = {}) {
+  const corpus = summarizeDatasetRows(corpusRecords);
+  const train = summarizeDatasetRows(trainRecords);
+  const evalSet = summarizeDatasetRows(evalRecords);
+  const trainEvalOverlap = setIntersection(train.record_id_set, evalSet.record_id_set);
+  const trainMissingFromCorpus = setDifference(train.record_id_set, corpus.record_id_set);
+  const evalMissingFromCorpus = setDifference(evalSet.record_id_set, corpus.record_id_set);
+  const corpusMissingFromSplits = setDifference(
+    corpus.record_id_set,
+    new Set([...train.record_id_set, ...evalSet.record_id_set])
+  );
+  return {
+    contract_version: DATASET_INTEGRITY_CONTRACT_VERSION,
+    corpus_sha256: corpus.row_sha256,
+    train_sha256: train.row_sha256,
+    eval_sha256: evalSet.row_sha256,
+    corpus_membership_sha256: corpus.membership_sha256,
+    train_membership_sha256: train.membership_sha256,
+    eval_membership_sha256: evalSet.membership_sha256,
+    corpus_duplicate_record_id_count: corpus.duplicate_record_id_count,
+    train_duplicate_record_id_count: train.duplicate_record_id_count,
+    eval_duplicate_record_id_count: evalSet.duplicate_record_id_count,
+    corpus_duplicate_fingerprint_count: corpus.duplicate_fingerprint_count,
+    train_duplicate_fingerprint_count: train.duplicate_fingerprint_count,
+    eval_duplicate_fingerprint_count: evalSet.duplicate_fingerprint_count,
+    corpus_invalid_row_count: corpus.invalid_row_count,
+    train_invalid_row_count: train.invalid_row_count,
+    eval_invalid_row_count: evalSet.invalid_row_count,
+    train_missing_from_corpus_count: trainMissingFromCorpus.length,
+    eval_missing_from_corpus_count: evalMissingFromCorpus.length,
+    corpus_missing_from_splits_count: corpusMissingFromSplits.length,
+    train_eval_overlap_count: trainEvalOverlap.length,
+    split_coverage_ok:
+      trainMissingFromCorpus.length === 0 &&
+      evalMissingFromCorpus.length === 0 &&
+      corpusMissingFromSplits.length === 0 &&
+      trainEvalOverlap.length === 0,
+  };
+}
+
+export function auditPreparedDataset(manifest, registryRun = null) {
+  const findings = [];
+  const addFinding = (severity, code, message) => {
+    findings.push({ severity, code, message });
+  };
+
+  const corpusPath = readString(manifest?.corpus?.path) || readString(registryRun?.corpus_path);
+  const trainPath = readString(manifest?.corpus?.train_path) || readString(registryRun?.train_path);
+  const evalPath = readString(manifest?.corpus?.eval_path) || readString(registryRun?.eval_path);
+  const expected = manifest?.corpus?.integrity && typeof manifest.corpus.integrity === "object" ? manifest.corpus.integrity : null;
+
+  const corpusPayload = readJsonlRecords(corpusPath);
+  const trainPayload = readJsonlRecords(trainPath);
+  const evalPayload = readJsonlRecords(evalPath);
+
+  if (!expected) {
+    addFinding(
+      "error",
+      "dataset.integrity_missing",
+      "The manifest is missing corpus.integrity, so the prepared packet cannot prove split membership or hash stability."
+    );
+  }
+  if (!corpusPayload.ok && !corpusPayload.missing) {
+    addFinding("error", "dataset.corpus_unreadable", "The corpus.jsonl file could not be parsed as JSONL.");
+  }
+  if (!trainPayload.ok && !trainPayload.missing) {
+    addFinding("error", "dataset.train_unreadable", "The train.jsonl file could not be parsed as JSONL.");
+  }
+  if (!evalPayload.ok && !evalPayload.missing) {
+    addFinding("error", "dataset.eval_unreadable", "The eval.jsonl file could not be parsed as JSONL.");
+  }
+
+  let actual = null;
+  if (corpusPayload.ok && trainPayload.ok && evalPayload.ok) {
+    actual = buildDatasetIntegrity({
+      corpusRecords: corpusPayload.rows,
+      trainRecords: trainPayload.rows,
+      evalRecords: evalPayload.rows,
+    });
+    if (actual.train_eval_overlap_count > 0) {
+      addFinding("error", "dataset.train_eval_overlap", "The train and eval splits are no longer disjoint.");
+    }
+    if (!actual.split_coverage_ok) {
+      addFinding("error", "dataset.split_coverage_drift", "The train/eval membership no longer reconstructs the prepared corpus exactly.");
+    }
+    if (
+      actual.corpus_duplicate_record_id_count > 0 ||
+      actual.train_duplicate_record_id_count > 0 ||
+      actual.eval_duplicate_record_id_count > 0
+    ) {
+      addFinding("error", "dataset.duplicate_record_ids", "The prepared packet contains duplicate record_id values.");
+    }
+    if (
+      actual.corpus_duplicate_fingerprint_count > 0 ||
+      actual.train_duplicate_fingerprint_count > 0 ||
+      actual.eval_duplicate_fingerprint_count > 0
+    ) {
+      addFinding("error", "dataset.duplicate_fingerprints", "The prepared packet contains duplicate text fingerprints.");
+    }
+    if (actual.corpus_invalid_row_count > 0 || actual.train_invalid_row_count > 0 || actual.eval_invalid_row_count > 0) {
+      addFinding("error", "dataset.invalid_rows", "The prepared packet contains rows missing record_id, text, or fingerprint evidence.");
+    }
+    if (expected) {
+      const compareFields = [
+        ["corpus_sha256", "dataset.corpus_hash_drift", "The curated corpus hash drifted after packet preparation."],
+        ["train_sha256", "dataset.train_hash_drift", "The train split hash drifted after packet preparation."],
+        ["eval_sha256", "dataset.eval_hash_drift", "The eval split hash drifted after packet preparation."],
+        [
+          "corpus_membership_sha256",
+          "dataset.corpus_membership_drift",
+          "The corpus record membership no longer matches the prepared packet.",
+        ],
+        [
+          "train_membership_sha256",
+          "dataset.train_membership_drift",
+          "The train split membership no longer matches the prepared packet.",
+        ],
+        [
+          "eval_membership_sha256",
+          "dataset.eval_membership_drift",
+          "The eval split membership no longer matches the prepared packet.",
+        ],
+      ];
+      for (const [field, code, message] of compareFields) {
+        if (readString(expected[field]) && expected[field] !== actual[field]) {
+          addFinding("error", code, message);
+        }
+      }
+    }
+  }
+
+  const errorCount = findings.filter((entry) => entry.severity === "error").length;
+  return {
+    ok: errorCount === 0,
+    error_count: errorCount,
+    findings,
+    expected,
+    actual,
+    paths: {
+      corpus_path: corpusPath,
+      train_path: trainPath,
+      eval_path: evalPath,
+    },
+  };
+}
+
+export function assertPreparedDataset(manifest, registryRun = null) {
+  const audit = auditPreparedDataset(manifest, registryRun);
+  if (!audit.ok) {
+    const codes = audit.findings
+      .filter((entry) => entry.severity === "error")
+      .map((entry) => entry.code)
+      .join(", ");
+    throw new Error(
+      `The prepared training packet failed integrity checks (${codes || "dataset_integrity_failed"}). Rerun \`npm run local:training:prepare\` before continuing.`
+    );
+  }
+  return audit;
 }
 
 export function resolveTrainerPython(input = {}) {
@@ -475,12 +763,30 @@ export function detectWatchdogCommand() {
   };
 }
 
+export function detectVerifyCommand() {
+  const packageJson = readPackageJson();
+  const scripts = packageJson && typeof packageJson === "object" ? packageJson.scripts || {} : {};
+  const scripted = String(scripts["local:training:verify"] || "").trim();
+  if (scripted) {
+    return {
+      available: true,
+      command: "npm run local:training:verify",
+      source: "package.json",
+    };
+  }
+  return {
+    available: false,
+    command: null,
+    source: null,
+  };
+}
+
 function parseIsoTimestamp(value) {
   const parsed = Date.parse(String(value || "").trim());
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-export function buildPrimaryWatchdogState(latestRun, manifest) {
+export function buildPrimaryWatchdogState(latestRun, manifest, options = {}) {
   const status = String(latestRun?.status || manifest?.status || "").trim();
   const applicable = status === "adapter_primary_mlx" || status === "adapter_primary_ollama";
   const contract =
@@ -497,7 +803,9 @@ export function buildPrimaryWatchdogState(latestRun, manifest) {
   const soakOk =
     latestRun?.primary_soak_ok === true || (latestRun?.primary_soak_ok !== false && manifest?.primary_soak_result?.ok === true);
   const ageMinutes =
-    completedAtMs !== null ? Number(((Date.now() - completedAtMs) / 60000).toFixed(2)) : null;
+    completedAtMs !== null
+      ? Number((((Number.isFinite(options.nowMs) ? Number(options.nowMs) : Date.now()) - completedAtMs) / 60000).toFixed(2))
+      : null;
   const stale = applicable && completedAtMs !== null ? ageMinutes > maxSoakAgeMinutes : applicable && completedAtMs === null;
   const shouldRunWatchdog = applicable && (!soakOk || stale);
   return {
@@ -634,6 +942,306 @@ function currentModel() {
   );
 }
 
+function readJsonlLineCount(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return null;
+  }
+  const content = fs.readFileSync(filePath, "utf8");
+  return content
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .filter(Boolean).length;
+}
+
+function statusRank(status) {
+  const normalized = String(status || "").trim();
+  return TRAINING_STATUS_RANK[normalized] ?? 0;
+}
+
+function statusAtLeast(status, expected) {
+  return statusRank(status) >= statusRank(expected);
+}
+
+function summarizeTrainingProof({ status, manifest, registration, primaryWatchdog }) {
+  const normalizedStatus = String(status || "").trim();
+  const primarySoakOk = manifest?.primary_soak_result?.ok === true || manifest?.primary_watchdog_result?.ok === true;
+  const primaryWatchdogFresh =
+    normalizedStatus === "adapter_primary_mlx" || normalizedStatus === "adapter_primary_ollama"
+      ? primaryWatchdog?.should_run_watchdog === false
+      : null;
+  let stage = "unknown";
+  if (normalizedStatus === "adapter_primary_mlx" || normalizedStatus === "adapter_primary_ollama") {
+    if (primarySoakOk && primaryWatchdogFresh === true) {
+      stage = "primary_confidence_fresh";
+    } else if (primarySoakOk) {
+      stage = "primary_confidence_stale";
+    } else {
+      stage = "primary_pending_confidence";
+    }
+  } else if (normalizedStatus === "adapter_served_mlx" || normalizedStatus === "adapter_exported_ollama") {
+    stage = "integration_live";
+  } else if (normalizedStatus === "adapter_registered") {
+    stage = "promotion_registered";
+  } else if (normalizedStatus === "adapter_rejected") {
+    stage = "promotion_rejected";
+  } else if (normalizedStatus === "adapter_trained_unpromoted" || normalizedStatus === "training_failed") {
+    stage = "training_executed";
+  } else if (normalizedStatus === "training_ready" || normalizedStatus === "prepared_blocked") {
+    stage = "packet_prepared";
+  }
+
+  return {
+    stage,
+    packet_prepared: Boolean(manifest?.corpus?.path && manifest?.sources),
+    training_executed: manifest?.training_intent?.executed === true,
+    promotion_registered: manifest?.promotion_result?.status === "registered" && registration?.decision?.accepted === true,
+    integration_live: Boolean(manifest?.integration_result?.backend_id),
+    router_primary: normalizedStatus === "adapter_primary_mlx" || normalizedStatus === "adapter_primary_ollama",
+    rollback_ready: Boolean(
+      manifest?.rollback_model ||
+        manifest?.cutover_result?.previous_default_backend_id ||
+        registration?.cutover_result?.previous_default_backend_id
+    ),
+    primary_soak_ok: primarySoakOk,
+    primary_watchdog_fresh: primaryWatchdogFresh,
+    safe_promotion_allowed_now: manifest?.safe_promotion_metadata?.allowed_now === true,
+  };
+}
+
+export function auditTrainingRun({ registryRun, manifest, registration, nowMs = Date.now() }) {
+  const findings = [];
+  const addFinding = (severity, code, message) => {
+    findings.push({ severity, code, message });
+  };
+
+  const manifestPath =
+    readString(manifest?.manifest_path) ||
+    readString(registryRun?.manifest_path) ||
+    null;
+  const status = readString(manifest?.status) || readString(registryRun?.status) || "unknown";
+  const primaryWatchdog = buildPrimaryWatchdogState(
+    registryRun || {},
+    manifest || {},
+    { nowMs }
+  );
+  const proof = summarizeTrainingProof({
+    status,
+    manifest,
+    registration,
+    primaryWatchdog,
+  });
+
+  if (!registryRun || typeof registryRun !== "object") {
+    addFinding("error", "registry.entry_missing", "The registry entry is missing or unreadable.");
+  }
+  if (!manifest || typeof manifest !== "object") {
+    addFinding("error", "manifest.unreadable", `The manifest could not be read${manifestPath ? ` at ${manifestPath}` : ""}.`);
+  }
+  if (!readString(registryRun?.candidate_id)) {
+    addFinding("warn", "registry.candidate_missing", "The registry entry does not persist a candidate_id.");
+  }
+  if (manifest && registryRun?.run_id && manifest.run_id && registryRun.run_id !== manifest.run_id) {
+    addFinding("error", "manifest.run_id_mismatch", "The registry run_id does not match the manifest run_id.");
+  }
+  if (
+    manifest &&
+    readString(registryRun?.candidate_id) &&
+    readString(manifest?.candidate_id) &&
+    registryRun.candidate_id !== manifest.candidate_id
+  ) {
+    addFinding("error", "manifest.candidate_id_mismatch", "The registry candidate_id does not match the manifest candidate_id.");
+  }
+
+  if (manifest && manifest.schema_version !== MANIFEST_SCHEMA_VERSION) {
+    addFinding(
+      "warn",
+      "manifest.schema_version_legacy",
+      `The manifest schema version is ${manifest.schema_version || "missing"} instead of ${MANIFEST_SCHEMA_VERSION}.`
+    );
+  }
+  if (manifest && (!manifest.acceptance_contract || !manifest.evaluation_targets)) {
+    addFinding(
+      "error",
+      "manifest.contract_missing",
+      "The manifest is missing acceptance_contract or evaluation_targets, so promotion evidence is underspecified."
+    );
+  }
+
+  const corpusPath = readString(manifest?.corpus?.path) || readString(registryRun?.corpus_path);
+  const trainPath = readString(manifest?.corpus?.train_path) || readString(registryRun?.train_path);
+  const evalPath = readString(manifest?.corpus?.eval_path) || readString(registryRun?.eval_path);
+  const corpusCount = readJsonlLineCount(corpusPath);
+  const trainCount = readJsonlLineCount(trainPath);
+  const evalCount = readJsonlLineCount(evalPath);
+  if (corpusPath && corpusCount === null) {
+    addFinding("error", "dataset.corpus_missing", "The curated corpus path is missing from disk.");
+  }
+  if (trainPath && trainCount === null) {
+    addFinding("error", "dataset.train_missing", "The train split path is missing from disk.");
+  }
+  if (evalPath && evalCount === null) {
+    addFinding("error", "dataset.eval_missing", "The eval split path is missing from disk.");
+  }
+  if (Number.isFinite(manifest?.corpus?.record_count) && corpusCount !== null && corpusCount !== manifest.corpus.record_count) {
+    addFinding("error", "dataset.corpus_count_mismatch", "The corpus.jsonl row count does not match manifest.corpus.record_count.");
+  }
+  if (
+    Number.isFinite(manifest?.corpus?.train_record_count) &&
+    trainCount !== null &&
+    trainCount !== manifest.corpus.train_record_count
+  ) {
+    addFinding("error", "dataset.train_count_mismatch", "The train.jsonl row count does not match manifest.corpus.train_record_count.");
+  }
+  if (
+    Number.isFinite(manifest?.corpus?.eval_record_count) &&
+    evalCount !== null &&
+    evalCount !== manifest.corpus.eval_record_count
+  ) {
+    addFinding("error", "dataset.eval_count_mismatch", "The eval.jsonl row count does not match manifest.corpus.eval_record_count.");
+  }
+  const datasetAudit = auditPreparedDataset(manifest, registryRun);
+  for (const finding of datasetAudit.findings) {
+    addFinding(finding.severity, finding.code, finding.message);
+  }
+
+  const trainingExecuted = manifest?.training_intent?.executed === true;
+  const safePromotionAllowed = manifest?.safe_promotion_metadata?.allowed_now === true;
+  const artifactRoot =
+    readString(manifest?.training_result?.adapter_path) ||
+    readString(registryRun?.adapter_path) ||
+    (readString(manifest?.training_result?.training_metrics_path)
+      ? path.dirname(readString(manifest.training_result.training_metrics_path))
+      : null) ||
+    (readString(manifestPath) ? path.dirname(manifestPath) : null);
+  const artifacts = artifactRoot
+    ? detectAdapterArtifacts(artifactRoot)
+    : { all_present: false, missing: EXPECTED_ADAPTER_ARTIFACTS.map((entry) => entry.artifact), present: [] };
+
+  if (statusAtLeast(status, "adapter_trained_unpromoted")) {
+    if (!trainingExecuted) {
+      addFinding("error", "training.intent_missing", "The run reached a post-train state without training_intent.executed=true.");
+    }
+    if (!artifacts.all_present) {
+      addFinding("error", "training.artifacts_missing", "The run reached a post-train state without all expected adapter artifacts.");
+    }
+    if (!readString(manifest?.training_result?.training_metrics_path)) {
+      addFinding("error", "training.metrics_missing", "The training result is missing a training_metrics_path.");
+    }
+    if (manifest?.training_result?.generate_smoke?.ok !== true) {
+      addFinding("warn", "training.generate_smoke_missing", "The training result does not show a successful adapter generation smoke check.");
+    }
+  } else {
+    if (trainingExecuted) {
+      addFinding("error", "training.executed_too_early", "training_intent.executed is true before the lane reached a trained state.");
+    }
+    if (safePromotionAllowed) {
+      addFinding("error", "promotion.allowed_too_early", "safe_promotion_metadata.allowed_now is true before a live integration state exists.");
+    }
+  }
+
+  if (statusAtLeast(status, "adapter_registered") || status === "adapter_rejected") {
+    const expectedPromotionStatus = status === "adapter_rejected" ? "rejected" : "registered";
+    if (!manifest?.promotion_result || manifest.promotion_result.status !== expectedPromotionStatus) {
+      addFinding(
+        "error",
+        "promotion.result_missing",
+        `The manifest is missing a ${expectedPromotionStatus} promotion_result despite the current status.`
+      );
+    }
+    if (!readString(manifest?.promotion_result?.benchmark_suite_id) || !readString(manifest?.promotion_result?.eval_suite_id)) {
+      addFinding("error", "promotion.suites_missing", "The promotion result is missing benchmark or eval suite identifiers.");
+    }
+    if (!Number.isFinite(manifest?.promotion_result?.reward_score)) {
+      addFinding("error", "promotion.reward_missing", "The promotion result is missing a numeric reward_score.");
+    }
+    if (status !== "adapter_rejected" && registration?.decision?.accepted !== true) {
+      addFinding("error", "promotion.registration_missing", "The run claims a registered state without an accepted registration artifact.");
+    }
+  }
+
+  const integrated = statusAtLeast(status, "adapter_served_mlx") || statusAtLeast(status, "adapter_exported_ollama");
+  if (integrated) {
+    if (!manifest?.integration_result?.backend_id || !manifest?.integration_result?.model_id) {
+      addFinding("error", "integration.result_missing", "The run is integrated but the integration_result is incomplete.");
+    }
+    if (!safePromotionAllowed) {
+      addFinding("error", "promotion.allowed_missing", "safe_promotion_metadata.allowed_now should be true once the adapter is live and reachable.");
+    }
+    if (Array.isArray(manifest?.safe_promotion_metadata?.blockers) && manifest.safe_promotion_metadata.blockers.length > 0) {
+      addFinding("warn", "promotion.blockers_still_present", "The adapter is integrated but safe_promotion_metadata still lists blockers.");
+    }
+  }
+
+  const primary = status === "adapter_primary_mlx" || status === "adapter_primary_ollama";
+  if (primary) {
+    if (manifest?.cutover_result?.ok !== true || manifest?.cutover_result?.promoted !== true) {
+      addFinding("error", "cutover.result_missing", "The run is primary but cutover_result does not show a successful promotion.");
+    }
+    if (!readString(manifest?.cutover_result?.previous_default_backend_id)) {
+      addFinding("error", "rollback.previous_default_missing", "The current primary is missing the previous_default_backend_id needed for rollback.");
+    }
+    if (!manifest?.primary_soak_result) {
+      addFinding("warn", "confidence.soak_missing", "The adapter is primary but does not yet have a recorded bounded soak result.");
+    } else if (primaryWatchdog.should_run_watchdog) {
+      addFinding(
+        "warn",
+        "confidence.watchdog_stale",
+        `The latest green confidence proof is stale (${primaryWatchdog.primary_soak_age_minutes ?? "n/a"} minutes old).`
+      );
+    }
+  }
+
+  const errorCount = findings.filter((entry) => entry.severity === "error").length;
+  const warningCount = findings.filter((entry) => entry.severity === "warn").length;
+  return {
+    ok: errorCount === 0,
+    clean: errorCount === 0 && warningCount === 0,
+    status,
+    manifest_path: manifestPath,
+    candidate_id: readString(manifest?.candidate_id) || readString(registryRun?.candidate_id) || null,
+    error_count: errorCount,
+    warning_count: warningCount,
+    proof,
+    dataset_audit: datasetAudit,
+    primary_watchdog: primaryWatchdog,
+    findings,
+  };
+}
+
+export function buildTrainingRegistryAudit(registry, options = {}) {
+  const runs = Array.isArray(registry?.runs) ? registry.runs : [];
+  const limit = Number.isFinite(options.limit) ? Math.max(1, Math.trunc(options.limit)) : runs.length;
+  const runAudits = runs.slice(0, limit).map((registryRun) => {
+    const manifestPath = readString(registryRun?.manifest_path);
+    const manifest = manifestPath && fs.existsSync(manifestPath) ? readJson(manifestPath) : null;
+    const registrationPath =
+      readString(manifest?.promotion_result?.registration_path) ||
+      readString(registryRun?.registration_path);
+    const registration = registrationPath && fs.existsSync(registrationPath) ? readJson(registrationPath) : null;
+    return {
+      run_id: readString(registryRun?.run_id) || null,
+      ...auditTrainingRun({
+        registryRun,
+        manifest,
+        registration,
+        nowMs: options.nowMs,
+      }),
+    };
+  });
+  const errorCount = runAudits.reduce((sum, entry) => sum + entry.error_count, 0);
+  const warningCount = runAudits.reduce((sum, entry) => sum + entry.warning_count, 0);
+  return {
+    ok: errorCount === 0,
+    clean: errorCount === 0 && warningCount === 0,
+    run_count: runAudits.length,
+    error_count: errorCount,
+    warning_count: warningCount,
+    runs_with_errors: runAudits.filter((entry) => entry.error_count > 0).length,
+    runs_with_warnings: runAudits.filter((entry) => entry.warning_count > 0).length,
+    runs: runAudits,
+  };
+}
+
 function latestCapabilityReports(limit = 3) {
   return listNewestFiles(REPORT_DIR, ".json", limit)
     .map((filePath) => ({ filePath, payload: readJson(filePath) }))
@@ -691,6 +1299,11 @@ function prepareLane() {
   const trainingCommand = detectTrainingCommand();
   const candidateId = buildCandidateId(model, runId);
   const artifacts = detectAdapterArtifacts(runDir);
+  const integrity = buildDatasetIntegrity({
+    corpusRecords: curated.records,
+    trainRecords: split.train_records,
+    evalRecords: split.eval_records,
+  });
   const readiness = buildTrainingReadiness({
     trainer,
     promotion_gate: gate,
@@ -732,6 +1345,7 @@ function prepareLane() {
       format: "jsonl/plain_text_corpus",
       split_strategy: split.strategy,
       curation: curated.stats,
+      integrity,
     },
     training_intent: {
       type: "lora_adapter_preparation",
@@ -793,6 +1407,9 @@ function prepareLane() {
       ],
       target_candidate_id: candidateId,
       target_base_model: model,
+      target_corpus_sha256: integrity.corpus_sha256,
+      target_train_sha256: integrity.train_sha256,
+      target_eval_sha256: integrity.eval_sha256,
       rollback_model: currentPromotedModel,
     },
     readiness,
@@ -821,6 +1438,10 @@ function prepareLane() {
     promotion_gate_ready: gate.ready,
     promotion_gate_pass_rate: gate.pass_rate,
     readiness_blockers: readiness.blockers,
+    dataset_integrity_ok: integrity.split_coverage_ok,
+    corpus_sha256: integrity.corpus_sha256,
+    train_sha256: integrity.train_sha256,
+    eval_sha256: integrity.eval_sha256,
     rollback_model: currentPromotedModel,
     evaluation_targets: Object.keys(manifest.evaluation_targets),
   });
@@ -843,11 +1464,14 @@ function statusLane() {
   const trainer = detectTrainerAvailability();
   const registry = loadRegistry();
   const latestRun = Array.isArray(registry.runs) && registry.runs.length > 0 ? registry.runs[0] : null;
+  const registryAudit = buildTrainingRegistryAudit(registry, { limit: 10 });
+  const latestRunAudit = Array.isArray(registryAudit.runs) ? registryAudit.runs[0] || null : null;
   const trainingCommand = detectTrainingCommand();
   const promotionCommand = detectPromotionCommand();
   const integrationCommand = detectIntegrationCommand();
   const cutoverCommand = detectCutoverCommand();
   const soakCommand = detectSoakCommand();
+  const verifyCommand = detectVerifyCommand();
   return {
     ok: true,
     current_model: currentModel(),
@@ -858,7 +1482,31 @@ function statusLane() {
     cutover_command: cutoverCommand,
     soak_command: soakCommand,
     watchdog_command: detectWatchdogCommand(),
+    verify_command: verifyCommand,
     latest_run: latestRun,
+    latest_run_proof: latestRunAudit?.proof || null,
+    latest_run_audit:
+      latestRunAudit
+        ? {
+            ok: latestRunAudit.ok,
+            clean: latestRunAudit.clean,
+            error_count: latestRunAudit.error_count,
+            warning_count: latestRunAudit.warning_count,
+            findings: latestRunAudit.findings,
+          }
+        : null,
+    registry_audit:
+      registryAudit
+        ? {
+            ok: registryAudit.ok,
+            clean: registryAudit.clean,
+            run_count: registryAudit.run_count,
+            error_count: registryAudit.error_count,
+            warning_count: registryAudit.warning_count,
+            runs_with_errors: registryAudit.runs_with_errors,
+            runs_with_warnings: registryAudit.runs_with_warnings,
+          }
+        : null,
     primary_watchdog: buildPrimaryWatchdogState(
       latestRun,
       latestRun?.manifest_path && fs.existsSync(latestRun.manifest_path) ? readJson(latestRun.manifest_path) : null
@@ -900,6 +1548,25 @@ function statusLane() {
   };
 }
 
+function auditLane() {
+  const trainer = detectTrainerAvailability();
+  const registry = loadRegistry();
+  const audit = buildTrainingRegistryAudit(registry, { limit: 25 });
+  return {
+    ok: audit.ok,
+    clean: audit.clean,
+    current_model: currentModel(),
+    trainer,
+    registry_path: REGISTRY_PATH,
+    run_count: audit.run_count,
+    error_count: audit.error_count,
+    warning_count: audit.warning_count,
+    runs_with_errors: audit.runs_with_errors,
+    runs_with_warnings: audit.runs_with_warnings,
+    runs: audit.runs,
+  };
+}
+
 function bootstrapLane() {
   if (process.platform !== "darwin" || process.arch !== "arm64") {
     return {
@@ -931,11 +1598,13 @@ function bootstrapLane() {
 function main() {
   const action = String(process.argv[2] || "status").trim();
   const result =
-    action === "prepare"
-      ? prepareLane()
-      : action === "bootstrap"
-        ? bootstrapLane()
-        : statusLane();
+    action === "audit" || action === "verify"
+      ? auditLane()
+      : action === "prepare"
+        ? prepareLane()
+        : action === "bootstrap"
+          ? bootstrapLane()
+          : statusLane();
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 

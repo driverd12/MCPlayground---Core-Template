@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   acquireRunnerSingletonLock,
   callTool,
@@ -272,6 +272,87 @@ function backendHealthSummary(backend) {
   };
 }
 
+function summarizeOfficeTruth(officeSnapshot, officeSnapshotError) {
+  if (officeSnapshotError) {
+    return {
+      ok: false,
+      blockers: ["office.snapshot_unavailable"],
+      generated_at: null,
+      error: officeSnapshotError,
+      fallback: {},
+      provider_bridge: {},
+      desktop_control: {},
+      patient_zero: {},
+      launchers: {},
+      next_actions: [],
+    };
+  }
+  const setupDiagnostics =
+    officeSnapshot?.setup_diagnostics && typeof officeSnapshot.setup_diagnostics === "object"
+      ? officeSnapshot.setup_diagnostics
+      : null;
+  if (!setupDiagnostics) {
+    return {
+      ok: false,
+      blockers: ["office.setup_diagnostics_missing"],
+      generated_at: String(officeSnapshot?.generated_at || "").trim() || null,
+      error: null,
+      fallback: {},
+      provider_bridge: {},
+      desktop_control: {},
+      patient_zero: {},
+      launchers: {},
+      next_actions: [],
+    };
+  }
+
+  const fallback =
+    setupDiagnostics.fallback && typeof setupDiagnostics.fallback === "object" ? setupDiagnostics.fallback : {};
+  const providerBridge =
+    setupDiagnostics.provider_bridge && typeof setupDiagnostics.provider_bridge === "object"
+      ? setupDiagnostics.provider_bridge
+      : {};
+  const desktopControl =
+    setupDiagnostics.desktop_control && typeof setupDiagnostics.desktop_control === "object"
+      ? setupDiagnostics.desktop_control
+      : {};
+  const patientZero =
+    setupDiagnostics.patient_zero && typeof setupDiagnostics.patient_zero === "object"
+      ? setupDiagnostics.patient_zero
+      : {};
+  const launchers = setupDiagnostics.launchers && typeof setupDiagnostics.launchers === "object" ? setupDiagnostics.launchers : {};
+  const officeGuiLauncher = launchers.office_gui && typeof launchers.office_gui === "object" ? launchers.office_gui : {};
+  const agenticSuiteLauncher =
+    launchers.agentic_suite && typeof launchers.agentic_suite === "object" ? launchers.agentic_suite : {};
+  const blockers = [];
+
+  if (fallback.core_usable === false) blockers.push("office.core_unusable");
+  if (providerBridge.stale === true) blockers.push("office.provider_bridge_stale");
+  if (fallback.provider_bridge_degraded === true) blockers.push("office.provider_bridge_degraded");
+  if (fallback.desktop_degraded === true) blockers.push("office.desktop_degraded");
+  if (patientZero.enabled === true && patientZero.browser_ready === false) blockers.push("office.browser_degraded");
+  if (officeGuiLauncher.supported === true && officeGuiLauncher.ready !== true) blockers.push("office.office_gui_not_ready");
+  if (officeGuiLauncher.degraded === true) blockers.push("office.office_gui_degraded");
+  if (agenticSuiteLauncher.supported === true && agenticSuiteLauncher.ready !== true) blockers.push("office.agentic_suite_not_ready");
+  if (agenticSuiteLauncher.degraded === true) blockers.push("office.agentic_suite_degraded");
+
+  return {
+    ok: blockers.length === 0,
+    blockers,
+    generated_at: String(officeSnapshot?.generated_at || "").trim() || null,
+    error: null,
+    fallback,
+    provider_bridge: providerBridge,
+    desktop_control: desktopControl,
+    patient_zero: patientZero,
+    launchers: {
+      office_gui: officeGuiLauncher,
+      agentic_suite: agenticSuiteLauncher,
+    },
+    next_actions: normalizeStringArray(setupDiagnostics.next_actions),
+  };
+}
+
 export function selectRollbackTarget({ routerState, routeResult, candidateBackendId, currentModel }) {
   const backends = Array.isArray(routerState?.backends) ? routerState.backends : [];
   const healthyLocalOllama = backends.filter((backend) => {
@@ -325,6 +406,8 @@ export function evaluatePromotionGate({
   routerStatus,
   routeResult,
   bootstrapStatus,
+  officeSnapshot,
+  officeSnapshotError,
   currentModel,
 }) {
   const candidateBackendId = backendIdForModel(model);
@@ -348,11 +431,13 @@ export function evaluatePromotionGate({
   const currentModelBackendId = backendIdForModel(currentModel);
   const candidateIsCurrentDefault =
     currentDefaultBackendId === candidateBackendId || String(currentModel || "").trim() === String(model || "").trim();
+  const officeTruth = summarizeOfficeTruth(officeSnapshot, officeSnapshotError);
 
   const blockers = [];
   if (!shouldPromoteModel(summary)) blockers.push("capability_soak.failed");
   if (!benchmarkOk) blockers.push("benchmark.failed");
   if (!evalOk) blockers.push("eval.failed");
+  blockers.push(...officeTruth.blockers);
   if (!candidate.backend_id) blockers.push("router.backend_missing");
   if (candidate.probe_healthy === false) blockers.push("router.candidate_probe_unhealthy");
   if (candidate.model_known === false) blockers.push("router.candidate_model_unknown");
@@ -393,6 +478,7 @@ export function evaluatePromotionGate({
         aggregate_metric_value: readNumber(evalRun?.aggregate_metric_value),
         run_id: String(evalRun?.run_id || "").trim() || null,
       },
+      office_truth: officeTruth,
       candidate,
       route: {
         selected_backend_id: selectedBackendId,
@@ -729,7 +815,41 @@ function setEnvValues(updates) {
   }
 }
 
-function collectPromotionEvidence({ model, summary, currentModel }) {
+let officeSnapshotRuntimePromise = null;
+
+async function readOfficeTruthSnapshotDirect() {
+  ensureServerBuild();
+  loadRunnerEnv(REPO_ROOT);
+  if (!officeSnapshotRuntimePromise) {
+    officeSnapshotRuntimePromise = Promise.all([
+      import(pathToFileURL(path.join(REPO_ROOT, "dist", "storage.js")).href),
+      import(pathToFileURL(path.join(REPO_ROOT, "dist", "tools", "office_snapshot.js")).href),
+    ]);
+  }
+  const [{ Storage }, { officeSnapshot }] = await officeSnapshotRuntimePromise;
+  const dbPath = process.env.ANAMNESIS_HUB_DB_PATH || path.join(REPO_ROOT, "data", "hub.sqlite");
+  const storage = new Storage(dbPath);
+  const snapshot = officeSnapshot(storage, {
+    thread_id: "ring-leader-main",
+    turn_limit: 1,
+    task_limit: 1,
+    session_limit: 1,
+    event_limit: 1,
+    learning_limit: 1,
+    runtime_worker_limit: 1,
+    include_kernel: true,
+    include_learning: false,
+    include_bus: false,
+    include_adapter: false,
+    include_runtime_workers: false,
+  });
+  return {
+    generated_at: snapshot?.generated_at ?? null,
+    setup_diagnostics: snapshot?.setup_diagnostics ?? null,
+  };
+}
+
+async function collectPromotionEvidence({ model, summary, currentModel }) {
   ensureServerBuild();
   loadRunnerEnv(REPO_ROOT);
   const transport = "stdio";
@@ -782,6 +902,13 @@ function collectPromotionEvidence({ model, summary, currentModel }) {
     },
     transport,
   });
+  let officeSnapshotResult = null;
+  let officeSnapshotError = null;
+  try {
+    officeSnapshotResult = await readOfficeTruthSnapshotDirect();
+  } catch (error) {
+    officeSnapshotError = safeErrorMessage(error);
+  }
 
   return {
     benchmark_run: benchmark.result,
@@ -794,6 +921,8 @@ function collectPromotionEvidence({ model, summary, currentModel }) {
     route_error: routeResult.error,
     bootstrap_status: bootstrapStatus.result,
     bootstrap_error: bootstrapStatus.error,
+    office_snapshot: officeSnapshotResult,
+    office_error: officeSnapshotError,
     gate: evaluatePromotionGate({
       model,
       summary,
@@ -802,6 +931,8 @@ function collectPromotionEvidence({ model, summary, currentModel }) {
       routerStatus: routerStatus.result,
       routeResult: routeResult.result,
       bootstrapStatus: bootstrapStatus.result,
+      officeSnapshot: officeSnapshotResult,
+      officeSnapshotError: officeSnapshotError,
       currentModel,
     }),
   };
@@ -860,7 +991,7 @@ function rollbackCutover({ rollbackModel, rollbackBackendId, rollbackPreferredTa
   };
 }
 
-function applyCutoverDecision(model, summary, promotionEvidence) {
+async function applyCutoverDecision(model, summary, promotionEvidence) {
   const previousModel = String(
     readEnvValue("TRICHAT_OLLAMA_MODEL") || process.env.TRICHAT_OLLAMA_MODEL || ""
   ).trim() || null;
@@ -946,17 +1077,29 @@ function applyCutoverDecision(model, summary, promotionEvidence) {
     },
     transport: "stdio",
   });
+  let postCutoverOfficeSnapshotResult = null;
+  let postCutoverOfficeSnapshotError = null;
+  try {
+    postCutoverOfficeSnapshotResult = await readOfficeTruthSnapshotDirect();
+  } catch (error) {
+    postCutoverOfficeSnapshotError = safeErrorMessage(error);
+  }
 
   const postSelectedBackendId =
     String(postCutoverRoute.result?.selected_backend?.backend_id || "").trim() || null;
   const postRepairs = normalizeStringArray(postCutoverBootstrap.result?.repairs_needed);
+  const postCutoverOfficeTruth = summarizeOfficeTruth(
+    postCutoverOfficeSnapshotResult,
+    postCutoverOfficeSnapshotError
+  );
   const cutoverVerified =
     routerConfigure.ok &&
     evalSuiteUpsert.ok &&
     postCutoverEval.ok &&
     postCutoverEval.result?.ok === true &&
     postSelectedBackendId === gate.candidate_backend_id &&
-    !postRepairs.includes("eval.suite.default_drift");
+    !postRepairs.includes("eval.suite.default_drift") &&
+    postCutoverOfficeTruth.ok;
 
   if (cutoverVerified) {
     return {
@@ -972,6 +1115,7 @@ function applyCutoverDecision(model, summary, promotionEvidence) {
         eval_run_id: String(postCutoverEval.result?.run_id || "").trim() || null,
         selected_backend_id: postSelectedBackendId,
         repairs_needed: postRepairs,
+        office_truth: postCutoverOfficeTruth,
       },
     };
   }
@@ -997,6 +1141,7 @@ function applyCutoverDecision(model, summary, promotionEvidence) {
       eval_error: postCutoverEval.error,
       selected_backend_id: postSelectedBackendId,
       repairs_needed: postRepairs,
+      office_truth: postCutoverOfficeTruth,
       rollback,
     },
   };
@@ -1181,12 +1326,12 @@ async function main() {
       timeoutMs: Math.max(5_000, args.timeoutMs),
     });
     const summary = summarizeCaseRuns(caseRuns);
-    const promotionEvidence = collectPromotionEvidence({
+    const promotionEvidence = await collectPromotionEvidence({
       model,
       summary,
       currentModel,
     });
-    const cutover = applyCutoverDecision(model, summary, promotionEvidence);
+    const cutover = await applyCutoverDecision(model, summary, promotionEvidence);
     const report = {
       ok: cutover.promoted === true,
       generated_at: new Date().toISOString(),

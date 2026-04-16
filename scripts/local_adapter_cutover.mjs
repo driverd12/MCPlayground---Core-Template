@@ -78,6 +78,13 @@ function readString(value) {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function normalizeStringArray(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return [...new Set(value.map((entry) => readString(entry)).filter(Boolean))];
+}
+
 function latestManifestPath() {
   const registry = readJson(REGISTRY_PATH);
   const latest = Array.isArray(registry?.runs) ? registry.runs[0] : null;
@@ -245,10 +252,19 @@ export function resolveCutoverCandidate(manifest, registration) {
       reason: "No integrated adapter backend is available for cutover.",
     };
   }
-  const plannedBackend =
+  const integrationConsideration =
     target === "mlx"
+      ? manifest?.promotion_result?.integration_consideration?.router ||
+        registration?.decision?.integration_consideration?.router ||
+        null
+      : manifest?.promotion_result?.integration_consideration?.ollama ||
+        registration?.decision?.integration_consideration?.ollama ||
+        null;
+  const plannedBackend =
+    integrationConsideration?.planned_backend ||
+    (target === "mlx"
       ? registration?.decision?.integration_consideration?.router?.planned_backend
-      : registration?.decision?.integration_consideration?.ollama?.planned_backend;
+      : registration?.decision?.integration_consideration?.ollama?.planned_backend);
   const backendId = readString(integrationResult?.backend_id) || readString(plannedBackend?.backend_id);
   const modelId = readString(integrationResult?.model_id) || readString(plannedBackend?.model_id);
   if (!backendId) {
@@ -261,6 +277,24 @@ export function resolveCutoverCandidate(manifest, registration) {
     return {
       ok: false,
       reason: "The integrated adapter is missing its promotion eval suite id.",
+    };
+  }
+  const liveReady = integrationConsideration?.live_ready === true;
+  const blockers = normalizeStringArray(integrationConsideration?.blockers);
+  const plannedBackendId = readString(plannedBackend?.backend_id);
+  const readinessBlockers = [
+    ...(integrationResult?.ok === true ? [] : ["integration_result_not_ok"]),
+    ...(liveReady ? [] : ["integration_live_ready_missing"]),
+    ...blockers.map((entry) => `integration_blocker:${entry}`),
+    ...(plannedBackendId && backendId !== plannedBackendId ? ["integration_backend_mismatch"] : []),
+  ];
+  if (readinessBlockers.length > 0) {
+    return {
+      ok: false,
+      reason: "Cutover requires an explicit live-ready integration record.",
+      target,
+      backend_id: backendId,
+      blockers: readinessBlockers,
     };
   }
   return {

@@ -1463,6 +1463,7 @@ test("autonomy.bootstrap status uses the configured default local backend when c
           latency_budget_ms: 2000,
           expected_backend_id: "ollama-llama3-2-3b",
           expected_backend_tags: [],
+          required_tags: ["primary"],
           preferred_tags: ["local", "ollama", "gpu", "primary"],
           required: true,
           weight: 1,

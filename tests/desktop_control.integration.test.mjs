@@ -63,6 +63,7 @@ test("desktop control tools persist host-control state and surface dry-run machi
     });
     assert.equal(screenshot.observation.dry_run, true);
     assert.match(screenshot.observation.output_path, /test-capture\.png$/);
+    assert.equal(typeof screenshot.state.last_screenshot_at, "string");
 
     const act = await callTool(client, "desktop.act", {
       action: "open_url",

@@ -124,6 +124,63 @@ test("trichat.bus streams message_post events over Unix socket while persisting 
   }
 });
 
+test("trichat.bus self-heals stale socket artifacts on startup", async () => {
+  const testId = `${Date.now()}`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-trichat-bus-stale-socket-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const busSocketPath = path.join(tempDir, "trichat.bus.sock");
+
+  fs.mkdirSync(path.dirname(busSocketPath), { recursive: true });
+  fs.writeFileSync(busSocketPath, "stale socket artifact", "utf8");
+  assert.equal(fs.statSync(busSocketPath).isSocket(), false);
+
+  const transport = new StdioClientTransport({
+    command: "node",
+    args: ["dist/server.js"],
+    cwd: REPO_ROOT,
+    env: inheritedEnv({
+      ANAMNESIS_HUB_DB_PATH: dbPath,
+      TRICHAT_BUS_SOCKET_PATH: busSocketPath,
+      MCP_BACKGROUND_OWNER: "1",
+    }),
+    stderr: "pipe",
+  });
+  const client = new Client(
+    { name: "mcp-trichat-bus-stale-socket-test-client", version: "0.1.0" },
+    { capabilities: {} }
+  );
+
+  let socket = null;
+  try {
+    await client.connect(transport);
+    const originalClose = client.close.bind(client);
+    client.close = async () => {
+      await originalClose().catch(() => {});
+      if (typeof transport.close === "function") {
+        await transport.close().catch(() => {});
+      }
+    };
+
+    const busStatus = await callTool(client, "trichat.bus", { action: "status" });
+    assert.equal(busStatus.running, true);
+    const activeSocketPath = String(busStatus.socket_path);
+    assert.equal(activeSocketPath, path.resolve(busSocketPath));
+    await waitForUnixSocketConnect(activeSocketPath, 15000, 25);
+
+    const socketMessages = [];
+    socket = await connectUnixSocket(activeSocketPath, socketMessages);
+    socket.write(`${JSON.stringify({ op: "ping" })}\n`);
+    const pong = await waitForSocketMessage(socketMessages, (entry) => entry.kind === "pong", 30000);
+    assert.equal(pong.kind, "pong");
+  } finally {
+    if (socket) {
+      socket.destroy();
+    }
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function connectUnixSocket(socketPath, sink) {
   return await new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
@@ -175,6 +232,24 @@ async function waitForCondition(predicate, timeoutMs, pollMs) {
     await sleep(pollMs);
   }
   throw new Error("Timed out waiting for expected condition");
+}
+
+async function waitForUnixSocketConnect(socketPath, timeoutMs, pollMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    let socket = null;
+    try {
+      socket = await connectUnixSocket(socketPath, []);
+      socket.destroy();
+      return;
+    } catch {
+      if (socket) {
+        socket.destroy();
+      }
+    }
+    await sleep(pollMs);
+  }
+  throw new Error("Timed out waiting for expected Unix socket listener");
 }
 
 function sleep(ms) {

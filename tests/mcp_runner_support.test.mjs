@@ -14,6 +14,7 @@ import {
   waitForServerResourcesToClear,
 } from "../scripts/mcp_runner_support.mjs";
 import { runAutonomyKeepaliveOnce } from "../scripts/autonomy_keepalive_lib.mjs";
+import { prepareInboxWorkerStartup } from "../scripts/imprint_inbox_worker_runner_lib.mjs";
 
 function waitFor(predicate, timeoutMs, label) {
   const deadline = Date.now() + timeoutMs;
@@ -95,6 +96,52 @@ test("acquireRunnerSingletonLock rejects a live competing owner and allows reuse
   assert.equal(third.ok, true);
   third.release();
   fs.rmSync(tempRoot, { recursive: true, force: true });
+});
+
+test("acquireRunnerSingletonLock reclaims a stale legacy lock when the pid belongs to a newer live process", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-runner-reused-pid-lock-"));
+  const distDir = path.join(tempRoot, "dist");
+  const childScript = path.join(distDir, "server.js");
+  const childPidFile = path.join(tempRoot, "live.pid");
+  const lockDir = path.join(tempRoot, "data", "imprint", "locks", "shared-runner.lock");
+  const lockPidFile = path.join(lockDir, "pid");
+  fs.mkdirSync(distDir, { recursive: true });
+  fs.writeFileSync(
+    childScript,
+    `
+      const fs = require("node:fs");
+      fs.writeFileSync(${JSON.stringify(childPidFile)}, String(process.pid));
+      setInterval(() => {}, 1000);
+    `,
+    "utf8"
+  );
+
+  const child = spawn(process.execPath, [childScript], {
+    cwd: tempRoot,
+    stdio: "ignore",
+  });
+
+  try {
+    await waitFor(() => fs.existsSync(childPidFile), 5_000, "live child pid file");
+    const livePid = Number.parseInt(fs.readFileSync(childPidFile, "utf8").trim(), 10);
+    assert.equal(Number.isInteger(livePid), true);
+
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(lockPidFile, `${livePid}\n`, "utf8");
+    const older = new Date(Date.now() - 60_000);
+    fs.utimesSync(lockPidFile, older, older);
+    fs.utimesSync(lockDir, older, older);
+
+    const lock = await acquireRunnerSingletonLock(tempRoot, "shared-runner", 2_000);
+    assert.equal(lock.ok, true);
+    assert.equal(fs.readFileSync(lockPidFile, "utf8").trim(), String(process.pid));
+    lock.release();
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {}
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test("runAutonomyKeepaliveOnce skips duplicate cycles when singleton lock is already held", async () => {
@@ -182,6 +229,51 @@ test("runAutonomyKeepaliveOnce normalizes attention-only maintain results to suc
   assert.equal(result.health_ok, false);
   assert.equal(result.attention_only, true);
   assert.equal(result.eval?.aggregate_metric_value, 50);
+});
+
+test("prepareInboxWorkerStartup skips duplicate launch attempts when singleton lock is held", async () => {
+  const startup = await prepareInboxWorkerStartup({
+    repoRoot: process.cwd(),
+    env: {},
+    acquireLockFn: async () => ({ ok: false }),
+  });
+  assert.equal(startup.ok, true);
+  assert.equal(startup.skipped, true);
+  assert.equal(startup.reason, "singleton_locked");
+  assert.equal(startup.singleton_lock?.acquired, false);
+});
+
+test("prepareInboxWorkerStartup fails closed when http is not ready and rollback is disabled", async () => {
+  const startup = await prepareInboxWorkerStartup({
+    repoRoot: process.cwd(),
+    env: {
+      ANAMNESIS_INBOX_MCP_TRANSPORT: "http",
+      ANAMNESIS_INBOX_RESTART_DELAY_MS: "2345",
+      ANAMNESIS_INBOX_HTTP_ROLLBACK_TO_STDIO: "0",
+    },
+    acquireLockFn: async () => ({ ok: true, release: () => {} }),
+    waitForHttpReadyFn: async () => false,
+  });
+  assert.equal(startup.ok, false);
+  assert.equal(startup.reason, "http_not_ready");
+  assert.equal(startup.transport, "http");
+  assert.equal(startup.restart_delay_ms, 2345);
+});
+
+test("prepareInboxWorkerStartup rolls back to stdio when explicitly enabled and http is not ready", async () => {
+  const startup = await prepareInboxWorkerStartup({
+    repoRoot: process.cwd(),
+    env: {
+      ANAMNESIS_INBOX_MCP_TRANSPORT: "http",
+      ANAMNESIS_INBOX_HTTP_ROLLBACK_TO_STDIO: "true",
+    },
+    acquireLockFn: async () => ({ ok: true, release: () => {} }),
+    waitForHttpReadyFn: async () => false,
+  });
+  assert.equal(startup.ok, true);
+  assert.equal(startup.reason, "http_not_ready_rolled_back_stdio");
+  assert.equal(startup.transport, "stdio");
+  assert.equal(startup.transport_fallback_from, "http");
 });
 
 test("waitForServerResourcesToClear waits for a busy TCP port to become free", async () => {

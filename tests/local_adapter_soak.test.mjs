@@ -11,13 +11,36 @@ function sampleManifest(status = "adapter_primary_mlx") {
   return {
     candidate_id: "local-adapter-sample",
     status,
+    safe_promotion_metadata: {
+      allowed_now: true,
+      blockers: [],
+    },
     promotion_result: {
       eval_suite_id: "local-adapter-eval-suite",
       benchmark_suite_id: "local-adapter-benchmark-suite",
       reward_score: 82,
       baseline_score: 76,
+      integration_consideration: {
+        router: {
+          live_ready: true,
+          blockers: [],
+          planned_backend: {
+            backend_id: "mlx-adapter-local-adapter-sample",
+            tags: ["local", "mlx", "adapter"],
+          },
+        },
+        ollama: {
+          live_ready: true,
+          blockers: [],
+          planned_backend: {
+            backend_id: "ollama-adapter-local-adapter-sample",
+            tags: ["local", "ollama", "adapter"],
+          },
+        },
+      },
     },
     integration_result: {
+      ok: true,
       target: status.includes("ollama") ? "ollama" : "mlx",
       backend_id: status.includes("ollama") ? "ollama-adapter-local-adapter-sample" : "mlx-adapter-local-adapter-sample",
       model_id: status.includes("ollama")
@@ -38,12 +61,16 @@ function sampleRegistration() {
       accepted: true,
       integration_consideration: {
         router: {
+          live_ready: true,
+          blockers: [],
           planned_backend: {
             backend_id: "mlx-adapter-local-adapter-sample",
             tags: ["local", "mlx", "adapter"],
           },
         },
         ollama: {
+          live_ready: true,
+          blockers: [],
           planned_backend: {
             backend_id: "ollama-adapter-local-adapter-sample",
             tags: ["local", "ollama", "adapter"],

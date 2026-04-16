@@ -15,18 +15,32 @@ AUTO_LABEL="com.mcplayground.imprint.autosnapshot"
 WORKER_LABEL="com.mcplayground.imprint.inboxworker"
 KEEPALIVE_LABEL="com.mcplayground.autonomy.keepalive"
 WATCHDOG_LABEL="com.mcplayground.local-adapter.watchdog"
+OFFICE_GUI_LABEL="com.mcplayground.agent-office.gui.watch"
 MLX_LABEL="com.mcplayground.mlx.server"
 MCP_PLIST="${LAUNCH_DIR}/${MCP_LABEL}.plist"
 AUTO_PLIST="${LAUNCH_DIR}/${AUTO_LABEL}.plist"
 WORKER_PLIST="${LAUNCH_DIR}/${WORKER_LABEL}.plist"
 KEEPALIVE_PLIST="${LAUNCH_DIR}/${KEEPALIVE_LABEL}.plist"
 WATCHDOG_PLIST="${LAUNCH_DIR}/${WATCHDOG_LABEL}.plist"
+OFFICE_GUI_PLIST="${LAUNCH_DIR}/${OFFICE_GUI_LABEL}.plist"
 MLX_PLIST="${LAUNCH_DIR}/${MLX_LABEL}.plist"
 GUI_FALLBACK_SESSION="mcplayground-http"
 TOKEN_FILE="${REPO_ROOT}/data/imprint/http_bearer_token"
 if [[ -z "${MCP_HTTP_BEARER_TOKEN+x}" && -f "${TOKEN_FILE}" ]]; then
   export MCP_HTTP_BEARER_TOKEN="$(cat "${TOKEN_FILE}")"
 fi
+
+launch_agent_plist_current() {
+  local plist="$1"
+  [[ -f "${plist}" ]] || return 1
+  grep -Fq "${REPO_ROOT}" "${plist}" 2>/dev/null
+}
+
+launch_agent_plist_ready() {
+  local plist="$1"
+  [[ -f "${plist}" ]] || return 1
+  launch_agent_plist_current "${plist}"
+}
 
 DISABLED_SERVICES_RAW=""
 
@@ -262,7 +276,15 @@ wait_for_mcp_http() {
 
 case "${ACTION}" in
   on)
-    if [[ ! -f "${MCP_PLIST}" || ! -f "${AUTO_PLIST}" || ! -f "${WORKER_PLIST}" || ! -f "${KEEPALIVE_PLIST}" || ! -f "${WATCHDOG_PLIST}" || ( "${TRICHAT_MLX_SERVER_ENABLED:-0}" == "1" && ! -f "${MLX_PLIST}" ) ]]; then
+    # Repo moves leave launchd plists behind under ~/Library/LaunchAgents with dead absolute paths.
+    # Treat those stale definitions the same as missing files so `agents:on` rewrites them safely.
+    if ! launch_agent_plist_ready "${MCP_PLIST}" || \
+      ! launch_agent_plist_ready "${AUTO_PLIST}" || \
+      ! launch_agent_plist_ready "${WORKER_PLIST}" || \
+      ! launch_agent_plist_ready "${KEEPALIVE_PLIST}" || \
+      ! launch_agent_plist_ready "${WATCHDOG_PLIST}" || \
+      ! launch_agent_plist_ready "${OFFICE_GUI_PLIST}" || \
+      { [[ "${TRICHAT_MLX_SERVER_ENABLED:-0}" == "1" ]] && ! launch_agent_plist_ready "${MLX_PLIST}"; }; then
       "${REPO_ROOT}/scripts/launchd_install.sh"
     else
       launchctl enable "${DOMAIN}/${MCP_LABEL}" >/dev/null 2>&1 || true
@@ -270,6 +292,7 @@ case "${ACTION}" in
       launchctl enable "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
       launchctl enable "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
       launchctl enable "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
+      launchctl enable "${DOMAIN}/${OFFICE_GUI_LABEL}" >/dev/null 2>&1 || true
       if [[ -f "${MLX_PLIST}" ]]; then
         launchctl enable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
       fi
@@ -278,6 +301,7 @@ case "${ACTION}" in
       reset_launch_agent "${WORKER_PLIST}" "${WORKER_LABEL}"
       reset_launch_agent "${KEEPALIVE_PLIST}" "${KEEPALIVE_LABEL}"
       reset_launch_agent "${WATCHDOG_PLIST}" "${WATCHDOG_LABEL}"
+      reset_launch_agent "${OFFICE_GUI_PLIST}" "${OFFICE_GUI_LABEL}"
       reset_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
       clear_repo_http_runtime
       bootstrap_if_exists "${MCP_PLIST}"
@@ -287,11 +311,13 @@ case "${ACTION}" in
       bootstrap_if_exists "${WORKER_PLIST}"
       bootstrap_if_exists "${KEEPALIVE_PLIST}"
       bootstrap_if_exists "${WATCHDOG_PLIST}"
+      bootstrap_if_exists "${OFFICE_GUI_PLIST}"
       bootstrap_if_exists "${MLX_PLIST}"
       launchctl kickstart -k "${DOMAIN}/${AUTO_LABEL}" >/dev/null 2>&1 || true
       launchctl kickstart -k "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
       launchctl kickstart -k "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
       launchctl kickstart -k "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
+      launchctl kickstart -k "${DOMAIN}/${OFFICE_GUI_LABEL}" >/dev/null 2>&1 || true
       if [[ -f "${MLX_PLIST}" ]]; then
         launchctl kickstart -k "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
       fi
@@ -304,12 +330,14 @@ case "${ACTION}" in
     reset_launch_agent "${AUTO_PLIST}" "${AUTO_LABEL}"
     reset_launch_agent "${MCP_PLIST}" "${MCP_LABEL}"
     reset_launch_agent "${WATCHDOG_PLIST}" "${WATCHDOG_LABEL}"
+    reset_launch_agent "${OFFICE_GUI_PLIST}" "${OFFICE_GUI_LABEL}"
     reset_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
     launchctl disable "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
     launchctl disable "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
     launchctl disable "${DOMAIN}/${AUTO_LABEL}" >/dev/null 2>&1 || true
     launchctl disable "${DOMAIN}/${MCP_LABEL}" >/dev/null 2>&1 || true
     launchctl disable "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
+    launchctl disable "${DOMAIN}/${OFFICE_GUI_LABEL}" >/dev/null 2>&1 || true
     launchctl disable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
     ;;
   status)
@@ -331,25 +359,43 @@ AUTO_AGENT_LOADED=false
 WORKER_AGENT_LOADED=false
 KEEPALIVE_AGENT_LOADED=false
 WATCHDOG_AGENT_LOADED=false
+OFFICE_GUI_AGENT_LOADED=false
 MLX_AGENT_LOADED=false
 MCP_DISABLED=false
 AUTO_AGENT_DISABLED=false
 WORKER_AGENT_DISABLED=false
 KEEPALIVE_AGENT_DISABLED=false
 WATCHDOG_AGENT_DISABLED=false
+OFFICE_GUI_AGENT_DISABLED=false
 MLX_AGENT_DISABLED=false
 if is_loaded "${MCP_LABEL}"; then MCP_RUNNING=true; fi
 if is_loaded "${AUTO_LABEL}"; then AUTO_AGENT_LOADED=true; fi
 if is_loaded "${WORKER_LABEL}"; then WORKER_AGENT_LOADED=true; fi
 if is_loaded "${KEEPALIVE_LABEL}"; then KEEPALIVE_AGENT_LOADED=true; fi
 if is_loaded "${WATCHDOG_LABEL}"; then WATCHDOG_AGENT_LOADED=true; fi
+if is_loaded "${OFFICE_GUI_LABEL}"; then OFFICE_GUI_AGENT_LOADED=true; fi
 if is_loaded "${MLX_LABEL}"; then MLX_AGENT_LOADED=true; fi
 if is_disabled "${MCP_LABEL}"; then MCP_DISABLED=true; fi
 if is_disabled "${AUTO_LABEL}"; then AUTO_AGENT_DISABLED=true; fi
 if is_disabled "${WORKER_LABEL}"; then WORKER_AGENT_DISABLED=true; fi
 if is_disabled "${KEEPALIVE_LABEL}"; then KEEPALIVE_AGENT_DISABLED=true; fi
 if is_disabled "${WATCHDOG_LABEL}"; then WATCHDOG_AGENT_DISABLED=true; fi
+if is_disabled "${OFFICE_GUI_LABEL}"; then OFFICE_GUI_AGENT_DISABLED=true; fi
 if is_disabled "${MLX_LABEL}"; then MLX_AGENT_DISABLED=true; fi
+MCP_PLIST_CURRENT=false
+AUTO_PLIST_CURRENT=false
+WORKER_PLIST_CURRENT=false
+KEEPALIVE_PLIST_CURRENT=false
+WATCHDOG_PLIST_CURRENT=false
+OFFICE_GUI_PLIST_CURRENT=false
+MLX_PLIST_CURRENT=false
+if launch_agent_plist_current "${MCP_PLIST}"; then MCP_PLIST_CURRENT=true; fi
+if launch_agent_plist_current "${AUTO_PLIST}"; then AUTO_PLIST_CURRENT=true; fi
+if launch_agent_plist_current "${WORKER_PLIST}"; then WORKER_PLIST_CURRENT=true; fi
+if launch_agent_plist_current "${KEEPALIVE_PLIST}"; then KEEPALIVE_PLIST_CURRENT=true; fi
+if launch_agent_plist_current "${WATCHDOG_PLIST}"; then WATCHDOG_PLIST_CURRENT=true; fi
+if launch_agent_plist_current "${OFFICE_GUI_PLIST}"; then OFFICE_GUI_PLIST_CURRENT=true; fi
+if launch_agent_plist_current "${MLX_PLIST}"; then MLX_PLIST_CURRENT=true; fi
 
 AUTO_SNAPSHOT_STATUS="{}"
 AUTONOMY_STATUS="{}"
@@ -392,6 +438,9 @@ node --input-type=module - <<'NODE' \
 "${WATCHDOG_LABEL}" \
 "${WATCHDOG_AGENT_LOADED}" \
 "${WATCHDOG_AGENT_DISABLED}" \
+"${OFFICE_GUI_LABEL}" \
+"${OFFICE_GUI_AGENT_LOADED}" \
+"${OFFICE_GUI_AGENT_DISABLED}" \
 "${MLX_LABEL}" \
 "${MLX_AGENT_LOADED}" \
 "${MLX_AGENT_DISABLED}" \
@@ -400,7 +449,15 @@ node --input-type=module - <<'NODE' \
 "${WORKER_PLIST}" \
 "${KEEPALIVE_PLIST}" \
 "${WATCHDOG_PLIST}" \
+"${OFFICE_GUI_PLIST}" \
 "${MLX_PLIST}" \
+"${MCP_PLIST_CURRENT}" \
+"${AUTO_PLIST_CURRENT}" \
+"${WORKER_PLIST_CURRENT}" \
+"${KEEPALIVE_PLIST_CURRENT}" \
+"${WATCHDOG_PLIST_CURRENT}" \
+"${OFFICE_GUI_PLIST_CURRENT}" \
+"${MLX_PLIST_CURRENT}" \
 "${AUTO_SNAPSHOT_STATUS}" \
 "${AUTONOMY_STATUS}"
 const [
@@ -421,6 +478,9 @@ const [
   watchdogLabel,
   watchdogAgentLoaded,
   watchdogAgentDisabled,
+  officeGuiLabel,
+  officeGuiAgentLoaded,
+  officeGuiAgentDisabled,
   mlxLabel,
   mlxAgentLoaded,
   mlxAgentDisabled,
@@ -429,7 +489,15 @@ const [
   workerPlist,
   keepalivePlist,
   watchdogPlist,
+  officeGuiPlist,
   mlxPlist,
+  mcpPlistCurrent,
+  autoPlistCurrent,
+  workerPlistCurrent,
+  keepalivePlistCurrent,
+  watchdogPlistCurrent,
+  officeGuiPlistCurrent,
+  mlxPlistCurrent,
   autoSnapshotStatusRaw,
   autonomyStatusRaw,
 ] = process.argv.slice(2);
@@ -453,43 +521,70 @@ const payload = {
   action,
   domain,
   switches: {
-    mcp_server: mcpRunning === 'true' && mcpDisabled !== 'true',
-    auto_snapshot: autoAgentLoaded === 'true' && autoAgentDisabled !== 'true',
-    inbox_worker: workerAgentLoaded === 'true' && workerAgentDisabled !== 'true',
-    autonomy_keepalive: keepaliveAgentLoaded === 'true' && keepaliveAgentDisabled !== 'true',
-    local_adapter_watchdog: watchdogAgentLoaded === 'true' && watchdogAgentDisabled !== 'true',
-    mlx_server: mlxAgentLoaded === 'true' && mlxAgentDisabled !== 'true',
+    mcp_server: mcpRunning === 'true' && mcpDisabled !== 'true' && mcpPlistCurrent === 'true',
+    auto_snapshot: autoAgentLoaded === 'true' && autoAgentDisabled !== 'true' && autoPlistCurrent === 'true',
+    inbox_worker: workerAgentLoaded === 'true' && workerAgentDisabled !== 'true' && workerPlistCurrent === 'true',
+    autonomy_keepalive:
+      keepaliveAgentLoaded === 'true' && keepaliveAgentDisabled !== 'true' && keepalivePlistCurrent === 'true',
+    local_adapter_watchdog:
+      watchdogAgentLoaded === 'true' && watchdogAgentDisabled !== 'true' && watchdogPlistCurrent === 'true',
+    agent_office_gui:
+      officeGuiAgentLoaded === 'true' && officeGuiAgentDisabled !== 'true' && officeGuiPlistCurrent === 'true',
+    mlx_server: mlxAgentLoaded === 'true' && mlxAgentDisabled !== 'true' && mlxPlistCurrent === 'true',
   },
   launchd: {
     mcp_label: mcpLabel,
     mcp_loaded: mcpRunning === 'true',
     mcp_disabled: mcpDisabled === 'true',
-    mcp_operational: mcpRunning === 'true' && mcpDisabled !== 'true',
+    mcp_plist_current: mcpPlistCurrent === 'true',
+    mcp_operational: mcpRunning === 'true' && mcpDisabled !== 'true' && mcpPlistCurrent === 'true',
     mcp_plist: mcpPlist,
     auto_snapshot_label: autoLabel,
     auto_snapshot_agent_loaded: autoAgentLoaded === 'true',
     auto_snapshot_disabled: autoAgentDisabled === 'true',
-    auto_snapshot_operational: autoAgentLoaded === 'true' && autoAgentDisabled !== 'true',
+    auto_snapshot_plist_current: autoPlistCurrent === 'true',
+    auto_snapshot_operational:
+      autoAgentLoaded === 'true' && autoAgentDisabled !== 'true' && autoPlistCurrent === 'true',
     auto_snapshot_plist: autoPlist,
     inbox_worker_label: workerLabel,
     inbox_worker_loaded: workerAgentLoaded === 'true',
     inbox_worker_disabled: workerAgentDisabled === 'true',
-    inbox_worker_operational: workerAgentLoaded === 'true' && workerAgentDisabled !== 'true',
+    inbox_worker_plist_current: workerPlistCurrent === 'true',
+    inbox_worker_operational:
+      workerAgentLoaded === 'true' && workerAgentDisabled !== 'true' && workerPlistCurrent === 'true',
     inbox_worker_plist: workerPlist,
     autonomy_keepalive_label: keepaliveLabel,
     autonomy_keepalive_loaded: keepaliveAgentLoaded === 'true',
     autonomy_keepalive_disabled: keepaliveAgentDisabled === 'true',
-    autonomy_keepalive_operational: keepaliveAgentLoaded === 'true' && keepaliveAgentDisabled !== 'true',
+    autonomy_keepalive_plist_current: keepalivePlistCurrent === 'true',
+    autonomy_keepalive_operational:
+      keepaliveAgentLoaded === 'true' &&
+      keepaliveAgentDisabled !== 'true' &&
+      keepalivePlistCurrent === 'true',
     autonomy_keepalive_plist: keepalivePlist,
     local_adapter_watchdog_label: watchdogLabel,
     local_adapter_watchdog_loaded: watchdogAgentLoaded === 'true',
     local_adapter_watchdog_disabled: watchdogAgentDisabled === 'true',
-    local_adapter_watchdog_operational: watchdogAgentLoaded === 'true' && watchdogAgentDisabled !== 'true',
+    local_adapter_watchdog_plist_current: watchdogPlistCurrent === 'true',
+    local_adapter_watchdog_operational:
+      watchdogAgentLoaded === 'true' &&
+      watchdogAgentDisabled !== 'true' &&
+      watchdogPlistCurrent === 'true',
     local_adapter_watchdog_plist: watchdogPlist,
+    agent_office_gui_label: officeGuiLabel,
+    agent_office_gui_loaded: officeGuiAgentLoaded === 'true',
+    agent_office_gui_disabled: officeGuiAgentDisabled === 'true',
+    agent_office_gui_plist_current: officeGuiPlistCurrent === 'true',
+    agent_office_gui_operational:
+      officeGuiAgentLoaded === 'true' &&
+      officeGuiAgentDisabled !== 'true' &&
+      officeGuiPlistCurrent === 'true',
+    agent_office_gui_plist: officeGuiPlist,
     mlx_label: mlxLabel,
     mlx_loaded: mlxAgentLoaded === 'true',
     mlx_disabled: mlxAgentDisabled === 'true',
-    mlx_operational: mlxAgentLoaded === 'true' && mlxAgentDisabled !== 'true',
+    mlx_plist_current: mlxPlistCurrent === 'true',
+    mlx_operational: mlxAgentLoaded === 'true' && mlxAgentDisabled !== 'true' && mlxPlistCurrent === 'true',
     mlx_plist: mlxPlist,
   },
   auto_snapshot_runtime: autoSnapshotStatus,

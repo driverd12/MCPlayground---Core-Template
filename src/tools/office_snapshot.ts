@@ -238,6 +238,307 @@ function summarizeRuntimeWorkers(storage: Storage, limit: number): RuntimeWorker
   return summarizeLiveRuntimeWorkers(storage, limit);
 }
 
+function compactWorkbenchText(value: unknown, limit = 180) {
+  const text = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) {
+    return "";
+  }
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+}
+
+function normalizeWorkbenchMode(value: unknown) {
+  const normalized = String(value ?? "").trim();
+  return normalized || "";
+}
+
+function buildWorkbenchTaskCards(tasks: TaskRecord[]) {
+  return tasks.slice(0, 5).map((task) => ({
+    task_id: task.task_id,
+    status: task.status,
+    priority: task.priority,
+    objective: compactWorkbenchText(task.objective, 120),
+    updated_at: task.updated_at,
+    source_agent: task.source_agent,
+    last_error: compactWorkbenchText(task.last_error, 120) || null,
+  }));
+}
+
+function buildWorkbenchSummary(params: {
+  taskSummaryPayload: TaskSummaryPayload;
+  taskRunning: TaskListPayload;
+  taskPending: TaskListPayload;
+  taskFailed: TaskListPayload;
+  operatorBriefPayload: OperatorBriefPayload;
+  kernel: Record<string, unknown>;
+  setupDiagnostics: Record<string, unknown>;
+  providerBridge: ProviderBridgePayload;
+  desktopControl: {
+    state: ReturnType<Storage["getDesktopControlState"]>;
+    summary: ReturnType<typeof summarizeDesktopControlState>;
+  };
+  patientZero: {
+    state: ReturnType<Storage["getPatientZeroState"]>;
+    summary: ReturnType<typeof summarizePatientZeroState>;
+    report: ReturnType<typeof buildPatientZeroReport>;
+  };
+}) {
+  const counts = asRecord(params.taskSummaryPayload.counts);
+  const operatorBriefRecord = asRecord(params.operatorBriefPayload);
+  const kernelRecord = asRecord(params.kernel);
+  const controlPlane = asRecord(operatorBriefRecord.control_plane_summary);
+  const providerDiagnostics = params.providerBridge.diagnostics;
+  const setupFallback = asRecord(params.setupDiagnostics.fallback);
+  const goalSummary = asRecord(operatorBriefRecord.goal_summary);
+  const planSummary = asRecord(operatorBriefRecord.plan_summary);
+  const stepSummary = asRecord(operatorBriefRecord.step_summary);
+  const taskSummary = asRecord(operatorBriefRecord.task_summary);
+  const runningCount = Number(counts.running ?? 0);
+  const pendingCount = Number(counts.pending ?? 0);
+  const failedCount = Number(counts.failed ?? 0);
+  const completedCount = Number(counts.completed ?? 0);
+  const currentObjective = compactWorkbenchText(operatorBriefRecord.current_objective, 220);
+  const attention = dedupeText(asList(kernelRecord.attention));
+  const blockers: Array<{
+    kind: string;
+    title: string;
+    detail: string;
+    remediation: null | {
+      label: string;
+      action: string;
+      payload?: Record<string, unknown>;
+    };
+  }> = [];
+
+  const failedTasks = buildWorkbenchTaskCards(params.taskFailed.tasks);
+  if (failedCount > 0) {
+    blockers.push({
+      kind: "failed_tasks",
+      title: `${failedCount} failed task${failedCount === 1 ? "" : "s"}`,
+      detail: "Recover or requeue failed tasks before expanding the queue.",
+      remediation: {
+        label: "Retry Failed Tasks",
+        action: "retry_failed_tasks",
+        payload: {
+          task_ids: failedTasks.map((task) => task.task_id).filter(Boolean),
+        },
+      },
+    });
+  }
+  attention.slice(0, 3).forEach((entry) => {
+    blockers.push({
+      kind: "kernel_attention",
+      title: "Kernel attention",
+      detail: compactWorkbenchText(entry, 180),
+      remediation: {
+        label: "Run Maintain",
+        action: "maintain",
+      },
+    });
+  });
+  if (providerDiagnostics.stale === true) {
+    blockers.push({
+      kind: "provider_bridge",
+      title: "Provider bridge diagnostics are stale",
+      detail: "Bridge health is out of date, so remote agent readiness is uncertain.",
+      remediation: {
+        label: "Refresh Maintain Loop",
+        action: "maintain",
+      },
+    });
+  } else if (countProviderBridgeDiagnostics(providerDiagnostics.diagnostics, "disconnected") > 0) {
+    blockers.push({
+      kind: "provider_bridge",
+      title: "Provider bridge clients are disconnected",
+      detail: "Some bridge-backed agents will stay blocked until their client connection is restored.",
+      remediation: {
+        label: "Run Maintain",
+        action: "maintain",
+      },
+    });
+  }
+  if (params.desktopControl.summary.stale) {
+    blockers.push({
+      kind: "desktop_control",
+      title: "Desktop control is stale",
+      detail: "Observation or actuation lanes are not reporting fresh capability state.",
+      remediation: {
+        label: "Refresh Maintain Loop",
+        action: "maintain",
+      },
+    });
+  }
+  if (setupFallback.desktop_degraded === true) {
+    blockers.push({
+      kind: "desktop_control",
+      title: "Desktop lane degraded",
+      detail: "Keep desktop-dependent work explicit until the local lane recovers.",
+      remediation: {
+        label: "Run Maintain",
+        action: "maintain",
+      },
+    });
+  }
+  if (params.patientZero.summary.enabled && controlPlane.privileged_access && asRecord(controlPlane.privileged_access).root_execution_ready !== true) {
+    blockers.push({
+      kind: "privileged_access",
+      title: "Patient Zero is armed without a ready root lane",
+      detail: "High-risk local control is not fully available yet.",
+      remediation: {
+        label: "Disarm Patient Zero",
+        action: "patient_zero_disable",
+        payload: {
+          operator_note: "Disarmed from workbench because the privileged root lane was not ready.",
+        },
+      },
+    });
+  }
+
+  let focusArea = "intake";
+  let status = "ready";
+  let headline = "Define the next bounded objective and dispatch it through the MCP core.";
+
+  if (blockers.length > 0) {
+    focusArea = "stabilize";
+    status = "attention";
+    headline = "Stabilize the runtime before taking on more work.";
+  } else if (currentObjective && (runningCount > 0 || String(stepSummary.status ?? "").trim().toLowerCase() === "running")) {
+    focusArea = "execute";
+    status = "active";
+    headline = "Push the current execution forward and keep the active lane moving.";
+  } else if (pendingCount > 0) {
+    focusArea = "queue";
+    status = "ready";
+    headline = "Turn pending queue into owned execution instead of adding fresh surface area.";
+  }
+
+  const nextActions: Array<{ label: string; detail: string }> = [];
+  if (blockers.length > 0) {
+    nextActions.push({
+      label: "Clear blockers",
+      detail: blockers.map((entry) => entry.title).slice(0, 2).join(" · "),
+    });
+  }
+  if (currentObjective) {
+    nextActions.push({
+      label: "Advance current objective",
+      detail: currentObjective,
+    });
+  }
+  if (pendingCount > 0) {
+    nextActions.push({
+      label: "Drain pending queue",
+      detail: `${pendingCount} pending task${pendingCount === 1 ? "" : "s"} waiting for ownership or execution.`,
+    });
+  }
+  if (nextActions.length === 0) {
+    nextActions.push({
+      label: "Open a bounded objective",
+      detail: "Use the intake desk to create one concrete, reviewable slice of work.",
+    });
+  }
+
+  const suggestedObjectives: Array<{
+    title: string;
+    objective: string;
+    risk: "low" | "medium" | "high" | "critical";
+    mode: string;
+    why: string;
+  }> = [];
+  if (failedCount > 0) {
+    suggestedObjectives.push({
+      title: "Recover failed tasks",
+      objective:
+        "Inspect the failed task queue, identify the immediate cause of failure, and either requeue or close each failed task with a concrete recovery note and next action.",
+      risk: "medium",
+      mode: "recommend",
+      why: "The core already has failed work. Clearing it improves reliability faster than opening new work.",
+    });
+  }
+  if (String(stepSummary.title ?? "").trim()) {
+    const stepTitle = compactWorkbenchText(stepSummary.title, 90);
+    const goalTitle = compactWorkbenchText(goalSummary.title || currentObjective || "the active goal", 90);
+    suggestedObjectives.push({
+      title: `Advance ${stepTitle}`,
+      objective: `Advance the current plan step "${stepTitle}" for ${goalTitle}. Produce the minimum concrete outcome needed to move the plan into the next executable state, including evidence and rollback notes if applicable.`,
+      risk: "medium",
+      mode: normalizeWorkbenchMode(goalSummary.autonomy_mode) || "execute_bounded",
+      why: "There is already an active plan context, so the highest leverage move is to progress it instead of starting a parallel thread.",
+    });
+  }
+  if (pendingCount > 0) {
+    const firstPending = params.taskPending.tasks[0];
+    const pendingObjective = compactWorkbenchText(firstPending?.objective, 110) || "the pending queue";
+    suggestedObjectives.push({
+      title: "Turn queue into owned execution",
+      objective: `Take the front of the pending queue and convert it into an owned execution slice with a clear agent, acceptance bar, and evidence contract. Start with: ${pendingObjective}.`,
+      risk: "medium",
+      mode: "recommend",
+      why: "The system already has queued work that can be clarified and dispatched.",
+    });
+  }
+  if (suggestedObjectives.length === 0) {
+    suggestedObjectives.push({
+      title: "Open today’s first bounded objective",
+      objective:
+        "Define one concrete objective for today with a clear outcome, hard constraints, and a small enough scope that it can be dispatched and verified through the MCP core in one pass.",
+      risk: "low",
+      mode: "recommend",
+      why: "No active execution context is visible, so the best next move is to open one bounded slice of work.",
+    });
+  }
+
+  return {
+    focus_area: focusArea,
+    status,
+    headline,
+    active_execution: {
+      current_objective: currentObjective || null,
+      goal: {
+        goal_id: String(goalSummary.goal_id ?? "").trim() || null,
+        title: compactWorkbenchText(goalSummary.title, 120) || null,
+        status: String(goalSummary.status ?? "").trim() || null,
+        autonomy_mode: String(goalSummary.autonomy_mode ?? "").trim() || null,
+      },
+      plan: {
+        plan_id: String(planSummary.plan_id ?? "").trim() || null,
+        title: compactWorkbenchText(planSummary.title, 120) || null,
+        status: String(planSummary.status ?? "").trim() || null,
+      },
+      step: {
+        step_id: String(stepSummary.step_id ?? "").trim() || null,
+        title: compactWorkbenchText(stepSummary.title, 120) || null,
+        status: String(stepSummary.status ?? "").trim() || null,
+      },
+      task: {
+        task_id: String(taskSummary.task_id ?? "").trim() || null,
+        objective: compactWorkbenchText(taskSummary.objective, 140) || null,
+        status: String(taskSummary.status ?? "").trim() || null,
+      },
+    },
+    queue: {
+      running: runningCount,
+      pending: pendingCount,
+      failed: failedCount,
+      completed: completedCount,
+      running_tasks: buildWorkbenchTaskCards(params.taskRunning.tasks),
+      pending_tasks: buildWorkbenchTaskCards(params.taskPending.tasks),
+      failed_tasks: failedTasks,
+    },
+    blockers,
+    next_actions: nextActions,
+    suggested_objectives: suggestedObjectives.slice(0, 3),
+    quick_actions: {
+      retry_failed_tasks: failedTasks.length > 0,
+      recover_expired_tasks: runningCount > 0,
+    },
+  };
+}
+
 function summarizeAutonomyMaintainState(storage: Storage) {
   const state = storage.getAutonomyMaintainState();
   const summary = summarizeAutonomyMaintain(state, storage);
@@ -518,6 +819,9 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
   const taskPending = safe<TaskListPayload>("task_pending", { status_filter: "pending", count: 0, tasks: [] as TaskRecord[] }, () =>
     taskList(storage, { status: "pending", limit: input.task_limit })
   );
+  const taskFailed = safe<TaskListPayload>("task_failed", { status_filter: "failed", count: 0, tasks: [] as TaskRecord[] }, () =>
+    taskList(storage, { status: "failed", limit: input.task_limit })
+  );
   const agentSessions = safe<AgentSessionListPayload>("agent_sessions", {
     status_filter: null,
     agent_id_filter: null,
@@ -751,6 +1055,18 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     desktopControl,
     patientZero,
   });
+  const workbench = buildWorkbenchSummary({
+    taskSummaryPayload,
+    taskRunning,
+    taskPending,
+    taskFailed,
+    operatorBriefPayload,
+    kernel: asRecord(kernel),
+    setupDiagnostics: asRecord(setupDiagnostics),
+    providerBridge,
+    desktopControl,
+    patientZero,
+  });
 
   return {
     generated_at: new Date().toISOString(),
@@ -780,6 +1096,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     patient_zero: patientZero,
     privileged_access: privilegedAccess,
     setup_diagnostics: setupDiagnostics,
+    workbench,
     source: "office.snapshot",
   };
 }

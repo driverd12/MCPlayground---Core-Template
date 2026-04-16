@@ -97,6 +97,13 @@ test("office.snapshot returns a storage-backed GUI payload without depending on 
     assert.equal(snapshot.operator_brief.kernel, null);
     assert.equal(typeof snapshot.operator_brief.brief_markdown, "string");
     assert.ok(snapshot.operator_brief.brief_markdown.includes("# Operator Brief"));
+    assert.equal(typeof snapshot.workbench.focus_area, "string");
+    assert.equal(typeof snapshot.workbench.status, "string");
+    assert.equal(typeof snapshot.workbench.headline, "string");
+    assert.equal(Array.isArray(snapshot.workbench.blockers), true);
+    assert.equal(Array.isArray(snapshot.workbench.next_actions), true);
+    assert.equal(Array.isArray(snapshot.workbench.suggested_objectives), true);
+    assert.equal(typeof snapshot.workbench.queue.pending, "number");
     assert.equal(typeof snapshot.provider_bridge.snapshot.canonical_ingress_tool, "string");
     assert.ok(Array.isArray(snapshot.provider_bridge.diagnostics.diagnostics));
     assert.equal(typeof snapshot.provider_bridge.diagnostics.cached, "boolean");

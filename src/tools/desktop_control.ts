@@ -669,6 +669,7 @@ export function desktopObserve(storage: Storage, input: z.infer<typeof desktopOb
       const frontmost = readFrontmostOverride() ?? { app_name: state.last_frontmost_app ?? "", window_title: state.last_frontmost_window ?? "" };
       const nextState = storage.setDesktopControlState({
         last_observation_at: new Date().toISOString(),
+        last_screenshot_at: new Date().toISOString(),
         last_frontmost_app: frontmost.app_name || state.last_frontmost_app,
         last_frontmost_window: frontmost.window_title || state.last_frontmost_window,
         last_error: null,

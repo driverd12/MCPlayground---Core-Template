@@ -192,6 +192,24 @@ test("evaluatePromotionGate blocks unhealthy candidates and default drift", () =
     bootstrapStatus: {
       repairs_needed: ["eval.suite.default_drift"],
     },
+    officeSnapshot: {
+      generated_at: "2026-04-15T13:38:16.534Z",
+      setup_diagnostics: {
+        provider_bridge: { stale: false },
+        desktop_control: {},
+        patient_zero: { enabled: true, browser_ready: true },
+        fallback: {
+          core_usable: true,
+          provider_bridge_degraded: false,
+          desktop_degraded: false,
+        },
+        launchers: {
+          office_gui: { supported: true, ready: true, degraded: false },
+          agentic_suite: { supported: true, ready: true, degraded: false },
+        },
+        next_actions: [],
+      },
+    },
   });
 
   assert.equal(gate.ready, false);
@@ -269,6 +287,24 @@ test("evaluatePromotionGate passes when soak, benchmark, route, eval, and rollba
     bootstrapStatus: {
       repairs_needed: [],
     },
+    officeSnapshot: {
+      generated_at: "2026-04-15T13:38:16.534Z",
+      setup_diagnostics: {
+        provider_bridge: { stale: false },
+        desktop_control: {},
+        patient_zero: { enabled: true, browser_ready: true },
+        fallback: {
+          core_usable: true,
+          provider_bridge_degraded: false,
+          desktop_degraded: false,
+        },
+        launchers: {
+          office_gui: { supported: true, ready: true, degraded: false },
+          agentic_suite: { supported: true, ready: true, degraded: false },
+        },
+        next_actions: [],
+      },
+    },
   });
 
   assert.equal(gate.ready, true);
@@ -278,4 +314,97 @@ test("evaluatePromotionGate passes when soak, benchmark, route, eval, and rollba
     model: "llama3.2:3b",
     backend_id: "ollama-llama3-2-3b",
   });
+});
+
+test("evaluatePromotionGate blocks office truth regressions before cutover", () => {
+  const gate = evaluatePromotionGate({
+    model: "qwen3.5:35b-a3b-coding-nvfp4",
+    currentModel: "llama3.2:3b",
+    summary: {
+      total_cases: 5,
+      failed_cases: 0,
+      pass_rate: 100,
+    },
+    benchmarkRun: {
+      ok: true,
+      aggregate_metric_value: 100,
+      run_id: "benchmark-run-test",
+      suite: { suite_id: "autonomy.smoke.local" },
+    },
+    evalRun: {
+      ok: true,
+      aggregate_metric_value: 100,
+      run_id: "eval-run-test",
+      suite: { suite_id: "autonomy.control-plane" },
+    },
+    routerStatus: {
+      state: {
+        default_backend_id: "ollama-llama3-2-3b",
+        backends: [
+          {
+            backend_id: "ollama-qwen3-5-35b-a3b-coding-nvfp4",
+            model_id: "qwen3.5:35b-a3b-coding-nvfp4",
+            provider: "ollama",
+            enabled: true,
+            tags: ["local", "ollama", "gpu", "apple-silicon"],
+            capabilities: {
+              probe_healthy: true,
+              probe_model_known: true,
+              probe_model_loaded: true,
+              probe_benchmark_ok: true,
+            },
+          },
+          {
+            backend_id: "ollama-llama3-2-3b",
+            model_id: "llama3.2:3b",
+            provider: "ollama",
+            enabled: true,
+            tags: ["local", "ollama", "gpu"],
+            capabilities: {
+              probe_healthy: true,
+              probe_model_known: true,
+              probe_model_loaded: true,
+              probe_benchmark_ok: true,
+            },
+          },
+        ],
+      },
+    },
+    routeResult: {
+      selected_backend: {
+        backend_id: "ollama-qwen3-5-35b-a3b-coding-nvfp4",
+      },
+      ranked_backends: [
+        { backend: { backend_id: "ollama-qwen3-5-35b-a3b-coding-nvfp4" } },
+        { backend: { backend_id: "ollama-llama3-2-3b" } },
+      ],
+    },
+    bootstrapStatus: {
+      repairs_needed: [],
+    },
+    officeSnapshot: {
+      generated_at: "2026-04-15T13:38:16.534Z",
+      setup_diagnostics: {
+        provider_bridge: { stale: false },
+        desktop_control: {},
+        patient_zero: { enabled: true, browser_ready: true },
+        fallback: {
+          core_usable: false,
+          provider_bridge_degraded: false,
+          desktop_degraded: false,
+        },
+        launchers: {
+          office_gui: { supported: true, ready: true, degraded: false },
+          agentic_suite: { supported: true, ready: false, degraded: true },
+        },
+        next_actions: ["Run `npm run autonomy:ensure`."],
+      },
+    },
+  });
+
+  assert.equal(gate.ready, false);
+  assert.match(gate.blockers.join(","), /office\.core_unusable/);
+  assert.match(gate.blockers.join(","), /office\.agentic_suite_not_ready/);
+  assert.match(gate.blockers.join(","), /office\.agentic_suite_degraded/);
+  assert.equal(gate.evidence.office_truth.ok, false);
 });

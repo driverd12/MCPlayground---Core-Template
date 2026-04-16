@@ -10,11 +10,34 @@ function sampleManifest(status = "adapter_served_mlx") {
   return {
     candidate_id: "local-adapter-sample",
     status,
+    safe_promotion_metadata: {
+      allowed_now: true,
+      blockers: [],
+    },
     promotion_result: {
       eval_suite_id: "local-adapter-eval-suite",
       benchmark_suite_id: "local-adapter-benchmark-suite",
+      integration_consideration: {
+        router: {
+          live_ready: true,
+          blockers: [],
+          planned_backend: {
+            backend_id: "mlx-adapter-local-adapter-sample",
+            tags: ["local", "mlx", "adapter"],
+          },
+        },
+        ollama: {
+          live_ready: true,
+          blockers: [],
+          planned_backend: {
+            backend_id: "ollama-adapter-local-adapter-sample",
+            tags: ["local", "ollama", "adapter"],
+          },
+        },
+      },
     },
     integration_result: {
+      ok: true,
       target: status.includes("ollama") ? "ollama" : "mlx",
       backend_id: status.includes("ollama") ? "ollama-adapter-local-adapter-sample" : "mlx-adapter-local-adapter-sample",
       model_id: status.includes("ollama")
@@ -32,12 +55,16 @@ function sampleRegistration() {
       accepted: true,
       integration_consideration: {
         router: {
+          live_ready: true,
+          blockers: [],
           planned_backend: {
             backend_id: "mlx-adapter-local-adapter-sample",
             tags: ["local", "mlx", "adapter"],
           },
         },
         ollama: {
+          live_ready: true,
+          blockers: [],
           planned_backend: {
             backend_id: "ollama-adapter-local-adapter-sample",
             tags: ["local", "ollama", "adapter"],
@@ -69,6 +96,20 @@ test("resolveCutoverCandidate returns the MLX backend after integration", () => 
   assert.equal(candidate.target, "mlx");
   assert.equal(candidate.backend_id, "mlx-adapter-local-adapter-sample");
   assert.equal(candidate.eval_suite_id, "local-adapter-eval-suite");
+});
+
+test("resolveCutoverCandidate refuses cutover without explicit live-ready integration proof", () => {
+  const manifest = sampleManifest("adapter_served_mlx");
+  manifest.integration_result.ok = false;
+  manifest.promotion_result.integration_consideration.router.live_ready = false;
+  manifest.promotion_result.integration_consideration.router.blockers = ["mlx_integration_pending"];
+
+  const candidate = resolveCutoverCandidate(manifest, sampleRegistration());
+  assert.equal(candidate.ok, false);
+  assert.match(candidate.reason, /live-ready integration record/i);
+  assert.ok(candidate.blockers.includes("integration_result_not_ok"));
+  assert.ok(candidate.blockers.includes("integration_live_ready_missing"));
+  assert.ok(candidate.blockers.includes("integration_blocker:mlx_integration_pending"));
 });
 
 test("verifyCutoverOutcome only passes when eval, route selection, and bootstrap repairs are clean", () => {

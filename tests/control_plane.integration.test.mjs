@@ -336,11 +336,24 @@ test("patient.zero arms and disarms explicit elevated local control with an oper
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-control-plane-patient-zero-"));
   const dbPath = path.join(tempDir, "hub.sqlite");
   let mutationCounter = 0;
+  const macosAuthorityAuditOverride = JSON.stringify({
+    ok: true,
+    platform: "darwin",
+    ready_for_patient_zero_full_authority: false,
+    blockers: ["full_disk_access"],
+    checks: {
+      full_disk_access: {
+        status: "blocked",
+        detail: "TCC database is not readable from the current shell host.",
+      },
+    },
+  });
 
   const { client } = await openClient(tempDir, dbPath, {
     MCP_PRIVILEGED_EXEC_DRY_RUN: "1",
     MCP_PRIVILEGED_EXEC_TEST_ACCOUNT_EXISTS: "1",
     MCP_PRIVILEGED_EXEC_TEST_SECRET: "integration-secret",
+    MCP_PATIENT_ZERO_AUTHORITY_AUDIT_JSON: macosAuthorityAuditOverride,
   });
   try {
     const initial = await callTool(client, "patient.zero", {
@@ -364,6 +377,15 @@ test("patient.zero arms and disarms explicit elevated local control with an oper
     assert.equal(armed.summary.root_shell_enabled, true);
     assert.equal(armed.summary.autonomous_control_enabled, true);
     assert.equal(armed.summary.full_control_authority, false);
+    assert.ok(Array.isArray(armed.summary.authority_blockers));
+    assert.equal(armed.summary.authority_blockers.length > 0, true);
+    assert.equal(armed.summary.authority_blockers.includes("macos_authority_full_disk_access"), true);
+    assert.equal(armed.summary.authority_proofs.screen_recording_proven, false);
+    assert.equal(armed.summary.macos_authority_audit_status, "blocked");
+    assert.equal(armed.summary.macos_authority_ready, false);
+    assert.equal(armed.macos_authority_audit.status, "blocked");
+    assert.equal(armed.macos_authority_audit.ready_for_patient_zero_full_authority, false);
+    assert.equal(armed.report.macos_authority_audit.status, "blocked");
     assert.equal(armed.summary.last_operator_note, "Taking over while the operator steps away.");
     assert.equal(armed.desktop_control.state.enabled, true);
     assert.equal(armed.desktop_control.state.allow_observe, true);

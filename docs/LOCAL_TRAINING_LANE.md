@@ -6,6 +6,7 @@ The local adapter lane prepares explicit training packets for bounded local adap
 
 ```bash
 npm run local:training:status
+npm run local:training:verify
 npm run local:training:bootstrap
 npm run local:training:prepare
 npm run local:training:train
@@ -25,6 +26,13 @@ Each run writes a packet under `data/training/local_adapter_lane/<run_id>/`:
 - `eval.jsonl`: deterministic eval holdout
 - `manifest.json`: the packet contract for the run
 
+The manifest now carries a dataset-integrity contract for those files:
+
+- SHA-256 hashes for `corpus.jsonl`, `train.jsonl`, and `eval.jsonl`
+- membership hashes for each split
+- proof that train and eval are disjoint and reconstruct the curated corpus exactly
+- duplicate and invalid-row counts so later steps can fail closed on tampering or malformed rows
+
 The registry entry is appended to `data/training/model_registry.json` with:
 
 - `candidate_id`: stable local adapter candidate identifier
@@ -33,12 +41,22 @@ The registry entry is appended to `data/training/model_registry.json` with:
 - `promotion_gate_ready`: whether the latest local capability report is clean
 - `readiness_blockers`: explicit reasons the lane is not ready to run or promote
 
+## Verify Command
+
+`npm run local:training:verify` is the filesystem-backed evidence gate for the lane.
+
+- It re-reads the latest registry row, manifest, registration artifact, and corpus/train/eval files from disk instead of trusting previously printed status.
+- It fails closed on internal drift such as registry/manifest id mismatches, missing corpus artifacts, packet hash drift, train/eval overlap, split-membership drift, missing adapter artifacts in trained states, missing promotion metadata in registered states, premature `safe_promotion_metadata.allowed_now`, or missing rollback metadata on a live primary.
+- It reports stale primary-watchdog confidence as a warning, not a fake success, so a primary adapter can be reachable and still show that its proof is old.
+- It does not claim that new weights were trained or promoted on this run; it only verifies whether the lane's persisted evidence still matches the state being reported.
+
 ## Packet Guarantees
 
 `manifest.json` now records:
 
 - curation stats and source breakdown
 - train and eval counts
+- dataset-integrity hashes and split-membership proof
 - local evaluation targets for Ollama and MLX context
 - benchmark and eval acceptance criteria
 - rollback metadata for the currently promoted Ollama model
@@ -48,6 +66,7 @@ The registry entry is appended to `data/training/model_registry.json` with:
 
 `npm run local:training:train` runs a bounded MLX LoRA pass against the latest prepared packet.
 
+- It refuses to run on a stale or tampered prepared packet; rerun `npm run local:training:prepare` if the dataset hashes or split proof drift.
 - It uses a trainable MLX companion model by default instead of pretending the active Ollama runtime model is directly fine-tuned in place.
 - On this Mac, the default companion is the cached `mlx-community/Qwen2.5-Coder-3B-Instruct-4bit` snapshot when present.
 - It materializes `train.jsonl`, `valid.jsonl`, and `test.jsonl` for `mlx_lm.lora`, writes adapter artifacts under `adapter/`, records `training_metrics.json`, and runs one adapter-backed generation smoke test.
@@ -57,6 +76,7 @@ The registry entry is appended to `data/training/model_registry.json` with:
 
 `npm run local:training:promote` runs the bounded registration gate for the latest trained adapter.
 
+- It rechecks the prepared packet-integrity contract before running benchmark or eval gates, so a mutated dataset cannot silently inherit an older training packet identity.
 - It shells through the repo's benchmark and eval tooling instead of inventing a parallel acceptance path.
 - The benchmark command runs `scripts/local_adapter_eval.mjs`, which scores deterministic base-vs-adapter prompts, writes a reward file, and exits non-zero if the gate fails.
 - A passing gate records the candidate as `adapter_registered`, writes a durable registration artifact, and records explicit router/Ollama integration blockers instead of pretending the adapter is live.
@@ -76,6 +96,7 @@ The registry entry is appended to `data/training/model_registry.json` with:
 `npm run local:training:cutover` is the explicit router-default switch for an already integrated adapter.
 
 - It refuses to run until the adapter is already reachable as `adapter_served_mlx` or `adapter_exported_ollama`.
+- It now also refuses to run unless the integration step recorded a successful live-ready proof for the chosen MLX or Ollama target: `integration_result.ok` must be true, the target's `integration_consideration.*.live_ready` flag must be true, and the target-specific blockers list must be empty.
 - It reruns the adapter's eval suite before cutover, switches `model.router.default_backend_id`, runs a bounded maintain refresh, reruns the eval gate, verifies route selection, and rolls back to the previous default if any post-cutover check fails.
 - On Ollama companion cutover, it also aligns `.env` with the promoted companion model so CLI-driven local inference does not drift from the router default.
 - On success, the lane records `adapter_primary_mlx` or `adapter_primary_ollama`.
@@ -104,6 +125,7 @@ The registry entry is appended to `data/training/model_registry.json` with:
 - `training_intent.weights_modified` remains `false` during `prepare`
 - `training_intent.executed` remains `false` during `prepare`
 - `safe_promotion_metadata.allowed_now` remains `false` until adapter artifacts exist and the gate is green
+- `npm run local:training:verify` must be able to reconstruct the claimed lane state from the filesystem, registry row, and manifest without relying on operator memory
 - missing train commands or missing evidence are surfaced as readiness blockers instead of being treated as success
 - a red promotion gate does not block training execution; it blocks later promotion and route cutover
 - `adapter_registered` does not mean "served live". It means "accepted by the bounded gate and recorded as eligible for integration work."

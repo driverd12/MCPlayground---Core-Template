@@ -160,6 +160,96 @@ function processAlive(pid) {
   }
 }
 
+function readProcessStartTimeMs(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return null;
+  }
+  try {
+    const output = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        LC_ALL: "C",
+      },
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .trim()
+      .replace(/\s+/g, " ");
+    if (!output) {
+      return null;
+    }
+    const startedAtMs = Date.parse(output);
+    return Number.isFinite(startedAtMs) ? startedAtMs : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildLockOwnerIdentity(pid = process.pid) {
+  const startedAtMs = readProcessStartTimeMs(pid);
+  return {
+    pid,
+    startedAtMs,
+    startedAt: Number.isFinite(startedAtMs) ? new Date(startedAtMs).toISOString() : null,
+  };
+}
+
+function readLockOwnerMetadata(lockDir) {
+  const metadataPath = path.join(lockDir, "owner.json");
+  try {
+    const parsed = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+    const pid = Number.parseInt(String(parsed?.pid ?? ""), 10);
+    const startedAtMs = Number.parseInt(String(parsed?.startedAtMs ?? ""), 10);
+    return {
+      pid: Number.isInteger(pid) && pid > 0 ? pid : null,
+      startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : null,
+      startedAt: typeof parsed?.startedAt === "string" ? parsed.startedAt : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeLockOwnerMetadata(lockDir, identity) {
+  const metadataPath = path.join(lockDir, "owner.json");
+  try {
+    fs.writeFileSync(metadataPath, `${JSON.stringify(identity)}\n`, "utf8");
+  } catch {}
+}
+
+function lockOwnerMatchesLiveProcess(owner, liveIdentity) {
+  if (!owner || !liveIdentity) {
+    return null;
+  }
+  if (!Number.isInteger(owner.pid) || owner.pid <= 0 || owner.pid !== liveIdentity.pid) {
+    return false;
+  }
+  if (Number.isFinite(owner.startedAtMs) && Number.isFinite(liveIdentity.startedAtMs)) {
+    return Math.abs(owner.startedAtMs - liveIdentity.startedAtMs) <= 1000;
+  }
+  if (typeof owner.startedAt === "string" && typeof liveIdentity.startedAt === "string") {
+    return owner.startedAt === liveIdentity.startedAt;
+  }
+  return null;
+}
+
+function readLockTimestampMs(pidFile, lockDir) {
+  for (const candidate of [pidFile, lockDir]) {
+    try {
+      return fs.statSync(candidate).mtimeMs;
+    } catch {}
+  }
+  return null;
+}
+
+function liveProcessStartedAfterLockWrite(pidFile, lockDir, liveIdentity) {
+  if (!liveIdentity || !Number.isFinite(liveIdentity.startedAtMs)) {
+    return false;
+  }
+  const lockTimestampMs = readLockTimestampMs(pidFile, lockDir);
+  return Number.isFinite(lockTimestampMs) && liveIdentity.startedAtMs > lockTimestampMs + 1000;
+}
+
 function commandExists(name) {
   try {
     execFileSync(process.platform === "win32" ? "where" : "which", [String(name)], {
@@ -393,6 +483,8 @@ export async function acquireRunnerSingletonLock(repoRoot, name, timeoutMs = 200
     try {
       fs.mkdirSync(lockDir);
       fs.writeFileSync(pidFile, `${process.pid}\n`, "utf8");
+      // Persist process-incarnation metadata so stale locks can be reclaimed safely after PID reuse.
+      writeLockOwnerMetadata(lockDir, buildLockOwnerIdentity(process.pid));
       let released = false;
       const release = () => {
         if (released) return;
@@ -411,6 +503,18 @@ export async function acquireRunnerSingletonLock(repoRoot, name, timeoutMs = 200
         ownerPid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
       } catch {}
       if (!processAlive(ownerPid)) {
+        try {
+          fs.rmSync(lockDir, { recursive: true, force: true });
+        } catch {}
+        continue;
+      }
+      const ownerMetadata = readLockOwnerMetadata(lockDir);
+      const liveIdentity = buildLockOwnerIdentity(ownerPid);
+      const ownerMatchesLiveProcess = lockOwnerMatchesLiveProcess(ownerMetadata, liveIdentity);
+      const staleLiveOwner =
+        ownerMatchesLiveProcess === false ||
+        (ownerMatchesLiveProcess !== true && liveProcessStartedAfterLockWrite(pidFile, lockDir, liveIdentity));
+      if (staleLiveOwner) {
         try {
           fs.rmSync(lockDir, { recursive: true, force: true });
         } catch {}

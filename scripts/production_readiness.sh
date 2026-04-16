@@ -716,13 +716,17 @@ launchd = data.get("launchd") or {}
 loaded = bool(launchd.get("autonomy_keepalive_loaded"))
 disabled = bool(launchd.get("autonomy_keepalive_disabled"))
 operational = bool(launchd.get("autonomy_keepalive_operational"))
+plist_current = bool(launchd.get("autonomy_keepalive_plist_current"))
 print(
     "[production] autonomy keepalive: "
     f"loaded={loaded} "
     f"disabled={disabled} "
+    f"plist_current={plist_current} "
     f"operational={operational}"
 )
 if not operational:
+    if not plist_current:
+        raise SystemExit("launchd autonomy keepalive plist is stale for the current repo path")
     if disabled:
         raise SystemExit("launchd autonomy keepalive agent is disabled")
     raise SystemExit("launchd autonomy keepalive agent is not loaded")

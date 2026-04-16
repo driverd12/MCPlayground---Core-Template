@@ -17,6 +17,7 @@
     subtitle: document.querySelector("#subtitle"),
     statusStrip: document.querySelector("#status-strip"),
     officeView: document.querySelector("#office-view"),
+    workbenchView: document.querySelector("#workbench-view"),
     briefingView: document.querySelector("#briefing-view"),
     workersView: document.querySelector("#workers-view"),
     patientZeroView: document.querySelector("#patient-zero-view"),
@@ -353,6 +354,249 @@
       "</div>";
   }
 
+  function seedIntakeFromWorkbench(index) {
+    if (!state.snapshot || !state.snapshot.workbench || !Array.isArray(state.snapshot.workbench.suggested_objectives)) {
+      return;
+    }
+    var suggestion = state.snapshot.workbench.suggested_objectives[index];
+    if (!suggestion) {
+      return;
+    }
+    var titleNode = document.querySelector("#intake-title");
+    var objectiveNode = document.querySelector("#intake-objective");
+    var riskNode = document.querySelector("#intake-risk");
+    var modeNode = document.querySelector("#intake-mode");
+    if (titleNode) titleNode.value = String(suggestion.title || "");
+    if (objectiveNode) objectiveNode.value = String(suggestion.objective || "");
+    if (riskNode && suggestion.risk) riskNode.value = suggestion.risk;
+    if (modeNode) {
+      modeNode.value = suggestion.mode || "";
+      state.intakeModeDirty = String(modeNode.value || "").trim().length > 0;
+    }
+    setResultText("Seeded intake from workbench suggestion.");
+  }
+
+  function triggerWorkbenchAction(action, payload) {
+    return postAction(action, payload || {});
+  }
+
+  function dispatchWorkbenchSuggestion(index) {
+    if (!state.snapshot || !state.snapshot.workbench || !Array.isArray(state.snapshot.workbench.suggested_objectives)) {
+      return Promise.resolve();
+    }
+    var suggestion = state.snapshot.workbench.suggested_objectives[index];
+    if (!suggestion) {
+      return Promise.resolve();
+    }
+    return getJson("/office/api/intake", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: suggestion.title || "",
+        objective: suggestion.objective || "",
+        risk: suggestion.risk || "medium",
+        mode: suggestion.mode || "",
+        thread_id: state.snapshot.thread_id || "",
+        tags: ["workbench"],
+      }),
+    }).then(function (result) {
+      setResultText(JSON.stringify(result, null, 2));
+      return fetchSnapshot({ forceLive: true, explicitForceLive: true });
+    });
+  }
+
+  function triggerBlockerRemediation(index) {
+    if (!state.snapshot || !state.snapshot.workbench || !Array.isArray(state.snapshot.workbench.blockers)) {
+      return Promise.resolve();
+    }
+    var blocker = state.snapshot.workbench.blockers[index];
+    var remediation = blocker && blocker.remediation ? blocker.remediation : null;
+    if (!remediation || !remediation.action) {
+      return Promise.resolve();
+    }
+    return triggerWorkbenchAction(remediation.action, remediation.payload || {});
+  }
+
+  function renderWorkbenchView() {
+    if (!state.snapshot) {
+      els.workbenchView.innerHTML = "";
+      return;
+    }
+    var workbench = state.snapshot.workbench || {};
+    var activeExecution = workbench.active_execution || {};
+    var goal = activeExecution.goal || {};
+    var plan = activeExecution.plan || {};
+    var step = activeExecution.step || {};
+    var task = activeExecution.task || {};
+    var queue = workbench.queue || {};
+    var blockers = Array.isArray(workbench.blockers) ? workbench.blockers : [];
+    var nextActions = Array.isArray(workbench.next_actions) ? workbench.next_actions : [];
+    var suggestions = Array.isArray(workbench.suggested_objectives) ? workbench.suggested_objectives : [];
+    var summary = (state.snapshot.summary && state.snapshot.summary.workbench) || {};
+    var statusClassName =
+      summary.status === "attention"
+        ? "workbench-status--attention"
+        : summary.status === "active"
+          ? "workbench-status--active"
+          : "workbench-status--ready";
+    var runningTasks = Array.isArray(queue.running_tasks) ? queue.running_tasks : [];
+    var pendingTasks = Array.isArray(queue.pending_tasks) ? queue.pending_tasks : [];
+    var failedTasks = Array.isArray(queue.failed_tasks) ? queue.failed_tasks : [];
+    var quickActions = workbench.quick_actions || {};
+    els.workbenchView.innerHTML =
+      '<div class="workbench-grid">' +
+      '<section class="workbench-hero">' +
+      '<div><div class="section-title">Daily Workbench</div><h2>' + escapeHtml(workbench.headline || "No workbench headline available.") + '</h2><p>This view turns live MCP core state into the next concrete move, instead of making you infer it from raw telemetry.</p></div>' +
+      '<div class="workbench-hero__meta">' +
+      '<div class="workbench-status ' + statusClassName + '">' + escapeHtml(String(workbench.status || "ready").toUpperCase()) + '</div>' +
+      '<div class="metric"><span>Focus</span><strong>' + escapeHtml(workbench.focus_area || "intake") + '</strong></div>' +
+      '<div class="metric"><span>Blockers</span><strong>' + String(blockers.length) + '</strong></div>' +
+      '<div class="metric"><span>Suggestions</span><strong>' + String(suggestions.length) + "</strong></div>" +
+      "</div>" +
+      "</section>" +
+      '<section class="workbench-card workbench-card--wide">' +
+      '<div class="section-title">Quick Actions</div>' +
+      '<div class="workbench-actions">' +
+      '<button class="button" data-workbench-action="recover_expired_tasks"' + (quickActions.recover_expired_tasks ? "" : " disabled") + '>Recover Expired Tasks</button>' +
+      '<button class="button" data-workbench-action="retry_failed_tasks"' + (quickActions.retry_failed_tasks ? "" : " disabled") + '>Retry Failed Tasks</button>' +
+      '<button class="button" data-workbench-action="seed_first_suggestion"' + (suggestions.length ? "" : " disabled") + '>Seed First Suggestion</button>' +
+      "</div>" +
+      "</section>" +
+      '<section class="workbench-card">' +
+      '<div class="section-title">Active Lane</div>' +
+      '<div class="metric-list">' +
+      '<div class="metric"><span>Objective</span><strong>' + escapeHtml(activeExecution.current_objective || "No active objective.") + '</strong></div>' +
+      '<div class="metric"><span>Goal</span><strong>' + escapeHtml(goal.title || "none") + '</strong></div>' +
+      '<div class="metric"><span>Plan</span><strong>' + escapeHtml(plan.title || "none") + '</strong></div>' +
+      '<div class="metric"><span>Step</span><strong>' + escapeHtml(step.title || "none") + '</strong></div>' +
+      '<div class="metric"><span>Task</span><strong>' + escapeHtml(task.objective || "none") + "</strong></div>" +
+      "</div>" +
+      "</section>" +
+      '<section class="workbench-card">' +
+      '<div class="section-title">Queue Shape</div>' +
+      '<div class="workbench-stats">' +
+      '<article><span>Running</span><strong>' + String(queue.running || 0) + '</strong></article>' +
+      '<article><span>Pending</span><strong>' + String(queue.pending || 0) + '</strong></article>' +
+      '<article><span>Failed</span><strong>' + String(queue.failed || 0) + '</strong></article>' +
+      '<article><span>Completed</span><strong>' + String(queue.completed || 0) + "</strong></article>" +
+      "</div>" +
+      "</section>" +
+      '<section class="workbench-card">' +
+      '<div class="section-title">Next Moves</div>' +
+      '<div class="workbench-list">' +
+      nextActions.map(function (entry) {
+        return '<article class="workbench-list__item"><strong>' + escapeHtml(entry.label || "Action") + '</strong><span>' + escapeHtml(entry.detail || "") + "</span></article>";
+      }).join("") +
+      "</div>" +
+      "</section>" +
+      '<section class="workbench-card">' +
+      '<div class="section-title">Blockers</div>' +
+      '<div class="workbench-list">' +
+      (blockers.length
+        ? blockers.map(function (entry) {
+            return '<article class="workbench-list__item workbench-list__item--warn"><strong>' + escapeHtml(entry.title || entry.kind || "Blocker") + '</strong><span>' + escapeHtml(entry.detail || "") + '</span>' + (entry.remediation && entry.remediation.action ? ('<button class="button" data-blocker-index="' + escapeHtml(String(blockers.indexOf(entry))) + '">' + escapeHtml(entry.remediation.label || "Remediate") + "</button>") : "") + "</article>";
+          }).join("")
+        : '<article class="workbench-list__item"><strong>Clear</strong><span>No immediate blockers detected in the core snapshot.</span></article>') +
+      "</div>" +
+      "</section>" +
+      '<section class="workbench-card workbench-card--wide">' +
+      '<div class="section-title">Suggested Objectives</div>' +
+      '<div class="workbench-suggestions">' +
+      suggestions.map(function (entry, index) {
+        return (
+          '<article class="workbench-suggestion">' +
+          '<div class="workbench-suggestion__meta"><span>' + escapeHtml(entry.risk || "medium") + '</span><span>' + escapeHtml(entry.mode || "auto") + '</span></div>' +
+          '<h3>' + escapeHtml(entry.title || ("Suggestion " + (index + 1))) + '</h3>' +
+          '<p>' + escapeHtml(entry.objective || "") + '</p>' +
+          '<div class="workbench-suggestion__why">' + escapeHtml(entry.why || "") + '</div>' +
+          '<div class="workbench-suggestion__actions"><button class="button button--primary" data-dispatch-suggestion="' + String(index) + '">Dispatch Now</button><button class="button" data-intake-seed="' + String(index) + '">Seed Intake</button></div>' +
+          "</article>"
+        );
+      }).join("") +
+      "</div>" +
+      "</section>" +
+      '<section class="workbench-card">' +
+      '<div class="section-title">Running Tasks</div>' +
+      '<div class="workbench-list">' +
+      (runningTasks.length
+        ? runningTasks.map(function (entry) {
+            return '<article class="workbench-list__item"><strong>' + escapeHtml(entry.objective || entry.task_id || "running task") + '</strong><span>' + escapeHtml((entry.task_id || "task") + " · p" + String(entry.priority || 0)) + "</span></article>";
+          }).join("")
+        : '<article class="workbench-list__item"><strong>No running tasks</strong><span>The core is not actively executing a task right now.</span></article>') +
+      "</div>" +
+      "</section>" +
+      '<section class="workbench-card">' +
+      '<div class="section-title">Failed Tasks</div>' +
+      '<div class="workbench-list">' +
+      (failedTasks.length
+        ? failedTasks.map(function (entry) {
+            return '<article class="workbench-list__item workbench-list__item--warn"><strong>' + escapeHtml(entry.objective || entry.task_id || "failed task") + '</strong><span>' + escapeHtml((entry.task_id || "task") + " · " + (entry.last_error || "error unavailable")) + '</span><button class="button" data-retry-task-id="' + escapeHtml(entry.task_id || "") + '">Retry</button></article>';
+          }).join("")
+        : '<article class="workbench-list__item"><strong>No failed tasks</strong><span>Nothing is currently blocked in the failed queue.</span></article>') +
+      "</div>" +
+      "</section>" +
+      '<section class="workbench-card">' +
+      '<div class="section-title">Pending Tasks</div>' +
+      '<div class="workbench-list">' +
+      (pendingTasks.length
+        ? pendingTasks.map(function (entry) {
+            return '<article class="workbench-list__item"><strong>' + escapeHtml(entry.objective || entry.task_id || "pending task") + '</strong><span>' + escapeHtml((entry.task_id || "task") + " · p" + String(entry.priority || 0)) + "</span></article>";
+          }).join("")
+        : '<article class="workbench-list__item"><strong>No pending tasks</strong><span>The queue is clear enough to open the next bounded objective.</span></article>') +
+      "</div>" +
+      "</section>" +
+      "</div>";
+    Array.prototype.slice.call(els.workbenchView.querySelectorAll("[data-intake-seed]")).forEach(function (button) {
+      button.addEventListener("click", function () {
+        seedIntakeFromWorkbench(Number(button.getAttribute("data-intake-seed") || "0"));
+      });
+    });
+    Array.prototype.slice.call(els.workbenchView.querySelectorAll("[data-dispatch-suggestion]")).forEach(function (button) {
+      button.addEventListener("click", function () {
+        dispatchWorkbenchSuggestion(Number(button.getAttribute("data-dispatch-suggestion") || "0")).catch(function (error) {
+          setResultText(String(error));
+        });
+      });
+    });
+    Array.prototype.slice.call(els.workbenchView.querySelectorAll("[data-blocker-index]")).forEach(function (button) {
+      button.addEventListener("click", function () {
+        triggerBlockerRemediation(Number(button.getAttribute("data-blocker-index") || "0")).catch(function (error) {
+          setResultText(String(error));
+        });
+      });
+    });
+    Array.prototype.slice.call(els.workbenchView.querySelectorAll("[data-workbench-action]")).forEach(function (button) {
+      button.addEventListener("click", function () {
+        var action = button.getAttribute("data-workbench-action") || "";
+        if (action === "seed_first_suggestion") {
+          seedIntakeFromWorkbench(0);
+          return;
+        }
+        if (action === "retry_failed_tasks") {
+          triggerWorkbenchAction("retry_failed_tasks", {
+            task_ids: failedTasks.map(function (entry) { return entry.task_id; }).filter(Boolean),
+          }).catch(function (error) {
+            setResultText(String(error));
+          });
+          return;
+        }
+        triggerWorkbenchAction(action, {}).catch(function (error) {
+          setResultText(String(error));
+        });
+      });
+    });
+    Array.prototype.slice.call(els.workbenchView.querySelectorAll("[data-retry-task-id]")).forEach(function (button) {
+      button.addEventListener("click", function () {
+        var taskId = button.getAttribute("data-retry-task-id") || "";
+        triggerWorkbenchAction("retry_failed_tasks", {
+          task_ids: [taskId],
+        }).catch(function (error) {
+          setResultText(String(error));
+        });
+      });
+    });
+  }
+
   function renderWorkersView() {
     if (!state.snapshot) {
       els.workersView.innerHTML = "";
@@ -599,6 +843,7 @@
     renderSubtitle();
     renderStatusStrip();
     renderOfficeView();
+    renderWorkbenchView();
     renderBriefingView();
     renderWorkersView();
     renderPatientZeroView();

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { parseJsonText, startHttpTransport } from "../dist/transports/http.js";
 
 function officeHttpCachePath(cacheDir, cacheFile) {
@@ -817,6 +818,174 @@ test("/office/api/snapshot raw mode times out stalled raw snapshots and falls ba
   }
 });
 
+test("/office/api/action retries failed tasks through task.retry", { concurrency: false }, async () => {
+  const previousBearer = process.env.MCP_HTTP_BEARER_TOKEN;
+  process.env.MCP_HTTP_BEARER_TOKEN = "office-action-retry-token";
+  const retryCalls = [];
+  const port = await reservePort();
+  const server = await startHttpTransport(
+    () => buildToolServer({
+      "task.retry": async (args) => {
+        retryCalls.push(args);
+        return {
+          ok: true,
+          task_id: args.task_id,
+          retried: true,
+        };
+      },
+      "task.recover_expired": async () => ({ ok: true, recovered: 0 }),
+    }),
+    {
+      host: "127.0.0.1",
+      port,
+      allowedOrigins: ["http://127.0.0.1"],
+      bearerToken: "office-action-retry-token",
+    }
+  );
+
+  try {
+    const response = await fetchHttpJsonResponse(port, "/office/api/action", {
+      method: "POST",
+      headers: {
+        Origin: "http://127.0.0.1",
+        Authorization: "Bearer office-action-retry-token",
+        "Content-Type": "application/json",
+      },
+      body: {
+        action: "retry_failed_tasks",
+        task_ids: ["task-a", "task-b"],
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.ok, true);
+    assert.equal(response.body.action, "retry_failed_tasks");
+    assert.equal(response.body.retried_count, 2);
+    assert.equal(retryCalls.length, 2);
+    assert.equal(retryCalls[0].task_id, "task-a");
+    assert.equal(retryCalls[1].task_id, "task-b");
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+    if (previousBearer === undefined) {
+      delete process.env.MCP_HTTP_BEARER_TOKEN;
+    } else {
+      process.env.MCP_HTTP_BEARER_TOKEN = previousBearer;
+    }
+  }
+});
+
+test("/office/api/action recovers expired tasks through task.recover_expired", { concurrency: false }, async () => {
+  const previousBearer = process.env.MCP_HTTP_BEARER_TOKEN;
+  process.env.MCP_HTTP_BEARER_TOKEN = "office-action-recover-token";
+  const recoverCalls = [];
+  const port = await reservePort();
+  const server = await startHttpTransport(
+    () => buildToolServer({
+      "task.retry": async () => ({ ok: true }),
+      "task.recover_expired": async (args) => {
+        recoverCalls.push(args);
+        return {
+          ok: true,
+          recovered_count: 3,
+        };
+      },
+    }),
+    {
+      host: "127.0.0.1",
+      port,
+      allowedOrigins: ["http://127.0.0.1"],
+      bearerToken: "office-action-recover-token",
+    }
+  );
+
+  try {
+    const response = await fetchHttpJsonResponse(port, "/office/api/action", {
+      method: "POST",
+      headers: {
+        Origin: "http://127.0.0.1",
+        Authorization: "Bearer office-action-recover-token",
+        "Content-Type": "application/json",
+      },
+      body: {
+        action: "recover_expired_tasks",
+        limit: 7,
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.ok, true);
+    assert.equal(response.body.action, "recover_expired_tasks");
+    assert.equal(response.body.result.ok, true);
+    assert.equal(response.body.result.recovered_count, 3);
+    assert.equal(recoverCalls.length, 1);
+    assert.equal(recoverCalls[0].limit, 7);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+    if (previousBearer === undefined) {
+      delete process.env.MCP_HTTP_BEARER_TOKEN;
+    } else {
+      process.env.MCP_HTTP_BEARER_TOKEN = previousBearer;
+    }
+  }
+});
+
+function buildToolServer(toolHandlers) {
+  const server = new Server(
+    {
+      name: "http-office-action-tool-server",
+      version: "1.0.0",
+    },
+    {
+      capabilities: {
+        tools: {},
+      },
+    }
+  );
+
+  const tools = Object.keys(toolHandlers).map((name) => ({
+    name,
+    description: `${name} test tool`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: true,
+    },
+  }));
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const name = request.params.name;
+    const handler = toolHandlers[name];
+    if (!handler) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `unknown tool: ${name}` }],
+      };
+    }
+    const result = await handler(request.params.arguments || {});
+    return {
+      content: [{ type: "text", text: JSON.stringify(result) }],
+    };
+  });
+
+  return server;
+}
+
 function reservePort() {
   return new Promise((resolve, reject) => {
     const server = http.createServer();
@@ -872,14 +1041,18 @@ function fetchReady(port, bearerToken = "ready-cache-token") {
   });
 }
 
-function fetchHttpJsonResponse(port, requestPath) {
+function fetchHttpJsonResponse(port, requestPath, options = {}) {
   return new Promise((resolve, reject) => {
+    const method = options.method || "GET";
+    const headers = options.headers || {};
+    const body = options.body == null ? null : JSON.stringify(options.body);
     const request = http.request(
       {
         hostname: "127.0.0.1",
         port,
         path: requestPath,
-        method: "GET",
+        method,
+        headers,
       },
       (response) => {
         const chunks = [];
@@ -901,7 +1074,7 @@ function fetchHttpJsonResponse(port, requestPath) {
       request.destroy(new Error(`timed out waiting for ${requestPath}`));
     });
     request.on("error", reject);
-    request.end();
+    request.end(body ?? undefined);
   });
 }
 

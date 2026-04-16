@@ -7,7 +7,7 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { detectAdapterArtifacts, detectTrainerAvailability } from "./local_adapter_lane.mjs";
+import { assertPreparedDataset, detectAdapterArtifacts, detectTrainerAvailability } from "./local_adapter_lane.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ENV_PATH = path.join(REPO_ROOT, ".env");
@@ -398,6 +398,7 @@ function main() {
   if (!manifest || typeof manifest !== "object") {
     throw new Error(`Could not read manifest at ${manifestPath}`);
   }
+  assertPreparedDataset(manifest);
   const runDir = path.dirname(manifestPath);
   const trainer = detectTrainerAvailability();
   if (trainer.trainer_ready !== true || !trainer.python_path) {

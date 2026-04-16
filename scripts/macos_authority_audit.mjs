@@ -374,14 +374,14 @@ export function upgradeStatusWithDesktopProof(baseline, desktopStatus, lane) {
   }
   if (
     lane === "screen" &&
-    summary.observe_ready === true &&
-    typeof state.last_observation_at === "string" &&
+    (summary.screen_recording_proven === true ||
+      (summary.observe_ready === true && typeof state.last_screenshot_at === "string")) &&
     !state.last_error
   ) {
     return {
       ...baseline,
       status: "granted",
-      detail: `${baseline.detail} Live desktop.observe proof succeeded at ${state.last_observation_at}.`,
+      detail: `${baseline.detail} Live desktop.observe screenshot proof succeeded at ${state.last_screenshot_at || "recent proof timestamp"}.`,
     };
   }
   return baseline;

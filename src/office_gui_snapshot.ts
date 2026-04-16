@@ -445,6 +445,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const autopilot = asDict(raw.autopilot);
   const maintain = asDict(raw.autonomy_maintain);
   const runtimeWorkers = asDict(raw.runtime_workers);
+  const workbench = asDict(raw.workbench);
 
   const catalog = buildCatalog(roster);
   const fallbackRoster = isFallbackRoster(roster);
@@ -621,6 +622,27 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const patientZeroToolkit = asDict(patientZeroAutonomyControl.toolkit || patientZeroReport.toolkit);
   const patientZeroReportedAutonomousControlEnabled = Boolean(patientZeroReport.autonomous_control_enabled);
   const patientZeroReportedFullControlAuthority = Boolean(patientZeroReport.full_control_authority);
+  const patientZeroMacosAuthorityAudit = asDict(patientZeroReport.macos_authority_audit);
+  const patientZeroMacosAuthorityStatus = String(
+    patientZeroSummary.macos_authority_audit_status ?? patientZeroMacosAuthorityAudit.status ?? ""
+  )
+    .trim()
+    .toLowerCase();
+  const patientZeroMacosAuthorityReady =
+    typeof patientZeroSummary.macos_authority_ready === "boolean"
+      ? patientZeroSummary.macos_authority_ready
+      : typeof patientZeroMacosAuthorityAudit.ready_for_patient_zero_full_authority === "boolean"
+        ? patientZeroMacosAuthorityAudit.ready_for_patient_zero_full_authority
+        : null;
+  const patientZeroAuthorityBlockers = dedupe([
+    ...asList(patientZeroSummary.authority_blockers),
+    ...asList(patientZeroReport.authority_blockers),
+  ]);
+  const patientZeroAuthorityBlocked =
+    patientZeroAuthorityBlockers.length > 0 ||
+    patientZeroMacosAuthorityReady === false ||
+    patientZeroMacosAuthorityStatus === "blocked" ||
+    patientZeroMacosAuthorityStatus === "unavailable";
   const privilegedAccessSummary = asDict(kernelPrivilegedAccess.summary || rawPrivilegedAccess.summary || rawPrivilegedAccess);
   const threadId = String(raw.thread_id ?? "ring-leader-main").trim() || "ring-leader-main";
   const latestAutopilotSession = asList(agentSessions.sessions).find((entry) => {
@@ -666,15 +688,16 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
       Boolean(patientZeroToolkit.local_agent_spawn_ready) &&
       Boolean(patientZeroToolkit.terminal_toolkit_ready));
   const patientZeroFullControlAuthority =
-    Boolean(patientZeroSummary.full_control_authority) ||
-    patientZeroReportedFullControlAuthority ||
-    (Boolean(patientZeroSummary.enabled) &&
-      Boolean(desktopControlSummary.observe_ready) &&
-      Boolean(desktopControlSummary.act_ready) &&
-      Boolean(desktopControlSummary.listen_ready) &&
-      Boolean(patientZeroSummary.browser_ready) &&
-      Boolean(privilegedAccessSummary.root_execution_ready) &&
-      patientZeroAutonomousControlEnabled);
+    !patientZeroAuthorityBlocked &&
+    (Boolean(patientZeroSummary.full_control_authority) ||
+      patientZeroReportedFullControlAuthority ||
+      (Boolean(patientZeroSummary.enabled) &&
+        Boolean(desktopControlSummary.observe_ready) &&
+        Boolean(desktopControlSummary.act_ready) &&
+        Boolean(desktopControlSummary.listen_ready) &&
+        Boolean(patientZeroSummary.browser_ready) &&
+        Boolean(privilegedAccessSummary.root_execution_ready) &&
+        patientZeroAutonomousControlEnabled));
   const currentObjective = hasLiveExecutionContext
     ? compactSingleLine(
         currentTask.objective ||
@@ -710,6 +733,13 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
       : hasLiveExecutionContext
         ? asDict(latestTurn.selected_delegation_brief)
         : {};
+  const workbenchQueue = asDict(workbench.queue);
+  const workbenchActiveExecution = asDict(workbench.active_execution);
+  const workbenchQuickActions = asDict(workbench.quick_actions);
+  const workbenchGoal = asDict(workbenchActiveExecution.goal);
+  const workbenchPlan = asDict(workbenchActiveExecution.plan);
+  const workbenchStep = asDict(workbenchActiveExecution.step);
+  const workbenchTask = asDict(workbenchActiveExecution.task);
 
   return {
     thread_id: threadId,
@@ -835,6 +865,9 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         autonomy_enabled: Boolean(patientZeroSummary.autonomy_enabled),
         autonomous_control_enabled: patientZeroAutonomousControlEnabled,
         full_control_authority: patientZeroFullControlAuthority,
+        authority_blockers: patientZeroAuthorityBlockers,
+        macos_authority_ready: patientZeroMacosAuthorityReady,
+        macos_authority_audit_status: patientZeroMacosAuthorityStatus || null,
         toolkit: {
           bridge_agents: asList(patientZeroToolkit.bridge_agents),
           local_agents: asList(patientZeroToolkit.local_agents),
@@ -940,6 +973,14 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         patient_zero_full_control_authority: patientZeroFullControlAuthority,
         privileged_root_ready: Boolean(privilegedAccessSummary.root_execution_ready),
       },
+      workbench: {
+        focus_area: String(workbench.focus_area ?? "intake"),
+        status: String(workbench.status ?? "ready"),
+        headline: compactSingleLine(workbench.headline, 200),
+        blocker_count: asList(workbench.blockers).length,
+        next_action_count: asList(workbench.next_actions).length,
+        suggested_objective_count: asList(workbench.suggested_objectives).length,
+      },
     },
     current: {
       decision_summary: currentDecisionSummary,
@@ -957,6 +998,51 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
       confidence_method: asDict(lastTick.confidence_method || autopilotSessionMetadata.last_confidence_method),
       learning_signal: asDict(lastTick.learning_signal || autopilotSessionMetadata.last_learning_signal),
       last_tick: lastTick,
+    },
+    workbench: {
+      focus_area: String(workbench.focus_area ?? "intake"),
+      status: String(workbench.status ?? "ready"),
+      headline: compactSingleLine(workbench.headline, 220),
+      active_execution: {
+        current_objective: compactSingleLine(workbenchActiveExecution.current_objective, 220),
+        goal: {
+          goal_id: String(workbenchGoal.goal_id ?? ""),
+          title: compactSingleLine(workbenchGoal.title, 120),
+          status: String(workbenchGoal.status ?? ""),
+          autonomy_mode: String(workbenchGoal.autonomy_mode ?? ""),
+        },
+        plan: {
+          plan_id: String(workbenchPlan.plan_id ?? ""),
+          title: compactSingleLine(workbenchPlan.title, 120),
+          status: String(workbenchPlan.status ?? ""),
+        },
+        step: {
+          step_id: String(workbenchStep.step_id ?? ""),
+          title: compactSingleLine(workbenchStep.title, 120),
+          status: String(workbenchStep.status ?? ""),
+        },
+        task: {
+          task_id: String(workbenchTask.task_id ?? ""),
+          objective: compactSingleLine(workbenchTask.objective, 140),
+          status: String(workbenchTask.status ?? ""),
+        },
+      },
+      queue: {
+        running: parseAnyInt(workbenchQueue.running),
+        pending: parseAnyInt(workbenchQueue.pending),
+        failed: parseAnyInt(workbenchQueue.failed),
+        completed: parseAnyInt(workbenchQueue.completed),
+        running_tasks: asList(workbenchQueue.running_tasks).map((entry) => asDict(entry)),
+        pending_tasks: asList(workbenchQueue.pending_tasks).map((entry) => asDict(entry)),
+        failed_tasks: asList(workbenchQueue.failed_tasks).map((entry) => asDict(entry)),
+      },
+      blockers: asList(workbench.blockers).map((entry) => asDict(entry)),
+      next_actions: asList(workbench.next_actions).map((entry) => asDict(entry)),
+      suggested_objectives: asList(workbench.suggested_objectives).map((entry) => asDict(entry)),
+      quick_actions: {
+        retry_failed_tasks: Boolean(workbenchQuickActions.retry_failed_tasks),
+        recover_expired_tasks: Boolean(workbenchQuickActions.recover_expired_tasks),
+      },
     },
     events: asList(busTail.events).slice(0, 20),
     runtime_sessions: asList(runtimeWorkers.sessions).slice(0, 20),

@@ -644,10 +644,30 @@ function reportLocalTrainingSection() {
     recommendedMissing++;
     write(`  ${WARN} ${c.yellow}local adapter watchdog command is not wired yet${c.reset}`);
   }
+  if (payload.verify_command?.available === true) {
+    write(
+      `  ${PASS} verify command ${c.dim}(${payload.verify_command.command}${payload.verify_command?.source ? ` via ${payload.verify_command.source}` : ""})${c.reset}`
+    );
+  } else {
+    recommendedMissing++;
+    write(`  ${WARN} ${c.yellow}local adapter verify command is not wired yet${c.reset}`);
+  }
   if (payload.latest_run?.manifest_path) {
     write(`  ${PASS} prepared corpus ${c.dim}(${payload.latest_run.manifest_path})${c.reset}`);
     if (payload.latest_run?.status) {
       write(`  ${PASS} latest local adapter status ${c.dim}(${payload.latest_run.status})${c.reset}`);
+    }
+    if ((payload.latest_run_audit?.error_count ?? 0) > 0) {
+      recommendedMissing++;
+      write(
+        `  ${WARN} ${c.yellow}training lane verify found ${payload.latest_run_audit.error_count} error(s) on the latest run${c.reset}`
+      );
+    } else if ((payload.latest_run_audit?.warning_count ?? 0) > 0) {
+      write(
+        `  ${WARN} ${c.yellow}training lane verify found ${payload.latest_run_audit.warning_count} warning(s) on the latest run${c.reset}`
+      );
+    } else if (payload.latest_run_audit?.clean === true) {
+      write(`  ${PASS} training lane verify ${c.dim}(latest run is internally consistent)${c.reset}`);
     }
     if (payload.primary_watchdog?.applicable === true && payload.primary_watchdog?.should_run_watchdog === true) {
       recommendedMissing++;

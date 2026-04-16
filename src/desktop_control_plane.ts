@@ -61,6 +61,7 @@ export type DesktopControlStateRecord = {
   heartbeat_interval_seconds: number;
   last_heartbeat_at: string | null;
   last_observation_at: string | null;
+  last_screenshot_at: string | null;
   last_action_at: string | null;
   last_listen_at: string | null;
   last_frontmost_app: string | null;
@@ -99,6 +100,7 @@ export function getDefaultDesktopControlState(): DesktopControlStateRecord {
     heartbeat_interval_seconds: 300,
     last_heartbeat_at: null,
     last_observation_at: null,
+    last_screenshot_at: null,
     last_action_at: null,
     last_listen_at: null,
     last_frontmost_app: null,
@@ -142,6 +144,7 @@ export function normalizeDesktopControlState(value: unknown, updatedAt: string |
     ),
     last_heartbeat_at: readString(input.last_heartbeat_at),
     last_observation_at: readString(input.last_observation_at),
+    last_screenshot_at: readString(input.last_screenshot_at),
     last_action_at: readString(input.last_action_at),
     last_listen_at: readString(input.last_listen_at),
     last_frontmost_app: readString(input.last_frontmost_app),
@@ -161,6 +164,9 @@ export function summarizeDesktopControlState(state: DesktopControlStateRecord) {
   const observeReady = state.enabled && state.allow_observe && state.capability_probe.can_observe;
   const actReady = state.enabled && state.allow_act && state.capability_probe.can_act;
   const listenReady = state.enabled && state.allow_listen && state.capability_probe.can_listen;
+  const screenshotProof = observeReady && Boolean(readString(state.last_screenshot_at)) && !state.last_error;
+  const actuationProof = actReady && Boolean(readString(state.last_action_at)) && !state.last_error;
+  const listenProof = listenReady && Boolean(readString(state.last_listen_at)) && !state.last_error;
   const capabilityCount = [observeReady, actReady, listenReady].filter(Boolean).length;
   return {
     enabled: state.enabled,
@@ -171,6 +177,9 @@ export function summarizeDesktopControlState(state: DesktopControlStateRecord) {
     observe_ready: observeReady,
     act_ready: actReady,
     listen_ready: listenReady,
+    screen_recording_proven: screenshotProof,
+    accessibility_actuation_proven: actuationProof,
+    microphone_listen_proven: listenProof,
     available_capability_count: capabilityCount,
     heartbeat_age_seconds: Number.isFinite(heartbeatAgeSeconds) ? Number(heartbeatAgeSeconds.toFixed(2)) : null,
     last_frontmost_app: state.last_frontmost_app,

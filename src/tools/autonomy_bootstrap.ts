@@ -743,6 +743,7 @@ function buildDefaultAutonomyControlPlaneEvalSuite(primaryBackend: {
   const preferredTags = normalizeStringArray(primaryBackend.tags).filter((tag) =>
     ["local", "ollama", "mlx", "llama.cpp", "vllm", "gpu", "primary"].includes(tag)
   );
+  const requiredTags = preferredTags.includes("primary") ? ["primary"] : [];
   return {
     suite_id: DEFAULT_EVAL_SUITE_ID,
     title: "Autonomy control-plane eval",
@@ -767,6 +768,7 @@ function buildDefaultAutonomyControlPlaneEvalSuite(primaryBackend: {
         latency_budget_ms: 2000,
         expected_backend_id: backendId,
         expected_backend_tags: [],
+        required_tags: requiredTags,
         preferred_tags: preferredTags,
         required: true,
         weight: 1,
@@ -836,6 +838,8 @@ function defaultAutonomyControlPlaneEvalSuiteNeedsReconcile(
       String(currentCase.expected_backend_id ?? "") !== String((expectedCase as any).expected_backend_id ?? "") ||
       normalizeStringArray(currentCase.expected_backend_tags).join("|") !==
         normalizeStringArray((expectedCase as any).expected_backend_tags).join("|") ||
+      normalizeStringArray(currentCase.required_tags).join("|") !==
+        normalizeStringArray((expectedCase as any).required_tags).join("|") ||
       normalizeStringArray(currentCase.preferred_tags).join("|") !==
         normalizeStringArray((expectedCase as any).preferred_tags).join("|")
     );
@@ -1337,7 +1341,13 @@ export async function autonomyBootstrap(storage: Storage, invokeTool: InvokeTool
 
       if (input.seed_eval_suite !== false && availableLocalBackends.length > 0) {
         const evalSuites = evalSuiteList(storage, {});
-        const primaryBackend = selectPrimaryLocalBackend(availableLocalBackends, input.local_host_id);
+        const routerState = storage.getModelRouterState();
+        const routerLocalBackends = (routerState?.backends ?? []).filter(
+          (entry) => String(entry.locality || "") === "local" || String(entry.host_id || "") === input.local_host_id
+        );
+        const primaryBackend =
+          resolvePrimaryLocalBackend(routerLocalBackends, routerState?.default_backend_id) ??
+          selectPrimaryLocalBackend(availableLocalBackends, input.local_host_id);
         if (!primaryBackend) {
           throw new Error("autonomy.bootstrap could not determine an eval backend");
         }

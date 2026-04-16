@@ -79,7 +79,7 @@ test("upgradeStatusWithDesktopProof accepts recent live desktop lane evidence", 
     },
     "microphone"
   );
-  const screen = upgradeStatusWithDesktopProof(
+  const screenWithoutScreenshot = upgradeStatusWithDesktopProof(
     { status: "unknown", detail: "No matching TCC rows were found for the active shell/app clients." },
     {
       state: { last_observation_at: "2026-04-14T13:35:00.000Z", last_error: null },
@@ -87,8 +87,21 @@ test("upgradeStatusWithDesktopProof accepts recent live desktop lane evidence", 
     },
     "screen"
   );
+  const screenWithScreenshot = upgradeStatusWithDesktopProof(
+    { status: "unknown", detail: "No matching TCC rows were found for the active shell/app clients." },
+    {
+      state: {
+        last_observation_at: "2026-04-14T13:35:00.000Z",
+        last_screenshot_at: "2026-04-14T13:36:00.000Z",
+        last_error: null,
+      },
+      summary: { observe_ready: true },
+    },
+    "screen"
+  );
   assert.equal(microphone.status, "granted");
   assert.match(microphone.detail, /Live desktop\.listen proof succeeded/);
-  assert.equal(screen.status, "granted");
-  assert.match(screen.detail, /Live desktop\.observe proof succeeded/);
+  assert.equal(screenWithoutScreenshot.status, "unknown");
+  assert.equal(screenWithScreenshot.status, "granted");
+  assert.match(screenWithScreenshot.detail, /screenshot proof succeeded/);
 });

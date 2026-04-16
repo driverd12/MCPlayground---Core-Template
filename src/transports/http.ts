@@ -1477,6 +1477,102 @@ async function maybeHandleOfficeRequest(
           timeoutMs: 30000,
         }
       );
+    } else if (action === "retry_failed_tasks") {
+      const taskIds = Array.isArray(body.task_ids)
+        ? body.task_ids.map((entry: unknown) => String(entry ?? "").trim()).filter(Boolean)
+        : [];
+      if (taskIds.length === 0) {
+        sendJson(res, 400, { ok: false, error: "missing_task_ids" });
+        return true;
+      }
+      const results = [];
+      for (const taskId of taskIds) {
+        const toolArgs = {
+          task_id: taskId,
+          reason: String(body.reason || "Retried from office workbench").trim() || "Retried from office workbench",
+          force: body.force === true,
+          mutation: buildOfficeMutation(`task-retry-${taskId}`),
+          source_client: "office.api",
+          source_agent: "operator",
+        };
+        result = await runLocalCommand(
+          process.execPath,
+          [
+            mcpToolCallScript,
+            "--tool",
+            "task.retry",
+            "--args",
+            JSON.stringify(toolArgs),
+            "--transport",
+            "http",
+            "--url",
+            `${origin}/`,
+            "--origin",
+            normalizedOfficeOrigin(origin),
+            "--cwd",
+            repoRoot,
+          ],
+          {
+            cwd: repoRoot,
+            env: officeEnv(origin),
+            timeoutMs: 30000,
+          }
+        );
+        const parsed = parseJsonText(result.stdout.trim());
+        if (result.code !== 0) {
+          sendJson(res, 500, {
+            ok: false,
+            action,
+            task_id: taskId,
+            result: parsed ?? null,
+            stdout: parsed ? "" : result.stdout.trim(),
+            stderr: result.stderr.trim(),
+          });
+          return true;
+        }
+        results.push({
+          task_id: taskId,
+          result: parsed ?? null,
+        });
+      }
+      invalidateOfficeSnapshotCaches();
+      sendJson(res, 200, {
+        ok: true,
+        action,
+        retried_count: results.length,
+        results,
+      });
+      return true;
+    } else if (action === "recover_expired_tasks") {
+      const toolArgs = {
+        limit: Number.isFinite(Number(body.limit)) ? Number(body.limit) : 20,
+        mutation: buildOfficeMutation("task-recover-expired"),
+        source_client: "office.api",
+        source_agent: "operator",
+      };
+      result = await runLocalCommand(
+        process.execPath,
+        [
+          mcpToolCallScript,
+          "--tool",
+          "task.recover_expired",
+          "--args",
+          JSON.stringify(toolArgs),
+          "--transport",
+          "http",
+          "--url",
+          `${origin}/`,
+          "--origin",
+          normalizedOfficeOrigin(origin),
+          "--cwd",
+          repoRoot,
+        ],
+        {
+          cwd: repoRoot,
+          env: officeEnv(origin),
+          timeoutMs: 30000,
+        }
+      );
     } else {
       sendJson(res, 400, { ok: false, error: "unsupported_action" });
       return true;
