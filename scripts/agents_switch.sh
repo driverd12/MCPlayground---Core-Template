@@ -4,6 +4,12 @@ set -euo pipefail
 ACTION="${1:-status}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 eval "$("${REPO_ROOT}/scripts/export_dotenv_env.sh" "${REPO_ROOT}")"
+if [[ "${OSTYPE:-}" == darwin* ]]; then
+  SUPPORT_ROOT="${HOME}/Library/Application Support/master-mold"
+else
+  SUPPORT_ROOT="${XDG_DATA_HOME:-${HOME}/.local/share}/master-mold"
+fi
+SUPPORT_RUNNER="${SUPPORT_ROOT}/bin/run_from_repo.sh"
 LAUNCH_DIR="${HOME}/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
 MCP_PORT="${MCP_HTTP_PORT:-${ANAMNESIS_MCP_HTTP_PORT:-8787}}"
@@ -16,6 +22,7 @@ WORKER_LABEL="com.master-mold.imprint.inboxworker"
 KEEPALIVE_LABEL="com.master-mold.autonomy.keepalive"
 WATCHDOG_LABEL="com.master-mold.local-adapter.watchdog"
 OFFICE_GUI_LABEL="com.master-mold.agent-office.gui.watch"
+AUTO_OPEN_LABEL="com.master-mold.agent-office.gui.open"
 MLX_LABEL="com.master-mold.mlx.server"
 MCP_PLIST="${LAUNCH_DIR}/${MCP_LABEL}.plist"
 AUTO_PLIST="${LAUNCH_DIR}/${AUTO_LABEL}.plist"
@@ -23,6 +30,7 @@ WORKER_PLIST="${LAUNCH_DIR}/${WORKER_LABEL}.plist"
 KEEPALIVE_PLIST="${LAUNCH_DIR}/${KEEPALIVE_LABEL}.plist"
 WATCHDOG_PLIST="${LAUNCH_DIR}/${WATCHDOG_LABEL}.plist"
 OFFICE_GUI_PLIST="${LAUNCH_DIR}/${OFFICE_GUI_LABEL}.plist"
+AUTO_OPEN_PLIST="${LAUNCH_DIR}/${AUTO_OPEN_LABEL}.plist"
 MLX_PLIST="${LAUNCH_DIR}/${MLX_LABEL}.plist"
 GUI_FALLBACK_SESSION="master-mold-http"
 TOKEN_FILE="${REPO_ROOT}/data/imprint/http_bearer_token"
@@ -33,7 +41,7 @@ fi
 launch_agent_plist_current() {
   local plist="$1"
   [[ -f "${plist}" ]] || return 1
-  grep -Fq "${REPO_ROOT}" "${plist}" 2>/dev/null
+  grep -Fq "${REPO_ROOT}" "${plist}" 2>/dev/null || grep -Fq "${SUPPORT_RUNNER}" "${plist}" 2>/dev/null
 }
 
 launch_agent_plist_ready() {
@@ -284,6 +292,7 @@ case "${ACTION}" in
       ! launch_agent_plist_ready "${KEEPALIVE_PLIST}" || \
       ! launch_agent_plist_ready "${WATCHDOG_PLIST}" || \
       ! launch_agent_plist_ready "${OFFICE_GUI_PLIST}" || \
+      ! launch_agent_plist_ready "${AUTO_OPEN_PLIST}" || \
       { [[ "${TRICHAT_MLX_SERVER_ENABLED:-0}" == "1" ]] && ! launch_agent_plist_ready "${MLX_PLIST}"; }; then
       "${REPO_ROOT}/scripts/launchd_install.sh"
     else
@@ -293,6 +302,7 @@ case "${ACTION}" in
       launchctl enable "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
       launchctl enable "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
       launchctl enable "${DOMAIN}/${OFFICE_GUI_LABEL}" >/dev/null 2>&1 || true
+      launchctl enable "${DOMAIN}/${AUTO_OPEN_LABEL}" >/dev/null 2>&1 || true
       if [[ -f "${MLX_PLIST}" ]]; then
         launchctl enable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
       fi
@@ -302,6 +312,7 @@ case "${ACTION}" in
       reset_launch_agent "${KEEPALIVE_PLIST}" "${KEEPALIVE_LABEL}"
       reset_launch_agent "${WATCHDOG_PLIST}" "${WATCHDOG_LABEL}"
       reset_launch_agent "${OFFICE_GUI_PLIST}" "${OFFICE_GUI_LABEL}"
+      reset_launch_agent "${AUTO_OPEN_PLIST}" "${AUTO_OPEN_LABEL}"
       reset_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
       clear_repo_http_runtime
       bootstrap_if_exists "${MCP_PLIST}"
@@ -312,12 +323,14 @@ case "${ACTION}" in
       bootstrap_if_exists "${KEEPALIVE_PLIST}"
       bootstrap_if_exists "${WATCHDOG_PLIST}"
       bootstrap_if_exists "${OFFICE_GUI_PLIST}"
+      bootstrap_if_exists "${AUTO_OPEN_PLIST}"
       bootstrap_if_exists "${MLX_PLIST}"
       launchctl kickstart -k "${DOMAIN}/${AUTO_LABEL}" >/dev/null 2>&1 || true
       launchctl kickstart -k "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
       launchctl kickstart -k "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
       launchctl kickstart -k "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
       launchctl kickstart -k "${DOMAIN}/${OFFICE_GUI_LABEL}" >/dev/null 2>&1 || true
+      launchctl kickstart -k "${DOMAIN}/${AUTO_OPEN_LABEL}" >/dev/null 2>&1 || true
       if [[ -f "${MLX_PLIST}" ]]; then
         launchctl kickstart -k "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
       fi
@@ -331,6 +344,7 @@ case "${ACTION}" in
     reset_launch_agent "${MCP_PLIST}" "${MCP_LABEL}"
     reset_launch_agent "${WATCHDOG_PLIST}" "${WATCHDOG_LABEL}"
     reset_launch_agent "${OFFICE_GUI_PLIST}" "${OFFICE_GUI_LABEL}"
+    reset_launch_agent "${AUTO_OPEN_PLIST}" "${AUTO_OPEN_LABEL}"
     reset_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
     launchctl disable "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
     launchctl disable "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
@@ -338,6 +352,7 @@ case "${ACTION}" in
     launchctl disable "${DOMAIN}/${MCP_LABEL}" >/dev/null 2>&1 || true
     launchctl disable "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
     launchctl disable "${DOMAIN}/${OFFICE_GUI_LABEL}" >/dev/null 2>&1 || true
+    launchctl disable "${DOMAIN}/${AUTO_OPEN_LABEL}" >/dev/null 2>&1 || true
     launchctl disable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
     ;;
   status)

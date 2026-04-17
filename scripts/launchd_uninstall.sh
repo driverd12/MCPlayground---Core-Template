@@ -11,6 +11,7 @@ WORKER_LABEL="com.master-mold.imprint.inboxworker"
 KEEPALIVE_LABEL="com.master-mold.autonomy.keepalive"
 WATCHDOG_LABEL="com.master-mold.local-adapter.watchdog"
 OFFICE_GUI_LABEL="com.master-mold.agent-office.gui.watch"
+AUTO_OPEN_LABEL="com.master-mold.agent-office.gui.open"
 MLX_LABEL="com.master-mold.mlx.server"
 
 MCP_PLIST="${LAUNCH_DIR}/${MCP_LABEL}.plist"
@@ -19,6 +20,7 @@ WORKER_PLIST="${LAUNCH_DIR}/${WORKER_LABEL}.plist"
 KEEPALIVE_PLIST="${LAUNCH_DIR}/${KEEPALIVE_LABEL}.plist"
 WATCHDOG_PLIST="${LAUNCH_DIR}/${WATCHDOG_LABEL}.plist"
 OFFICE_GUI_PLIST="${LAUNCH_DIR}/${OFFICE_GUI_LABEL}.plist"
+AUTO_OPEN_PLIST="${LAUNCH_DIR}/${AUTO_OPEN_LABEL}.plist"
 MLX_PLIST="${LAUNCH_DIR}/${MLX_LABEL}.plist"
 
 bootout_service_target() {
@@ -45,6 +47,7 @@ remove_launch_agent "${WORKER_PLIST}" "${WORKER_LABEL}"
 remove_launch_agent "${KEEPALIVE_PLIST}" "${KEEPALIVE_LABEL}"
 remove_launch_agent "${WATCHDOG_PLIST}" "${WATCHDOG_LABEL}"
 remove_launch_agent "${OFFICE_GUI_PLIST}" "${OFFICE_GUI_LABEL}"
+remove_launch_agent "${AUTO_OPEN_PLIST}" "${AUTO_OPEN_LABEL}"
 remove_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
 
-echo "{\"ok\":true,\"removed\":[\"${MCP_LABEL}\",\"${AUTO_LABEL}\",\"${WORKER_LABEL}\",\"${KEEPALIVE_LABEL}\",\"${WATCHDOG_LABEL}\",\"${OFFICE_GUI_LABEL}\",\"${MLX_LABEL}\"]}" >&2
+echo "{\"ok\":true,\"removed\":[\"${MCP_LABEL}\",\"${AUTO_LABEL}\",\"${WORKER_LABEL}\",\"${KEEPALIVE_LABEL}\",\"${WATCHDOG_LABEL}\",\"${OFFICE_GUI_LABEL}\",\"${AUTO_OPEN_LABEL}\",\"${MLX_LABEL}\"]}" >&2

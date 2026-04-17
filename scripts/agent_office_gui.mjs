@@ -27,6 +27,13 @@ const PID_FILE = path.join(PID_DIR, "agent-office-http-runner.pid");
 const RUNNER_SCRIPT = path.join(REPO_ROOT, "scripts", "mcp_http_runner.mjs");
 const OPEN_BROWSER_SCRIPT = path.join(REPO_ROOT, "scripts", "open_browser.mjs");
 const AGENTS_SWITCH_SCRIPT = path.join(REPO_ROOT, "scripts", "agents_switch.sh");
+const MCP_LABEL = "com.master-mold.mcp.server";
+const LAUNCHD_DOMAIN =
+  process.platform === "darwin" && typeof process.getuid === "function" ? `gui/${process.getuid()}` : null;
+const MCP_LAUNCH_AGENT_PLIST =
+  process.platform === "darwin" && process.env.HOME
+    ? path.join(process.env.HOME, "Library", "LaunchAgents", `${MCP_LABEL}.plist`)
+    : null;
 const WATCH_INTERVAL_MS = (() => {
   const configuredIntervalMs = Number.parseInt(process.env.AGENT_OFFICE_GUI_WATCH_INTERVAL_MS || "10000", 10);
   return Number.isFinite(configuredIntervalMs) && configuredIntervalMs > 0 ? configuredIntervalMs : 10000;
@@ -140,21 +147,34 @@ async function listenerOk() {
 }
 
 function launchdLoaded() {
-  if (process.platform !== "darwin") {
+  if (!LAUNCHD_DOMAIN) {
     return false;
   }
-  const uid = typeof process.getuid === "function" ? process.getuid() : null;
-  if (!uid) {
-    return false;
-  }
-  const result = spawnSync("launchctl", ["print", `gui/${uid}/com.master-mold.mcp.server`], {
+  const result = spawnSync("launchctl", ["print", `${LAUNCHD_DOMAIN}/${MCP_LABEL}`], {
     stdio: "ignore",
     timeout: 5000,
   });
   return result.status === 0;
 }
 
+function kickstartMcpViaDarwinLaunchd() {
+  if (!isLocalHostTarget() || !LAUNCHD_DOMAIN || !MCP_LAUNCH_AGENT_PLIST || !fs.existsSync(MCP_LAUNCH_AGENT_PLIST)) {
+    return false;
+  }
+  const launchctlOptions = {
+    stdio: "ignore",
+    timeout: 15000,
+  };
+  spawnSync("launchctl", ["bootstrap", LAUNCHD_DOMAIN, MCP_LAUNCH_AGENT_PLIST], launchctlOptions);
+  spawnSync("launchctl", ["enable", `${LAUNCHD_DOMAIN}/${MCP_LABEL}`], launchctlOptions);
+  const kickstart = spawnSync("launchctl", ["kickstart", "-k", `${LAUNCHD_DOMAIN}/${MCP_LABEL}`], launchctlOptions);
+  return kickstart.status === 0 || launchdLoaded();
+}
+
 function startViaDarwinLaunchd() {
+  if (ACTION === "watch") {
+    return kickstartMcpViaDarwinLaunchd();
+  }
   if (!isLocalHostTarget() || process.platform !== "darwin" || !fs.existsSync(AGENTS_SWITCH_SCRIPT)) {
     return false;
   }

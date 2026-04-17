@@ -4,8 +4,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 eval "$("${REPO_ROOT}/scripts/export_dotenv_env.sh" "${REPO_ROOT}")"
+if [[ "${OSTYPE:-}" == darwin* ]]; then
+  SUPPORT_ROOT="${HOME}/Library/Application Support/master-mold"
+else
+  SUPPORT_ROOT="${XDG_DATA_HOME:-${HOME}/.local/share}/master-mold"
+fi
+SUPPORT_BIN="${SUPPORT_ROOT}/bin"
+SUPPORT_RUNNER="${SUPPORT_BIN}/run_from_repo.sh"
 LAUNCH_DIR="${HOME}/Library/LaunchAgents"
-LOG_DIR="${REPO_ROOT}/data/imprint/logs"
+LOG_DIR="${SUPPORT_ROOT}/launchd-logs"
 DOMAIN="gui/$(id -u)"
 
 MCP_LABEL="com.master-mold.mcp.server"
@@ -14,6 +21,7 @@ WORKER_LABEL="com.master-mold.imprint.inboxworker"
 KEEPALIVE_LABEL="com.master-mold.autonomy.keepalive"
 WATCHDOG_LABEL="com.master-mold.local-adapter.watchdog"
 OFFICE_GUI_LABEL="com.master-mold.agent-office.gui.watch"
+AUTO_OPEN_LABEL="com.master-mold.agent-office.gui.open"
 MLX_LABEL="com.master-mold.mlx.server"
 
 MCP_PLIST="${LAUNCH_DIR}/${MCP_LABEL}.plist"
@@ -22,6 +30,7 @@ WORKER_PLIST="${LAUNCH_DIR}/${WORKER_LABEL}.plist"
 KEEPALIVE_PLIST="${LAUNCH_DIR}/${KEEPALIVE_LABEL}.plist"
 WATCHDOG_PLIST="${LAUNCH_DIR}/${WATCHDOG_LABEL}.plist"
 OFFICE_GUI_PLIST="${LAUNCH_DIR}/${OFFICE_GUI_LABEL}.plist"
+AUTO_OPEN_PLIST="${LAUNCH_DIR}/${AUTO_OPEN_LABEL}.plist"
 MLX_PLIST="${LAUNCH_DIR}/${MLX_LABEL}.plist"
 LEGACY_BUS_SOCKET_PATH="${REPO_ROOT}/data/trichat.bus.sock"
 BUS_SOCKET_DIGEST="$(printf '%s' "${REPO_ROOT}" | shasum -a 256 | cut -c1-12)"
@@ -88,6 +97,7 @@ mkdir -p "$(dirname "${TOKEN_FILE}")"
 printf '%s' "${HTTP_BEARER_TOKEN}" > "${TOKEN_FILE}"
 chmod 600 "${TOKEN_FILE}" >/dev/null 2>&1 || true
 
+"${REPO_ROOT}/scripts/install_local_support.sh" "${REPO_ROOT}" >/dev/null
 mkdir -p "${LAUNCH_DIR}" "${LOG_DIR}" "$(dirname "${BUS_SOCKET_PATH}")"
 
 bootout_service_target() {
@@ -179,12 +189,14 @@ cat >"${MCP_PLIST}" <<PLIST
 
     <key>ProgramArguments</key>
     <array>
-      <string>${NODE_BIN}</string>
-      <string>${REPO_ROOT}/scripts/mcp_http_runner.mjs</string>
+      <string>/bin/bash</string>
+      <string>${SUPPORT_RUNNER}</string>
+      <string>node-script</string>
+      <string>scripts/mcp_http_runner.mjs</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>${REPO_ROOT}</string>
+    <string>${SUPPORT_ROOT}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -235,12 +247,14 @@ cat >"${AUTO_PLIST}" <<PLIST
 
     <key>ProgramArguments</key>
     <array>
-      <string>${NODE_BIN}</string>
-      <string>${REPO_ROOT}/scripts/imprint_auto_snapshot_runner.mjs</string>
+      <string>/bin/bash</string>
+      <string>${SUPPORT_RUNNER}</string>
+      <string>node-script</string>
+      <string>scripts/imprint_auto_snapshot_runner.mjs</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>${REPO_ROOT}</string>
+    <string>${SUPPORT_ROOT}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -273,10 +287,12 @@ cat >"${WORKER_PLIST}" <<PLIST
 
     <key>ProgramArguments</key>
     <array>
-      <string>${NODE_BIN}</string>
-      <string>${REPO_ROOT}/scripts/imprint_inbox_worker_runner.mjs</string>
+      <string>/bin/bash</string>
+      <string>${SUPPORT_RUNNER}</string>
+      <string>node-script</string>
+      <string>scripts/imprint_inbox_worker_runner.mjs</string>
       <string>--repo-root</string>
-      <string>${REPO_ROOT}</string>
+      <string>__MASTER_MOLD_REPO_ROOT__</string>
       <string>--poll-interval</string>
       <string>${INBOX_POLL_INTERVAL}</string>
       <string>--batch-size</string>
@@ -288,7 +304,7 @@ cat >"${WORKER_PLIST}" <<PLIST
     </array>
 
     <key>WorkingDirectory</key>
-    <string>${REPO_ROOT}</string>
+    <string>${SUPPORT_ROOT}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -333,12 +349,14 @@ cat >"${KEEPALIVE_PLIST}" <<PLIST
 
     <key>ProgramArguments</key>
     <array>
-      <string>${NODE_BIN}</string>
-      <string>${REPO_ROOT}/scripts/autonomy_keepalive_runner.mjs</string>
+      <string>/bin/bash</string>
+      <string>${SUPPORT_RUNNER}</string>
+      <string>node-script</string>
+      <string>scripts/autonomy_keepalive_runner.mjs</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>${REPO_ROOT}</string>
+    <string>${SUPPORT_ROOT}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -392,8 +410,10 @@ cat >"${WATCHDOG_PLIST}" <<PLIST
 
     <key>ProgramArguments</key>
     <array>
-      <string>${NODE_BIN}</string>
-      <string>${REPO_ROOT}/scripts/local_adapter_watchdog.mjs</string>
+      <string>/bin/bash</string>
+      <string>${SUPPORT_RUNNER}</string>
+      <string>node-script</string>
+      <string>scripts/local_adapter_watchdog.mjs</string>
       <string>--transport</string>
       <string>http</string>
       <string>--max-soak-age-minutes</string>
@@ -405,7 +425,7 @@ cat >"${WATCHDOG_PLIST}" <<PLIST
     </array>
 
     <key>WorkingDirectory</key>
-    <string>${REPO_ROOT}</string>
+    <string>${SUPPORT_ROOT}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -447,13 +467,15 @@ cat >"${OFFICE_GUI_PLIST}" <<PLIST
 
     <key>ProgramArguments</key>
     <array>
-      <string>${NODE_BIN}</string>
-      <string>${REPO_ROOT}/scripts/agent_office_gui.mjs</string>
+      <string>/bin/bash</string>
+      <string>${SUPPORT_RUNNER}</string>
+      <string>node-script</string>
+      <string>scripts/agent_office_gui.mjs</string>
       <string>watch</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>${REPO_ROOT}</string>
+    <string>${SUPPORT_ROOT}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -488,6 +510,58 @@ cat >"${OFFICE_GUI_PLIST}" <<PLIST
 </plist>
 PLIST
 
+cat >"${AUTO_OPEN_PLIST}" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>${AUTO_OPEN_LABEL}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>${SUPPORT_BIN}/auto_open_default.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>${SUPPORT_ROOT}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>${PATH}</string>
+      <key>MCP_HTTP_BEARER_TOKEN</key>
+      <string>${HTTP_BEARER_TOKEN}</string>
+      <key>MCP_HTTP_HOST</key>
+      <string>${MCP_HOST}</string>
+      <key>MCP_HTTP_PORT</key>
+      <string>${MCP_PORT}</string>
+      <key>TRICHAT_MCP_URL</key>
+      <string>http://${MCP_HOST}:${MCP_PORT}/</string>
+      <key>TRICHAT_MCP_ORIGIN</key>
+      <string>http://127.0.0.1</string>
+      <key>MASTER_MOLD_REPO_ROOT</key>
+      <string>${REPO_ROOT}</string>
+      <key>MASTER_MOLD_AUTO_OPEN_TARGET</key>
+      <string>${MASTER_MOLD_AUTO_OPEN_TARGET:-office}</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/agent-office-open.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/agent-office-open.err.log</string>
+  </dict>
+</plist>
+PLIST
+
 if [[ "${MLX_SERVER_ENABLED}" == "1" && -n "${MLX_PYTHON}" && -n "${MLX_MODEL}" ]]; then
 MLX_ADAPTER_ARGUMENTS=""
 if [[ -n "${MLX_ADAPTER_PATH}" ]]; then
@@ -505,8 +579,10 @@ cat >"${MLX_PLIST}" <<PLIST
 
     <key>ProgramArguments</key>
     <array>
+      <string>/bin/bash</string>
+      <string>${SUPPORT_RUNNER}</string>
+      <string>python-module</string>
       <string>${MLX_PYTHON}</string>
-      <string>-m</string>
       <string>mlx_lm.server</string>
       <string>--model</string>
       <string>${MLX_MODEL}</string>
@@ -518,7 +594,7 @@ ${MLX_ADAPTER_ARGUMENTS}
     </array>
 
     <key>WorkingDirectory</key>
-    <string>${REPO_ROOT}</string>
+    <string>${SUPPORT_ROOT}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -551,7 +627,7 @@ else
 fi
 
 chmod 644 "${MCP_PLIST}" "${AUTO_PLIST}" "${WORKER_PLIST}" "${KEEPALIVE_PLIST}" "${WATCHDOG_PLIST}"
-chmod 644 "${OFFICE_GUI_PLIST}"
+chmod 644 "${OFFICE_GUI_PLIST}" "${AUTO_OPEN_PLIST}"
 if [[ -f "${MLX_PLIST}" ]]; then
   chmod 644 "${MLX_PLIST}"
 fi
@@ -564,6 +640,7 @@ reset_launch_agent "${WORKER_PLIST}" "${WORKER_LABEL}"
 reset_launch_agent "${KEEPALIVE_PLIST}" "${KEEPALIVE_LABEL}"
 reset_launch_agent "${WATCHDOG_PLIST}" "${WATCHDOG_LABEL}"
 reset_launch_agent "${OFFICE_GUI_PLIST}" "${OFFICE_GUI_LABEL}"
+reset_launch_agent "${AUTO_OPEN_PLIST}" "${AUTO_OPEN_LABEL}"
 if [[ -f "${MLX_PLIST}" ]]; then
   reset_launch_agent "${MLX_PLIST}" "${MLX_LABEL}"
 fi
@@ -578,6 +655,7 @@ launchctl bootstrap "${DOMAIN}" "${WORKER_PLIST}"
 launchctl bootstrap "${DOMAIN}" "${KEEPALIVE_PLIST}"
 launchctl bootstrap "${DOMAIN}" "${WATCHDOG_PLIST}"
 launchctl bootstrap "${DOMAIN}" "${OFFICE_GUI_PLIST}"
+launchctl bootstrap "${DOMAIN}" "${AUTO_OPEN_PLIST}"
 if [[ -f "${MLX_PLIST}" ]]; then
   launchctl bootstrap "${DOMAIN}" "${MLX_PLIST}"
 fi
@@ -587,6 +665,7 @@ launchctl enable "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
 launchctl enable "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
 launchctl enable "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
 launchctl enable "${DOMAIN}/${OFFICE_GUI_LABEL}" >/dev/null 2>&1 || true
+launchctl enable "${DOMAIN}/${AUTO_OPEN_LABEL}" >/dev/null 2>&1 || true
 if [[ -f "${MLX_PLIST}" ]]; then
   launchctl enable "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
 fi
@@ -596,6 +675,7 @@ launchctl kickstart -k "${DOMAIN}/${WORKER_LABEL}" >/dev/null 2>&1 || true
 launchctl kickstart -k "${DOMAIN}/${KEEPALIVE_LABEL}" >/dev/null 2>&1 || true
 launchctl kickstart -k "${DOMAIN}/${WATCHDOG_LABEL}" >/dev/null 2>&1 || true
 launchctl kickstart -k "${DOMAIN}/${OFFICE_GUI_LABEL}" >/dev/null 2>&1 || true
+launchctl kickstart -k "${DOMAIN}/${AUTO_OPEN_LABEL}" >/dev/null 2>&1 || true
 if [[ -f "${MLX_PLIST}" ]]; then
   launchctl kickstart -k "${DOMAIN}/${MLX_LABEL}" >/dev/null 2>&1 || true
 fi
@@ -607,6 +687,7 @@ echo "- ${WORKER_PLIST}" >&2
 echo "- ${KEEPALIVE_PLIST}" >&2
 echo "- ${WATCHDOG_PLIST}" >&2
 echo "- ${OFFICE_GUI_PLIST}" >&2
+echo "- ${AUTO_OPEN_PLIST}" >&2
 if [[ -f "${MLX_PLIST}" ]]; then
 echo "- ${MLX_PLIST}" >&2
 fi
@@ -620,6 +701,7 @@ echo "  \"worker_label\": \"${WORKER_LABEL}\"," >&2
 echo "  \"keepalive_label\": \"${KEEPALIVE_LABEL}\"," >&2
 echo "  \"watchdog_label\": \"${WATCHDOG_LABEL}\"," >&2
 echo "  \"office_gui_label\": \"${OFFICE_GUI_LABEL}\"," >&2
+echo "  \"auto_open_label\": \"${AUTO_OPEN_LABEL}\"," >&2
 echo "  \"mlx_label\": \"${MLX_LABEL}\"," >&2
 echo "  \"mcp_port\": ${MCP_PORT}," >&2
 echo "  \"http_token_file\": \"${TOKEN_FILE}\"" >&2

@@ -138,6 +138,19 @@ case "${LAUNCHER}" in
 esac
 
 REPO_ROOT="$(cd "${REPO_ROOT}" && pwd)"
+case "${OSTYPE:-}" in
+  darwin*)
+    SUPPORT_ROOT="${HOME}/Library/Application Support/master-mold"
+    ;;
+  linux*)
+    SUPPORT_ROOT="${XDG_DATA_HOME:-${HOME}/.local/share}/master-mold"
+    ;;
+  *)
+    SUPPORT_ROOT="${HOME}/.master-mold"
+    ;;
+esac
+SUPPORT_BIN="${SUPPORT_ROOT}/bin"
+"${REPO_ROOT}/scripts/install_local_support.sh" "${REPO_ROOT}" >/dev/null
 eval "$("${REPO_ROOT}/scripts/export_dotenv_env.sh" "${REPO_ROOT}")"
 if [[ "${TRANSPORT}" == "stdio" && -n "${MCP_HTTP_BEARER_TOKEN:-}" ]]; then
   TRANSPORT="http"
@@ -163,13 +176,13 @@ if [[ -n "${ICON_PATH}" ]]; then
 fi
 
 if [[ "${LAUNCHER}" == "suite" ]]; then
-  LAUNCH_SCRIPT="TRICHAT_AUTONOMY_ENSURE_ON_ENTRY=\${TRICHAT_AUTONOMY_ENSURE_ON_ENTRY:-1} TRICHAT_OFFICE_THEME=\${TRICHAT_OFFICE_THEME:-night} node ./scripts/agentic_suite_launch.mjs open"
+  LAUNCH_SCRIPT="TRICHAT_AUTONOMY_ENSURE_ON_ENTRY=\${TRICHAT_AUTONOMY_ENSURE_ON_ENTRY:-1} TRICHAT_OFFICE_THEME=\${TRICHAT_OFFICE_THEME:-night} ${SUPPORT_BIN}/open_agentic_suite.sh open"
 elif [[ "${SURFACE}" == "web" ]]; then
-  LAUNCH_SCRIPT="TRICHAT_AUTONOMY_ENSURE_ON_ENTRY=\${TRICHAT_AUTONOMY_ENSURE_ON_ENTRY:-1} TRICHAT_OFFICE_THEME=\${TRICHAT_OFFICE_THEME:-night} node ./scripts/agent_office_gui.mjs open"
+  LAUNCH_SCRIPT="TRICHAT_AUTONOMY_ENSURE_ON_ENTRY=\${TRICHAT_AUTONOMY_ENSURE_ON_ENTRY:-1} TRICHAT_OFFICE_THEME=\${TRICHAT_OFFICE_THEME:-night} ${SUPPORT_BIN}/open_agent_office.sh open"
 else
-  LAUNCH_SCRIPT="TRICHAT_AUTONOMY_ENSURE_ON_ENTRY=\${TRICHAT_AUTONOMY_ENSURE_ON_ENTRY:-1} TRICHAT_OFFICE_THEME=\${TRICHAT_OFFICE_THEME:-night} npm run trichat:office:tmux"
+  LAUNCH_SCRIPT="TRICHAT_AUTONOMY_ENSURE_ON_ENTRY=\${TRICHAT_AUTONOMY_ENSURE_ON_ENTRY:-1} TRICHAT_OFFICE_THEME=\${TRICHAT_OFFICE_THEME:-night} ${SUPPORT_BIN}/run_from_repo.sh shell-script scripts/agent_office_tmux_open.sh"
   if [[ "${TRANSPORT}" == "http" ]]; then
-    LAUNCH_SCRIPT="TRICHAT_AUTONOMY_ENSURE_ON_ENTRY=\${TRICHAT_AUTONOMY_ENSURE_ON_ENTRY:-1} TRICHAT_OFFICE_THEME=\${TRICHAT_OFFICE_THEME:-night} TRICHAT_MCP_TRANSPORT=http npm run trichat:office:tmux"
+    LAUNCH_SCRIPT="TRICHAT_AUTONOMY_ENSURE_ON_ENTRY=\${TRICHAT_AUTONOMY_ENSURE_ON_ENTRY:-1} TRICHAT_OFFICE_THEME=\${TRICHAT_OFFICE_THEME:-night} TRICHAT_MCP_TRANSPORT=http ${SUPPORT_BIN}/run_from_repo.sh shell-script scripts/agent_office_tmux_open.sh"
   fi
 fi
 
@@ -203,8 +216,7 @@ fi
 
 if [[ "${TERMINAL_MODE}" == "terminal" ]]; then
   cat > "${TMP_APPLESCRIPT}" <<EOF
-set repoPath to "${REPO_ROOT}"
-set launchCmd to "cd " & quoted form of repoPath & " && ${LAUNCH_SCRIPT}"
+set launchCmd to "${LAUNCH_SCRIPT}"
 tell application "Terminal"
   activate
   do script launchCmd
@@ -212,10 +224,9 @@ end tell
 EOF
 else
   cat > "${TMP_APPLESCRIPT}" <<EOF
-set repoPath to "${REPO_ROOT}"
-set launchCmd to "cd " & quoted form of repoPath & " && ${LAUNCH_SCRIPT}"
+set launchCmd to "${LAUNCH_SCRIPT}"
 set shellCmd to "if command -v alacritty >/dev/null 2>&1; then " & ¬
-  "nohup alacritty --working-directory " & quoted form of repoPath & " -e zsh -ilc " & quoted form of launchCmd & " >/dev/null 2>&1 & " & ¬
+  "nohup alacritty -e zsh -ilc " & quoted form of launchCmd & " >/dev/null 2>&1 & " & ¬
   "else open -na Alacritty --args -e zsh -ilc " & quoted form of launchCmd & "; fi"
 do shell script shellCmd
 EOF
