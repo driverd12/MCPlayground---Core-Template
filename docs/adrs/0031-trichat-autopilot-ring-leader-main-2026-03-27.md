@@ -14,4 +14,4 @@ Selected strategy: Use git status to check for changes before proceeding with th
 Execution mode: tmux_dispatch
 Execution commands: git status || npm run build || npm test
 Verification: skipped (execution deferred to task queue)
-Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/MCPlayground---Core-Template
+Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/SUPERPOWERS

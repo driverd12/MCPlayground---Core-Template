@@ -365,7 +365,13 @@ cat >"${KEEPALIVE_PLIST}" <<PLIST
     <integer>${AUTONOMY_KEEPALIVE_INTERVAL}</integer>
 
     <key>KeepAlive</key>
-    <false/>
+    <dict>
+      <key>SuccessfulExit</key>
+      <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
 
     <key>StandardOutPath</key>
     <string>${LOG_DIR}/autonomy-keepalive.out.log</string>

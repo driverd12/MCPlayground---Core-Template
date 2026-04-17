@@ -231,6 +231,31 @@ test("runAutonomyKeepaliveOnce normalizes attention-only maintain results to suc
   assert.equal(result.eval?.aggregate_metric_value, 50);
 });
 
+test("runAutonomyKeepaliveOnce reports http readiness misses as retryable failures", async () => {
+  const result = await runAutonomyKeepaliveOnce({
+    repoRoot: process.cwd(),
+    transport: "http",
+    env: {
+      AUTONOMY_KEEPALIVE_HTTP_READY_TIMEOUT_MS: "1000",
+    },
+    now: 1710000000300,
+    pid: 3333,
+    acquireLockFn: async () => ({
+      ok: true,
+      release: () => {},
+    }),
+    waitForHttpReadyFn: async () => false,
+    callToolFn: () => {
+      throw new Error("callToolFn should not run when http is not ready");
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.retryable, true);
+  assert.equal(result.reason, "http_not_ready");
+  assert.equal(result.exit_code, 75);
+  assert.equal(result.singleton_lock?.acquired, true);
+});
+
 test("prepareInboxWorkerStartup skips duplicate launch attempts when singleton lock is held", async () => {
   const startup = await prepareInboxWorkerStartup({
     repoRoot: process.cwd(),

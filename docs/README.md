@@ -1,6 +1,6 @@
 # Documentation Index
 
-This is the centralized human-facing docs hub for MCPlayground Core Template.
+This is the centralized human-facing docs hub for SUPERPOWERS.
 
 ## Start Here
 

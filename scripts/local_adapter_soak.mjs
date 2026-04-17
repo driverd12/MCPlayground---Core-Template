@@ -12,6 +12,7 @@ import {
   repoRootFromMeta,
   resolveTransport,
 } from "./mcp_runner_support.mjs";
+import { deriveEffectiveTrainingStatus } from "./local_adapter_lane.mjs";
 import {
   resolveCutoverCandidate,
   rollbackRouterDefault,
@@ -245,7 +246,7 @@ export function resolvePrimarySoakCandidate(manifest, registration) {
   if (!candidate.ok) {
     return candidate;
   }
-  const currentStatus = readString(manifest?.status);
+  const currentStatus = readString(deriveEffectiveTrainingStatus({ manifest }).effective_status);
   if (currentStatus !== "adapter_primary_mlx" && currentStatus !== "adapter_primary_ollama") {
     return {
       ok: false,

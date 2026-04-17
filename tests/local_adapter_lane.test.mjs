@@ -327,6 +327,31 @@ test("buildPrimaryWatchdogState flags stale primary soak confidence", () => {
   }
 });
 
+test("buildPrimaryWatchdogState honors later-stage evidence when the reported status regresses", () => {
+  const state = buildPrimaryWatchdogState(
+    {
+      status: "adapter_registered",
+      cutover_status: "adapter_primary_mlx",
+      primary_soak_ok: true,
+      primary_soak_completed_at: "2026-04-14T12:00:00.000Z",
+    },
+    {
+      primary_watchdog_contract: {
+        max_soak_age_minutes: 240,
+      },
+    },
+    {
+      nowMs: Date.parse("2026-04-14T13:00:00.000Z"),
+    }
+  );
+
+  assert.equal(state.applicable, true);
+  assert.equal(state.reported_status, "adapter_registered");
+  assert.equal(state.effective_status, "adapter_primary_mlx");
+  assert.equal(state.status_regressed, true);
+  assert.equal(state.should_run_watchdog, false);
+});
+
 test("auditTrainingRun verifies a fully integrated primary candidate and flags stale confidence separately", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "local-adapter-audit-pass-"));
   try {
@@ -478,6 +503,147 @@ test("auditTrainingRun verifies a fully integrated primary candidate and flags s
     assert.equal(stale.clean, false);
     assert.equal(stale.proof.stage, "primary_confidence_stale");
     assert.ok(stale.findings.some((entry) => entry.code === "confidence.watchdog_stale"));
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("auditTrainingRun fails closed when reported status backslides behind later-stage evidence", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "local-adapter-audit-regressed-"));
+  try {
+    const manifestPath = path.join(tempDir, "manifest.json");
+    const registrationPath = path.join(tempDir, "registration.json");
+    const corpusPath = path.join(tempDir, "corpus.jsonl");
+    const trainPath = path.join(tempDir, "train.jsonl");
+    const evalPath = path.join(tempDir, "eval.jsonl");
+    const adapterDir = path.join(tempDir, "adapter");
+    fs.mkdirSync(adapterDir, { recursive: true });
+    fs.writeFileSync(path.join(adapterDir, "adapter_config.json"), "{}\n", "utf8");
+    fs.writeFileSync(path.join(adapterDir, "adapter_model.safetensors"), "", "utf8");
+    writeJson(path.join(adapterDir, "training_metrics.json"), {
+      ok: true,
+      generate_smoke: { ok: true },
+      parsed_metrics: { test_loss: 1.1 },
+    });
+
+    const corpusRows = [
+      {
+        record_id: "corpus-01",
+        source_type: "recent_memory",
+        source_id: 1,
+        fingerprint: "fingerprint-01",
+        text: "corpus row one",
+      },
+      {
+        record_id: "corpus-02",
+        source_type: "recent_transcript_line",
+        source_id: 2,
+        fingerprint: "fingerprint-02",
+        text: "corpus row two",
+      },
+    ];
+    writeJsonl(corpusPath, corpusRows);
+    writeJsonl(trainPath, [corpusRows[1]]);
+    writeJsonl(evalPath, [corpusRows[0]]);
+
+    const manifest = {
+      schema_version: "local_training_packet.v2",
+      run_id: "run-regressed",
+      candidate_id: "candidate-regressed",
+      status: "adapter_registered",
+      acceptance_contract: {
+        benchmark: { suite_id: "bench", required_aggregate_metric: 100 },
+        eval: { suite_id: "eval", required_aggregate_metric: 100 },
+      },
+      evaluation_targets: {
+        ollama: { provider: "ollama" },
+        mlx: { provider: "mlx" },
+      },
+      corpus: {
+        path: corpusPath,
+        train_path: trainPath,
+        eval_path: evalPath,
+        record_count: 2,
+        train_record_count: 1,
+        eval_record_count: 1,
+        integrity: buildDatasetIntegrity({
+          corpusRecords: corpusRows,
+          trainRecords: [corpusRows[1]],
+          evalRecords: [corpusRows[0]],
+        }),
+      },
+      training_intent: {
+        executed: true,
+        weights_modified: true,
+      },
+      training_result: {
+        training_metrics_path: path.join(adapterDir, "training_metrics.json"),
+        generate_smoke: { ok: true },
+      },
+      promotion_result: {
+        status: "registered",
+        benchmark_suite_id: "bench",
+        eval_suite_id: "eval",
+        reward_score: 80,
+        registration_path: registrationPath,
+      },
+      integration_result: {
+        ok: true,
+        target: "mlx",
+        backend_id: "mlx-adapter-candidate-regressed",
+        model_id: "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit",
+      },
+      cutover_result: {
+        ok: true,
+        promoted: true,
+        target: "mlx",
+        active_default_backend_id: "mlx-adapter-candidate-regressed",
+        previous_default_backend_id: "ollama-prev",
+      },
+      rollback_model: "qwen3.5:35b-a3b-coding-nvfp4",
+      safe_promotion_metadata: {
+        allowed_now: true,
+        blockers: [],
+      },
+      primary_soak_result: {
+        ok: true,
+        completed_at: "2026-04-14T12:00:00.000Z",
+      },
+      primary_watchdog_contract: {
+        max_soak_age_minutes: 240,
+      },
+    };
+    const registration = {
+      decision: {
+        status: "registered",
+        accepted: true,
+      },
+      cutover_result: {
+        previous_default_backend_id: "ollama-prev",
+      },
+    };
+    writeJson(manifestPath, manifest);
+    writeJson(registrationPath, registration);
+
+    const audit = auditTrainingRun({
+      registryRun: {
+        run_id: "run-regressed",
+        candidate_id: "candidate-regressed",
+        status: "adapter_registered",
+        integration_status: "adapter_served_mlx",
+        cutover_status: "adapter_primary_mlx",
+        manifest_path: manifestPath,
+      },
+      manifest,
+      registration,
+      nowMs: Date.parse("2026-04-14T13:00:00.000Z"),
+    });
+
+    assert.equal(audit.ok, false);
+    assert.equal(audit.proof.reported_status, "adapter_registered");
+    assert.equal(audit.proof.effective_status, "adapter_primary_mlx");
+    assert.equal(audit.proof.status_regressed, true);
+    assert.ok(audit.findings.some((entry) => entry.code === "status.stage_regressed"));
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

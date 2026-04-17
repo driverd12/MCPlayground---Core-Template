@@ -36,6 +36,30 @@ test("resolveWatchdogDecision skips fresh successful soak", () => {
   assert.equal(decision.trigger, "primary_soak_fresh");
 });
 
+test("resolveWatchdogDecision honors primary evidence when the reported status regresses", () => {
+  const decision = resolveWatchdogDecision(
+    sampleManifest({
+      status: "adapter_registered",
+      integration_result: {
+        ok: true,
+        target: "mlx",
+        backend_id: "mlx-adapter-local-adapter-sample",
+        model_id: "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit",
+      },
+      cutover_result: {
+        ok: true,
+        promoted: true,
+        target: "mlx",
+      },
+    }),
+    { nowMs: Date.parse("2026-04-14T12:00:00.000Z") }
+  );
+  assert.equal(decision.ok, true);
+  assert.equal(decision.applicable, true);
+  assert.equal(decision.status, "adapter_primary_mlx");
+  assert.equal(decision.trigger, "primary_soak_fresh");
+});
+
 test("resolveWatchdogDecision runs when soak is stale", () => {
   const decision = resolveWatchdogDecision(sampleManifest(), {
     nowMs: Date.parse("2026-04-14T15:00:01.000Z"),

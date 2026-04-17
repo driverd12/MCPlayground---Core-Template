@@ -772,7 +772,7 @@ async function handleFastPathRequest(
   if (pathname === "/") {
     sendJson(res, 200, {
       ok: true,
-      server: "mcplayground-core-template",
+      server: "superpowers",
       transport: "http",
       office_path: "/office/",
       mcp_path: "/",
@@ -783,7 +783,7 @@ async function handleFastPathRequest(
     sendJson(res, 200, {
       ok: true,
       status: "ok",
-      server: "mcplayground-core-template",
+      server: "superpowers",
       ts: new Date().toISOString(),
     });
     return true;

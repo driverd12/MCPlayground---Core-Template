@@ -43,7 +43,7 @@ test("worker.fabric can register a remote host and expose host-aware worker slot
         host_id: "pve1",
         transport: "ssh",
         ssh_destination: "root@10.0.0.50",
-        workspace_root: "/srv/agentic/MCPlayground---Core-Template",
+        workspace_root: "/srv/agentic/SUPERPOWERS",
         worker_count: 2,
         shell: "/bin/bash",
         capabilities: {
@@ -97,7 +97,7 @@ test("trichat.tmux_controller dispatches onto a configured remote host with isol
         host_id: "pve1",
         transport: "ssh",
         ssh_destination: "root@10.0.0.50",
-        workspace_root: "/srv/agentic/MCPlayground---Core-Template",
+        workspace_root: "/srv/agentic/SUPERPOWERS",
         worker_count: 1,
         tags: ["remote", "gpu"],
         capabilities: {

@@ -99,6 +99,19 @@ test("resolvePrimarySoakCandidate returns the active primary backend and rollbac
   assert.equal(candidate.baseline_score, 76);
 });
 
+test("resolvePrimarySoakCandidate honors primary evidence when the reported status regresses", () => {
+  const manifest = sampleManifest("adapter_registered");
+  manifest.cutover_result = {
+    ok: true,
+    promoted: true,
+    target: "mlx",
+    previous_default_backend_id: "ollama-qwen3-5-35b-a3b-coding-nvfp4",
+  };
+  const candidate = resolvePrimarySoakCandidate(manifest, sampleRegistration());
+  assert.equal(candidate.ok, true);
+  assert.equal(candidate.target, "mlx");
+});
+
 test("buildSoakHeuristicConfig returns bounded defaults", () => {
   const config = buildSoakHeuristicConfig({});
   assert.deepEqual(config, {

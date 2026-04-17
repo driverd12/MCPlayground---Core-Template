@@ -14,4 +14,4 @@ Selected strategy: Inspect kernel state, choose one high-leverage bounded next a
 Execution mode: tmux_dispatch
 Execution commands: git status || npm run trichat:doctor || npm run ring-leader:status
 Verification: skipped (execution deferred to task queue)
-Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/MCPlayground---Core-Template
+Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/SUPERPOWERS

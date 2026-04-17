@@ -218,6 +218,29 @@ test("autonomy keepalive defaults to bounded maintenance instead of a bare readi
   }
 });
 
+test("autonomy keepalive runner exits tempfail when http is still down during restart recovery", async () => {
+  try {
+    await execFileAsync(process.execPath, ["./scripts/autonomy_keepalive_runner.mjs"], {
+      cwd: REPO_ROOT,
+      env: inheritedEnv({
+        AUTONOMY_BOOTSTRAP_TRANSPORT: "http",
+        AUTONOMY_KEEPALIVE_HTTP_READY_TIMEOUT_MS: "1000",
+        TRICHAT_MCP_URL: "http://127.0.0.1:9/",
+        TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
+      }),
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    assert.fail("autonomy_keepalive_runner.mjs should exit non-zero when http is not ready");
+  } catch (error) {
+    assert.equal(error.code ?? error.status, 75);
+    const parsed = JSON.parse(String(error.stdout || "{}"));
+    assert.equal(parsed.ok, false);
+    assert.equal(parsed.retryable, true);
+    assert.equal(parsed.reason, "http_not_ready");
+    assert.equal(parsed.exit_code, 75);
+  }
+});
+
 test("agents_switch status returns bounded JSON over the live HTTP control plane", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-agents-switch-status-http-"));
   const dbPath = path.join(tempDir, "hub.sqlite");
@@ -615,6 +638,11 @@ printf '{"ok":true,"ready":true}\\n'
   assert.doesNotMatch(keepalivePlist, /autonomy_keepalive\.sh/);
   assert.match(keepalivePlist, /<key>AUTONOMY_KEEPALIVE_HTTP_READY_TIMEOUT_MS<\/key>\s*<string>60000<\/string>/);
   assert.match(keepalivePlist, /<key>AUTONOMY_KEEPALIVE_TOOL_TIMEOUT_MS<\/key>\s*<string>180000<\/string>/);
+  assert.match(
+    keepalivePlist,
+    /<key>KeepAlive<\/key>\s*<dict>\s*<key>SuccessfulExit<\/key>\s*<false\/>\s*<\/dict>/
+  );
+  assert.match(keepalivePlist, /<key>ThrottleInterval<\/key>\s*<integer>10<\/integer>/);
   assert.match(watchdogPlist, /<string>.*node.*<\/string>/);
   assert.match(
     watchdogPlist,

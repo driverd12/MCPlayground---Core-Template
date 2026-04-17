@@ -14,4 +14,4 @@ Selected strategy: Delegate bounded verification tasks to quality-guard with exp
 Execution mode: tmux_dispatch
 Execution commands: git status || npm test || npm run trichat:doctor
 Verification: skipped (execution deferred to task queue)
-Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/MCPlayground---Core-Template
+Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/SUPERPOWERS

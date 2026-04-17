@@ -12,6 +12,7 @@ import {
   repoRootFromMeta,
   resolveTransport,
 } from "./mcp_runner_support.mjs";
+import { deriveEffectiveTrainingStatus } from "./local_adapter_lane.mjs";
 
 const REPO_ROOT = repoRootFromMeta(import.meta.url);
 const REGISTRY_PATH = path.join(REPO_ROOT, "data", "training", "model_registry.json");
@@ -230,7 +231,8 @@ function updateRegistry(manifest, manifestPath, updates) {
 }
 
 export function resolveCutoverCandidate(manifest, registration) {
-  const manifestStatus = readString(manifest?.status) || null;
+  const statusEvidence = deriveEffectiveTrainingStatus({ manifest });
+  const manifestStatus = readString(statusEvidence.effective_status) || null;
   const promotionEvalSuiteId = readString(manifest?.promotion_result?.eval_suite_id);
   const promotionBenchmarkSuiteId = readString(manifest?.promotion_result?.benchmark_suite_id);
   const integrationResult =

@@ -787,7 +787,11 @@ function parseIsoTimestamp(value) {
 }
 
 export function buildPrimaryWatchdogState(latestRun, manifest, options = {}) {
-  const status = String(latestRun?.status || manifest?.status || "").trim();
+  const statusEvidence = deriveEffectiveTrainingStatus({
+    registryRun: latestRun || {},
+    manifest: manifest || {},
+  });
+  const status = String(statusEvidence.effective_status || "").trim();
   const applicable = status === "adapter_primary_mlx" || status === "adapter_primary_ollama";
   const contract =
     manifest?.primary_watchdog_contract && typeof manifest.primary_watchdog_contract === "object"
@@ -810,6 +814,9 @@ export function buildPrimaryWatchdogState(latestRun, manifest, options = {}) {
   const shouldRunWatchdog = applicable && (!soakOk || stale);
   return {
     applicable,
+    reported_status: statusEvidence.reported_status,
+    effective_status: statusEvidence.effective_status,
+    status_regressed: statusEvidence.status_regressed,
     max_soak_age_minutes: maxSoakAgeMinutes,
     primary_soak_completed_at: completedAt,
     primary_soak_ok: soakOk,
@@ -962,8 +969,56 @@ function statusAtLeast(status, expected) {
   return statusRank(status) >= statusRank(expected);
 }
 
-function summarizeTrainingProof({ status, manifest, registration, primaryWatchdog }) {
-  const normalizedStatus = String(status || "").trim();
+function integrationStatusForTarget(target) {
+  return target === "ollama" ? "adapter_exported_ollama" : "adapter_served_mlx";
+}
+
+function primaryStatusForTarget(target) {
+  return target === "ollama" ? "adapter_primary_ollama" : "adapter_primary_mlx";
+}
+
+export function deriveEffectiveTrainingStatus({ registryRun, manifest }) {
+  const reportedStatus = readString(manifest?.status) || readString(registryRun?.status) || "unknown";
+  const candidates = [];
+  const pushCandidate = (source, status) => {
+    const normalized = readString(status);
+    if (normalized) {
+      candidates.push({ source, status: normalized });
+    }
+  };
+
+  pushCandidate("reported_status", reportedStatus);
+  pushCandidate("registry.integration_status", registryRun?.integration_status);
+  pushCandidate("registry.cutover_status", registryRun?.cutover_status);
+
+  const integrationTarget = readString(manifest?.integration_result?.target);
+  if (manifest?.integration_result?.ok === true && readString(manifest?.integration_result?.backend_id) && integrationTarget) {
+    pushCandidate("manifest.integration_result", integrationStatusForTarget(integrationTarget));
+  }
+
+  const cutoverTarget = readString(manifest?.cutover_result?.target);
+  if (manifest?.cutover_result?.ok === true && manifest?.cutover_result?.promoted === true && cutoverTarget) {
+    pushCandidate("manifest.cutover_result", primaryStatusForTarget(cutoverTarget));
+  }
+
+  let effectiveStatus = reportedStatus;
+  for (const candidate of candidates) {
+    if (statusRank(candidate.status) > statusRank(effectiveStatus)) {
+      effectiveStatus = candidate.status;
+    }
+  }
+
+  return {
+    reported_status: reportedStatus,
+    effective_status: effectiveStatus,
+    status_regressed: statusRank(effectiveStatus) > statusRank(reportedStatus),
+    evidence_statuses: [...new Set(candidates.map((entry) => entry.status))],
+    evidence_sources: candidates.filter((entry) => entry.status === effectiveStatus).map((entry) => entry.source),
+  };
+}
+
+function summarizeTrainingProof({ statusEvidence, manifest, registration, primaryWatchdog }) {
+  const normalizedStatus = String(statusEvidence?.effective_status || "unknown").trim();
   const primarySoakOk = manifest?.primary_soak_result?.ok === true || manifest?.primary_watchdog_result?.ok === true;
   const primaryWatchdogFresh =
     normalizedStatus === "adapter_primary_mlx" || normalizedStatus === "adapter_primary_ollama"
@@ -992,6 +1047,10 @@ function summarizeTrainingProof({ status, manifest, registration, primaryWatchdo
 
   return {
     stage,
+    reported_status: statusEvidence?.reported_status || "unknown",
+    effective_status: normalizedStatus,
+    status_regressed: statusEvidence?.status_regressed === true,
+    effective_status_sources: Array.isArray(statusEvidence?.evidence_sources) ? statusEvidence.evidence_sources : [],
     packet_prepared: Boolean(manifest?.corpus?.path && manifest?.sources),
     training_executed: manifest?.training_intent?.executed === true,
     promotion_registered: manifest?.promotion_result?.status === "registered" && registration?.decision?.accepted === true,
@@ -1018,14 +1077,18 @@ export function auditTrainingRun({ registryRun, manifest, registration, nowMs = 
     readString(manifest?.manifest_path) ||
     readString(registryRun?.manifest_path) ||
     null;
-  const status = readString(manifest?.status) || readString(registryRun?.status) || "unknown";
+  const statusEvidence = deriveEffectiveTrainingStatus({
+    registryRun: registryRun || {},
+    manifest: manifest || {},
+  });
+  const status = statusEvidence.effective_status;
   const primaryWatchdog = buildPrimaryWatchdogState(
     registryRun || {},
     manifest || {},
     { nowMs }
   );
   const proof = summarizeTrainingProof({
-    status,
+    statusEvidence,
     manifest,
     registration,
     primaryWatchdog,
@@ -1050,6 +1113,13 @@ export function auditTrainingRun({ registryRun, manifest, registration, nowMs = 
     registryRun.candidate_id !== manifest.candidate_id
   ) {
     addFinding("error", "manifest.candidate_id_mismatch", "The registry candidate_id does not match the manifest candidate_id.");
+  }
+  if (statusEvidence.status_regressed) {
+    addFinding(
+      "error",
+      "status.stage_regressed",
+      `The reported lane status regressed to ${statusEvidence.reported_status} even though later-stage evidence still shows ${statusEvidence.effective_status}. Do not rerun promote; re-verify the later-stage state instead.`
+    );
   }
 
   if (manifest && manifest.schema_version !== MANIFEST_SCHEMA_VERSION) {
@@ -1197,6 +1267,8 @@ export function auditTrainingRun({ registryRun, manifest, registration, nowMs = 
     ok: errorCount === 0,
     clean: errorCount === 0 && warningCount === 0,
     status,
+    reported_status: statusEvidence.reported_status,
+    status_regressed: statusEvidence.status_regressed,
     manifest_path: manifestPath,
     candidate_id: readString(manifest?.candidate_id) || readString(registryRun?.candidate_id) || null,
     error_count: errorCount,
@@ -1472,6 +1544,12 @@ function statusLane() {
   const cutoverCommand = detectCutoverCommand();
   const soakCommand = detectSoakCommand();
   const verifyCommand = detectVerifyCommand();
+  const latestPrimaryWatchdog = buildPrimaryWatchdogState(
+    latestRun,
+    latestRun?.manifest_path && fs.existsSync(latestRun.manifest_path) ? readJson(latestRun.manifest_path) : null
+  );
+  const effectiveLatestStatus = latestRunAudit?.proof?.effective_status || latestRun?.status || null;
+  const latestStatusRegressed = latestRunAudit?.proof?.status_regressed === true;
   return {
     ok: true,
     current_model: currentModel(),
@@ -1484,10 +1562,14 @@ function statusLane() {
     watchdog_command: detectWatchdogCommand(),
     verify_command: verifyCommand,
     latest_run: latestRun,
+    latest_run_effective_status: effectiveLatestStatus,
     latest_run_proof: latestRunAudit?.proof || null,
     latest_run_audit:
       latestRunAudit
         ? {
+            status: latestRunAudit.status,
+            reported_status: latestRunAudit.reported_status,
+            status_regressed: latestRunAudit.status_regressed,
             ok: latestRunAudit.ok,
             clean: latestRunAudit.clean,
             error_count: latestRunAudit.error_count,
@@ -1507,40 +1589,36 @@ function statusLane() {
             runs_with_warnings: registryAudit.runs_with_warnings,
           }
         : null,
-    primary_watchdog: buildPrimaryWatchdogState(
-      latestRun,
-      latestRun?.manifest_path && fs.existsSync(latestRun.manifest_path) ? readJson(latestRun.manifest_path) : null
-    ),
+    primary_watchdog: latestPrimaryWatchdog,
     training_root: TRAINING_ROOT,
     registry_path: REGISTRY_PATH,
     recommended_bootstrap_command: trainer.trainer_ready ? null : "npm run local:training:bootstrap",
     recommended_next_target:
-      latestRun?.status === "training_ready"
+      latestStatusRegressed
+        ? "The recorded lane status regressed behind later-stage evidence. Run `npm run local:training:verify` before any new promote, cutover, or watchdog action."
+        : effectiveLatestStatus === "training_ready"
         ? "Run the bounded local adapter trainer against the prepared packet."
-        : latestRun?.status === "prepared_blocked" && latestRun?.readiness_blockers?.length === 0
+        : effectiveLatestStatus === "prepared_blocked" && latestRun?.readiness_blockers?.length === 0
           ? "Run the bounded local adapter trainer against the prepared packet."
-          : latestRun?.status === "adapter_trained_unpromoted" && promotionCommand.available
+          : effectiveLatestStatus === "adapter_trained_unpromoted" && promotionCommand.available
           ? "Run the bounded local adapter promotion gate before treating this candidate as router-eligible."
-            : latestRun?.status === "adapter_registered" && integrationCommand.available
+            : effectiveLatestStatus === "adapter_registered" && integrationCommand.available
               ? "Run the bounded integration command so the accepted adapter becomes a real MLX backend or Ollama companion."
-              : latestRun?.status === "adapter_registered"
+              : effectiveLatestStatus === "adapter_registered"
                 ? "Wire a bounded integration command so the accepted adapter becomes a real MLX backend or Ollama companion."
-                : latestRun?.status === "adapter_served_mlx" || latestRun?.status === "adapter_exported_ollama"
+                : effectiveLatestStatus === "adapter_served_mlx" || effectiveLatestStatus === "adapter_exported_ollama"
                   ? cutoverCommand.available
                     ? "The accepted adapter is live as a reachable local backend; run the bounded cutover command if you want it to become router-default."
                     : "The accepted adapter is live as a reachable local backend; wire an explicit cutover command before making it router-default."
-                : latestRun?.status === "adapter_primary_mlx" || latestRun?.status === "adapter_primary_ollama"
-                  ? latestRun?.primary_soak_ok === true
-                    ? buildPrimaryWatchdogState(
-                        latestRun,
-                        latestRun?.manifest_path && fs.existsSync(latestRun.manifest_path) ? readJson(latestRun.manifest_path) : null
-                      ).should_run_watchdog && detectWatchdogCommand().available
+                : effectiveLatestStatus === "adapter_primary_mlx" || effectiveLatestStatus === "adapter_primary_ollama"
+                  ? latestPrimaryWatchdog.primary_soak_ok === true
+                    ? latestPrimaryWatchdog.should_run_watchdog && detectWatchdogCommand().available
                       ? "The accepted adapter is still primary but its confidence proof is stale; run the bounded watchdog to refresh or trip rollback."
                       : "The accepted adapter survived the bounded soak; keep the rollback path in place while you gather longer-running production evidence."
                     : soakCommand.available
                       ? "The accepted adapter is the active router default; run the bounded soak command to keep comparing it against the rollback path."
                       : "The accepted adapter is the active router default; wire a bounded soak command so regressions trigger rollback instead of drifting silently."
-              : latestRun?.status === "adapter_rejected"
+              : effectiveLatestStatus === "adapter_rejected"
                 ? "Tune the corpus or training parameters, then rerun prepare, train, and promote."
                 : latestRun?.readiness_blockers?.includes?.("training.command_unwired")
                   ? "Wire a local adapter train command that consumes the prepared packet."

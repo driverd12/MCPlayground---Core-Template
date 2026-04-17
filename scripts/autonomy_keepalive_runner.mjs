@@ -27,6 +27,9 @@ async function main() {
   });
 
   process.stdout.write(`${JSON.stringify(result)}\n`);
+  if (result && typeof result === "object" && !Array.isArray(result) && result.ok === false) {
+    process.exit(Number.isInteger(result.exit_code) && result.exit_code > 0 ? result.exit_code : 1);
+  }
 }
 
 main().catch((error) => {

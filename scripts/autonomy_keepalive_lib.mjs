@@ -9,6 +9,7 @@ import {
 
 const SOURCE_CLIENT = "autonomy.keepalive.launchd";
 const LOCK_NAME = "autonomy-keepalive-runner";
+const KEEPALIVE_TEMPFAIL_EXIT_CODE = 75;
 
 export function buildKeepaliveArgs({ env, now, pid }) {
   return {
@@ -36,6 +37,19 @@ export function buildKeepaliveArgs({ env, now, pid }) {
     refresh_learning_summary: true,
     publish_runtime_event: true,
     source_client: SOURCE_CLIENT,
+  };
+}
+
+function buildRetryableKeepaliveFailure({ reason, transport, singletonLock, ...rest }) {
+  return {
+    ok: false,
+    retryable: true,
+    exit_code: KEEPALIVE_TEMPFAIL_EXIT_CODE,
+    reason,
+    source_client: SOURCE_CLIENT,
+    transport,
+    singleton_lock: singletonLock,
+    ...rest,
   };
 }
 
@@ -124,17 +138,15 @@ export async function runAutonomyKeepaliveOnce({
         intervalMs: 500,
       });
       if (!ready) {
-        return {
-          ok: true,
-          skipped: true,
+        return buildRetryableKeepaliveFailure({
           reason: "http_not_ready",
-          source_client: SOURCE_CLIENT,
           transport,
-          singleton_lock: {
+          singletonLock: {
             name: LOCK_NAME,
             acquired: true,
+            timeout_ms: lockTimeoutMs,
           },
-        };
+        });
       }
     }
 

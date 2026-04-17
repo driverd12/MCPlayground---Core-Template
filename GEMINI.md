@@ -1,6 +1,6 @@
 # MCPlayground Gemini Instructions
 
-MCPlayground Core Template is a **local-first MCP server runtime** designed for high-confidence autonomous execution. Gemini is an **inbound MCP client** utilizing this control plane.
+SUPERPOWERS is a **local-first MCP server runtime** designed for high-confidence autonomous execution. Gemini is an **inbound MCP client** utilizing this control plane.
 
 ## Core Mandates
 

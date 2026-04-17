@@ -120,7 +120,7 @@ const platformLabel =
         : process.platform;
 
 const lines = [
-  "[preinstall] Stop: unsupported runtime for MCPlayground Core Template.",
+  "[preinstall] Stop: unsupported runtime for SUPERPOWERS.",
   "",
   "This repo requires:",
   `  - Node ${nodeEngine} (supported majors: ${describeMajorRange(nodeEngine)}; repo pin: ${pinnedNodeMajor}${pinnedNodeVersion ? ` / ${pinnedNodeVersion}` : ""})`,

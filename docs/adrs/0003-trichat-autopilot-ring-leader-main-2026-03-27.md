@@ -14,4 +14,4 @@ Selected strategy: Treat the uncommitted trichat/ring-leader slice as the active
 Execution mode: tmux_dispatch
 Execution commands: git status --short --branch || git diff --stat || npm run build -- --noEmit || git diff -- src/tools/trichat.ts scripts/trichat.py tests/trichat_autopilot.persistence.test.mjs tests/trichat_autopilot.tmux_backend.test.mjs
 Verification: skipped (execution deferred to task queue)
-Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/MCPlayground---Core-Template
+Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/SUPERPOWERS

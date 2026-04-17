@@ -14,4 +14,4 @@ Selected strategy: Inspect and freeze on the new autopilot routing surface first
 Execution mode: tmux_dispatch
 Execution commands: git status --short --branch || git diff --stat || npm run build -- --noEmit
 Verification: skipped (execution deferred to task queue)
-Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/MCPlayground---Core-Template
+Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/SUPERPOWERS

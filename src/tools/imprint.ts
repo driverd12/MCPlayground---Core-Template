@@ -662,7 +662,7 @@ function runAutoSnapshotTick(
         include_recent_transcript_lines: config.include_recent_transcript_lines,
         write_file: config.write_file,
         promote_summary: config.promote_summary,
-        source_client: "mcplayground-core-template",
+        source_client: "superpowers",
         source_model: "local-deterministic-v1",
         source_agent: "imprint.auto_snapshot",
       },

@@ -1,6 +1,6 @@
 # MCPlayground Claude Instructions
 
-MCPlayground Core Template is a **local-first MCP server runtime** — the foundation layer for Dan Driver's local agent office. Claude is both an **inbound MCP client** and the designated **safety and critique lane** in the agent council.
+SUPERPOWERS is a **local-first MCP server runtime** — the foundation layer for Dan Driver's local agent office. Claude is both an **inbound MCP client** and the designated **safety and critique lane** in the agent council.
 
 Claude's council role is **critic**: risk review, tradeoff analysis, counterarguments, and bounded safety verification. When participating in tri-chat council turns, focus on what could go wrong, what evidence is missing, and what rollback plan is needed — not on re-implementing what the implementation lane already owns.
 

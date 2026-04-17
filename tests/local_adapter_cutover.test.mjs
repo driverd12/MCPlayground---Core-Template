@@ -98,6 +98,14 @@ test("resolveCutoverCandidate returns the MLX backend after integration", () => 
   assert.equal(candidate.eval_suite_id, "local-adapter-eval-suite");
 });
 
+test("resolveCutoverCandidate honors integration evidence when the reported status regresses", () => {
+  const manifest = sampleManifest("adapter_registered");
+  const candidate = resolveCutoverCandidate(manifest, sampleRegistration());
+  assert.equal(candidate.ok, true);
+  assert.equal(candidate.target, "mlx");
+  assert.equal(candidate.backend_id, "mlx-adapter-local-adapter-sample");
+});
+
 test("resolveCutoverCandidate refuses cutover without explicit live-ready integration proof", () => {
   const manifest = sampleManifest("adapter_served_mlx");
   manifest.integration_result.ok = false;

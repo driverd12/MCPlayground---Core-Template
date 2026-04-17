@@ -14,4 +14,4 @@ Selected strategy: Inspect kernel state and choose one high-leverage bounded nex
 Execution mode: direct_command
 Execution commands: git status || npm run trichat:roster
 Verification: passed (execution checks passed)
-Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/MCPlayground---Core-Template
+Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/SUPERPOWERS

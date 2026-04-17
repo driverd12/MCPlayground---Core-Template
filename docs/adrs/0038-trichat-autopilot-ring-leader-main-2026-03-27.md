@@ -14,4 +14,4 @@ Selected strategy: Inspect kernel state, choose high-leverage bounded next actio
 Execution mode: direct_command
 Execution commands: npm run trichat:roster
 Verification: passed (execution checks passed)
-Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/MCPlayground---Core-Template
+Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/SUPERPOWERS

@@ -48,7 +48,7 @@ Many clients accept a config object like this:
 ```json
 {
   "mcpServers": {
-    "mcplayground-core-template": {
+    "superpowers": {
       "command": "node",
       "args": ["/absolute/path/to/repo/dist/server.js"],
       "env": {

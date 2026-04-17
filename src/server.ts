@@ -440,7 +440,7 @@ function registerRuntimeShutdownHandlers() {
 }
 registerRuntimeShutdownHandlers();
 
-const SERVER_NAME = "mcplayground-core-template";
+const SERVER_NAME = "superpowers";
 const SERVER_VERSION = "1.0.0";
 const SERVER_INSTRUCTIONS = [
   "Use autonomy.ide_ingress as the canonical operator objective entrypoint.",

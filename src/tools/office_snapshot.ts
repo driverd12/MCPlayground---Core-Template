@@ -141,6 +141,51 @@ function dedupeText(values: unknown[]) {
   return ordered;
 }
 
+function resolvePatientZeroAuthoritySnapshot(patientZero: {
+  summary: ReturnType<typeof summarizePatientZeroState>;
+  report: ReturnType<typeof buildPatientZeroReport>;
+}) {
+  const summary = asRecord(patientZero.summary);
+  const report = asRecord(patientZero.report);
+  const macosAuthorityAudit = asRecord(report.macos_authority_audit);
+  const authorityBlockers = dedupeText([
+    ...asList(summary.authority_blockers),
+    ...asList(report.authority_blockers),
+  ]);
+  const macosAuthorityStatusRaw = String(
+    summary.macos_authority_audit_status ?? macosAuthorityAudit.status ?? ""
+  )
+    .trim()
+    .toLowerCase();
+  const macosAuthorityStatus = macosAuthorityStatusRaw || null;
+  const macosAuthorityReady =
+    typeof summary.macos_authority_ready === "boolean"
+      ? summary.macos_authority_ready
+      : typeof macosAuthorityAudit.ready_for_patient_zero_full_authority === "boolean"
+        ? macosAuthorityAudit.ready_for_patient_zero_full_authority
+        : null;
+  const reportedFullControlAuthority =
+    typeof summary.full_control_authority === "boolean"
+      ? summary.full_control_authority
+      : typeof report.full_control_authority === "boolean"
+        ? report.full_control_authority
+        : null;
+  const authorityBlockedByStatus = macosAuthorityStatus === "blocked" || macosAuthorityStatus === "unavailable";
+  const authorityBlocked =
+    authorityBlockers.length > 0 ||
+    macosAuthorityReady === false ||
+    authorityBlockedByStatus ||
+    reportedFullControlAuthority === false;
+  const fullControlAuthority = reportedFullControlAuthority === true && !authorityBlocked;
+  return {
+    full_control_authority: fullControlAuthority,
+    authority_blockers: authorityBlockers,
+    macos_authority_audit_status: macosAuthorityStatus,
+    macos_authority_ready: macosAuthorityReady,
+    authority_blocked: authorityBlocked,
+  };
+}
+
 function countProviderBridgeDiagnostics(
   diagnostics: ProviderBridgePayload["diagnostics"]["diagnostics"],
   status: "connected" | "configured" | "disconnected" | "unavailable"
@@ -303,6 +348,7 @@ function buildWorkbenchSummary(params: {
   const completedCount = Number(counts.completed ?? 0);
   const currentObjective = compactWorkbenchText(operatorBriefRecord.current_objective, 220);
   const attention = dedupeText(asList(kernelRecord.attention));
+  const patientZeroAuthority = resolvePatientZeroAuthoritySnapshot(params.patientZero);
   const blockers: Array<{
     kind: string;
     title: string;
@@ -380,6 +426,26 @@ function buildWorkbenchSummary(params: {
       remediation: {
         label: "Run Maintain",
         action: "maintain",
+      },
+    });
+  }
+  if (params.patientZero.summary.enabled && patientZeroAuthority.authority_blocked) {
+    const authorityDetail =
+      patientZeroAuthority.authority_blockers.length > 0
+        ? `Full-control claims are blocked by: ${patientZeroAuthority.authority_blockers.slice(0, 4).join(", ")}.`
+        : patientZeroAuthority.macos_authority_audit_status
+          ? `Full-control claims are blocked while macOS authority audit status is ${patientZeroAuthority.macos_authority_audit_status}.`
+          : "Full-control claims are blocked until macOS and local authority proofs are complete.";
+    blockers.push({
+      kind: "patient_zero_authority",
+      title: "Patient Zero authority is blocked",
+      detail: authorityDetail,
+      remediation: {
+        label: "Run macOS Authority Doctor",
+        action: "doctor_macos_authority",
+        payload: {
+          command: "npm run doctor:macos:authority",
+        },
       },
     });
   }
@@ -618,6 +684,8 @@ function buildOfficeSetupDiagnostics(params: {
   const kernelAgenticSuiteLauncher = asRecord(kernelLaunchers.agentic_suite);
   const providerBridgeDegraded = isProviderBridgeDegraded(params.providerBridge.diagnostics);
   const browserDegraded = params.patientZero.summary.enabled && params.patientZero.summary.browser_ready !== true;
+  const patientZeroAuthority = resolvePatientZeroAuthoritySnapshot(params.patientZero);
+  const patientZeroAuthorityDegraded = params.patientZero.summary.enabled && patientZeroAuthority.authority_blocked;
   const desktopDegraded =
     params.desktopControl.summary.enabled &&
     (params.desktopControl.summary.stale ||
@@ -648,6 +716,11 @@ function buildOfficeSetupDiagnostics(params: {
           "Desktop control is degraded on this host; observation or actuation should stay bounded and explicit until the lane recovers.",
         ]
       : []),
+    ...(patientZeroAuthorityDegraded
+      ? [
+          "Patient Zero authority is blocked; run `npm run doctor:macos:authority` and complete the listed macOS consent remediation before claiming full local control.",
+        ]
+      : []),
     ...(kernelAgenticSuiteLauncher.degraded === true
       ? [
           "Run `npm run agentic:suite:status` to inspect the visible-suite fallback path before a demo or operator handoff.",
@@ -673,7 +746,13 @@ function buildOfficeSetupDiagnostics(params: {
       onboarding: params.providerBridge.onboarding,
     },
     desktop_control: params.desktopControl.summary,
-    patient_zero: params.patientZero.summary,
+    patient_zero: {
+      ...params.patientZero.summary,
+      full_control_authority: patientZeroAuthority.full_control_authority,
+      authority_blockers: patientZeroAuthority.authority_blockers,
+      macos_authority_ready: patientZeroAuthority.macos_authority_ready,
+      macos_authority_audit_status: patientZeroAuthority.macos_authority_audit_status,
+    },
     fallback: {
       core_usable:
         typeof kernelFallback.core_usable === "boolean"
@@ -685,6 +764,8 @@ function buildOfficeSetupDiagnostics(params: {
         kernelFallback.provider_bridge_degraded === true || providerBridgeDegraded,
       desktop_degraded:
         kernelFallback.desktop_degraded === true || desktopDegraded,
+      patient_zero_authority_degraded:
+        kernelFallback.patient_zero_authority_degraded === true || patientZeroAuthorityDegraded,
     },
     launchers: {
       office_gui: {

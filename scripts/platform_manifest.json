@@ -1,5 +1,5 @@
 {
-  "_description": "Canonical platform capability manifest for MCPlayground Core Template. Source of truth for prerequisites, browser defaults, and platform-specific paths.",
+  "_description": "Canonical platform capability manifest for SUPERPOWERS. Source of truth for prerequisites, browser defaults, and platform-specific paths.",
   "prerequisites": {
     "required": [
       { "name": "node", "check": "node --version", "version_pattern": "^v(2[0-2])\\.", "min_version": "20.0.0", "install_hint": { "darwin": "brew install node@22", "linux": "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs", "win32": "winget install OpenJS.NodeJS.LTS" } },

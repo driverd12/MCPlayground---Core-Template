@@ -6,6 +6,7 @@ import {
   buildOllamaCompanionName,
   decidePromotion,
   detectAdapterArchitecture,
+  resolvePromotionReplayGuard,
 } from "../scripts/local_adapter_promote.mjs";
 
 function sampleManifest() {
@@ -115,4 +116,31 @@ test("decidePromotion registers only when both the report and eval gate are gree
   assert.equal(rejected.accepted, false);
   assert.ok(rejected.blockers.includes("adapter_reward_below_gate"));
   assert.ok(rejected.blockers.includes("eval_gate_failed"));
+});
+
+test("resolvePromotionReplayGuard blocks re-running promote after integration or cutover evidence exists", () => {
+  const guard = resolvePromotionReplayGuard({
+    ...sampleManifest(),
+    status: "adapter_registered",
+    integration_result: {
+      ok: true,
+      target: "mlx",
+      backend_id: "mlx-adapter-local-adapter-sample",
+    },
+    cutover_result: {
+      ok: true,
+      promoted: true,
+      target: "mlx",
+      active_default_backend_id: "mlx-adapter-local-adapter-sample",
+    },
+    primary_soak_result: {
+      ok: true,
+    },
+  });
+
+  assert.equal(guard.ok, false);
+  assert.equal(guard.reported_status, "adapter_registered");
+  assert.equal(guard.effective_stage, "adapter_primary_mlx");
+  assert.ok(guard.blockers.includes("promotion_stage_regression_blocked"));
+  assert.ok(guard.next_action.includes("do not rerun promote"));
 });

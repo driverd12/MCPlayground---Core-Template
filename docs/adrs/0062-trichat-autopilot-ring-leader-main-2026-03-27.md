@@ -14,4 +14,4 @@ Selected strategy: Delegate specialist work through implementation-director to i
 Execution mode: direct_command
 Execution commands: npm run trichat:roster || git status
 Verification: passed (execution checks passed)
-Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/MCPlayground---Core-Template
+Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/SUPERPOWERS

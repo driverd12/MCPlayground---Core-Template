@@ -239,6 +239,77 @@ test("office.snapshot keeps the Office GUI launcher ready when Patient Zero brow
   }
 });
 
+test("office.snapshot surfaces blocked Patient Zero authority with explicit remediation", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-snapshot-authority-blocked-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+
+  const client = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+    MCP_PATIENT_ZERO_AUTHORITY_AUDIT_JSON: JSON.stringify({
+      source: "macos_authority_audit",
+      generated_at: new Date().toISOString(),
+      platform: "darwin",
+      ready_for_patient_zero_full_authority: false,
+      blockers: ["screen_recording"],
+      checks: {
+        screen_recording: {
+          status: "blocked",
+          detail: "Screen Recording consent has not been granted.",
+        },
+      },
+    }),
+  });
+
+  try {
+    const storage = new Storage(dbPath);
+    const now = new Date().toISOString();
+    storage.setDesktopControlState({
+      enabled: true,
+      allow_observe: true,
+      allow_act: true,
+      allow_listen: true,
+      capability_probe: {
+        can_observe: true,
+        can_act: true,
+        can_listen: true,
+      },
+      last_screenshot_at: now,
+      last_action_at: now,
+      last_listen_at: now,
+      last_error: null,
+    });
+    storage.setPatientZeroState({
+      enabled: true,
+      autonomy_enabled: true,
+      allow_observe: true,
+      allow_act: true,
+      allow_listen: true,
+      browser_app: "Safari",
+      root_shell_reason: "office.snapshot authority test",
+      audit_required: true,
+    });
+
+    const snapshot = await callTool(client, "office.snapshot", {
+      thread_id: "ring-leader-main",
+      metadata: { source: "dashboard.direct" },
+    });
+
+    assert.equal(snapshot.setup_diagnostics.patient_zero.full_control_authority, false);
+    assert.equal(snapshot.setup_diagnostics.patient_zero.macos_authority_audit_status, "blocked");
+    assert.equal(snapshot.setup_diagnostics.patient_zero.macos_authority_ready, false);
+    assert.equal(snapshot.setup_diagnostics.patient_zero.authority_blockers.includes("macos_authority_screen_recording"), true);
+    assert.equal(snapshot.setup_diagnostics.fallback.patient_zero_authority_degraded, true);
+    assert.ok(snapshot.setup_diagnostics.next_actions.some((entry) => entry.includes("doctor:macos:authority")));
+    const authorityBlocker = snapshot.workbench.blockers.find((entry) => entry.kind === "patient_zero_authority");
+    assert.equal(Boolean(authorityBlocker), true);
+    assert.equal(authorityBlocker.remediation.action, "doctor_macos_authority");
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("office.snapshot direct reads stay storage-backed when persisted provider bridge diagnostics are stale", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-snapshot-stale-provider-bridge-"));
   const dbPath = path.join(tempDir, "hub.sqlite");

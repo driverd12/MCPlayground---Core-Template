@@ -1,4 +1,4 @@
-# MCPlayground Core Template Setup
+# SUPERPOWERS Setup
 
 Fastest path to run locally.
 
@@ -19,8 +19,8 @@ For Windows users: prefer the `npm run ...` commands in this guide. Do not manua
 ## 2. Clone
 
 ```bash
-git clone https://github.com/driverd12/MCPlayground---Core-Template.git
-cd MCPlayground---Core-Template
+git clone https://github.com/driverd12/SUPERPOWERS.git
+cd SUPERPOWERS
 ```
 
 ## 3. Pin the Runtime
@@ -165,7 +165,7 @@ npm run agentic:suite:status
 Point MCP client STDIO command to:
 
 ```bash
-node /absolute/path/to/MCPlayground---Core-Template/dist/server.js
+node /absolute/path/to/SUPERPOWERS/dist/server.js
 ```
 
 For full client examples, see [IDE + Agent Setup Guide](./IDE_AGENT_SETUP.md).
@@ -191,6 +191,7 @@ For full client examples, see [IDE + Agent Setup Guide](./IDE_AGENT_SETUP.md).
 - Automated first-run remediation: run `npm run bootstrap:env:install` to install the pinned runtime prerequisites for the current supported platform profile.
 - Office GUI stutters or a browser reload hangs: run `npm run agents:off && npm run agents:on` to restart the launchd HTTP runner. The runner defaults office snapshot refreshes to a separate STDIO child process so cached GUI reads do not block `/health`, `/ready`, or other MCP client traffic.
 - Launchd feels wedged after a reboot, login churn, or repo move: `npm run agents:on` now treats repo-bound LaunchAgents plists that still point at an old workspace path as stale, rewrites them before re-bootstrap, and `./scripts/agents_switch.sh status` plus `npm run production:doctor` now surface `*_plist_current=false` instead of treating those agents as healthy.
+- Launchd keepalive misses the first restart window: the autonomy keepalive runner now exits with a temporary failure when the MCP HTTP lane is still coming up, and the generated LaunchAgent is configured to relaunch on unsuccessful exit instead of sleeping until the next `StartInterval`. Check `data/imprint/logs/autonomy-keepalive.out.log` if that retry loop keeps tripping.
 - Launchd still looks wedged after a crash even though the plist paths are current: the HTTP runner, keepalive runner, and inbox-worker runner now validate lock ownership with process-incarnation metadata instead of PID alone, so stale lock directories from a crashed wrapper should self-clear on the next restart attempt. If a wedge survives that path, inspect `data/imprint/locks/` alongside the launchd logs.
 - Office GUI vs Patient Zero browser lane: the `/office/` operator surface is a general visibility UI and should stay launchable whenever the MCP HTTP surface is healthy, even if Patient Zero browser automation is degraded. Treat those as separate signals.
 - `mcp_tool_call` and office snapshots: `office.snapshot` now uses a shorter bounded timeout and falls back to the local office snapshot cache instead of hanging for a full minute when the direct stdio path is overloaded. When the last truthful cache is older than the normal stale window, the HTTP office route still serves it as explicitly expired state while a background refresh runs.
@@ -200,6 +201,6 @@ For full client examples, see [IDE + Agent Setup Guide](./IDE_AGENT_SETUP.md).
 - Apple Silicon Ollama MLX preview: the March 30, 2026 Ollama MLX announcement uses `qwen3.5:35b-a3b-coding-nvfp4` on Ollama `0.19+` and recommends more than 32 GB of unified memory. `npm run doctor` now reports whether the local Mac clears those gates before you spend time pulling the model.
 - Apple Silicon-only setup path: run `npm run ollama:mlx:preview` after upgrading Ollama. The command refuses to run on Linux or Windows and only pulls the candidate model. It does not cut the router over immediately.
 - After that pull completes, the repo automatically runs a post-pull soak and imprint cycle. It writes a capability report into `data/imprint/reports/`, updates imprint preferences, snapshots the result, and appends a distilled memory entry. Re-run that manually with `npm run ollama:mlx:postpull`. The runner is single-instance per model and only promotes the candidate into `.env` when the capability soak passes every required case.
-- macOS authority audit: run `npm run doctor:macos:authority` before treating Patient Zero as full-authority-ready. It audits the active console session, Accessibility, Screen Recording, microphone/listen-lane consent, Full Disk Access visibility, and the `mcagent` root helper + secret provisioning path. Screen Recording proof now requires a real `desktop.observe` screenshot event (frontmost-app/clipboard probes no longer count as consent proof), and `patient.zero` now merges this audit into explicit `authority_blockers` (`macos_authority_*`) plus `macos_authority_audit_status` so full-control claims fail closed when macOS authority is unproven. It does not bypass OS prompts; it makes them explicit and remediation-oriented.
+- macOS authority audit: run `npm run doctor:macos:authority` before treating Patient Zero as full-authority-ready. It audits the active console session, Accessibility, Screen Recording, microphone/listen-lane consent, Full Disk Access visibility, and the `mcagent` root helper + secret provisioning path. Screen Recording proof now requires a real `desktop.observe` screenshot event (frontmost-app/clipboard probes no longer count as consent proof), and `patient.zero` now merges this audit into explicit `authority_blockers` (`macos_authority_*`) plus `macos_authority_audit_status` so full-control claims fail closed when macOS authority is unproven. `office.snapshot` now carries those blockers into `setup_diagnostics.patient_zero`, flags `fallback.patient_zero_authority_degraded`, and adds a remediation action pointing back to the doctor command. It does not bypass OS prompts; it makes them explicit and remediation-oriented.
 - Local adapter lane: run `npm run local:training:bootstrap` on Apple Silicon to install the repo-local MLX trainer backend into `.venv-mlx`, then run `npm run local:training:prepare` to curate a local plain-text corpus from imprint snapshots, transcript evidence, and local capability reports into `data/training/local_adapter_lane/`, plus a registry entry in `data/training/model_registry.json`. Follow that with `npm run local:training:train` to run a bounded MLX LoRA pass against the prepared packet and emit adapter artifacts plus `training_metrics.json`, then `npm run local:training:promote` to benchmark and either reject or register the trained adapter. Run `npm run local:training:integrate` to materialize an accepted adapter as a real MLX backend or an Ollama companion model, then `npm run local:training:cutover` if you want that reachable backend to become the router default, `npm run local:training:soak` to validate the new primary across repeated benchmark/route/eval cycles with deterministic rollback if reward regresses against the accepted or baseline contracts, and `npm run local:training:watchdog` to refresh that bounded proof automatically when the last green soak is missing, failed, or stale. `npm run local:training:verify` is the fail-closed verifier for that lane: it re-reads the registry, manifest, dataset splits, promotion proof, rollback metadata, and watchdog freshness from disk so operator surfaces do not rely on stale assumptions. On macOS, `npm run agents:on` now installs that watchdog as its own launchd agent so MLX primary confidence survives logout, reboot, and app restarts. On the current Apple Silicon Qwen path, integration prefers MLX serving because the adapter runtime is real and verified there. Cutover remains explicit, post-verified, and rollback-capable instead of optimistic.
 - This remains an operator-visible knowledge/bootstrap path, not a hidden weight fine-tune. The durable state lives in the local MCP memory/imprint layer so other local agents can reuse it truthfully, and the new training lane only claims what it actually prepared.

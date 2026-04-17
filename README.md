@@ -1,8 +1,8 @@
-# MCPlayground Core Template
+# SUPERPOWERS
 
 <img src="./docs/assets/patient-zero-banner-v2.svg" alt="Patient Zero pixel-art banner showing Agent Office, MCP Server, and the local agent crew" width="100%" />
 
-MCPlayground Core Template is a local-first MCP server runtime designed to be reused across domains.
+SUPERPOWERS is a local-first MCP server runtime designed to be reused across domains.
 
 The repository is intentionally split into two layers:
 
@@ -75,7 +75,7 @@ This is the operator-facing map of the current server surface.
 ```mermaid
 flowchart TD
   Clients["Codex / Cursor / IDE / HTTP Clients"] --> Transport["MCP Transports<br/>stdio / HTTP / launchd"]
-  Transport --> Kernel["MCPlayground Core Template Server"]
+  Transport --> Kernel["SUPERPOWERS Server"]
 
   Kernel --> Memory["Continuity + Knowledge<br/>memory.* / transcript.* / who_knows / knowledge.query / retrieval.hybrid / imprint.*"]
   Kernel --> Control["Execution Control Plane<br/>goal.* / plan.* / dispatch.autorun / goal.autorun* / playbook.*"]
@@ -422,8 +422,8 @@ On Windows, use the `npm run ...` scripts exactly as shown. Do not manually type
 Fresh clone:
 
 ```bash
-git clone https://github.com/driverd12/MCPlayground---Core-Template.git
-cd MCPlayground---Core-Template
+git clone https://github.com/driverd12/SUPERPOWERS.git
+cd SUPERPOWERS
 npm run bootstrap:env
 ```
 
@@ -574,7 +574,7 @@ The export includes:
 On the target server:
 
 ```bash
-./bootstrap-server.sh /path/to/target /path/to/MCPlayground---Core-Template-<timestamp>.bundle
+./bootstrap-server.sh /path/to/target /path/to/SUPERPOWERS-<timestamp>.bundle
 ```
 
 ## Configuration
@@ -697,11 +697,11 @@ Fast STDIO connection example:
 ```json
 {
   "mcpServers": {
-    "mcplayground-core-template": {
+    "superpowers": {
       "command": "node",
-      "args": ["/absolute/path/to/MCPlayground---Core-Template/dist/server.js"],
+      "args": ["/absolute/path/to/SUPERPOWERS/dist/server.js"],
       "env": {
-        "ANAMNESIS_HUB_DB_PATH": "/absolute/path/to/MCPlayground---Core-Template/data/hub.sqlite"
+        "ANAMNESIS_HUB_DB_PATH": "/absolute/path/to/SUPERPOWERS/data/hub.sqlite"
       }
     }
   }
@@ -715,9 +715,9 @@ Pure core / no-pack connection example:
   "mcpServers": {
     "mcplayground-core-only": {
       "command": "node",
-      "args": ["/absolute/path/to/MCPlayground---Core-Template/dist/server.js"],
+      "args": ["/absolute/path/to/SUPERPOWERS/dist/server.js"],
       "env": {
-        "ANAMNESIS_HUB_DB_PATH": "/absolute/path/to/MCPlayground---Core-Template/data/hub.sqlite",
+        "ANAMNESIS_HUB_DB_PATH": "/absolute/path/to/SUPERPOWERS/data/hub.sqlite",
         "MCP_DOMAIN_PACKS": "none"
       }
     }
@@ -759,7 +759,7 @@ npm run trichat:dogfood
 npm run trichat:soak:gate -- --hours 1 --interval-seconds 60
 ```
 
-Background upkeep is real, not advisory: launchd keepalive drives `autonomy.maintain`, which keeps the control plane ready, keeps `goal.autorun_daemon` alive, refreshes bounded learning visibility, maintains tmux worker lanes, and runs the default eval suite only when it is due.
+Background upkeep is real, not advisory: launchd keepalive drives `autonomy.maintain`, which keeps the control plane ready, keeps `goal.autorun_daemon` alive, refreshes bounded learning visibility, maintains tmux worker lanes, and runs the default eval suite only when it is due. When the MCP HTTP lane is still coming back after a restart, the keepalive runner now exits temporary-failure so launchd retries the upkeep lane immediately instead of waiting for the next timer slot.
 
 Extended validation flows, tmux dry-run examples, legacy env vars, and older compatibility-named autopilot examples now live in [TriChat Compatibility Reference](./docs/TRICHAT_COMPATIBILITY_REFERENCE.md).
 

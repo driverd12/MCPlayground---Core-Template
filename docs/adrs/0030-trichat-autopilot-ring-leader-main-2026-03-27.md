@@ -14,4 +14,4 @@ Selected strategy: Delegate bounded research tasks to research-scout with explic
 Execution mode: tmux_dispatch
 Execution commands: npm run build || npm test || git status
 Verification: skipped (execution deferred to task queue)
-Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/MCPlayground---Core-Template
+Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/SUPERPOWERS

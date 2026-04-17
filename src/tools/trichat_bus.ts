@@ -259,10 +259,11 @@ export class TriChatBusRuntime {
   }
 
   start() {
-    if (this.running && this.server) {
+    if (this.server) {
       return {
         ...this.status(),
         started: false,
+        start_reason: this.running ? "already_running" : "startup_in_progress",
       };
     }
 
@@ -275,6 +276,7 @@ export class TriChatBusRuntime {
       return {
         ...this.status(),
         started: false,
+        start_reason: "socket_active_elsewhere",
       };
     }
     if (socketState === "stale") {
@@ -282,6 +284,7 @@ export class TriChatBusRuntime {
     }
 
     const server = net.createServer((socket) => this.handleConnection(socket));
+    this.server = server;
     server.on("listening", () => {
       if (this.server !== server) {
         return;
@@ -321,10 +324,20 @@ export class TriChatBusRuntime {
       this.lastError = message;
       console.error(`[trichat.bus] server error: ${message}`);
     });
-    server.listen(this.socketPath);
+    try {
+      server.listen(this.socketPath);
+    } catch (error) {
+      if (this.server === server) {
+        this.server = null;
+      }
+      this.running = false;
+      this.ownsSocketPath = false;
+      this.startedAt = null;
+      const message = error instanceof Error ? error.message : String(error);
+      this.lastError = message;
+      throw error;
+    }
     server.unref?.();
-
-    this.server = server;
     this.running = false;
     this.startedAt = null;
     this.lastError = null;
@@ -381,6 +394,7 @@ export class TriChatBusRuntime {
     }
     return {
       running: this.running,
+      startup_in_progress: this.server !== null && !this.running,
       socket_path: this.socketPath,
       started_at: this.startedAt,
       last_error: this.lastError,

@@ -1,4 +1,4 @@
-# MCPlayground Core Template Security
+# SUPERPOWERS Security
 
 ## Scope
 

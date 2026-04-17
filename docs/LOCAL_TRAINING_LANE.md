@@ -81,6 +81,7 @@ The registry entry is appended to `data/training/model_registry.json` with:
 - The benchmark command runs `scripts/local_adapter_eval.mjs`, which scores deterministic base-vs-adapter prompts, writes a reward file, and exits non-zero if the gate fails.
 - A passing gate records the candidate as `adapter_registered`, writes a durable registration artifact, and records explicit router/Ollama integration blockers instead of pretending the adapter is live.
 - A failing gate records the candidate as `adapter_rejected` with a durable report and leaves the current runtime untouched.
+- Promotion is now registration-only: if the candidate already has integration, cutover, or rollback evidence, `promote` fails closed instead of rewriting the manifest or registry back to an earlier stage.
 
 ## Integration Command
 
@@ -133,6 +134,8 @@ The registry entry is appended to `data/training/model_registry.json` with:
 - `adapter_exported_ollama` means the accepted adapter was exported into a local Ollama companion model and verified.
 - `adapter_primary_mlx` or `adapter_primary_ollama` means the adapter is the active router default.
 - a green soak result means the new primary survived repeated bounded checks; it does not mean the rollback path should be deleted.
+- later persisted integration, cutover, soak, or watchdog evidence outranks a stale top-level status string when the lane reports readiness.
+- rerunning `npm run local:training:promote` after integration, cutover, or rollback evidence exists is blocked instead of regressing the lane back to `adapter_registered`.
 
 ## Next Best Target
 

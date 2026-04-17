@@ -14,4 +14,4 @@ Selected strategy: Delegate to director agents first, then leaf SMEs when a dire
 Execution mode: direct_command
 Execution commands: npm run trichat:roster || git status
 Verification: passed (execution checks passed)
-Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/MCPlayground---Core-Template
+Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/SUPERPOWERS

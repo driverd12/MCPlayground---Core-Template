@@ -14,7 +14,7 @@ Create a fork whose default posture is:
 ## Step 1: Fork The Repo
 
 ```bash
-git clone https://github.com/driverd12/MCPlayground---Core-Template.git MCPlayground---Agentic-Server
+git clone https://github.com/driverd12/SUPERPOWERS.git MCPlayground---Agentic-Server
 cd MCPlayground---Agentic-Server
 npm ci
 npm run build

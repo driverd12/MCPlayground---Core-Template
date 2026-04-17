@@ -6,12 +6,13 @@ import path from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { TriChatBusRuntime } from "../dist/tools/trichat_bus.js";
 
 const REPO_ROOT = process.cwd();
 
 test("trichat.bus streams message_post events over Unix socket while persisting to SQLite", async () => {
   const testId = `${Date.now()}`;
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-trichat-bus-test-"));
+  const tempDir = createTestTempDir("mcp-trichat-bus-test");
   const dbPath = path.join(tempDir, "hub.sqlite");
   const busSocketPath = path.join(tempDir, "trichat.bus.sock");
   let mutationCounter = 0;
@@ -126,7 +127,7 @@ test("trichat.bus streams message_post events over Unix socket while persisting 
 
 test("trichat.bus self-heals stale socket artifacts on startup", async () => {
   const testId = `${Date.now()}`;
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-trichat-bus-stale-socket-test-"));
+  const tempDir = createTestTempDir("mcp-trichat-bus-stale-socket-test");
   const dbPath = path.join(tempDir, "hub.sqlite");
   const busSocketPath = path.join(tempDir, "trichat.bus.sock");
 
@@ -177,6 +178,35 @@ test("trichat.bus self-heals stale socket artifacts on startup", async () => {
       socket.destroy();
     }
     await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("trichat.bus runtime start is single-flight during startup", async () => {
+  const tempDir = createTestTempDir("mcp-trichat-bus-single-flight");
+  const socketPath = path.join(tempDir, "trichat.bus.sock");
+  const runtime = new TriChatBusRuntime({}, { socket_path: socketPath });
+
+  try {
+    const first = runtime.start();
+    assert.equal(first.started, true);
+    assert.equal(first.startup_in_progress, true);
+
+    const duplicate = runtime.start();
+    assert.equal(duplicate.started, false);
+    assert.equal(duplicate.start_reason, "startup_in_progress");
+    assert.equal(duplicate.startup_in_progress, true);
+
+    await waitForCondition(() => runtime.status().running === true, 15000, 25);
+    const runningStatus = runtime.status();
+    assert.equal(runningStatus.running, true);
+    assert.equal(runningStatus.startup_in_progress, false);
+
+    const runningDuplicate = runtime.start();
+    assert.equal(runningDuplicate.started, false);
+    assert.equal(runningDuplicate.start_reason, "already_running");
+  } finally {
+    runtime.stop();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
@@ -254,6 +284,14 @@ async function waitForUnixSocketConnect(socketPath, timeoutMs, pollMs) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createTestTempDir(prefix) {
+  const root = path.join(os.homedir(), ".cache", "mcplayground-tests");
+  fs.mkdirSync(root, { recursive: true });
+  const dir = path.join(root, `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 function inheritedEnv(extra) {

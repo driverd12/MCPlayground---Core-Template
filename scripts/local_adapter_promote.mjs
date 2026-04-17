@@ -6,7 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { assertPreparedDataset } from "./local_adapter_lane.mjs";
+import { assertPreparedDataset, deriveEffectiveTrainingStatus } from "./local_adapter_lane.mjs";
 import {
   acquireRunnerSingletonLock,
   callTool,
@@ -346,6 +346,46 @@ export function decidePromotion({ manifest, report, evalRun }) {
   };
 }
 
+export function resolvePromotionReplayGuard(manifest) {
+  const statusEvidence = deriveEffectiveTrainingStatus({ manifest });
+  const reportedStatus = readString(statusEvidence.reported_status);
+  const effectiveStage = readString(statusEvidence.effective_status);
+  const stageIsIntegrated = effectiveStage === "adapter_served_mlx" || effectiveStage === "adapter_exported_ollama";
+  const stageIsPrimary = effectiveStage === "adapter_primary_mlx" || effectiveStage === "adapter_primary_ollama";
+  const stageIsRollback = effectiveStage === "rollback_restored";
+  if (!stageIsIntegrated && !stageIsPrimary && !stageIsRollback) {
+    return {
+      ok: true,
+      reported_status: reportedStatus,
+      effective_stage: effectiveStage,
+      blockers: [],
+    };
+  }
+  const nextAction = stageIsPrimary
+    ? "Run `npm run local:training:verify` and refresh soak/watchdog evidence before any new router change; do not rerun promote."
+    : stageIsIntegrated
+      ? "Keep promotion immutable after integration. Revalidate the live backend with `npm run local:training:verify` or proceed to cutover explicitly."
+      : "Inspect the recorded rollback and rerun integrate or cutover only after the failure cause is understood; do not rerun promote.";
+  return {
+    ok: false,
+    reported_status: reportedStatus,
+    effective_stage: effectiveStage,
+    reason: "Promotion is registration-only and cannot rewrite a candidate that already has integration, cutover, or rollback evidence.",
+    blockers: [
+      "promotion_stage_regression_blocked",
+      ...(effectiveStage ? [`recorded_stage:${effectiveStage}`] : []),
+    ],
+    next_action: nextAction,
+    state_evidence: {
+      integration_backend_id: readString(manifest?.integration_result?.backend_id),
+      cutover_backend_id:
+        readString(manifest?.cutover_result?.active_default_backend_id) ||
+        readString(manifest?.cutover_result?.attempted_backend_id),
+      primary_soak_ok: manifest?.primary_soak_result?.ok === true || manifest?.primary_watchdog_result?.ok === true,
+    },
+  };
+}
+
 function updateRegistry(manifest, manifestPath, updates) {
   const registry = readJson(REGISTRY_PATH) || { runs: [] };
   const runs = Array.isArray(registry.runs) ? registry.runs : [];
@@ -386,6 +426,28 @@ async function main() {
   const { manifestPath, manifest, runDir } = resolveManifest(args.manifestPath);
   if (manifest?.training_intent?.executed !== true) {
     throw new Error("The selected manifest has not executed a local adapter training run yet.");
+  }
+  const replayGuard = resolvePromotionReplayGuard(manifest);
+  if (!replayGuard.ok) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          ok: false,
+          skipped: true,
+          manifest_path: manifestPath,
+          candidate_id: manifest?.candidate_id ?? null,
+          reason: replayGuard.reason,
+          blockers: replayGuard.blockers,
+          reported_status: replayGuard.reported_status,
+          effective_stage: replayGuard.effective_stage,
+          next_action: replayGuard.next_action,
+          state_evidence: replayGuard.state_evidence,
+        },
+        null,
+        2
+      )}\n`
+    );
+    process.exit(1);
   }
   const datasetAudit = assertPreparedDataset(manifest);
   const promotionDir = path.join(runDir, "promotion");

@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { acquireRunnerSingletonLock, loadRunnerEnv, repoRootFromMeta } from "./mcp_runner_support.mjs";
+import { deriveEffectiveTrainingStatus } from "./local_adapter_lane.mjs";
 
 const REPO_ROOT = repoRootFromMeta(import.meta.url);
 const REGISTRY_PATH = path.join(REPO_ROOT, "data", "training", "model_registry.json");
@@ -158,7 +159,7 @@ function parseIsoTime(value) {
 }
 
 export function resolveWatchdogDecision(manifest, options = {}) {
-  const status = readString(manifest?.status);
+  const status = readString(deriveEffectiveTrainingStatus({ manifest }).effective_status);
   const applicable = status === "adapter_primary_mlx" || status === "adapter_primary_ollama";
   const config = {
     ...buildPrimaryWatchdogConfig(manifest),

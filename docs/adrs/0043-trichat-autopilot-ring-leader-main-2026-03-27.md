@@ -14,4 +14,4 @@ Selected strategy: Delegate specialist work to implementation-director, research
 Execution mode: tmux_dispatch
 Execution commands: npm run trichat:roster || npm run git status || npm run build
 Verification: skipped (execution deferred to task queue)
-Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/MCPlayground---Core-Template
+Rollback: revert workspace changes and replay task queue from /Users/dan.driver/Documents/Playground/Agentic Playground/SUPERPOWERS
