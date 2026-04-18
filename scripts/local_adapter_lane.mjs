@@ -21,6 +21,7 @@ const DEFAULT_EVAL_SUITE_ID = "autonomy.control-plane";
 const REGISTRY_SCHEMA_VERSION = "training.model_registry.v2";
 const MANIFEST_SCHEMA_VERSION = "local_training_packet.v2";
 const DATASET_INTEGRITY_CONTRACT_VERSION = "local_training_packet.dataset_integrity.v1";
+const LEGACY_REPO_ROOT_NAMES = ["MCPlayground---Core-Template", "SUPERPOWERS"];
 const DEFAULT_EVAL_FRACTION = 0.2;
 const MIN_CORPUS_CHAR_COUNT = 20;
 const MIN_CORPUS_WORD_COUNT = 4;
@@ -51,6 +52,49 @@ const EXPECTED_ADAPTER_ARTIFACTS = [
     candidates: ["training_metrics.json", "metrics.json"],
   },
 ];
+
+function resolveRepoPath(input) {
+  const candidate = readString(input);
+  if (!candidate) {
+    return null;
+  }
+  const normalized = path.normalize(candidate);
+  if (!path.isAbsolute(normalized)) {
+    return normalized;
+  }
+  if (normalized === REPO_ROOT || normalized.startsWith(`${REPO_ROOT}${path.sep}`)) {
+    return normalized;
+  }
+  for (const repoName of LEGACY_REPO_ROOT_NAMES) {
+    const marker = `${path.sep}${repoName}${path.sep}`;
+    const index = normalized.indexOf(marker);
+    if (index >= 0) {
+      const suffix = normalized.slice(index + marker.length);
+      return path.join(REPO_ROOT, suffix);
+    }
+    if (normalized.endsWith(`${path.sep}${repoName}`)) {
+      return REPO_ROOT;
+    }
+  }
+  return normalized;
+}
+
+function normalizeRegistryRunPaths(run) {
+  if (!run || typeof run !== "object") {
+    return run;
+  }
+  return {
+    ...run,
+    manifest_path: resolveRepoPath(run.manifest_path),
+    corpus_path: resolveRepoPath(run.corpus_path),
+    train_path: resolveRepoPath(run.train_path),
+    eval_path: resolveRepoPath(run.eval_path),
+    adapter_path: resolveRepoPath(run.adapter_path),
+    training_metrics_path: resolveRepoPath(run.training_metrics_path),
+    promotion_report_path: resolveRepoPath(run.promotion_report_path),
+    registration_path: resolveRepoPath(run.registration_path),
+  };
+}
 
 function readEnvValue(key) {
   try {
@@ -323,9 +367,9 @@ export function auditPreparedDataset(manifest, registryRun = null) {
     findings.push({ severity, code, message });
   };
 
-  const corpusPath = readString(manifest?.corpus?.path) || readString(registryRun?.corpus_path);
-  const trainPath = readString(manifest?.corpus?.train_path) || readString(registryRun?.train_path);
-  const evalPath = readString(manifest?.corpus?.eval_path) || readString(registryRun?.eval_path);
+  const corpusPath = resolveRepoPath(readString(manifest?.corpus?.path) || readString(registryRun?.corpus_path));
+  const trainPath = resolveRepoPath(readString(manifest?.corpus?.train_path) || readString(registryRun?.train_path));
+  const evalPath = resolveRepoPath(readString(manifest?.corpus?.eval_path) || readString(registryRun?.eval_path));
   const expected = manifest?.corpus?.integrity && typeof manifest.corpus.integrity === "object" ? manifest.corpus.integrity : null;
 
   const corpusPayload = readJsonlRecords(corpusPath);
@@ -1073,10 +1117,11 @@ export function auditTrainingRun({ registryRun, manifest, registration, nowMs = 
     findings.push({ severity, code, message });
   };
 
-  const manifestPath =
+  const manifestPath = resolveRepoPath(
     readString(manifest?.manifest_path) ||
-    readString(registryRun?.manifest_path) ||
-    null;
+      readString(registryRun?.manifest_path) ||
+      null
+  );
   const statusEvidence = deriveEffectiveTrainingStatus({
     registryRun: registryRun || {},
     manifest: manifest || {},
@@ -1137,9 +1182,9 @@ export function auditTrainingRun({ registryRun, manifest, registration, nowMs = 
     );
   }
 
-  const corpusPath = readString(manifest?.corpus?.path) || readString(registryRun?.corpus_path);
-  const trainPath = readString(manifest?.corpus?.train_path) || readString(registryRun?.train_path);
-  const evalPath = readString(manifest?.corpus?.eval_path) || readString(registryRun?.eval_path);
+  const corpusPath = resolveRepoPath(readString(manifest?.corpus?.path) || readString(registryRun?.corpus_path));
+  const trainPath = resolveRepoPath(readString(manifest?.corpus?.train_path) || readString(registryRun?.train_path));
+  const evalPath = resolveRepoPath(readString(manifest?.corpus?.eval_path) || readString(registryRun?.eval_path));
   const corpusCount = readJsonlLineCount(corpusPath);
   const trainCount = readJsonlLineCount(trainPath);
   const evalCount = readJsonlLineCount(evalPath);
@@ -1177,10 +1222,10 @@ export function auditTrainingRun({ registryRun, manifest, registration, nowMs = 
   const trainingExecuted = manifest?.training_intent?.executed === true;
   const safePromotionAllowed = manifest?.safe_promotion_metadata?.allowed_now === true;
   const artifactRoot =
-    readString(manifest?.training_result?.adapter_path) ||
-    readString(registryRun?.adapter_path) ||
-    (readString(manifest?.training_result?.training_metrics_path)
-      ? path.dirname(readString(manifest.training_result.training_metrics_path))
+    resolveRepoPath(readString(manifest?.training_result?.adapter_path)) ||
+    resolveRepoPath(readString(registryRun?.adapter_path)) ||
+    (resolveRepoPath(readString(manifest?.training_result?.training_metrics_path))
+      ? path.dirname(resolveRepoPath(readString(manifest.training_result.training_metrics_path)))
       : null) ||
     (readString(manifestPath) ? path.dirname(manifestPath) : null);
   const artifacts = artifactRoot
@@ -1283,12 +1328,14 @@ export function auditTrainingRun({ registryRun, manifest, registration, nowMs = 
 export function buildTrainingRegistryAudit(registry, options = {}) {
   const runs = Array.isArray(registry?.runs) ? registry.runs : [];
   const limit = Number.isFinite(options.limit) ? Math.max(1, Math.trunc(options.limit)) : runs.length;
-  const runAudits = runs.slice(0, limit).map((registryRun) => {
-    const manifestPath = readString(registryRun?.manifest_path);
+  const runAudits = runs.slice(0, limit).map((rawRegistryRun) => {
+    const registryRun = normalizeRegistryRunPaths(rawRegistryRun);
+    const manifestPath = resolveRepoPath(readString(registryRun?.manifest_path));
     const manifest = manifestPath && fs.existsSync(manifestPath) ? readJson(manifestPath) : null;
-    const registrationPath =
+    const registrationPath = resolveRepoPath(
       readString(manifest?.promotion_result?.registration_path) ||
-      readString(registryRun?.registration_path);
+        readString(registryRun?.registration_path)
+    );
     const registration = registrationPath && fs.existsSync(registrationPath) ? readJson(registrationPath) : null;
     return {
       run_id: readString(registryRun?.run_id) || null,
@@ -1535,7 +1582,8 @@ function prepareLane() {
 function statusLane() {
   const trainer = detectTrainerAvailability();
   const registry = loadRegistry();
-  const latestRun = Array.isArray(registry.runs) && registry.runs.length > 0 ? registry.runs[0] : null;
+  const latestRun =
+    Array.isArray(registry.runs) && registry.runs.length > 0 ? normalizeRegistryRunPaths(registry.runs[0]) : null;
   const registryAudit = buildTrainingRegistryAudit(registry, { limit: 10 });
   const latestRunAudit = Array.isArray(registryAudit.runs) ? registryAudit.runs[0] || null : null;
   const trainingCommand = detectTrainingCommand();
