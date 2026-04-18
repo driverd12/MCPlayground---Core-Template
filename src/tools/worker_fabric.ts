@@ -1,3 +1,4 @@
+import { isAbsolute, join, normalize, sep } from "node:path";
 import { z } from "zod";
 import {
   Storage,
@@ -11,6 +12,7 @@ import type { ExecutionIsolationMode } from "../execution_isolation.js";
 
 const hostTransportSchema = z.enum(["local", "ssh"]);
 const thermalPressureSchema = z.enum(["nominal", "fair", "serious", "critical"]);
+const LEGACY_LOCAL_WORKSPACE_ROOT_NAMES = ["MCPlayground---Core-Template", "SUPERPOWERS"] as const;
 
 const recordSchema = z.record(z.unknown());
 
@@ -153,6 +155,47 @@ function readString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function resolveLiveRepoWorkspaceRoot(workspaceRoot: string | null | undefined): string | null {
+  const candidate = readString(workspaceRoot);
+  if (!candidate) {
+    return null;
+  }
+  const normalized = normalize(candidate);
+  if (!isAbsolute(normalized)) {
+    return normalized;
+  }
+  const liveRepoRoot = normalize(process.cwd());
+  if (normalized === liveRepoRoot || normalized.startsWith(`${liveRepoRoot}${sep}`)) {
+    return normalized;
+  }
+  for (const legacyRepoName of LEGACY_LOCAL_WORKSPACE_ROOT_NAMES) {
+    const marker = `${sep}${legacyRepoName}${sep}`;
+    const markerIndex = normalized.indexOf(marker);
+    if (markerIndex >= 0) {
+      const suffix = normalized.slice(markerIndex + marker.length);
+      return join(liveRepoRoot, suffix);
+    }
+    if (normalized.endsWith(`${sep}${legacyRepoName}`)) {
+      return liveRepoRoot;
+    }
+  }
+  return normalized;
+}
+
+export function resolveTransportWorkspaceRoot(
+  transport: "local" | "ssh",
+  workspaceRoot: string | null | undefined
+): string | null {
+  const candidate = readString(workspaceRoot);
+  if (!candidate) {
+    return null;
+  }
+  if (transport !== "local") {
+    return candidate;
+  }
+  return resolveLiveRepoWorkspaceRoot(candidate) ?? normalize(process.cwd());
+}
+
 function normalizeStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
@@ -255,12 +298,15 @@ export function computeHostHealthScore(telemetry: WorkerFabricHostTelemetryRecor
 }
 
 function normalizeHost(input: WorkerFabricHostRecord): WorkerFabricHostRecord {
+  const workspaceRoot =
+    resolveTransportWorkspaceRoot(input.transport, input.workspace_root) ??
+    (input.transport === "local" ? normalize(process.cwd()) : input.workspace_root.trim());
   return {
     host_id: input.host_id.trim(),
     enabled: input.enabled !== false,
     transport: input.transport === "ssh" ? "ssh" : "local",
     ssh_destination: input.ssh_destination?.trim() || null,
-    workspace_root: input.workspace_root.trim(),
+    workspace_root: workspaceRoot,
     worker_count: Math.max(1, Math.min(64, Math.trunc(input.worker_count || 1))),
     shell: input.shell?.trim() || "/bin/zsh",
     capabilities: isRecord(input.capabilities) ? input.capabilities : {},
@@ -308,6 +354,7 @@ export function buildImplicitLocalWorkerFabric(input: {
   shell: string;
 }): WorkerFabricStateRecord {
   const now = new Date().toISOString();
+  const workspaceRoot = resolveTransportWorkspaceRoot("local", input.workspace_root) ?? normalize(process.cwd());
   return {
     enabled: true,
     strategy: "prefer_local",
@@ -319,7 +366,7 @@ export function buildImplicitLocalWorkerFabric(input: {
         enabled: true,
         transport: "local",
         ssh_destination: null,
-        workspace_root: input.workspace_root,
+        workspace_root: workspaceRoot,
         worker_count: Math.max(1, Math.min(64, Math.trunc(input.worker_count || 1))),
         shell: input.shell || "/bin/zsh",
         capabilities: {
@@ -696,13 +743,19 @@ export function workerFabric(storage: Storage, input: z.infer<typeof workerFabri
     mutation: input.mutation!,
     payload: input,
     execute: () => {
-      const existing = storage.getWorkerFabricState() ?? {
-        enabled: false,
-        strategy: "balanced" as const,
-        default_host_id: null,
-        hosts: [],
-        updated_at: new Date().toISOString(),
-      };
+      const persisted = storage.getWorkerFabricState();
+      const existing = persisted
+        ? {
+            ...persisted,
+            hosts: persisted.hosts.map(normalizeHost),
+          }
+        : {
+            enabled: false,
+            strategy: "balanced" as const,
+            default_host_id: null,
+            hosts: [],
+            updated_at: new Date().toISOString(),
+          };
 
       if (input.action === "configure") {
         return {
@@ -717,13 +770,16 @@ export function workerFabric(storage: Storage, input: z.infer<typeof workerFabri
 
       if (input.action === "upsert_host") {
         const host = input.host!;
+        const workspaceRoot =
+          resolveTransportWorkspaceRoot(host.transport, host.workspace_root) ??
+          (host.transport === "local" ? normalize(process.cwd()) : host.workspace_root.trim());
         const nextHosts = existing.hosts.filter((entry) => entry.host_id !== host.host_id).concat([
           {
             host_id: host.host_id,
             enabled: host.enabled !== false,
             transport: host.transport,
             ssh_destination: host.ssh_destination?.trim() || null,
-            workspace_root: host.workspace_root,
+            workspace_root: workspaceRoot,
             worker_count: host.worker_count,
             shell: host.shell?.trim() || "/bin/zsh",
             capabilities: host.capabilities ?? {},

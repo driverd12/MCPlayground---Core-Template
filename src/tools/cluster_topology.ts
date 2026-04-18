@@ -8,7 +8,7 @@ import {
   Storage,
 } from "../storage.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
-import { workerFabric } from "./worker_fabric.js";
+import { resolveTransportWorkspaceRoot, workerFabric } from "./worker_fabric.js";
 
 const recordSchema = z.record(z.unknown());
 const nodeStatusSchema = z.enum(["planned", "provisioning", "active", "maintenance", "retired"]);
@@ -90,6 +90,22 @@ function dedupeStrings(values: readonly string[] | undefined | null) {
   return [...new Set((values ?? []).map((entry) => String(entry ?? "").trim()).filter(Boolean))];
 }
 
+function normalizeNodeWorkspaceRoot(node: ClusterTopologyNodeRecord): ClusterTopologyNodeRecord {
+  if (!node.workspace_root) {
+    return node;
+  }
+  const workspaceRoot =
+    resolveTransportWorkspaceRoot(node.transport, node.workspace_root) ??
+    (node.transport === "local" ? process.cwd() : node.workspace_root);
+  if (workspaceRoot === node.workspace_root) {
+    return node;
+  }
+  return {
+    ...node,
+    workspace_root: workspaceRoot,
+  };
+}
+
 function normalizeNodeId(value: string | null | undefined) {
   return String(value ?? "")
     .trim()
@@ -169,7 +185,9 @@ function resolveEmptyTopology(): ClusterTopologyStateRecord {
 }
 
 export function resolveClusterTopologyState(storage: Storage) {
-  return storage.getClusterTopologyState() ?? resolveEmptyTopology();
+  const state = storage.getClusterTopologyState() ?? resolveEmptyTopology();
+  const nodes = state.nodes.map((node) => normalizeNodeWorkspaceRoot(node));
+  return nodes.some((node, index) => node !== state.nodes[index]) ? { ...state, nodes } : state;
 }
 
 export function summarizeClusterTopologyState(state: ClusterTopologyStateRecord) {
@@ -229,6 +247,7 @@ export function summarizeClusterTopologyState(state: ClusterTopologyStateRecord)
 
 function buildDefaultLabNodes(input: { local_host_id: string; workspace_root: string }): ClusterTopologyNodeRecord[] {
   const now = new Date().toISOString();
+  const workspaceRoot = resolveTransportWorkspaceRoot("local", input.workspace_root) ?? process.cwd();
   return [
     {
       node_id: "mac-control",
@@ -238,7 +257,7 @@ function buildDefaultLabNodes(input: { local_host_id: string; workspace_root: st
       host_id: input.local_host_id,
       transport: "local",
       ssh_destination: null,
-      workspace_root: input.workspace_root,
+      workspace_root: workspaceRoot,
       worker_count: 4,
       tags: ["local", "control-plane", "developer-workstation", "apple-silicon", "ollama", "bridge"],
       preferred_domains: ["autonomy", "orchestration", "planning", "verification"],
@@ -635,7 +654,7 @@ export async function clusterTopology(storage: Storage, input: z.infer<typeof cl
           current,
           buildDefaultLabNodes({
             local_host_id: input.local_host_id,
-            workspace_root: input.workspace_root?.trim() || process.cwd(),
+            workspace_root: resolveTransportWorkspaceRoot("local", input.workspace_root) ?? process.cwd(),
           })
         );
         const state = storage.setClusterTopologyState({
@@ -654,6 +673,7 @@ export async function clusterTopology(storage: Storage, input: z.infer<typeof cl
       if (input.action === "upsert_node") {
         const node = input.node!;
         const normalizedNodeId = normalizeNodeId(node.node_id);
+        const workspaceRoot = node.workspace_root?.trim() || null;
         const nextNodes = current.nodes
           .filter((entry) => entry.node_id !== normalizedNodeId)
           .concat([
@@ -665,7 +685,11 @@ export async function clusterTopology(storage: Storage, input: z.infer<typeof cl
               host_id: node.host_id?.trim() || null,
               transport: node.transport,
               ssh_destination: node.ssh_destination?.trim() || null,
-              workspace_root: node.workspace_root?.trim() || null,
+              workspace_root:
+                workspaceRoot === null
+                  ? null
+                  : resolveTransportWorkspaceRoot(node.transport, workspaceRoot) ??
+                    (node.transport === "local" ? process.cwd() : workspaceRoot),
               worker_count: node.worker_count ?? null,
               tags: dedupeStrings(node.tags),
               preferred_domains: dedupeStrings(node.preferred_domains),
