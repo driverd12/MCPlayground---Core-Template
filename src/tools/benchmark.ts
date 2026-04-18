@@ -164,12 +164,19 @@ function resolveExperimentMetricDirection(direction: ExperimentMetricDirection) 
 function mapSuiteProjectDirToHost(suiteProjectDir: string, hostWorkspaceRoot: string) {
   const cwd = process.cwd();
   const normalizedSuiteDir = path.resolve(suiteProjectDir);
+  const normalizedHostWorkspaceRoot = path.resolve(hostWorkspaceRoot || normalizedSuiteDir);
   const normalizedCwd = path.resolve(cwd);
+  const hostWorkspaceLooksLegacy = normalizedHostWorkspaceRoot
+    .split(path.sep)
+    .some((segment) => segment === "MCPlayground---Core-Template" || segment === "SUPERPOWERS");
+  if (fs.existsSync(normalizedSuiteDir) && (!fs.existsSync(normalizedHostWorkspaceRoot) || hostWorkspaceLooksLegacy)) {
+    return normalizedSuiteDir;
+  }
   if (!normalizedSuiteDir.startsWith(normalizedCwd)) {
-    return hostWorkspaceRoot;
+    return normalizedHostWorkspaceRoot;
   }
   const relative = path.relative(normalizedCwd, normalizedSuiteDir);
-  return relative && relative !== "." ? path.join(hostWorkspaceRoot, relative) : hostWorkspaceRoot;
+  return relative && relative !== "." ? path.join(normalizedHostWorkspaceRoot, relative) : normalizedHostWorkspaceRoot;
 }
 
 async function runBenchmarkCommand(input: {
