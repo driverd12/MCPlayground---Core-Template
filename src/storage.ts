@@ -906,6 +906,23 @@ export type WorkerFabricStateRecord = {
   updated_at: string;
 };
 
+const WORKER_FABRIC_HEARTBEAT_FRESHNESS_MS = 10 * 60 * 1000;
+
+function normalizeWorkerFabricHostHealthState(
+  heartbeatAt: string | null,
+  healthState: WorkerFabricHostHealthState,
+  nowMs = Date.now()
+): WorkerFabricHostHealthState {
+  if (healthState !== "healthy") {
+    return healthState;
+  }
+  const parsedHeartbeatMs = heartbeatAt ? Date.parse(heartbeatAt) : Number.NaN;
+  if (!Number.isFinite(parsedHeartbeatMs)) {
+    return "offline";
+  }
+  return nowMs - parsedHeartbeatMs > WORKER_FABRIC_HEARTBEAT_FRESHNESS_MS ? "offline" : "healthy";
+}
+
 export type ClusterTopologyNodeStatus = "planned" | "provisioning" | "active" | "maintenance" | "retired";
 export type ClusterTopologyNodeClass = "control-plane" | "cpu-memory" | "gpu-workstation" | "virtualization";
 
@@ -3333,9 +3350,12 @@ export class Storage {
           thermalRaw === "nominal" || thermalRaw === "fair" || thermalRaw === "serious" || thermalRaw === "critical"
             ? thermalRaw
             : null;
+        const heartbeatAt = normalizeOptionalIsoTimestamp(asNullableString(telemetry.heartbeat_at));
         const healthRaw = String(telemetry.health_state ?? "").trim().toLowerCase();
-        const healthState: WorkerFabricHostHealthState =
-          healthRaw === "offline" || healthRaw === "degraded" ? healthRaw : "healthy";
+        const healthState = normalizeWorkerFabricHostHealthState(
+          heartbeatAt,
+          healthRaw === "offline" || healthRaw === "degraded" ? healthRaw : "healthy"
+        );
         return {
           host_id: hostId,
           enabled: parseBoolean(item.enabled, true),
@@ -3347,7 +3367,7 @@ export class Storage {
           capabilities: parseLooseObject(item.capabilities),
           tags: dedupeNonEmpty(Array.isArray(item.tags) ? item.tags : []),
           telemetry: {
-            heartbeat_at: asNullableString(telemetry.heartbeat_at),
+            heartbeat_at: heartbeatAt,
             health_state: healthState,
             queue_depth: parseBoundedInt(telemetry.queue_depth, 0, 0, 100_000),
             active_tasks: parseBoundedInt(telemetry.active_tasks, 0, 0, 100_000),
@@ -3415,9 +3435,12 @@ export class Storage {
           thermalRaw === "nominal" || thermalRaw === "fair" || thermalRaw === "serious" || thermalRaw === "critical"
             ? thermalRaw
             : null;
+        const heartbeatAt = normalizeOptionalIsoTimestamp(asNullableString(telemetry.heartbeat_at));
         const healthRaw = String(telemetry.health_state ?? "").trim().toLowerCase();
-        const healthState: WorkerFabricHostHealthState =
-          healthRaw === "offline" || healthRaw === "degraded" ? healthRaw : "healthy";
+        const healthState = normalizeWorkerFabricHostHealthState(
+          heartbeatAt,
+          healthRaw === "offline" || healthRaw === "degraded" ? healthRaw : "healthy"
+        );
         return {
           host_id: hostId,
           enabled: Boolean(host.enabled),
@@ -3429,7 +3452,7 @@ export class Storage {
           capabilities: parseLooseObject(host.capabilities),
           tags: dedupeNonEmpty(host.tags ?? []),
           telemetry: {
-            heartbeat_at: asNullableString(telemetry.heartbeat_at),
+            heartbeat_at: heartbeatAt,
             health_state: healthState,
             queue_depth: parseBoundedInt(telemetry.queue_depth, 0, 0, 100_000),
             active_tasks: parseBoundedInt(telemetry.active_tasks, 0, 0, 100_000),
