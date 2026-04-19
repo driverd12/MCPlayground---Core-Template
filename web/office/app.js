@@ -24,8 +24,14 @@
     eventsView: document.querySelector("#events-view"),
     tabs: Array.prototype.slice.call(document.querySelectorAll(".tabs__button")),
     intakeForm: document.querySelector("#intake-form"),
+    intakeTitle: document.querySelector("#intake-title"),
+    intakeObjective: document.querySelector("#intake-objective"),
+    intakeRisk: document.querySelector("#intake-risk"),
     intakeMode: document.querySelector("#intake-mode"),
+    intakeDryRun: document.querySelector("#intake-dry-run"),
+    intakeSubmit: document.querySelector('#intake-form button[type="submit"]'),
     intakeResult: document.querySelector("#intake-result"),
+    intakeConsole: null,
     agentDetail: document.querySelector("#agent-detail"),
     refreshButton: document.querySelector("#refresh-button"),
     actionButtons: Array.prototype.slice.call(document.querySelectorAll("[data-action]")),
@@ -184,7 +190,257 @@
     }
   }
 
+  function compactIntakeText(value, limit) {
+    var text = String(value == null ? "" : value).replace(/\s+/g, " ").trim();
+    if (!limit || text.length <= limit) return text;
+    return text.slice(0, Math.max(0, limit - 1)).replace(/\s+$/, "") + "…";
+  }
+
+  function shellQuote(value) {
+    return "'" + String(value == null ? "" : value).replace(/'/g, "'\"'\"'") + "'";
+  }
+
+  function getWorkbench() {
+    if (!state.snapshot || !state.snapshot.workbench || typeof state.snapshot.workbench !== "object") {
+      return null;
+    }
+    return state.snapshot.workbench;
+  }
+
+  function ensureIntakeConsole() {
+    if (els.intakeConsole) return els.intakeConsole;
+    if (!els.intakeForm || !els.intakeForm.parentNode) return null;
+    els.intakeConsole = document.createElement("section");
+    els.intakeConsole.className = "intake-console";
+    els.intakeForm.parentNode.insertBefore(els.intakeConsole, els.intakeForm);
+    return els.intakeConsole;
+  }
+
+  function readIntakeDraft() {
+    return {
+      title: els.intakeTitle ? String(els.intakeTitle.value || "").trim() : "",
+      objective: els.intakeObjective ? String(els.intakeObjective.value || "").trim() : "",
+      risk: els.intakeRisk ? String(els.intakeRisk.value || "medium").trim() || "medium" : "medium",
+      mode: els.intakeMode ? String(els.intakeMode.value || "").trim() : "",
+      dryRun: els.intakeDryRun ? !!els.intakeDryRun.checked : false,
+    };
+  }
+
+  function compilerCommandPreview(draft) {
+    var parts = ["./scripts/autonomy_intake_shell.sh"];
+    if (draft.title) parts.push("--title " + shellQuote(draft.title));
+    if (draft.risk) parts.push("--risk " + shellQuote(draft.risk));
+    if (draft.mode) parts.push("--mode " + shellQuote(draft.mode));
+    if (draft.dryRun) parts.push("--dry-run");
+    parts.push("-- " + shellQuote(draft.objective || "<bounded objective>"));
+    return parts.join(" ");
+  }
+
+  function gateTone(ok, warn) {
+    if (ok) return "good";
+    if (warn) return "warn";
+    return "bad";
+  }
+
+  function renderIntakeDesk() {
+    var host = ensureIntakeConsole();
+    if (!host) return;
+
+    var draft = readIntakeDraft();
+    if (els.intakeSubmit) {
+      els.intakeSubmit.textContent = draft.dryRun ? "Preview dispatch" : "Dispatch objective";
+    }
+
+    if (!state.snapshot) {
+      host.innerHTML =
+        '<div class="intake-console__header">' +
+        '<div class="intake-console__eyebrow">Objective Compiler</div>' +
+        "<h3>Waiting for live workbench telemetry.</h3>" +
+        "<p>Once the office snapshot lands, the intake desk will show blockers, suggested objectives, and a dispatch preview.</p>" +
+        "</div>";
+      return;
+    }
+
+    var workbench = getWorkbench() || {};
+    var summary = state.snapshot.summary || {};
+    var maintain = summary.maintain || {};
+    var providers = summary.provider_bridge || {};
+    var patientZero = summary.patient_zero || {};
+    var blockers = Array.isArray(workbench.blockers) ? workbench.blockers.slice(0, 3) : [];
+    var nextActions = Array.isArray(workbench.next_actions) ? workbench.next_actions.slice(0, 3) : [];
+    var suggestions = Array.isArray(workbench.suggested_objectives) ? workbench.suggested_objectives.slice(0, 3) : [];
+    var activeExecution = workbench.active_execution || {};
+    var dispatchReady = !!draft.objective;
+    var modeLabel = draft.mode || "auto";
+    var riskLabel = draft.risk || "medium";
+    var focusArea = compactIntakeText(workbench.focus_area || "intake", 24);
+    var statusLabel = compactIntakeText(workbench.status || (dispatchReady ? "ready" : "draft"), 24);
+    var headline = compactIntakeText(
+      workbench.headline || "Compile one bounded objective, review runtime gates, and dispatch through the MCP core.",
+      180
+    );
+    var activeLabel =
+      compactIntakeText(
+        (activeExecution.step && activeExecution.step.title) ||
+          (activeExecution.task && activeExecution.task.objective) ||
+          (activeExecution.goal && activeExecution.goal.title) ||
+          "",
+        110
+      ) || "No active execution summary from the workbench yet.";
+
+    var gates = [
+      {
+        label: "Maintain",
+        tone: gateTone(maintain.running === true, maintain.eval_due === false),
+        detail: (maintain.running ? "loop active" : "loop idle") + " · eval_due " + (maintain.eval_due ? "yes" : "no"),
+      },
+      {
+        label: "Providers",
+        tone: gateTone((providers.disconnected_count || 0) === 0, (providers.connected_count || 0) > 0),
+        detail:
+          "connected " +
+          String(providers.connected_count || 0) +
+          " · disconnected " +
+          String(providers.disconnected_count || 0),
+      },
+      {
+        label: "Patient Zero",
+        tone: gateTone(patientZero.enabled !== true, patientZero.autonomous_control_enabled !== true),
+        detail:
+          (patientZero.enabled ? "armed" : "standby") +
+          " · autonomy " +
+          (patientZero.autonomous_control_enabled ? "enabled" : "bounded"),
+      },
+      {
+        label: "Dispatch",
+        tone: gateTone(dispatchReady, !!draft.title || !!draft.objective),
+        detail: (draft.dryRun ? "dry run" : "live dispatch") + " · mode " + modeLabel + " · risk " + riskLabel,
+      },
+    ];
+
+    var blockersHtml = blockers.length
+      ? '<div class="intake-console__section">' +
+        '<div class="intake-console__label">Blockers</div>' +
+        '<div class="intake-console__stack">' +
+        blockers
+          .map(function (entry) {
+            var remediation = entry && entry.remediation ? entry.remediation : null;
+            var payload = remediation && remediation.payload ? JSON.stringify(remediation.payload) : "";
+            return (
+              '<article class="intake-console__card">' +
+              '<strong>' + escapeHtml(compactIntakeText(entry.title || "Runtime attention", 96)) + "</strong>" +
+              '<p>' + escapeHtml(compactIntakeText(entry.detail || "", 180)) + "</p>" +
+              (remediation && remediation.action
+                ? '<button type="button" class="button intake-console__inline-action" data-workbench-action="' +
+                  escapeHtml(remediation.action) +
+                  '" data-workbench-payload="' +
+                  escapeHtml(payload) +
+                  '">' +
+                  escapeHtml(remediation.label || "Run") +
+                  "</button>"
+                : "") +
+              "</article>"
+            );
+          })
+          .join("") +
+        "</div>" +
+        "</div>"
+      : "";
+
+    var nextActionsHtml = nextActions.length
+      ? '<div class="intake-console__section">' +
+        '<div class="intake-console__label">Next actions</div>' +
+        '<ul class="intake-console__list">' +
+        nextActions
+          .map(function (entry) {
+            return (
+              "<li><strong>" +
+              escapeHtml(compactIntakeText(entry.label || "Next", 72)) +
+              "</strong><span>" +
+              escapeHtml(compactIntakeText(entry.detail || "", 120)) +
+              "</span></li>"
+            );
+          })
+          .join("") +
+        "</ul>" +
+        "</div>"
+      : "";
+
+    var suggestionsHtml =
+      '<div class="intake-console__section">' +
+      '<div class="intake-console__label">Suggested objectives</div>' +
+      '<div class="intake-console__stack">' +
+      (suggestions.length
+        ? suggestions
+            .map(function (entry, index) {
+              return (
+                '<article class="intake-console__card intake-console__card--suggestion">' +
+                '<strong>' + escapeHtml(compactIntakeText(entry.title || "Suggested objective", 90)) + "</strong>" +
+                '<p>' + escapeHtml(compactIntakeText(entry.why || entry.objective || "", 180)) + "</p>" +
+                '<div class="intake-console__meta">' +
+                "<span>" + escapeHtml("risk " + (entry.risk || "medium")) + "</span>" +
+                "<span>" + escapeHtml("mode " + (entry.mode || "auto")) + "</span>" +
+                "</div>" +
+                '<button type="button" class="button intake-console__inline-action" data-seed-objective-index="' +
+                String(index) +
+                '">Seed intake</button>' +
+                "</article>"
+              );
+            })
+            .join("")
+        : '<article class="intake-console__card"><strong>No suggestions yet</strong><p>The workbench will surface compiler suggestions once the current queue and blockers are summarized.</p></article>') +
+      "</div>" +
+      "</div>";
+
+    host.innerHTML =
+      '<div class="intake-console__header">' +
+      '<div class="intake-console__eyebrow">Objective Compiler</div>' +
+      "<h3>" + escapeHtml(headline) + "</h3>" +
+      "<p>Focus " + escapeHtml(focusArea) + " · status " + escapeHtml(statusLabel) + " · active lane " + escapeHtml(activeLabel) + "</p>" +
+      "</div>" +
+      '<div class="intake-console__gates">' +
+      gates
+        .map(function (entry) {
+          return (
+            '<div class="intake-console__gate intake-console__gate--' +
+            entry.tone +
+            '">' +
+            "<strong>" +
+            escapeHtml(entry.label) +
+            "</strong>" +
+            "<span>" +
+            escapeHtml(entry.detail) +
+            "</span>" +
+            "</div>"
+          );
+        })
+        .join("") +
+      "</div>" +
+      blockersHtml +
+      nextActionsHtml +
+      suggestionsHtml +
+      '<div class="intake-console__section">' +
+      '<div class="intake-console__label">Dispatch preview</div>' +
+      '<article class="intake-console__card intake-console__card--preview">' +
+      '<strong>' +
+      escapeHtml(dispatchReady ? (draft.dryRun ? "Dry-run preview ready" : "Dispatch summary ready") : "Seed or write a bounded objective") +
+      "</strong>" +
+      "<p>" +
+      escapeHtml(
+        dispatchReady
+          ? compactIntakeText(draft.objective, 220)
+          : "Use a suggested objective or write one bounded slice of work with a clear definition of done."
+      ) +
+      "</p>" +
+      '<pre class="intake-console__preview">' +
+      escapeHtml(compilerCommandPreview(draft)) +
+      "</pre>" +
+      "</article>" +
+      "</div>";
+  }
+
   function renderStatusStrip() {
+    renderIntakeDesk();
     if (!state.snapshot) {
       els.statusStrip.innerHTML = '<div class="chip"><strong>Loading</strong><span>Waiting for office telemetry.</span></div>';
       return;
@@ -443,10 +699,216 @@
     var pendingTasks = Array.isArray(queue.pending_tasks) ? queue.pending_tasks : [];
     var failedTasks = Array.isArray(queue.failed_tasks) ? queue.failed_tasks : [];
     var quickActions = workbench.quick_actions || {};
+    var controlPlane = state.snapshot.summary || {};
+    var maintain = controlPlane.maintain || {};
+    var runtimeWorkers = controlPlane.runtime_workers || {};
+    var reactionEngine = controlPlane.reaction_engine || {};
+    var autopilot = controlPlane.autopilot || {};
+    var providers = controlPlane.provider_bridge || {};
+    var desktop = controlPlane.desktop_control || {};
+    var patientZero = controlPlane.patient_zero || {};
+    var privilegedAccess = controlPlane.privileged_access || {};
+    var firstBlocker = blockers[0] || null;
+    var firstSuggestion = suggestions[0] || null;
+    var secondSuggestion = suggestions[1] || null;
+    var firstPending = pendingTasks[0] || null;
+    var firstRunning = runningTasks[0] || null;
+    var schedulerReasons = [];
+    var queuePressure = [];
+    var schedulerNow = {
+      title: "Open a bounded objective",
+      detail: "The queue is clear enough to compile one concrete, reviewable slice of work.",
+      actionHtml: suggestions.length
+        ? '<button class="button button--primary" data-intake-seed="0">Seed intake</button>'
+        : "",
+    };
+    var schedulerNext = {
+      title: "Use the intake desk",
+      detail: "Turn a bounded idea into a dispatchable objective with explicit risk and execution mode.",
+      actionHtml: suggestions.length
+        ? '<button class="button" data-intake-seed="0">Seed intake</button>'
+        : "",
+    };
+    var whyNotNow = blockers.length
+      ? blockers.map(function (entry) {
+          return {
+            title: entry.title || entry.kind || "Blocker",
+            detail: entry.detail || "",
+          };
+        })
+      : [
+          {
+            title: "No hard blockers",
+            detail: "The runtime is clear enough to move the next owned slice without a recovery pass first.",
+          },
+        ];
+    var controlPlaneItems = [
+      {
+        label: "Maintain",
+        value: maintain.running ? "running" : "idle",
+        tone: maintain.running ? "good" : "warn",
+        detail: maintain.eval_due ? "eval due" : "eval current",
+      },
+      {
+        label: "Reaction",
+        value: reactionEngine.runtime_running ? "running" : "down",
+        tone: reactionEngine.runtime_running ? "good" : "bad",
+        detail: "runtime engine",
+      },
+      {
+        label: "Workers",
+        value: String(runtimeWorkers.active_count || 0) + " active",
+        tone: (runtimeWorkers.active_count || 0) > 0 ? "good" : "warn",
+        detail: String(runtimeWorkers.session_count || 0) + " sessions",
+      },
+      {
+        label: "Providers",
+        value: String(providers.connected_count || 0) + " connected",
+        tone: (providers.disconnected_count || 0) > 0 ? "warn" : "good",
+        detail: String(providers.disconnected_count || 0) + " disconnected",
+      },
+      {
+        label: "Desktop",
+        value: desktop.enabled ? "enabled" : "disabled",
+        tone: desktop.enabled && desktop.observe_ready && desktop.act_ready ? "good" : desktop.enabled ? "warn" : "bad",
+        detail: (desktop.observe_ready ? "eyes" : "no-eyes") + " / " + (desktop.act_ready ? "hands" : "no-hands"),
+      },
+      {
+        label: "Patient Zero",
+        value: patientZero.enabled ? "armed" : "standby",
+        tone: patientZero.enabled && privilegedAccess.root_execution_ready ? "good" : patientZero.enabled ? "warn" : "neutral",
+        detail: privilegedAccess.root_execution_ready ? "root lane ready" : "root lane manual",
+      },
+      {
+        label: "Autopilot",
+        value: autopilot.running ? "running" : "idle",
+        tone: autopilot.execute_enabled ? "good" : "warn",
+        detail: autopilot.execute_enabled ? "execution armed" : "advisory only",
+      },
+    ];
+    if (blockers.length) {
+      schedulerNow = {
+        title: firstBlocker.title || firstBlocker.kind || "Clear blockers",
+        detail: firstBlocker.detail || "The runtime needs recovery before it should take on more work.",
+        actionHtml:
+          firstBlocker.remediation && firstBlocker.remediation.action
+            ? '<button class="button button--primary" data-blocker-index="0">' + escapeHtml(firstBlocker.remediation.label || "Remediate") + "</button>"
+            : "",
+      };
+      schedulerReasons.push("Blockers outrank new work because the runtime is already carrying unresolved risk.");
+      if (failedTasks.length) {
+        schedulerReasons.push("Failed tasks are consuming execution budget; recover them before opening new surface area.");
+      }
+      schedulerReasons.push("The office should restore control-plane confidence before dispatching fresh work.");
+      if (activeExecution.current_objective) {
+        schedulerNext = {
+          title: "Resume the active lane",
+          detail: activeExecution.current_objective,
+          actionHtml: firstSuggestion
+            ? '<button class="button" data-dispatch-suggestion="0">Dispatch recovery follow-up</button>'
+            : "",
+        };
+      } else if (firstPending) {
+        schedulerNext = {
+          title: "Turn pending queue into owned execution",
+          detail: firstPending.objective || firstPending.task_id || "Use the front of the pending queue as the next bounded slice.",
+          actionHtml: firstSuggestion
+            ? '<button class="button" data-dispatch-suggestion="0">Dispatch queued slice</button>'
+            : "",
+        };
+      }
+    } else if (activeExecution.current_objective && (runningTasks.length > 0 || String(step.status || "").toLowerCase() === "running")) {
+      schedulerNow = {
+        title: activeExecution.current_objective,
+        detail: "Advance the owned execution lane before opening a parallel thread.",
+        actionHtml: firstSuggestion
+          ? '<button class="button button--primary" data-dispatch-suggestion="0">Dispatch next slice</button>'
+          : "",
+      };
+      schedulerReasons.push("An active lane already exists, so forward progress beats opening parallel scope.");
+      if (firstRunning) {
+        schedulerReasons.push("The runtime is already executing " + (firstRunning.objective || firstRunning.task_id || "a running task") + ".");
+      }
+      if (firstPending) {
+        schedulerNext = {
+          title: "Drain the front of the queue",
+          detail: firstPending.objective || firstPending.task_id || "Convert the next queued item into owned execution once the active lane moves.",
+          actionHtml: secondSuggestion
+            ? '<button class="button" data-dispatch-suggestion="1">Queue the follow-on slice</button>'
+            : firstSuggestion
+              ? '<button class="button" data-intake-seed="0">Seed intake from suggestion</button>'
+              : "",
+        };
+      } else if (firstSuggestion) {
+        schedulerNext = {
+          title: firstSuggestion.title || "Open the next bounded slice",
+          detail: firstSuggestion.why || firstSuggestion.objective || "",
+          actionHtml: '<button class="button" data-intake-seed="0">Seed intake</button>',
+        };
+      }
+    } else if (firstPending) {
+      schedulerNow = {
+        title: "Own the front of the pending queue",
+        detail: firstPending.objective || firstPending.task_id || "Clarify and dispatch the next queued item instead of inventing new work.",
+        actionHtml: firstSuggestion
+          ? '<button class="button button--primary" data-dispatch-suggestion="0">Dispatch queued slice</button>'
+          : "",
+      };
+      schedulerReasons.push("Pending work already exists, so the scheduler should convert it into owned execution before expanding scope.");
+      schedulerReasons.push("Queue discipline is the highest-leverage move when the runtime is stable but backlog exists.");
+      schedulerNext = {
+        title: firstSuggestion ? (firstSuggestion.title || "Seed intake from the queue") : "Open a bounded objective",
+        detail: firstSuggestion ? (firstSuggestion.why || firstSuggestion.objective || "") : "Once the pending queue is owned, open the next bounded objective.",
+        actionHtml: firstSuggestion
+          ? '<button class="button" data-intake-seed="0">Seed intake</button>'
+          : "",
+      };
+    } else if (firstSuggestion) {
+      schedulerNow = {
+        title: firstSuggestion.title || "Open the next bounded objective",
+        detail: firstSuggestion.why || firstSuggestion.objective || "The runtime is clear enough to dispatch a fresh bounded slice.",
+        actionHtml: '<button class="button button--primary" data-dispatch-suggestion="0">Dispatch suggested slice</button>',
+      };
+      schedulerReasons.push("No blockers or queue pressure are visible, so the scheduler can safely open fresh bounded work.");
+      schedulerNext = {
+        title: "Stage the follow-on objective",
+        detail: secondSuggestion ? (secondSuggestion.title || secondSuggestion.objective || "") : "Keep the intake desk warm with the next suggestion once the first slice is dispatched.",
+        actionHtml: secondSuggestion
+          ? '<button class="button" data-intake-seed="1">Seed second suggestion</button>'
+          : '<button class="button" data-intake-seed="0">Seed intake</button>',
+      };
+    }
+    if (!schedulerReasons.length) {
+      schedulerReasons.push("The scheduler defaults to the smallest reviewable slice that improves control-plane confidence or execution flow.");
+    }
+    if (failedTasks.length) {
+      queuePressure.push({
+        title: failedTasks.length + " failed",
+        detail: "Recovery work is already queued.",
+      });
+    }
+    if (pendingTasks.length) {
+      queuePressure.push({
+        title: pendingTasks.length + " pending",
+        detail: "Tasks are waiting for ownership or execution.",
+      });
+    }
+    if (runningTasks.length) {
+      queuePressure.push({
+        title: runningTasks.length + " running",
+        detail: "The active lane is already consuming execution capacity.",
+      });
+    }
+    if (!queuePressure.length) {
+      queuePressure.push({
+        title: "Queue is clear",
+        detail: "There is room to open one bounded objective without adding backlog debt.",
+      });
+    }
     els.workbenchView.innerHTML =
       '<div class="workbench-grid">' +
       '<section class="workbench-hero">' +
-      '<div><div class="section-title">Daily Workbench</div><h2>' + escapeHtml(workbench.headline || "No workbench headline available.") + '</h2><p>This view turns live MCP core state into the next concrete move, instead of making you infer it from raw telemetry.</p></div>' +
+      '<div><div class="section-title">Scheduler / Control Plane</div><h2>' + escapeHtml(workbench.headline || "No workbench headline available.") + '</h2><p>This view explains what should run next, what is being held back, and why the control plane picked that order.</p></div>' +
       '<div class="workbench-hero__meta">' +
       '<div class="workbench-status ' + statusClassName + '">' + escapeHtml(String(workbench.status || "ready").toUpperCase()) + '</div>' +
       '<div class="metric"><span>Focus</span><strong>' + escapeHtml(workbench.focus_area || "intake") + '</strong></div>' +
@@ -455,11 +917,48 @@
       "</div>" +
       "</section>" +
       '<section class="workbench-card workbench-card--wide">' +
-      '<div class="section-title">Quick Actions</div>' +
+      '<div class="section-title">What Runs Next and Why</div>' +
+      '<div class="workbench-scheduler">' +
+      '<article class="workbench-scheduler__lane">' +
+      '<span class="workbench-scheduler__eyebrow">Next up</span>' +
+      '<strong>' + escapeHtml(schedulerNow.title) + '</strong>' +
+      '<p>' + escapeHtml(schedulerNow.detail) + '</p>' +
+      '<div class="workbench-scheduler__actions">' + schedulerNow.actionHtml + "</div>" +
+      "</article>" +
+      '<article class="workbench-scheduler__lane">' +
+      '<span class="workbench-scheduler__eyebrow">Runs after</span>' +
+      '<strong>' + escapeHtml(schedulerNext.title) + '</strong>' +
+      '<p>' + escapeHtml(schedulerNext.detail) + '</p>' +
+      '<div class="workbench-scheduler__actions">' + schedulerNext.actionHtml + "</div>" +
+      "</article>" +
+      '<article class="workbench-scheduler__lane">' +
+      '<span class="workbench-scheduler__eyebrow">Control-plane health</span>' +
+      '<div class="workbench-health-grid">' +
+      controlPlaneItems.map(function (entry) {
+        return '<article class="workbench-health workbench-health--' + escapeHtml(entry.tone || "neutral") + '"><span>' + escapeHtml(entry.label || "Signal") + '</span><strong>' + escapeHtml(entry.value || "n/a") + '</strong><small>' + escapeHtml(entry.detail || "") + "</small></article>";
+      }).join("") +
+      "</div>" +
+      "</article>" +
+      "</div>" +
+      '<div class="workbench-scheduler__footer">' +
+      '<div class="workbench-scheduler__stack">' +
+      '<span class="workbench-scheduler__eyebrow">Why not now</span>' +
+      whyNotNow.map(function (entry) {
+        return '<article class="workbench-scheduler__item"><strong>' + escapeHtml(entry.title || "Gate") + '</strong><span>' + escapeHtml(entry.detail || "") + "</span></article>";
+      }).join("") +
+      "</div>" +
+      '<div class="workbench-scheduler__stack">' +
+      '<span class="workbench-scheduler__eyebrow">Queue pressure</span>' +
+      queuePressure.map(function (entry) {
+        return '<article class="workbench-scheduler__item"><strong>' + escapeHtml(entry.title || "Queue") + '</strong><span>' + escapeHtml(entry.detail || "") + "</span></article>";
+      }).join("") +
+      "</div>" +
       '<div class="workbench-actions">' +
       '<button class="button" data-workbench-action="recover_expired_tasks"' + (quickActions.recover_expired_tasks ? "" : " disabled") + '>Recover Expired Tasks</button>' +
       '<button class="button" data-workbench-action="retry_failed_tasks"' + (quickActions.retry_failed_tasks ? "" : " disabled") + '>Retry Failed Tasks</button>' +
       '<button class="button" data-workbench-action="seed_first_suggestion"' + (suggestions.length ? "" : " disabled") + '>Seed First Suggestion</button>' +
+      '<button class="button" data-workbench-action="maintain">Run Maintain</button>' +
+      "</div>" +
       "</div>" +
       "</section>" +
       '<section class="workbench-card">' +
@@ -473,7 +972,7 @@
       "</div>" +
       "</section>" +
       '<section class="workbench-card">' +
-      '<div class="section-title">Queue Shape</div>' +
+      '<div class="section-title">Queue Pressure</div>' +
       '<div class="workbench-stats">' +
       '<article><span>Running</span><strong>' + String(queue.running || 0) + '</strong></article>' +
       '<article><span>Pending</span><strong>' + String(queue.pending || 0) + '</strong></article>' +
@@ -482,8 +981,11 @@
       "</div>" +
       "</section>" +
       '<section class="workbench-card">' +
-      '<div class="section-title">Next Moves</div>' +
+      '<div class="section-title">Why This Order</div>' +
       '<div class="workbench-list">' +
+      schedulerReasons.map(function (entry) {
+        return '<article class="workbench-list__item"><strong>Scheduler rationale</strong><span>' + escapeHtml(entry || "") + "</span></article>";
+      }).join("") +
       nextActions.map(function (entry) {
         return '<article class="workbench-list__item"><strong>' + escapeHtml(entry.label || "Action") + '</strong><span>' + escapeHtml(entry.detail || "") + "</span></article>";
       }).join("") +
@@ -1027,12 +1529,7 @@
 
   function submitIntake(event) {
     event.preventDefault();
-    var objectiveNode = document.querySelector("#intake-objective");
-    var titleNode = document.querySelector("#intake-title");
-    var riskNode = document.querySelector("#intake-risk");
-    var modeNode = document.querySelector("#intake-mode");
-    var dryRunNode = document.querySelector("#intake-dry-run");
-    var objective = objectiveNode ? String(objectiveNode.value || "").trim() : "";
+    var objective = els.intakeObjective ? String(els.intakeObjective.value || "").trim() : "";
     if (!objective) {
       setResultText("Objective required.");
       return;
@@ -1041,14 +1538,15 @@
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        title: titleNode ? String(titleNode.value || "").trim() : "",
+        title: els.intakeTitle ? String(els.intakeTitle.value || "").trim() : "",
         objective: objective,
-        risk: riskNode ? riskNode.value : "medium",
-        mode: modeNode ? modeNode.value : "",
-        dry_run: dryRunNode ? !!dryRunNode.checked : false,
+        risk: els.intakeRisk ? els.intakeRisk.value : "medium",
+        mode: els.intakeMode ? els.intakeMode.value : "",
+        dry_run: els.intakeDryRun ? !!els.intakeDryRun.checked : false,
       }),
     }).then(function (result) {
       setResultText(JSON.stringify(result, null, 2));
+      renderIntakeDesk();
       return fetchSnapshot({ forceLive: true, explicitForceLive: true });
     });
   }
@@ -1065,7 +1563,54 @@
           setResultText(String(error));
         });
       });
+      [els.intakeTitle, els.intakeObjective, els.intakeRisk, els.intakeMode, els.intakeDryRun].forEach(function (node) {
+        if (!node) return;
+        node.addEventListener("input", renderIntakeDesk);
+        node.addEventListener("change", renderIntakeDesk);
+      });
     }
+    document.addEventListener("click", function (event) {
+      var target = event.target;
+      if (!target || !target.closest) return;
+      var seedButton = target.closest("[data-seed-objective-index]");
+      if (seedButton) {
+        var workbench = getWorkbench() || {};
+        var suggestions = Array.isArray(workbench.suggested_objectives) ? workbench.suggested_objectives : [];
+        var suggestion = suggestions[Number(seedButton.getAttribute("data-seed-objective-index"))];
+        if (!suggestion) return;
+        if (els.intakeTitle && !String(els.intakeTitle.value || "").trim()) {
+          els.intakeTitle.value = suggestion.title || "";
+        }
+        if (els.intakeObjective) {
+          els.intakeObjective.value = suggestion.objective || "";
+        }
+        if (els.intakeRisk && suggestion.risk) {
+          els.intakeRisk.value = suggestion.risk;
+        }
+        if (els.intakeMode && typeof suggestion.mode === "string") {
+          els.intakeMode.value = suggestion.mode;
+        }
+        setResultText("Seeded objective from the workbench. Review the dispatch preview, then submit.");
+        renderIntakeDesk();
+        return;
+      }
+      var actionButton = target.closest("[data-workbench-action]");
+      if (actionButton) {
+        var action = actionButton.getAttribute("data-workbench-action") || "";
+        var payloadText = actionButton.getAttribute("data-workbench-payload") || "";
+        var payload = {};
+        if (payloadText) {
+          try {
+            payload = JSON.parse(payloadText);
+          } catch (_error) {
+            payload = {};
+          }
+        }
+        postAction(action, payload).catch(function (error) {
+          setResultText(String(error));
+        });
+      }
+    });
     if (els.intakeMode) {
       els.intakeMode.addEventListener("change", function () {
         state.intakeModeDirty = String(els.intakeMode.value || "").trim().length > 0;
