@@ -113,8 +113,18 @@ function resolveRunRouterSuppression(
     run_id?: string;
     details?: Record<string, unknown>;
     latest_router_suppression?: Record<string, unknown> | null;
+    prefer_existing_run_snapshot?: boolean;
   }
 ) {
+  if (params.prefer_existing_run_snapshot && params.run_id) {
+    const timeline = storage.getRunTimeline(params.run_id, 1000);
+    for (const event of timeline) {
+      const snapshot = extractLatestRouterSuppressionFromDetails(event.details);
+      if (snapshot) {
+        return snapshot;
+      }
+    }
+  }
   if (params.latest_router_suppression) {
     return params.latest_router_suppression;
   }
@@ -204,6 +214,7 @@ export async function runStep(storage: Storage, input: z.infer<typeof runStepSch
         run_id: input.run_id,
         details: input.details,
         latest_router_suppression: input.latest_router_suppression ?? null,
+        prefer_existing_run_snapshot: true,
       });
       const details = attachLatestRouterSuppression(input.details, latestRouterSuppression);
       const event = storage.appendRunEvent({
@@ -250,6 +261,7 @@ export async function runEnd(storage: Storage, input: z.infer<typeof runEndSchem
         run_id: input.run_id,
         details: input.details,
         latest_router_suppression: input.latest_router_suppression ?? null,
+        prefer_existing_run_snapshot: true,
       });
       const details = attachLatestRouterSuppression(input.details, latestRouterSuppression);
       const event = storage.appendRunEvent({
