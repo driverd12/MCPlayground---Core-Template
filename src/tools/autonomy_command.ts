@@ -306,6 +306,92 @@ async function recordSwarmCheckpoint(
   })) as Record<string, unknown>;
 }
 
+function resolveRouterSuppressionReason(selection: ReturnType<typeof routeObjectiveBackends>) {
+  if (selection.auto_bridge_suppressed_for_resource_gate) {
+    return "laptop_pressure" as const;
+  }
+  if (selection.auto_bridge_suppressed_for_missing_local_attempt_evidence) {
+    return "local_evidence_missing" as const;
+  }
+  if (selection.auto_bridge_suppressed_for_local_first) {
+    return "local_first_required" as const;
+  }
+  return null;
+}
+
+function resolveLocalAttemptEvidenceRef(evidence: Record<string, unknown> | null) {
+  if (!evidence) {
+    return null;
+  }
+  return (
+    readString(evidence.artifact_id) ??
+    readString(evidence.note_id) ??
+    readString(evidence.event_id) ??
+    readString(evidence.id) ??
+    null
+  );
+}
+
+async function recordRouterSuppressionDecision(
+  invokeTool: InvokeTool,
+  baseMutation: { idempotency_key: string; side_effect_fingerprint: string },
+  params: {
+    goal_id: string;
+    objective: string;
+    selection: ReturnType<typeof routeObjectiveBackends>;
+    local_attempt_evidence: Record<string, unknown> | null;
+    source_client?: string;
+    source_model?: string;
+    source_agent?: string;
+  }
+) {
+  const suppressionReason = resolveRouterSuppressionReason(params.selection);
+  if (!suppressionReason) {
+    return null;
+  }
+  const selectedBackendId = params.selection.route.selected_backend?.backend_id ?? null;
+  const localEvidenceRef = resolveLocalAttemptEvidenceRef(params.local_attempt_evidence);
+  const resourceGate = params.selection.resource_gate;
+  return (await invokeTool("decision.link", {
+    mutation: deriveMutation(baseMutation, "model-router-suppression-decision"),
+    title: `Model router suppression: ${suppressionReason}`,
+    rationale:
+      suppressionReason === "laptop_pressure"
+        ? "Hosted bridge auto-join was suppressed because the shared laptop resource gate reported unsafe pressure."
+        : suppressionReason === "local_evidence_missing"
+          ? "Hosted bridge auto-join was suppressed until durable evidence of a local-first attempt exists."
+          : "Hosted bridge auto-join was suppressed because the selected backend kept the objective on the local-first lane.",
+    consequences:
+      "The control plane kept the objective on the bounded local lane and did not auto-join hosted bridge agents for this pass.",
+    rollback:
+      suppressionReason === "laptop_pressure"
+        ? "Wait for laptop pressure to drop or reduce local concurrency before retrying hosted escalation."
+        : suppressionReason === "local_evidence_missing"
+          ? "Record a durable local attempt receipt, then rerun the objective if hosted escalation is still needed."
+          : "Explicitly bypass local-first or target hosted bridge agents when the objective truly requires them.",
+    tags: ["model-router", "bridge-suppression", suppressionReason],
+    entity_type: "goal",
+    entity_id: params.goal_id,
+    relation: "supports",
+    details: {
+      kind: "model_router.auto_bridge_suppression",
+      suppression_reason: suppressionReason,
+      objective: params.objective,
+      task_kind: params.selection.task_kind,
+      selected_backend_id: selectedBackendId,
+      preferred_tags: params.selection.preferred_tags,
+      suppressed_agent_ids: params.selection.auto_bridge_suppressed_agent_ids,
+      local_attempt_evidence_ref: localEvidenceRef,
+      resource_gate_severity: resourceGate.severity,
+      resource_gate_reason: params.selection.auto_bridge_resource_gate_reason ?? resourceGate.reason ?? null,
+      observed_at: new Date().toISOString(),
+    },
+    source_client: params.source_client,
+    source_model: params.source_model,
+    source_agent: params.source_agent,
+  })) as Record<string, unknown>;
+}
+
 export async function autonomyCommand(
   storage: Storage,
   invokeTool: InvokeTool,
@@ -428,6 +514,8 @@ export async function autonomyCommand(
         model_router_resource_gate: modelRouterSelection.resource_gate,
         model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence:
           modelRouterSelection.auto_bridge_suppressed_for_missing_local_attempt_evidence,
+        model_router_auto_bridge_suppressed_agent_ids:
+          modelRouterSelection.auto_bridge_suppressed_agent_ids,
         model_router_hosted_bridge_escalation_reason:
           modelRouterSelection.auto_bridge_escalation_reason ?? localFirstRoutingState.hosted_bridge_escalation_reason,
         routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
@@ -498,6 +586,13 @@ export async function autonomyCommand(
       })) as { goal: GoalRecord };
 
       const goalId = createdGoal.goal.goal_id;
+      const routerSuppressionDecision = await recordRouterSuppressionDecision(invokeTool, input.mutation, {
+        goal_id: goalId,
+        objective: input.objective,
+        selection: modelRouterSelection,
+        local_attempt_evidence: localFirstRoutingState.local_attempt_evidence,
+        ...source,
+      });
       const intakeCheckpoint = await recordSwarmCheckpoint(invokeTool, input.mutation, "intake", {
         goal_id: goalId,
         producer_id: "autonomy.command",
@@ -513,6 +608,10 @@ export async function autonomyCommand(
             modelRouterSelection.auto_bridge_resource_gate_reason,
           model_router_auto_bridge_resource_gate_suppressed_agent_ids:
             modelRouterSelection.auto_bridge_resource_gate_suppressed_agent_ids,
+          model_router_auto_bridge_suppressed_agent_ids:
+            modelRouterSelection.auto_bridge_suppressed_agent_ids,
+          model_router_suppression_decision_id:
+            readString(routerSuppressionDecision?.decision_id),
         },
         ...source,
       });
@@ -643,6 +742,7 @@ export async function autonomyCommand(
           specialist_agent_ids: specialistAgentIds,
           support_agent_ids: bridgeReadySupportAgentIds,
           ...modelRouterMetadata,
+          model_router_suppression_decision_id: readString(routerSuppressionDecision?.decision_id),
           dry_run: input.dry_run ?? false,
         },
         ...source,
@@ -661,6 +761,7 @@ export async function autonomyCommand(
         specialists: specialistResolution,
         provider_bridge: providerBridgeStatus,
         model_router: modelRouterSelection,
+        router_suppression_decision: routerSuppressionDecision,
         swarm: {
           profile: effectiveSwarmProfile,
           memory_preflight: memoryPreflight,

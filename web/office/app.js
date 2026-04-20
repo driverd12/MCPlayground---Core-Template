@@ -1222,22 +1222,56 @@
     var runtimeSessions = Array.isArray(state.snapshot.runtime_sessions) ? state.snapshot.runtime_sessions.slice(0, 10) : [];
     var providerBridge = state.snapshot.provider_bridge || {};
     var providerDiagnostics = Array.isArray(providerBridge.diagnostics) ? providerBridge.diagnostics.slice(0, 8) : [];
+    var providerResourceGate = providerBridge.resource_gate || {};
+    var providerResourceGateActive = !!providerResourceGate.active;
+    var providerResourceGateSeverity = String(providerResourceGate.severity || "none").toLowerCase();
+    var providerResourceGateValue = !providerResourceGateActive
+      ? "normal"
+      : providerResourceGateSeverity === "high"
+        ? "critical"
+        : "elevated";
+    var providerResourceGateEffects = [];
+    if (providerResourceGate.recommendations && providerResourceGate.recommendations.suppress_outbound_bridges) {
+      providerResourceGateEffects.push("bridges shed");
+    }
+    if (providerResourceGate.recommendations && providerResourceGate.recommendations.pause_visible_sidecars) {
+      providerResourceGateEffects.push("sidecars paused");
+    }
     var routingHtml = routingOutlook.map(function (entry) {
       return '<div class="metric"><span>' + escapeHtml(entry.task_kind || "n/a") + '</span><strong>' + escapeHtml((entry.selected_backend_id || "n/a") + " -> " + (entry.top_planned_backend_id || "n/a") + "@" + (entry.top_planned_node_id || "n/a")) + "</strong></div>";
     }).join("");
     var sessionsHtml = runtimeSessions.map(function (entry) {
       return '<div class="metric"><span>' + escapeHtml((entry.runtime_id || "n/a") + " · " + (entry.status || "n/a")) + '</span><strong>' + escapeHtml(entry.task_id || entry.runtime_session_id || "n/a") + "</strong></div>";
     }).join("");
+    var providerGateHtml =
+      '<div class="metric"><span>Bridge gate</span><strong>' + escapeHtml(providerResourceGateValue) + "</strong></div>" +
+      '<div class="metric"><span>Gate detail</span><strong>' +
+      escapeHtml(
+        providerResourceGateActive
+          ? compactIntakeText(
+              (providerResourceGate.detail || providerResourceGate.reason || "local pressure detected") +
+                (providerResourceGateEffects.length ? " · " + providerResourceGateEffects.join(" · ") : ""),
+              140
+            )
+          : "bridges available"
+      ) +
+      "</strong></div>" +
+      '<div class="metric"><span>Gate snapshot</span><strong>' +
+      escapeHtml(providerBridge.generated_at ? ("sampled " + relativeTime(providerBridge.generated_at) + " ago") : "n/a") +
+      "</strong></div>";
     var providersHtml = providerDiagnostics.map(function (entry) {
       var label = (entry.display_name || entry.client_id || "provider") + " · " + (entry.status || "n/a");
       var detail = entry.detail || entry.command || "no detail";
+      if (entry.resource_gate_blocked) {
+        detail = [detail, entry.resource_gate_reason || "blocked by local resource gate"].filter(Boolean).join(" · ");
+      }
       return '<div class="metric"><span>' + escapeHtml(label) + '</span><strong>' + escapeHtml(detail) + "</strong></div>";
     }).join("");
     els.workersView.innerHTML =
       '<div class="workers-grid">' +
       '<section class="brief-card"><div class="section-title">Hybrid Routing Outlook</div><div class="metric-list">' + (routingHtml || '<div class="metric"><span>Routing</span><strong>no outlook entries</strong></div>') + "</div></section>" +
       '<section class="brief-card"><div class="section-title">Runtime Sessions</div><div class="metric-list">' + (sessionsHtml || '<div class="metric"><span>Runtime workers</span><strong>no active sessions</strong></div>') + "</div></section>" +
-      '<section class="brief-card"><div class="section-title">Provider Bridges</div><div class="metric-list">' + (providersHtml || '<div class="metric"><span>Provider bridge</span><strong>no diagnostics</strong></div>') + "</div></section>" +
+      '<section class="brief-card"><div class="section-title">Provider Bridges</div><div class="metric-list">' + providerGateHtml + (providersHtml || '<div class="metric"><span>Provider bridge</span><strong>no diagnostics</strong></div>') + "</div></section>" +
       '<section class="brief-card"><div class="section-title">Local Host</div><div class="metric-list">' +
       '<div class="metric"><span>CPU</span><strong>' + Math.round((localHost.cpu_utilization || 0) * 100) + '%</strong></div>' +
       '<div class="metric"><span>RAM</span><strong>' + fmt(localHost.ram_available_gb) + " / " + fmt(localHost.ram_total_gb) + ' GB</strong></div>' +

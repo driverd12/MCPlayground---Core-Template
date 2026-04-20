@@ -771,6 +771,12 @@ export function routeObjectiveBackends(
     suppressAutoBridgeEscalationForResourceGate
       ? []
       : rawRoutedBridgeAgentIds;
+  const suppressedBridgeAgentIds =
+    suppressAutoBridgeEscalation ||
+    suppressAutoBridgeEscalationForMissingLocalAttemptEvidence ||
+    suppressAutoBridgeEscalationForResourceGate
+      ? [...new Set(rawRoutedBridgeAgentIds)]
+      : [];
   const effectiveAgentIds = [
     ...new Set([...explicitAgentIds, ...routedBridgeAgentIds].map((entry) => String(entry ?? "").trim()).filter(Boolean)),
   ];
@@ -793,6 +799,7 @@ export function routeObjectiveBackends(
       suppressAutoBridgeEscalationForResourceGate ? [...new Set(rawRoutedBridgeAgentIds)] : [],
     auto_bridge_suppressed_for_missing_local_attempt_evidence:
       suppressAutoBridgeEscalationForMissingLocalAttemptEvidence,
+    auto_bridge_suppressed_agent_ids: suppressedBridgeAgentIds,
     auto_bridge_escalation_reason: suppressAutoBridgeEscalationForResourceGate
       ? "resource_gate_pressure"
       : suppressAutoBridgeEscalationForMissingLocalAttemptEvidence
