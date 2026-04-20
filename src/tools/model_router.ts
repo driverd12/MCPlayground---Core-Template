@@ -650,6 +650,14 @@ function shouldSuppressAutoBridgeEscalation(
   return selectedBackend.locality === "local" && ["ollama", "mlx", "llama.cpp", "vllm"].includes(provider);
 }
 
+function shouldSuppressAutoBridgeEscalationForMissingLocalAttemptEvidence(
+  routedBridgeAgentIds: string[],
+  localAttemptRecorded: boolean,
+  localAttemptBypassed: boolean
+) {
+  return routedBridgeAgentIds.length > 0 && !localAttemptRecorded && !localAttemptBypassed;
+}
+
 export function routeObjectiveBackends(
   storage: Storage,
   input: {
@@ -663,6 +671,8 @@ export function routeObjectiveBackends(
     fallback_worker_count?: number;
     fallback_shell?: string;
     bridge_margin?: number;
+    local_attempt_recorded?: boolean;
+    local_attempt_bypassed?: boolean;
   }
 ) {
   const taskKind = inferObjectiveTaskKind(input.objective);
@@ -686,12 +696,22 @@ export function routeObjectiveBackends(
   const bridgeMargin =
     typeof input.bridge_margin === "number" && Number.isFinite(input.bridge_margin) ? Math.max(0, input.bridge_margin) : 0.08;
   const explicitAgentIds = normalizeStringArray(input.explicit_agent_ids);
+  const localAttemptRecorded = input.local_attempt_recorded === true;
+  const localAttemptBypassed = input.local_attempt_bypassed === true;
   const suppressAutoBridgeEscalation = shouldSuppressAutoBridgeEscalation(route.selected_backend, preferredTags);
-  const routedBridgeAgentIds = suppressAutoBridgeEscalation
-    ? []
-    : route.ranked_backends
-        .filter((entry) => topScore === null || entry.score >= topScore - bridgeMargin)
-        .flatMap((entry) => resolveBridgeAgentIdsForBackend(entry.backend));
+  const rawRoutedBridgeAgentIds = route.ranked_backends
+    .filter((entry) => topScore === null || entry.score >= topScore - bridgeMargin)
+    .flatMap((entry) => resolveBridgeAgentIdsForBackend(entry.backend));
+  const suppressAutoBridgeEscalationForMissingLocalAttemptEvidence =
+    shouldSuppressAutoBridgeEscalationForMissingLocalAttemptEvidence(
+      rawRoutedBridgeAgentIds,
+      localAttemptRecorded,
+      localAttemptBypassed
+    );
+  const routedBridgeAgentIds =
+    suppressAutoBridgeEscalation || suppressAutoBridgeEscalationForMissingLocalAttemptEvidence
+      ? []
+      : rawRoutedBridgeAgentIds;
   const effectiveAgentIds = [
     ...new Set([...explicitAgentIds, ...routedBridgeAgentIds].map((entry) => String(entry ?? "").trim()).filter(Boolean)),
   ];
@@ -701,7 +721,18 @@ export function routeObjectiveBackends(
     route,
     routed_bridge_agent_ids: [...new Set(routedBridgeAgentIds)],
     effective_agent_ids: effectiveAgentIds,
+    local_attempt_recorded: localAttemptRecorded,
+    local_attempt_bypassed: localAttemptBypassed,
     auto_bridge_suppressed_for_local_first: suppressAutoBridgeEscalation,
+    auto_bridge_suppressed_for_missing_local_attempt_evidence:
+      suppressAutoBridgeEscalationForMissingLocalAttemptEvidence,
+    auto_bridge_escalation_reason: suppressAutoBridgeEscalationForMissingLocalAttemptEvidence
+      ? "local_attempt_required_before_auto_bridge"
+      : localAttemptBypassed
+        ? "local_attempt_bypassed"
+        : localAttemptRecorded
+          ? "local_attempt_recorded"
+          : null,
   };
 }
 

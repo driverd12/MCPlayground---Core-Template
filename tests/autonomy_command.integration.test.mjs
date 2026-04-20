@@ -192,7 +192,7 @@ test("autonomy.command auto-spawns matched SMEs and folds their bounded workstre
   }
 });
 
-test("autonomy.command uses routed bridge candidates to augment research intake without dropping local specialists", async () => {
+test("autonomy.command requires recorded local-first evidence before routed hosted bridges augment research intake", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-command-router-"));
   const dbPath = path.join(tempDir, "hub.sqlite");
   let mutationCounter = 0;
@@ -224,10 +224,74 @@ test("autonomy.command uses routed bridge candidates to augment research intake 
     assert.equal(intake.ok, true);
     assert.ok(intake.model_router);
     assert.equal(intake.model_router.task_kind, "research");
+    assert.equal(intake.model_router.auto_bridge_suppressed_for_missing_local_attempt_evidence, true);
+    assert.deepEqual(intake.model_router.routed_bridge_agent_ids, []);
+    assert.ok(intake.model_router.effective_agent_ids.includes("research-director"));
+    assert.equal(intake.model_router.effective_agent_ids.includes("gemini"), false);
+    assert.equal(intake.goal.metadata.model_router_task_kind, "research");
+    assert.equal(intake.goal.metadata.model_router_local_attempt_recorded, false);
+    assert.equal(intake.goal.metadata.model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence, true);
+    assert.equal(intake.goal.metadata.model_router_hosted_bridge_escalation_reason, "local_attempt_required_before_auto_bridge");
+    assert.deepEqual(intake.goal.metadata.routed_bridge_agent_ids, []);
+  } finally {
+    await session.client.close().catch(() => {});
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("autonomy.command augments research intake with routed hosted bridges after local-first evidence is recorded", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-command-router-escalation-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+  const ollama = await startFakeOllamaServer({
+    models: [{ name: "llama3.2:3b" }],
+  });
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+    TRICHAT_OLLAMA_URL: ollama.url,
+    GOOGLE_API_KEY: "test-gemini-key",
+    TRICHAT_RING_LEADER_AUTOSTART: "1",
+    TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+    TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+    TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+  });
+
+  try {
+    const intake = await callTool(session.client, "autonomy.command", {
+      mutation: nextMutation("autonomy-command-router-escalation", "autonomy.command", () => mutationCounter++),
+      objective: "Research and compare hosted versus local model-routing strategies for tomorrow's presentation.",
+      title: "Research routing escalation intake",
+      metadata: {
+        model_router_local_attempt_recorded: true,
+        model_router_local_attempt_evidence: {
+          backend_id: "ollama-default",
+          outcome: "insufficient_long_context",
+          note: "Local pass completed but could not satisfy the evidence bar for broad hosted comparison.",
+        },
+        model_router_hosted_bridge_escalation_reason: "local_context_insufficient_for_cross-provider_comparison",
+      },
+      trichat_bridge_dry_run: true,
+      dispatch_limit: 12,
+      max_passes: 3,
+    });
+
+    assert.equal(intake.ok, true);
+    assert.ok(intake.model_router);
+    assert.equal(intake.model_router.task_kind, "research");
+    assert.equal(intake.model_router.local_attempt_recorded, true);
+    assert.equal(intake.model_router.auto_bridge_suppressed_for_missing_local_attempt_evidence, false);
     assert.ok(intake.model_router.routed_bridge_agent_ids.includes("gemini"));
     assert.ok(intake.model_router.effective_agent_ids.includes("research-director"));
     assert.ok(intake.model_router.effective_agent_ids.includes("gemini"));
-    assert.equal(intake.goal.metadata.model_router_task_kind, "research");
+    assert.equal(intake.goal.metadata.model_router_local_attempt_recorded, true);
+    assert.equal(intake.goal.metadata.model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence, false);
+    assert.equal(
+      intake.goal.metadata.model_router_hosted_bridge_escalation_reason,
+      "local_attempt_recorded"
+    );
     assert.ok(intake.goal.metadata.routed_bridge_agent_ids.includes("gemini"));
   } finally {
     await session.client.close().catch(() => {});

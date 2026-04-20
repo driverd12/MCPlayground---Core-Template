@@ -149,6 +149,30 @@ function mergeAgentIds(...sources: Array<unknown>) {
   return dedupeStrings(sources.flatMap((value) => (Array.isArray(value) ? value : value == null ? [] : [value])));
 }
 
+function resolveLocalFirstRoutingState(metadata: Record<string, unknown>) {
+  const localAttemptRecorded =
+    readBoolean(metadata.model_router_local_attempt_recorded) === true ||
+    readBoolean(metadata.local_first_attempt_recorded) === true;
+  const localAttemptBypassed =
+    readBoolean(metadata.model_router_local_attempt_bypassed) === true ||
+    readBoolean(metadata.local_first_attempt_bypassed) === true;
+  const localAttemptEvidence = isRecord(metadata.model_router_local_attempt_evidence)
+    ? metadata.model_router_local_attempt_evidence
+    : isRecord(metadata.local_first_attempt_evidence)
+      ? metadata.local_first_attempt_evidence
+      : null;
+  const hostedBridgeEscalationReason =
+    readString(metadata.model_router_hosted_bridge_escalation_reason) ??
+    readString(metadata.local_first_escalation_reason) ??
+    (localAttemptBypassed ? "local_attempt_bypassed" : null);
+  return {
+    local_attempt_recorded: localAttemptRecorded,
+    local_attempt_bypassed: localAttemptBypassed,
+    local_attempt_evidence: localAttemptEvidence,
+    hosted_bridge_escalation_reason: hostedBridgeEscalationReason,
+  };
+}
+
 function filterBridgeReadySupportAgents(
   providerBridgeStatus: Record<string, unknown> | null,
   supportAgentIds: string[]
@@ -302,6 +326,7 @@ export async function autonomyCommand(
       const acceptanceCriteria = input.acceptance_criteria?.length
         ? dedupeStrings(input.acceptance_criteria)
         : defaultAcceptanceCriteria(input.objective);
+      const localFirstRoutingState = resolveLocalFirstRoutingState(intakeMetadata);
 
       const bootstrapResult = (await invokeTool("autonomy.bootstrap", {
         action: input.ensure_bootstrap ? "ensure" : "status",
@@ -365,6 +390,8 @@ export async function autonomyCommand(
         fallback_workspace_root: process.cwd(),
         fallback_worker_count: 1,
         fallback_shell: "/bin/zsh",
+        local_attempt_recorded: localFirstRoutingState.local_attempt_recorded,
+        local_attempt_bypassed: localFirstRoutingState.local_attempt_bypassed,
       });
       const effectiveTriChatAgentIds = modelRouterSelection.effective_agent_ids;
       const swarmProfileResult = (await invokeTool("swarm.profile", {
@@ -426,6 +453,13 @@ export async function autonomyCommand(
           model_router_task_kind: modelRouterSelection.task_kind,
           model_router_preferred_tags: modelRouterSelection.preferred_tags,
           model_router_backend_id: modelRouterSelection.route.selected_backend?.backend_id ?? null,
+          model_router_local_attempt_recorded: modelRouterSelection.local_attempt_recorded,
+          model_router_local_attempt_bypassed: modelRouterSelection.local_attempt_bypassed,
+          model_router_local_attempt_evidence: localFirstRoutingState.local_attempt_evidence,
+          model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence:
+            modelRouterSelection.auto_bridge_suppressed_for_missing_local_attempt_evidence,
+          model_router_hosted_bridge_escalation_reason:
+            modelRouterSelection.auto_bridge_escalation_reason ?? localFirstRoutingState.hosted_bridge_escalation_reason,
           routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
           swarm_profile: effectiveSwarmProfile,
           memory_preflight: memoryPreflight,
@@ -470,6 +504,13 @@ export async function autonomyCommand(
             model_router_task_kind: modelRouterSelection.task_kind,
             model_router_preferred_tags: modelRouterSelection.preferred_tags,
             model_router_backend_id: modelRouterSelection.route.selected_backend?.backend_id ?? null,
+            model_router_local_attempt_recorded: modelRouterSelection.local_attempt_recorded,
+            model_router_local_attempt_bypassed: modelRouterSelection.local_attempt_bypassed,
+            model_router_local_attempt_evidence: localFirstRoutingState.local_attempt_evidence,
+            model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence:
+              modelRouterSelection.auto_bridge_suppressed_for_missing_local_attempt_evidence,
+            model_router_hosted_bridge_escalation_reason:
+              modelRouterSelection.auto_bridge_escalation_reason ?? localFirstRoutingState.hosted_bridge_escalation_reason,
             routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
             swarm_profile: effectiveSwarmProfile,
             memory_preflight: memoryPreflight,
@@ -577,6 +618,12 @@ export async function autonomyCommand(
           specialist_agent_ids: specialistAgentIds,
           support_agent_ids: bridgeReadySupportAgentIds,
           model_router_backend_id: modelRouterSelection.route.selected_backend?.backend_id ?? null,
+          model_router_local_attempt_recorded: modelRouterSelection.local_attempt_recorded,
+          model_router_local_attempt_bypassed: modelRouterSelection.local_attempt_bypassed,
+          model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence:
+            modelRouterSelection.auto_bridge_suppressed_for_missing_local_attempt_evidence,
+          model_router_hosted_bridge_escalation_reason:
+            modelRouterSelection.auto_bridge_escalation_reason ?? localFirstRoutingState.hosted_bridge_escalation_reason,
           routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
           dry_run: input.dry_run ?? false,
         },
