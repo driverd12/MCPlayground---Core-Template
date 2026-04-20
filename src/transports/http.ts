@@ -883,7 +883,12 @@ function normalizedOfficeOrigin(origin: string) {
 function officeEnv(origin: string) {
   return {
     ...process.env,
-    TRICHAT_MCP_TRANSPORT: "http",
+    MCP_HTTP: "0",
+    MCP_BACKGROUND_OWNER: "0",
+    MCP_AUTONOMY_BOOTSTRAP_ON_START: "0",
+    MCP_AUTONOMY_MAINTAIN_ON_START: "0",
+    TRICHAT_RING_LEADER_TRANSPORT: "stdio",
+    TRICHAT_MCP_TRANSPORT: "stdio",
     TRICHAT_MCP_URL: `${origin}/`,
     TRICHAT_MCP_ORIGIN: normalizedOfficeOrigin(origin),
   };
@@ -1664,9 +1669,9 @@ async function maybeHandleOfficeRequest(
     }
     if (body.dry_run === true) {
       args.push("--dry-run");
-      args.push("--no-ensure");
-      args.push("--no-daemon");
     }
+    args.push("--no-ensure");
+    args.push("--no-daemon");
     args.push("--", objective);
     const started = runOfficeActionInBackground("intake", autonomyIngressScript, args.slice(1), {
       cwd: repoRoot,
