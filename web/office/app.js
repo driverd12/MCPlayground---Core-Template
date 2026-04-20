@@ -40,7 +40,7 @@
   };
 
   var MASTER_MOLD_MODE_LABEL = "MASTER-MOLD MODE";
-  var MASTER_MOLD_MODE_BANNER_ASSET = "/office/master-mold-mode-banner.svg?v=20260420b";
+  var MASTER_MOLD_MODE_HERO_ASSET = "/office/master-mold-mode-banner.svg?v=20260420c";
 
   function setBootState(value) {
     if (document.body) {
@@ -140,8 +140,8 @@
     );
   }
 
-  function masterMoldModeBannerMarkup() {
-    return '<img src="' + MASTER_MOLD_MODE_BANNER_ASSET + '" alt="' + MASTER_MOLD_MODE_LABEL + ' banner art" />';
+  function masterMoldModeHeroMarkup() {
+    return '<img src="' + MASTER_MOLD_MODE_HERO_ASSET + '" alt="' + MASTER_MOLD_MODE_LABEL + ' citadel artwork" />';
   }
 
   function getSnapshotAgents() {
@@ -1385,7 +1385,7 @@
     els.patientZeroView.innerHTML =
       '<div class="patient-zero-grid">' +
       '<section class="patient-zero-banner">' +
-      '<div class="patient-zero-banner__hero">' + masterMoldModeBannerMarkup() + '</div>' +
+      '<div class="patient-zero-banner__hero ' + (enabled ? "is-enabled" : "is-disabled") + '">' + masterMoldModeHeroMarkup() + '</div>' +
       '<div class="patient-zero-banner__copy">' +
       '<div class="section-title">Operator-Escalated Local Control</div>' +
       '<h2>' + escapeHtml(posture + " · " + MASTER_MOLD_MODE_LABEL) + '</h2>' +

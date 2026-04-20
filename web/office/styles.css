@@ -987,19 +987,49 @@ textarea {
 .patient-zero-banner {
   padding: 18px;
   display: grid;
-  grid-template-columns: minmax(320px, 440px) minmax(0, 1fr) minmax(220px, 280px);
+  grid-template-columns: minmax(360px, 480px) minmax(0, 1fr) minmax(220px, 280px);
   gap: 18px;
   align-items: stretch;
 }
 
 .patient-zero-banner__hero {
+  position: relative;
   overflow: hidden;
   border-radius: 14px;
   border: 1px solid rgba(114, 230, 221, 0.22);
   background:
     radial-gradient(circle at center, rgba(255, 244, 181, 0.12), transparent 48%),
     rgba(8, 11, 18, 0.76);
-  min-height: 208px;
+  min-height: 228px;
+}
+
+.patient-zero-banner__hero::after {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 2;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+.patient-zero-banner__hero.is-enabled::after {
+  content: "MODE ENABLED";
+  color: #fff4df;
+  border: 1px solid rgba(255, 124, 124, 0.58);
+  background: rgba(90, 17, 35, 0.74);
+  box-shadow: 0 0 24px rgba(255, 72, 72, 0.18);
+}
+
+.patient-zero-banner__hero.is-disabled::after {
+  content: "Standby";
+  color: #d8d5e7;
+  border: 1px solid rgba(114, 230, 221, 0.28);
+  background: rgba(18, 26, 40, 0.68);
 }
 
 .patient-zero-banner__hero img {
@@ -1007,7 +1037,17 @@ textarea {
   height: 100%;
   display: block;
   object-fit: cover;
-  object-position: center;
+  object-position: center 38%;
+  transition: filter 160ms ease, transform 160ms ease;
+}
+
+.patient-zero-banner__hero.is-enabled img {
+  filter: saturate(1.05) brightness(1.04);
+  transform: scale(1.01);
+}
+
+.patient-zero-banner__hero.is-disabled img {
+  filter: saturate(0.42) brightness(0.7);
 }
 
 .patient-zero-banner__copy {

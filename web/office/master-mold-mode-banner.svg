@@ -1,155 +1,113 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
-  <title id="title">MASTER-MOLD mechanized citadel banner</title>
-  <desc id="desc">Banner showing a towering purple mechanized citadel and giant sentinel-like operator figure under a moon, alongside MASTER-MOLD control-plane text and client lanes.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" role="img" aria-labelledby="title desc">
+  <title id="title">MASTER-MOLD MODE citadel hero</title>
+  <desc id="desc">A clean wide hero showing a towering generic sentinel-like robot citadel with glowing eyes under a moonlit sky.</desc>
 
-  <rect width="1200" height="360" fill="#10131c"/>
-  <rect width="1200" height="360" fill="url(#grid)"/>
-  <rect x="34" y="34" width="1132" height="292" rx="18" fill="#141926" stroke="#394058" stroke-width="2"/>
-  <rect x="34" y="34" width="1132" height="292" rx="18" fill="url(#panelSheen)"/>
+  <rect width="1200" height="600" fill="#090d16"/>
+  <rect width="1200" height="600" fill="url(#sky)"/>
+  <rect width="1200" height="600" fill="url(#grid)" opacity="0.38"/>
 
-  <rect x="54" y="58" width="306" height="244" rx="16" fill="url(#sky)" stroke="#48506b" stroke-width="2"/>
-  <rect x="380" y="58" width="760" height="130" rx="16" fill="#171d2a" stroke="#394058" stroke-width="2"/>
-  <rect x="380" y="204" width="760" height="98" rx="16" fill="#171d2a" stroke="#394058" stroke-width="2"/>
+  <circle cx="602" cy="142" r="118" fill="#fff1b1"/>
+  <circle cx="602" cy="142" r="176" fill="#86fff0" opacity="0.16"/>
+  <circle cx="602" cy="142" r="228" fill="#ff5f72" opacity="0.08"/>
 
-  <circle cx="208" cy="112" r="70" fill="#fff4b5" opacity="0.96"/>
-  <circle cx="208" cy="112" r="102" fill="#9ff6ee" opacity="0.16"/>
+  <path d="M0 152 C134 102, 216 120, 318 178 C230 198, 144 218, 0 214 Z" fill="#284a68" opacity="0.82"/>
+  <path d="M880 164 C998 102, 1088 108, 1200 158 L1200 236 C1090 214, 998 212, 880 220 Z" fill="#284a68" opacity="0.78"/>
+  <path d="M0 242 C132 220, 248 240, 344 296 C222 318, 128 330, 0 316 Z" fill="#556383" opacity="0.5"/>
+  <path d="M850 270 C976 222, 1086 228, 1200 272 L1200 348 C1088 344, 990 348, 858 334 Z" fill="#5f4b72" opacity="0.44"/>
 
-  <path d="M56 92 C96 62, 154 70, 188 102 C132 112, 96 126, 56 136 Z" fill="#4d5470" opacity="0.82"/>
-  <path d="M172 82 C212 56, 280 58, 334 96 C294 112, 238 122, 176 118 Z" fill="#2e8184" opacity="0.86"/>
-  <path d="M248 128 C282 110, 326 112, 360 138 L360 176 C322 160, 286 154, 246 154 Z" fill="#555d7a" opacity="0.78"/>
-  <path d="M54 178 C102 156, 162 160, 214 190 C162 206, 106 216, 54 214 Z" fill="#59607c" opacity="0.78"/>
-
-  <g opacity="0.92">
-    <path d="M142 166 L152 148 L168 136 L186 130 L230 130 L246 138 L260 154 L268 172 L268 222 L142 222 Z" fill="#875ca3"/>
-    <path d="M152 156 L164 140 L186 128 L226 128 L246 138 L258 154 L258 178 L152 178 Z" fill="#9162ae"/>
-    <rect x="168" y="106" width="82" height="34" rx="7" fill="#714b8e"/>
-    <rect x="158" y="112" width="12" height="20" rx="4" fill="#8353a3"/>
-    <rect x="248" y="112" width="12" height="20" rx="4" fill="#8353a3"/>
-    <path d="M176 108 L188 100 L228 100 L242 108 L242 118 L176 118 Z" fill="#6a4587"/>
-    <path d="M186 118 L204 112 L222 112 L236 118 L236 140 L182 140 Z" fill="#2d3242"/>
-    <path d="M194 140 L202 130 L220 130 L228 140 L228 164 L194 164 Z" fill="#494f64"/>
-    <rect x="194" y="126" width="10" height="4" rx="2" fill="#f5e86d"/>
-    <rect x="218" y="126" width="10" height="4" rx="2" fill="#f5e86d"/>
-    <rect x="207" y="146" width="8" height="12" rx="3" fill="#1c202e"/>
-    <rect x="180" y="170" width="50" height="12" rx="4" fill="#6e4a8a"/>
-    <rect x="184" y="184" width="42" height="12" rx="4" fill="#6b4788"/>
-    <rect x="192" y="198" width="26" height="24" rx="5" fill="#514562"/>
-  </g>
-
-  <g opacity="0.96">
-    <rect x="76" y="198" width="48" height="84" rx="10" fill="#c08abb"/>
-    <rect x="62" y="214" width="22" height="62" rx="8" fill="#7a6688"/>
-    <rect x="294" y="198" width="48" height="84" rx="10" fill="#c08abb"/>
-    <rect x="334" y="214" width="18" height="62" rx="8" fill="#7a6688"/>
-    <path d="M84 194 L88 184 L106 166 L118 166 L126 176 L116 194 Z" fill="#935db0"/>
-    <path d="M294 194 L304 176 L314 166 L328 166 L340 180 L342 194 Z" fill="#935db0"/>
-    <path d="M74 192 C76 174, 88 160, 106 150" fill="none" stroke="#cf9fd0" stroke-width="6" stroke-linecap="round"/>
-    <path d="M326 150 C344 160, 354 176, 352 196" fill="none" stroke="#cf9fd0" stroke-width="6" stroke-linecap="round"/>
+  <g opacity="0.94">
+    <path d="M54 314 L130 278 L178 292 L178 600 L0 600 L0 368 Z" fill="#4f2b47"/>
+    <path d="M1022 302 L1088 276 L1148 292 L1200 362 L1200 600 L1024 600 Z" fill="#4f2b47"/>
+    <rect x="120" y="324" width="34" height="176" fill="#2a2637"/>
+    <rect x="1042" y="320" width="38" height="188" fill="#2a2637"/>
+    <path d="M118 348 H214" stroke="#7d89a6" stroke-width="6" stroke-linecap="round" opacity="0.38"/>
+    <path d="M992 342 H1080" stroke="#7d89a6" stroke-width="6" stroke-linecap="round" opacity="0.38"/>
+    <rect x="164" y="350" width="18" height="118" fill="#232433"/>
+    <rect x="1096" y="344" width="18" height="124" fill="#232433"/>
   </g>
 
   <g opacity="0.98">
-    <path d="M128 224 L292 224 L312 302 L108 302 Z" fill="#b68cb8"/>
-    <path d="M148 230 L272 230 L286 302 L134 302 Z" fill="#92739f"/>
-    <path d="M166 238 L254 238 L264 302 L156 302 Z" fill="#756785"/>
-    <rect x="158" y="248" width="104" height="54" rx="8" fill="#8f7d87"/>
-    <rect x="188" y="264" width="42" height="38" fill="#090a10"/>
-    <path d="M178 246 L186 230 L194 246" fill="none" stroke="#534960" stroke-width="3"/>
-    <rect x="142" y="248" width="12" height="32" rx="3" fill="#7f7084"/>
-    <rect x="266" y="248" width="12" height="32" rx="3" fill="#7f7084"/>
-    <rect x="148" y="252" width="6" height="12" fill="#61546a"/>
-    <rect x="266" y="252" width="6" height="12" fill="#61546a"/>
-    <path d="M120 290 L140 272 L150 302 Z" fill="#7d6a7d"/>
-    <path d="M300 290 L280 272 L270 302 Z" fill="#7d6a7d"/>
-    <rect x="168" y="238" width="10" height="10" fill="#685774"/>
-    <rect x="182" y="238" width="10" height="10" fill="#685774"/>
-    <rect x="196" y="238" width="10" height="10" fill="#685774"/>
-    <rect x="210" y="238" width="10" height="10" fill="#685774"/>
-    <rect x="224" y="238" width="10" height="10" fill="#685774"/>
-    <rect x="238" y="238" width="10" height="10" fill="#685774"/>
+    <path d="M84 448 C142 336, 252 308, 454 322 L496 380 L448 446 L194 482 Z" fill="#8f2359"/>
+    <path d="M1118 448 C1060 336, 950 308, 748 322 L706 380 L754 446 L1008 482 Z" fill="#8f2359"/>
+    <path d="M120 468 C192 382, 290 362, 430 370 L454 418 L414 478 L198 504 Z" fill="#511b3e"/>
+    <path d="M1080 468 C1008 382, 910 362, 770 370 L746 418 L786 478 L1002 504 Z" fill="#511b3e"/>
+    <rect x="142" y="452" width="70" height="118" rx="24" fill="#e4ba36"/>
+    <rect x="988" y="452" width="70" height="118" rx="24" fill="#e4ba36"/>
   </g>
 
-  <rect x="78" y="74" width="178" height="3" fill="#ff8f7b"/>
-  <rect x="78" y="284" width="178" height="3" fill="#72e6dd"/>
-  <text x="82" y="266" fill="#f1edf7" font-family="Menlo, Monaco, Consolas, monospace" font-size="17" letter-spacing="2">MASTER-MOLD</text>
-  <text x="82" y="286" fill="#72e6dd" font-family="Menlo, Monaco, Consolas, monospace" font-size="12">LOCAL-FIRST CONTROL CITADEL</text>
-
-  <g opacity="0.12">
-    <circle cx="950" cy="112" r="58" fill="#fff4b5"/>
-    <path d="M840 150 C900 92, 980 86, 1086 122 L1086 188 L840 188 Z" fill="#7c5d96"/>
-    <rect x="876" y="116" width="122" height="52" rx="10" fill="#2e3446"/>
+  <g opacity="0.99">
+    <path d="M254 360 L946 360 L1028 600 L172 600 Z" fill="#5d526b"/>
+    <path d="M310 388 L890 388 L944 600 L256 600 Z" fill="#433f56"/>
+    <rect x="488" y="378" width="224" height="132" rx="24" fill="#cabee3"/>
+    <path d="M518 398 H682 L690 412 V494 H510 V412 Z" fill="#dfb837"/>
+    <path d="M392 402 H490 V510 H338 L350 438 Z" fill="#6e6385"/>
+    <path d="M810 402 H708 V510 H862 L850 438 Z" fill="#6e6385"/>
+    <path d="M466 486 L734 486 L778 600 L422 600 Z" fill="#7f7091"/>
+    <rect x="536" y="474" width="128" height="126" fill="#06080d"/>
+    <path d="M536 474 L600 414 L664 474" fill="none" stroke="#9384a7" stroke-width="10" stroke-linejoin="round"/>
+    <rect x="438" y="538" width="52" height="18" rx="8" fill="#584f6e"/>
+    <rect x="710" y="538" width="52" height="18" rx="8" fill="#584f6e"/>
   </g>
 
-  <g transform="translate(404 88)">
-    <text x="0" y="0" fill="#ff9a84" font-family="Menlo, Monaco, Consolas, monospace" font-size="18" letter-spacing="3">MASTER-MOLD</text>
-    <text x="0" y="52" fill="#f6f4fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="52" font-weight="700">SHARED MCP CONTROL PLANE</text>
-    <text x="0" y="92" fill="#d7cee8" font-family="Menlo, Monaco, Consolas, monospace" font-size="26" font-weight="700">DURABLE MEMORY • OFFICE ORCHESTRATION</text>
-    <text x="0" y="124" fill="#aeb1c8" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">LOCAL-FIRST ROUTING • OPERATOR-VISIBLE AI WORK</text>
+  <g opacity="0.95">
+    <rect x="470" y="300" width="260" height="68" rx="18" fill="#2a2434"/>
+    <rect x="502" y="316" width="196" height="38" rx="12" fill="#14131a"/>
+    <rect x="512" y="326" width="56" height="18" rx="8" fill="#5e566d"/>
+    <rect x="632" y="326" width="56" height="18" rx="8" fill="#5e566d"/>
   </g>
 
-  <g transform="translate(404 232)">
-    <text x="0" y="0" fill="#efeaf7" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">CODEX • VISIBLE CLAUDE • CURSOR • OLLAMA • SQLITE • EVENTS</text>
-    <text x="0" y="28" fill="#efeaf7" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">AUTONOMY.INGRESS • MODEL.ROUTER • AGENT OFFICE • LAUNCHD</text>
-    <rect x="0" y="46" width="704" height="2" fill="#404861"/>
-    <text x="0" y="72" fill="#72e6dd" font-family="Menlo, Monaco, Consolas, monospace" font-size="15">MASTER-MOLD MODE is optional. MASTER-MOLD is the durable base system.</text>
+  <g opacity="0.98">
+    <path d="M452 214 C492 128, 548 104, 600 104 C652 104, 708 128, 748 214 L748 288 L452 288 Z" fill="#8a2758"/>
+    <path d="M498 146 L702 146 L748 214 H452 Z" fill="#a53167"/>
+    <path d="M542 112 L658 112 L684 146 H516 Z" fill="#c4468a"/>
+    <path d="M568 88 L632 88 L632 124 L568 124 Z" fill="#a98e2a"/>
+    <path d="M506 162 L536 122 L566 122 L566 154 L544 178 L506 178 Z" fill="#d9b63b"/>
+    <path d="M694 162 L664 122 L634 122 L634 154 L656 178 L694 178 Z" fill="#d9b63b"/>
+    <rect x="432" y="210" width="38" height="108" rx="12" fill="#4b1f3e"/>
+    <rect x="730" y="210" width="38" height="108" rx="12" fill="#4b1f3e"/>
+    <path d="M494 196 H706 L722 214 L694 322 L506 322 L478 214 Z" fill="#2d252f"/>
+    <path d="M520 216 H680 L692 226 L670 300 L530 300 L508 226 Z" fill="#12131a"/>
+    <path d="M562 198 L600 176 L638 198 L632 224 H568 Z" fill="#5d5068"/>
+    <path d="M534 286 L600 244 L666 286 L642 318 H558 Z" fill="#3f3948"/>
+    <path d="M548 230 L582 230 L564 256 L530 256 Z" fill="#ff5f72"/>
+    <path d="M652 230 L618 230 L636 256 L670 256 Z" fill="#ff5f72"/>
+    <rect x="584" y="274" width="32" height="28" rx="8" fill="#05070b"/>
+    <path d="M542 316 H658" stroke="#191b24" stroke-width="16" stroke-linecap="round"/>
   </g>
 
-  <g transform="translate(400 198)">
-    <rect x="0" y="0" width="118" height="84" rx="10" fill="#1b2230" stroke="#4c5470" stroke-width="2"/>
-    <text x="59" y="64" text-anchor="middle" fill="#f5f1fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">codex</text>
-    <rect x="28" y="18" width="62" height="24" rx="6" fill="#6fd5ff" opacity="0.22"/>
-    <rect x="40" y="24" width="38" height="3" fill="#6fd5ff"/>
-    <rect x="40" y="31" width="24" height="3" fill="#6fd5ff"/>
+  <g filter="url(#eyeGlow)">
+    <path d="M548 228 L580 228 L564 252 L530 252 Z" fill="#ff6876"/>
+    <path d="M652 228 L620 228 L636 252 L670 252 Z" fill="#ff6876"/>
   </g>
 
-  <g transform="translate(530 198)">
-    <rect x="0" y="0" width="118" height="84" rx="10" fill="#1b2230" stroke="#4c5470" stroke-width="2"/>
-    <text x="59" y="64" text-anchor="middle" fill="#f5f1fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">claude</text>
-    <rect x="24" y="18" width="70" height="24" rx="6" fill="#ff9a84" opacity="0.22"/>
-    <rect x="38" y="24" width="42" height="3" fill="#ff9a84"/>
-    <rect x="38" y="31" width="28" height="3" fill="#ff9a84"/>
+  <g opacity="0.66" filter="url(#beamGlow)">
+    <path d="M548 238 L458 210" stroke="#ff5466" stroke-width="14" stroke-linecap="round"/>
+    <path d="M652 238 L742 210" stroke="#ff5466" stroke-width="14" stroke-linecap="round"/>
+    <path d="M548 238 L468 248" stroke="#ff5466" stroke-width="10" stroke-linecap="round"/>
+    <path d="M652 238 L732 248" stroke="#ff5466" stroke-width="10" stroke-linecap="round"/>
   </g>
 
-  <g transform="translate(660 198)">
-    <rect x="0" y="0" width="118" height="84" rx="10" fill="#1b2230" stroke="#4c5470" stroke-width="2"/>
-    <text x="59" y="64" text-anchor="middle" fill="#f5f1fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">cursor</text>
-    <rect x="28" y="18" width="62" height="24" rx="6" fill="#96dd95" opacity="0.22"/>
-    <rect x="40" y="24" width="38" height="3" fill="#96dd95"/>
-    <rect x="40" y="31" width="24" height="3" fill="#96dd95"/>
-  </g>
-
-  <g transform="translate(790 198)">
-    <rect x="0" y="0" width="118" height="84" rx="10" fill="#1b2230" stroke="#4c5470" stroke-width="2"/>
-    <text x="59" y="64" text-anchor="middle" fill="#f5f1fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">ollama</text>
-    <rect x="28" y="18" width="62" height="24" rx="6" fill="#ffe280" opacity="0.22"/>
-    <circle cx="50" cy="30" r="6" fill="#ffe280"/>
-    <rect x="60" y="23" width="16" height="4" fill="#ffe280"/>
-    <rect x="60" y="31" width="12" height="4" fill="#ffe280"/>
-  </g>
-
-  <g transform="translate(920 198)">
-    <rect x="0" y="0" width="194" height="84" rx="10" fill="#1b2230" stroke="#4c5470" stroke-width="2"/>
-    <text x="97" y="64" text-anchor="middle" fill="#f5f1fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">sqlite • memory • events</text>
-    <rect x="20" y="18" width="48" height="24" rx="6" fill="#c883c8" opacity="0.22"/>
-    <rect x="78" y="18" width="48" height="24" rx="6" fill="#6fd5ff" opacity="0.18"/>
-    <rect x="136" y="18" width="38" height="24" rx="6" fill="#96dd95" opacity="0.18"/>
-    <rect x="32" y="24" width="24" height="3" fill="#c883c8"/>
-    <rect x="90" y="24" width="24" height="3" fill="#6fd5ff"/>
-    <rect x="146" y="24" width="16" height="3" fill="#96dd95"/>
-  </g>
+  <path d="M0 534 C182 482, 344 486, 600 516 C856 486, 1018 482, 1200 534 L1200 600 L0 600 Z" fill="#05070d" opacity="0.6"/>
 
   <defs>
-    <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
-      <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#1a2130" stroke-width="1"/>
-    </pattern>
-    <linearGradient id="panelSheen" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.03"/>
-      <stop offset="100%" stop-color="#000000" stop-opacity="0.08"/>
-    </linearGradient>
     <linearGradient id="sky" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#48637e"/>
-      <stop offset="45%" stop-color="#32767d"/>
-      <stop offset="70%" stop-color="#5d4f73"/>
-      <stop offset="100%" stop-color="#372b45"/>
+      <stop offset="0%" stop-color="#18263d"/>
+      <stop offset="48%" stop-color="#2b2d56"/>
+      <stop offset="72%" stop-color="#44224a"/>
+      <stop offset="100%" stop-color="#1a1726"/>
     </linearGradient>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24 0 H0 V24" fill="none" stroke="#1c2232" stroke-width="1"/>
+    </pattern>
+    <filter id="eyeGlow" x="-40%" y="-80%" width="180%" height="220%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="beamGlow" x="-20%" y="-50%" width="140%" height="200%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
   </defs>
 </svg>
