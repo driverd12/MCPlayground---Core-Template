@@ -139,6 +139,13 @@ async function readyOk() {
 }
 
 async function officePageOk() {
+  if (
+    await fetchOk(new URL("office/", PROBE_BASE_URL), {
+      timeoutMs: 5000,
+    })
+  ) {
+    return true;
+  }
   const bootstrapUrl = new URL("office/api/bootstrap", PROBE_BASE_URL);
   if (await fetchOk(bootstrapUrl, { timeoutMs: 5000 })) {
     return true;
@@ -154,9 +161,7 @@ async function officePageOk() {
   if (bootstrapOk) {
     return true;
   }
-  return await fetchOk(new URL("office/", PROBE_BASE_URL), {
-    timeoutMs: 5000,
-  });
+  return false;
 }
 
 async function listenerOk() {

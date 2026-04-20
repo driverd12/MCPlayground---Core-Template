@@ -57,7 +57,7 @@ Root-level companion files intentionally left outside `docs/`:
 flowchart TD
   Operator["Operator Surfaces<br/>README / docs / Agent Office GUI / tmux / shell wrappers"] --> Clients["IDE + Terminal Clients<br/>Codex / Claude CLI / Cursor / Gemini CLI / GitHub Copilot CLI / shell sessions / gh"]
   Clients --> Transport["MCP Transport Layer<br/>HTTP / STDIO / launchd / app launchers"]
-  Transport --> Kernel["MCP Kernel Layer<br/>toolRegistry / server.ts / core tools / office snapshot"]
+  Transport --> Kernel["MCP Kernel Layer<br/>toolRegistry / server.ts / core tools / office snapshot / office action-status"]
   Kernel --> Control["Control-Plane Layer<br/>goal.* / plan.* / task.* / kernel.summary / operator.brief / tool.search / permission.profile / warm.cache / feature.flag / budget.ledger"]
   Kernel --> Autonomy["Autonomy Fabric Layer<br/>autonomy.maintain / autonomy.command / goal.autorun / reaction.engine / eval / optimizer"]
   Kernel --> Orchestration["Orchestration Fabric Layer<br/>office council / tmux controller / runtime.worker / worker.fabric / model.router / provider.bridge"]
@@ -81,7 +81,7 @@ flowchart TD
   Kernel --> Control["Execution Control Plane<br/>goal.* / plan.* / dispatch.autorun / goal.autorun* / playbook.*"]
   Kernel --> Worker["Durable Worker Ops<br/>agent.session.* / agent.claim_next / agent.report_result / task.* / run.* / lock.* / event.*"]
   Kernel --> Evidence["Evidence + Governance<br/>artifact.* / experiment.* / policy.evaluate / preflight.check / postflight.verify / adr.create / decision.link / incident.*"]
-  Kernel --> Office["Office + Orchestration Ops<br/>trichat.thread* / trichat.turn* / trichat.autopilot / trichat.tmux_controller / trichat.bus / trichat.adapter_telemetry / trichat.slo / trichat.chaos"]
+  Kernel --> Office["Office + Orchestration Ops<br/>trichat.thread* / trichat.turn* / trichat.autopilot / trichat.tmux_controller / trichat.bus / trichat.adapter_telemetry / trichat.slo / trichat.chaos / office action-status"]
   Kernel --> Health["Runtime + Recovery<br/>kernel.summary / health.* / migration.status / backups / corruption quarantine"]
   Kernel --> Learning["Bounded Agent Learning<br/>agent.learning_* / mentorship notes / MCP memory / ADR trail"]
 

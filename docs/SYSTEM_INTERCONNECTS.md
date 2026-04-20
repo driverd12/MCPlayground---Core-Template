@@ -137,7 +137,7 @@ The local adapter lane is now split into seven explicit phases: `prepare -> trai
 flowchart TD
   Surface["Surface Layer<br/>README / docs / GUI / TUI / apps / shell wrappers"] --> Client["Client Layer<br/>Codex / Claude CLI / Cursor / Gemini CLI / GitHub Copilot CLI / terminal sessions / gh"]
   Client --> Transport["Transport Layer<br/>HTTP / STDIO / launchd / app launchers"]
-  Transport --> Kernel["Kernel Layer<br/>server.ts / tool registry / MCP handlers / office snapshot"]
+  Transport --> Kernel["Kernel Layer<br/>server.ts / tool registry / MCP handlers / office snapshot / office action-status"]
   Kernel --> Control["Control-Plane Layer<br/>goal.* / plan.* / task.* / operator.brief / kernel.summary"]
   Kernel --> Policy["Governance Layer<br/>policy / preflight / postflight / ADR / decisions / incidents"]
   Kernel --> Autonomy["Autonomy Fabric Layer<br/>autonomy.maintain / autonomy.command / goal.autorun / eval / optimizer"]
@@ -344,7 +344,7 @@ flowchart TD
   Maintain --> Audit
   Autopilot --> Audit
 
-  Audit --> Office["Agent Office GUI / operator.brief / kernel.summary"]
+  Audit --> Office["Agent Office GUI / operator.brief / kernel.summary / office action-status"]
 ```
 
 ## 7. Operational Notes
@@ -352,7 +352,9 @@ flowchart TD
 - `/ready` is the authoritative HTTP readiness gate for the office launcher and automation wrappers.
 - `/health` is intentionally cheap and only proves that the listener is alive.
 - `/office/api/snapshot` serves cached snapshots by default and uses explicit live refreshes sparingly to avoid saturating the daemon.
+- `/office/api/action-status` is the live rally/dispatch truth surface for the office. The GUI now treats it as authoritative while a background intake or action is still running, then falls back to snapshot telemetry once that action settles.
 - The launchd HTTP runner sets `MCP_HTTP_OFFICE_SNAPSHOT_REFRESH_MODE=stdio`, but the office GUI now prefers a direct raw-snapshot-to-GUI transform when that lane is available and only falls back to the nested STDIO child when it must. This keeps the operator surface alive when the child lane is noisy or slow.
+- Office actions no longer depend on an immediate post-submit snapshot refresh. The GUI now renders running action state directly and lets the normal refresh cadence pull updated snapshot telemetry after settlement.
 - `scripts/agent_office_gui.mjs` is the cross-platform office launcher path for macOS, Linux, and win32. It prefers launchd on macOS when available and falls back to the detached Node HTTP runner everywhere else.
 - `Agent Office.app` and `Agentic Suite.app` are thin installed wrappers that invoke the Node launchers; they do not bypass the launcher logic or talk to the MCP HTTP listener directly.
 - `scripts/agentic_suite_launch.mjs` is the cross-platform suite/app launcher. It first ensures the office surface is available, then tries requested IDE windows, then reuses the office launcher for browser fallback, while `status` emits machine-readable readiness with next actions.

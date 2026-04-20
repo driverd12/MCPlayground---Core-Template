@@ -12,6 +12,7 @@
     patientZeroLastSavedNote: "",
     intakeModeDirty: false,
     intakeTargetAgentIds: [],
+    officeActions: {},
   };
 
   var els = {
@@ -541,6 +542,7 @@
     var desktop = summary.desktop_control || {};
     var patientZero = summary.patient_zero || {};
     var privilegedAccess = summary.privileged_access || {};
+    var officeAction = activeOfficeActionState();
     var chips = [];
     if (state.snapshot.errors && state.snapshot.errors.length) {
       chips.push(["Snapshot", String(state.snapshot.errors.length) + " partial errors"]);
@@ -552,6 +554,14 @@
       ["Router", String(router.default_backend_id || "n/a") + " | " + (liveBackend.probe_model_loaded ? "warm" : "cold") + " | " + fmt(liveBackend.latency_ms_p50, 0) + " ms"],
       ["Autopilot", (autopilot.running ? "running" : "idle") + " | exec " + (autopilot.execute_enabled ? "armed" : "advisory") + " | " + String(autopilot.last_execution_mode || "none")],
       ["Workers", "active " + String(runtimeWorkers.active_count || 0) + " | sessions " + String(runtimeWorkers.session_count || 0)],
+      [
+        "Office Action",
+        officeAction
+          ? String(officeAction.action || "action") +
+            " | running | " +
+            (officeAction.startedAt ? relativeTime(officeAction.startedAt) + " ago" : "n/a")
+          : "idle"
+      ],
       ["Maintain", (maintain.running ? "running" : "idle") + " | eval_due " + (maintain.eval_due ? "yes" : "no")],
       ["Providers", "connected " + String(providers.connected_count || 0) + " | disconnected " + String(providers.disconnected_count || 0)],
       [
@@ -752,6 +762,7 @@
       }),
     }).then(function (result) {
       setResultText(JSON.stringify(result, null, 2));
+      rememberOfficeActionResult("intake", result);
       waitForActionToSettle("intake", 1500);
       return result;
     });
@@ -1534,9 +1545,14 @@
 
   function renderSubtitle() {
     if (els.subtitle) {
-      els.subtitle.textContent = state.snapshot
+      var actionState = activeOfficeActionState();
+      var subtitle = state.snapshot
         ? "Thread " + state.snapshot.thread_id + " · data age " + relativeTime(state.snapshot.fetched_at_iso)
         : "Connecting to live MCP operator surface";
+      if (actionState && actionState.running) {
+        subtitle += " · " + actionState.action + " running " + relativeTime(actionState.startedAt) + " ago";
+      }
+      els.subtitle.textContent = subtitle;
     }
   }
 
@@ -1607,6 +1623,45 @@
     return getJson("/office/api/action-status?" + params.toString());
   }
 
+  function storeOfficeActionState(action, nextState) {
+    if (!action) {
+      return;
+    }
+    if (!nextState) {
+      delete state.officeActions[action];
+    } else {
+      state.officeActions[action] = nextState;
+    }
+    renderSubtitle();
+    renderStatusStrip();
+  }
+
+  function rememberOfficeActionResult(action, result) {
+    if (!action || !result || result.accepted !== true) {
+      return;
+    }
+    storeOfficeActionState(action, {
+      action: action,
+      startedAt: result.started_at || new Date().toISOString(),
+      completedAt: null,
+      running: true,
+      code: null,
+      stdout: "",
+      stderr: "",
+    });
+  }
+
+  function activeOfficeActionState() {
+    var actionIds = Object.keys(state.officeActions || {});
+    for (var i = 0; i < actionIds.length; i += 1) {
+      var entry = state.officeActions[actionIds[i]];
+      if (entry && entry.running) {
+        return entry;
+      }
+    }
+    return null;
+  }
+
   function settleActionRefresh() {
     fetchSnapshot().catch(function (error) {
       setResultText(String(error));
@@ -1628,18 +1683,19 @@
     function poll() {
       fetchActionStatus(action)
         .then(function (payload) {
-          var state = payload && payload.state ? payload.state : null;
-          if (!state) {
+          var actionState = payload && payload.state ? payload.state : null;
+          if (!actionState) {
             scheduleNextPoll();
             return;
           }
-          if (state.running) {
+          storeOfficeActionState(action, actionState);
+          if (actionState.running) {
             setResultText(action + " is still running.");
             scheduleNextPoll();
             return;
           }
-          if (typeof state.code === "number" && state.code !== 0) {
-            setResultText(action + " failed: " + String(state.stderr || state.code));
+          if (typeof actionState.code === "number" && actionState.code !== 0) {
+            setResultText(action + " failed: " + String(actionState.stderr || actionState.code));
             return;
           }
           setResultText(action + " complete.");
@@ -1732,6 +1788,9 @@
     var refreshSeconds = state.bootstrap && state.bootstrap.refresh_interval_seconds ? Number(state.bootstrap.refresh_interval_seconds) : 2;
     var intervalMs = Math.max(2000, refreshSeconds * 1000);
     state.refreshHandle = setInterval(function () {
+      if (activeOfficeActionState()) {
+        return;
+      }
       fetchSnapshot().catch(function (error) {
         setResultText("Snapshot refresh degraded: " + String(error));
         if (!state.snapshot) {
@@ -1755,6 +1814,7 @@
         state.patientZeroNoteDirty = false;
       }
       setResultText(JSON.stringify(result, null, 2));
+      rememberOfficeActionResult(action, result);
       waitForActionToSettle(action, 1000);
       return result;
     });
@@ -1781,6 +1841,7 @@
     }).then(function (result) {
       setResultText(JSON.stringify(result, null, 2));
       renderIntakeDesk();
+      rememberOfficeActionResult("intake", result);
       waitForActionToSettle("intake", 1500);
       return result;
     });
