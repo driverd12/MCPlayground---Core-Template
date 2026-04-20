@@ -85,6 +85,10 @@ resolve_call_transport() {
     printf '%s\n' "${TRICHAT_MCP_TRANSPORT}"
     return 0
   fi
+  if [[ "${ACTION}" == "status" || "${ACTION}" == "diagnose" ]]; then
+    printf 'stdio\n'
+    return 0
+  fi
   if [[ -n "${MCP_HTTP_BEARER_TOKEN:-}" ]]; then
     if node ./scripts/mcp_tool_call.mjs \
       --tool health.storage \

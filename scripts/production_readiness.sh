@@ -315,14 +315,49 @@ if (profile.accelerator_kind !== "none" && !profile.full_gpu_access) {
 NODE
 
 if [[ "${TRICHAT_MLX_SERVER_ENABLED:-0}" == "1" && -n "${TRICHAT_MLX_ENDPOINT:-}" ]]; then
-  MLX_HEALTH="$(
-    curl -fsS \
-      "${TRICHAT_MLX_ENDPOINT%/}/health"
-  )"
-  MLX_MODELS="$(
-    curl -fsS \
-      "${TRICHAT_MLX_ENDPOINT%/}/v1/models"
-  )"
+  node ./scripts/run_sh.mjs ./scripts/agents_switch.sh status > "${TMP_DIR}/agents-status.json"
+  python3 - "${TMP_DIR}/agents-status.json" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+launchd = data.get("launchd") or {}
+loaded = bool(launchd.get("mlx_loaded"))
+disabled = bool(launchd.get("mlx_disabled"))
+plist_current = bool(launchd.get("mlx_plist_current"))
+operational = bool(launchd.get("mlx_operational"))
+plist = launchd.get("mlx_plist") or "n/a"
+print(
+    "[production] mlx launchd: "
+    f"loaded={loaded} "
+    f"disabled={disabled} "
+    f"plist_current={plist_current} "
+    f"operational={operational} "
+    f"plist={plist}"
+)
+if not plist_current:
+    raise SystemExit("mlx launchd plist is missing or stale")
+if disabled:
+    raise SystemExit("mlx launchd agent is disabled")
+if not loaded:
+    raise SystemExit(f"mlx launchd agent is not loaded ({plist})")
+PY
+  MLX_HEALTH=""
+  MLX_MODELS=""
+  for _attempt in $(seq 1 15); do
+    if MLX_HEALTH="$(curl -fsS "${TRICHAT_MLX_ENDPOINT%/}/health" 2>/dev/null)" && \
+      MLX_MODELS="$(curl -fsS "${TRICHAT_MLX_ENDPOINT%/}/v1/models" 2>/dev/null)"; then
+      break
+    fi
+    MLX_HEALTH=""
+    MLX_MODELS=""
+    sleep 1
+  done
+  if [[ -z "${MLX_HEALTH}" || -z "${MLX_MODELS}" ]]; then
+    echo "mlx launchd agent is loaded but ${TRICHAT_MLX_ENDPOINT%/} did not become healthy in time" >&2
+    exit 1
+  fi
   python3 - "${TRICHAT_MLX_ENDPOINT%/}" "${MLX_HEALTH}" "${MLX_MODELS}" <<'PY'
 import json
 import sys
@@ -714,6 +749,42 @@ PY
 test -d "/Applications/Agent Office.app"
 echo "[production] app launcher: /Applications/Agent Office.app present"
 
+node ./scripts/agentic_suite_launch.mjs status > "${TMP_DIR}/office-suite-status.json"
+python3 - "${TMP_DIR}/office-suite-status.json" "${TMP_DIR}/office-suite-mode.txt" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+office = data.get("office") or {}
+mode = str((office.get("mode") if isinstance(office, dict) else None) or data.get("mode") or "unknown")
+health = bool((office.get("health") if isinstance(office, dict) else None) if isinstance(office, dict) else data.get("health"))
+office_ready = bool(
+    (office.get("office_ready") if isinstance(office, dict) else None)
+    if isinstance(office, dict)
+    else data.get("office_ready")
+)
+launchable = bool(
+    (office.get("launchable") if isinstance(office, dict) else None)
+    if isinstance(office, dict)
+    else data.get("launchable")
+)
+pathlib.Path(sys.argv[2]).write_text(mode)
+print(
+    "[production] office suite: "
+    f"mode={mode} "
+    f"health={health} "
+    f"office_ready={office_ready} "
+    f"launchable={launchable}"
+)
+if not data.get("ok"):
+    raise SystemExit("agentic suite status did not report ok")
+if not health:
+    raise SystemExit("agentic suite listener is not healthy")
+if not office_ready or not launchable:
+    raise SystemExit("agentic suite office surface is not ready")
+PY
+
 "${REPO_ROOT}/scripts/agents_switch.sh" status > "${TMP_DIR}/agents-status.json"
 python3 - "${TMP_DIR}/agents-status.json" <<'PY'
 import json
@@ -742,16 +813,20 @@ if not operational:
 PY
 
 OFFICE_SESSION_NAME="$(cat "${TMP_DIR}/office-session-name.txt")"
-tmux has-session -t "${OFFICE_SESSION_NAME}"
-WINDOWS="$(tmux list-windows -t "${OFFICE_SESSION_NAME}" -F '#{window_name}')"
-echo "${WINDOWS}" | grep -qx 'office'
-echo "${WINDOWS}" | grep -qx 'briefing'
-echo "${WINDOWS}" | grep -qx 'lanes'
-echo "${WINDOWS}" | grep -qx 'workers'
-printf "[production] tmux windows (%s):\n%s\n" "${OFFICE_SESSION_NAME}" "${WINDOWS}"
+OFFICE_SUITE_MODE="$(cat "${TMP_DIR}/office-suite-mode.txt")"
+if [[ "${OFFICE_SUITE_MODE}" == "launchd" ]]; then
+  echo "[production] tmux session: skipped in launchd mode (${OFFICE_SESSION_NAME})"
+else
+  tmux has-session -t "${OFFICE_SESSION_NAME}"
+  WINDOWS="$(tmux list-windows -t "${OFFICE_SESSION_NAME}" -F '#{window_name}')"
+  echo "${WINDOWS}" | grep -qx 'office'
+  echo "${WINDOWS}" | grep -qx 'briefing'
+  echo "${WINDOWS}" | grep -qx 'lanes'
+  echo "${WINDOWS}" | grep -qx 'workers'
+  printf "[production] tmux windows (%s):\n%s\n" "${OFFICE_SESSION_NAME}" "${WINDOWS}"
 
-call_http trichat.tmux_controller '{"action":"status"}' > "${TMP_DIR}/tmux.json"
-python3 - "${TMP_DIR}/tmux.json" <<'PY'
+  call_http trichat.tmux_controller '{"action":"status"}' > "${TMP_DIR}/tmux.json"
+  python3 - "${TMP_DIR}/tmux.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -765,5 +840,6 @@ print(
     f"queue_age_seconds={dashboard.get('queue_age_seconds')}"
 )
 PY
+fi
 
 echo "[production] readiness: PASS"

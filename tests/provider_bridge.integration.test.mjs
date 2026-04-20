@@ -839,6 +839,80 @@ test("provider.bridge diagnose refreshes stale cache automatically over stdio", 
   }
 });
 
+test("provider.bridge status self-heals stale runtime truth over stdio after live diagnose", { concurrency: false, timeout: 45_000 }, async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-provider-bridge-status-stale-runtime-truth-"));
+  const homeDir = path.join(tempDir, "home");
+  const binDir = path.join(tempDir, "bin");
+  fs.mkdirSync(homeDir, { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+  createFakeClaudeCli(path.join(binDir, "claude"));
+  fs.writeFileSync(path.join(homeDir, ".claude.json"), JSON.stringify({ mcpServers: {} }, null, 2));
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: path.join(tempDir, "hub.sqlite"),
+    HOME: homeDir,
+    PATH: `${binDir}:${process.env.PATH || ""}`,
+    MCP_HTTP_BEARER_TOKEN: "provider-bridge-status-stale-runtime-truth-token",
+    TRICHAT_MCP_URL: "http://127.0.0.1:8787/",
+    TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
+    PROVIDER_BRIDGE_DIAGNOSTICS_CACHE_SECONDS: "1",
+  });
+
+  try {
+    const initialStatus = await callTool(session.client, "provider.bridge", {
+      action: "status",
+      clients: ["claude-cli"],
+      workspace_root: tempDir,
+    });
+    assert.equal(initialStatus.ok, true);
+    assert.equal(initialStatus.clients[0].installed, false);
+
+    const install = await callTool(session.client, "provider.bridge", {
+      action: "install",
+      mutation: nextMutation("provider-bridge", "install-claude-status-self-heal", () => 0),
+      transport: "http",
+      workspace_root: tempDir,
+      clients: ["claude-cli"],
+    });
+    assert.equal(install.ok, true);
+
+    const diagnose = await callTool(session.client, "provider.bridge", {
+      action: "diagnose",
+      clients: ["claude-cli"],
+      probe_timeout_ms: 1000,
+      workspace_root: tempDir,
+    });
+    assert.equal(diagnose.ok, true);
+    assert.equal(diagnose.cached, false);
+    assert.equal(diagnose.diagnostics[0].status, "connected");
+
+    await new Promise((resolve) => setTimeout(resolve, 5_500));
+
+    const healedStatus = await callTool(session.client, "provider.bridge", {
+      action: "status",
+      clients: ["claude-cli"],
+      workspace_root: tempDir,
+      probe_timeout_ms: 1000,
+    });
+    assert.equal(healedStatus.ok, true);
+    assert.equal(healedStatus.onboarding.stale_runtime_checks, false);
+    assert.equal(healedStatus.clients[0].installed, true);
+    assert.equal(healedStatus.outbound_council_agents[0].runtime_ready, true);
+    assert.equal(healedStatus.router_backend_candidates[0].eligible, true);
+    assert.equal(healedStatus.router_backend_candidates[0].backend.metadata.runtime_ready, true);
+    assert.equal(healedStatus.router_backend_candidates[0].backend.metadata.runtime_ready_stale, false);
+    assert.match(
+      healedStatus.router_backend_candidates[0].backend.metadata.runtime_ready_source,
+      /^provider_bridge_diagnostics_(cache|live)$/
+    );
+    assert.equal(healedStatus.onboarding.entries[0].runtime_status, "connected");
+    assert.equal(healedStatus.onboarding.entries[0].ready, true);
+  } finally {
+    await session.client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("provider.bridge over HTTP: /health stays responsive during status calls and force_live is rejected", { concurrency: false, timeout: 60_000 }, async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-provider-bridge-http-health-"));
   const dbPath = path.join(tempDir, "hub.sqlite");

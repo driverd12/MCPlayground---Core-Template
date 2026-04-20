@@ -393,7 +393,12 @@ export function applyProviderBridgeDiagnosticsToSnapshot(
         metadata: {
           ...entry.backend.metadata,
           runtime_ready: entry.eligible && runtimeReady,
-          runtime_ready_source: diagnosticsState.cached ? "provider_bridge_diagnostics_cache" : "provider_bridge_diagnostics_missing",
+          runtime_ready_source:
+            diagnosticsState.diagnostics.length > 0
+              ? diagnosticsState.cached
+                ? "provider_bridge_diagnostics_cache"
+                : "provider_bridge_diagnostics_live"
+              : "provider_bridge_diagnostics_missing",
           runtime_ready_stale: diagnosticsState.stale === true,
         },
       },
@@ -1585,11 +1590,7 @@ function buildClientStatusesCached(
   transport: ProviderBridgeTransportConfig,
   serverName: string
 ): ProviderBridgeClientStatus[] {
-  const cacheKey = JSON.stringify({
-    workspaceRoot,
-    serverName,
-    transportMode: transport.mode,
-  });
+  const cacheKey = providerBridgeStatusCacheKey(workspaceRoot, transport, serverName);
   const cached = providerBridgeStatusCache.get(cacheKey);
   const ttlMs = providerBridgeStatusCacheTtlMs();
   if (cached && Date.now() - cached.captured_at <= ttlMs) {
@@ -1601,11 +1602,32 @@ function buildClientStatusesCached(
     return cached.statuses;
   }
   const statuses = buildClientStatuses(workspaceRoot, transport, serverName);
-  providerBridgeStatusCache.set(cacheKey, {
+  cacheProviderBridgeStatuses(workspaceRoot, transport, serverName, statuses);
+  return statuses;
+}
+
+function providerBridgeStatusCacheKey(
+  workspaceRoot: string,
+  transport: ProviderBridgeTransportConfig,
+  serverName: string
+) {
+  return JSON.stringify({
+    workspaceRoot,
+    serverName,
+    transportMode: transport.mode,
+  });
+}
+
+function cacheProviderBridgeStatuses(
+  workspaceRoot: string,
+  transport: ProviderBridgeTransportConfig,
+  serverName: string,
+  statuses: ProviderBridgeClientStatus[]
+) {
+  providerBridgeStatusCache.set(providerBridgeStatusCacheKey(workspaceRoot, transport, serverName), {
     captured_at: Date.now(),
     statuses,
   });
-  return statuses;
 }
 
 function resolveOutboundBridgeReady(agentId: string | null) {
@@ -2198,6 +2220,9 @@ export function resolveProviderBridgeDiagnostics(
   const statuses = input.bypass_cache || refreshStaleCacheLive
     ? buildClientStatuses(workspaceRoot, transport, serverName)
     : buildClientStatusesCached(workspaceRoot, transport, serverName);
+  if (input.bypass_cache || refreshStaleCacheLive) {
+    cacheProviderBridgeStatuses(workspaceRoot, transport, serverName, statuses);
+  }
   const diagnostics = runProviderDiagnostics(workspaceRoot, serverName, statuses, input.probe_timeout_ms ?? 5000);
   providerBridgeDiagnosticCache.set(cacheKey, {
     captured_at: Date.now(),
@@ -2467,7 +2492,7 @@ export async function providerBridge(
   input: z.infer<typeof providerBridgeSchema>
 ) {
   const execute = async () => {
-    const snapshot = resolveProviderBridgeSnapshot({
+    let snapshot = resolveProviderBridgeSnapshot({
       storage: _storage,
       workspace_root: input.workspace_root,
       transport: input.transport,
@@ -2487,7 +2512,7 @@ export async function providerBridge(
     const selectedRouterBackends = snapshot.router_backend_candidates.filter((entry) => clients.includes(entry.client_id));
 
     if (input.action === "status") {
-      const diagnostics = resolveProviderBridgeDiagnosticsCached({
+      let diagnostics = resolveProviderBridgeDiagnosticsCached({
         workspace_root: input.workspace_root,
         transport: input.transport,
         http_url: input.http_url,
@@ -2498,7 +2523,32 @@ export async function providerBridge(
         server_name: input.server_name,
         probe_timeout_ms: input.probe_timeout_ms,
       });
+      if (allowSyncCliProbe() && (diagnostics.stale === true || diagnostics.diagnostics.length === 0)) {
+        diagnostics = resolveProviderBridgeDiagnostics({
+          workspace_root: input.workspace_root,
+          transport: input.transport,
+          http_url: input.http_url,
+          http_origin: input.http_origin,
+          stdio_command: input.stdio_command,
+          stdio_args: input.stdio_args,
+          db_path: input.db_path,
+          server_name: input.server_name,
+          probe_timeout_ms: input.probe_timeout_ms,
+        });
+        snapshot = resolveProviderBridgeSnapshot({
+          storage: _storage,
+          workspace_root: input.workspace_root,
+          transport: input.transport,
+          http_url: input.http_url,
+          http_origin: input.http_origin,
+          stdio_command: input.stdio_command,
+          stdio_args: input.stdio_args,
+          db_path: input.db_path,
+          server_name: input.server_name,
+        });
+      }
       const truthySnapshot = applyProviderBridgeDiagnosticsToSnapshot(snapshot, diagnostics);
+      const selectedStatus = truthySnapshot.clients.filter((entry) => clients.includes(entry.client_id));
       const selectedDiagnostics = diagnostics.diagnostics.filter((entry) => clients.includes(entry.client_id));
       const selectedRouterBackends = truthySnapshot.router_backend_candidates.filter((entry) => clients.includes(entry.client_id));
       const onboarding = buildProviderBridgeOnboardingSummary({
@@ -2549,6 +2599,20 @@ export async function providerBridge(
         bypass_cache: forceLive,
         probe_timeout_ms: input.probe_timeout_ms,
       });
+      if (diagnostics.cached === false) {
+        snapshot = resolveProviderBridgeSnapshot({
+          storage: _storage,
+          workspace_root: input.workspace_root,
+          transport: input.transport,
+          http_url: input.http_url,
+          http_origin: input.http_origin,
+          stdio_command: input.stdio_command,
+          stdio_args: input.stdio_args,
+          db_path: input.db_path,
+          server_name: input.server_name,
+        });
+      }
+      const selectedStatus = snapshot.clients.filter((entry) => clients.includes(entry.client_id));
       const selectedDiagnostics = diagnostics.diagnostics.filter((entry) => clients.includes(entry.client_id));
       const onboarding = buildProviderBridgeOnboardingSummary({
         clients: selectedStatus,
