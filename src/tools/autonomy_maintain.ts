@@ -26,6 +26,13 @@ const sourceSchema = z.object({
   source_agent: z.string().optional(),
 });
 
+function dedupeStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return [...new Set(value.map((entry) => String(entry ?? "").trim()).filter(Boolean))];
+}
+
 export const autonomyMaintainSchema = z
   .object({
     action: z.enum(["status", "run", "run_once", "start", "stop"]).default("status"),

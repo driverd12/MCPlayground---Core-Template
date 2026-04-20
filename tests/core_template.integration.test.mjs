@@ -4818,6 +4818,133 @@ test("artifact and experiment tools persist evidence and judge candidate runs", 
   }
 });
 
+test("workflow.export preserves router hold context across run, export, artifact, and kernel surfaces", async () => {
+  const testId = `${Date.now()}-workflow-export-router-hold`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-workflow-export-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Workflow export router hold goal",
+      objective: "Verify router hold context survives workflow export round-trips",
+      status: "active",
+      acceptance_criteria: ["Router hold context is preserved in durable export surfaces"],
+    });
+
+    const createdPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      title: "Workflow export router hold plan",
+      summary: "Create one durable step tied to a run ledger so workflow export can round-trip router hold context",
+      selected: true,
+      steps: [
+        {
+          step_id: "export-step",
+          seq: 1,
+          title: "Bind an exported run ledger",
+          step_kind: "analysis",
+          executor_kind: "tool",
+          tool_name: "goal.get",
+          input: {
+            goal_id: createdGoal.goal.goal_id,
+          },
+        },
+      ],
+    });
+
+    const routerHold = {
+      decision_id: "router-hold-decision-1",
+      observed_at: "2026-04-20T18:30:00.000Z",
+      reason: "laptop_pressure",
+      selected_backend_id: "claude-bridge",
+      pressure_level: "high",
+      suppressed_agent_ids: ["claude", "codex"],
+    };
+
+    const startedRun = await callTool(client, "run.begin", {
+      mutation: nextMutation(testId, "run.begin", () => mutationCounter++),
+      summary: "workflow export router hold run",
+      latest_router_suppression: routerHold,
+    });
+
+    await callTool(client, "run.step", {
+      mutation: nextMutation(testId, "run.step", () => mutationCounter++),
+      run_id: startedRun.run_id,
+      step_index: 1,
+      status: "completed",
+      summary: "router hold step complete",
+    });
+
+    await callTool(client, "run.end", {
+      mutation: nextMutation(testId, "run.end", () => mutationCounter++),
+      run_id: startedRun.run_id,
+      status: "succeeded",
+      summary: "router hold run complete",
+    });
+
+    const runTimeline = await callTool(client, "run.timeline", {
+      run_id: startedRun.run_id,
+      limit: 20,
+    });
+    assert.deepEqual(runTimeline.latest_router_suppression, routerHold);
+
+    const updatedStep = await callTool(client, "plan.step_update", {
+      mutation: nextMutation(testId, "plan.step_update", () => mutationCounter++),
+      plan_id: createdPlan.plan.plan_id,
+      step_id: "export-step",
+      status: "completed",
+      summary: "Bind workflow export step to the run ledger",
+      run_id: startedRun.run_id,
+    });
+    assert.equal(updatedStep.step.run_id, startedRun.run_id);
+
+    const exported = await callTool(client, "workflow.export", {
+      mutation: nextMutation(testId, "workflow.export", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      plan_id: createdPlan.plan.plan_id,
+      output_dir: path.join(tempDir, "workflow-export"),
+    });
+    assert.equal(exported.ok, true);
+    assert.deepEqual(exported.latest_router_suppression, routerHold);
+
+    const exportedBundle = JSON.parse(fs.readFileSync(exported.bundle.path, "utf8"));
+    assert.deepEqual(exportedBundle.latest_router_suppression, routerHold);
+
+    const artifactBundle = await callTool(client, "artifact.bundle", {
+      entity: {
+        entity_type: "plan",
+        entity_id: createdPlan.plan.plan_id,
+      },
+      limit: 50,
+    });
+    assert.equal(artifactBundle.found, true);
+    assert.deepEqual(artifactBundle.latest_router_suppression, routerHold);
+
+    const workflowBundleArtifact = artifactBundle.artifacts.find((artifact) => artifact.artifact_type === "workflow.bundle");
+    assert.ok(workflowBundleArtifact, "expected workflow.bundle artifact in exported plan bundle");
+
+    const fetchedWorkflowBundleArtifact = await callTool(client, "artifact.get", {
+      artifact_id: workflowBundleArtifact.artifact_id,
+    });
+    assert.equal(fetchedWorkflowBundleArtifact.found, true);
+    assert.deepEqual(fetchedWorkflowBundleArtifact.latest_router_suppression, routerHold);
+
+    const kernel = await callTool(client, "kernel.summary", {
+      session_limit: 6,
+      event_limit: 6,
+      task_running_limit: 8,
+    });
+    assert.deepEqual(kernel.workflow_exports.latest_router_suppression, routerHold);
+    assert.deepEqual(kernel.workflow_exports.latest_bundle.latest_router_suppression, routerHold);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("agent.report_result derives experiment metrics from structured worker output", async () => {
   const testId = `${Date.now()}-experiment-derived-metric`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-experiment-derived-metric-test-"));

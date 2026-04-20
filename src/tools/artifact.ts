@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Storage } from "../storage.js";
+import { type ArtifactRecord, Storage } from "../storage.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 
 const artifactStatusSchema = z.enum(["active", "superseded", "invalid", "archived"]);
