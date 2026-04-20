@@ -45,7 +45,7 @@ const routeTaskKindSchema = z.enum(["planning", "coding", "research", "verificat
 
 export const modelRouterSchema = z
   .object({
-    action: z.enum(["status", "configure", "upsert_backend", "heartbeat", "remove_backend", "route"]).default("status"),
+    action: z.enum(["status", "local_status", "configure", "upsert_backend", "heartbeat", "remove_backend", "route", "select_local_backend"]).default("status"),
     mutation: mutationSchema.optional(),
     enabled: z.boolean().optional(),
     strategy: z.enum(["balanced", "prefer_speed", "prefer_quality", "prefer_cost", "prefer_context_fit"]).optional(),
@@ -81,7 +81,7 @@ export const modelRouterSchema = z
         path: ["backend"],
       });
     }
-    if ((value.action === "remove_backend" || value.action === "heartbeat") && !value.backend_id?.trim()) {
+    if ((value.action === "remove_backend" || value.action === "heartbeat" || value.action === "select_local_backend") && !value.backend_id?.trim()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "backend_id is required",
@@ -650,6 +650,55 @@ function shouldSuppressAutoBridgeEscalation(
   return selectedBackend.locality === "local" && ["ollama", "mlx", "llama.cpp", "vllm"].includes(provider);
 }
 
+function isLocalExecutionProvider(provider: ModelRouterBackendRecord["provider"]) {
+  return ["ollama", "mlx", "llama.cpp", "vllm"].includes(String(provider || "").trim().toLowerCase());
+}
+
+function isSelectableLocalBackend(backend: ModelRouterBackendRecord) {
+  return backend.enabled !== false && (backend.locality === "local" || isLocalExecutionProvider(backend.provider));
+}
+
+function summarizeLocalBackend(backend: ModelRouterBackendRecord, defaultBackendId: string | null) {
+  const heartbeatAgeSeconds = isoAgeSeconds(backend.heartbeat_at);
+  return {
+    backend_id: backend.backend_id,
+    provider: backend.provider,
+    model_id: backend.model_id,
+    enabled: backend.enabled !== false,
+    locality: backend.locality,
+    host_id: backend.host_id,
+    endpoint: backend.endpoint,
+    selected_as_default: defaultBackendId === backend.backend_id,
+    heartbeat_at: backend.heartbeat_at,
+    heartbeat_age_seconds: Number.isFinite(heartbeatAgeSeconds) ? Number(heartbeatAgeSeconds.toFixed(3)) : null,
+    throughput_tps: backend.throughput_tps,
+    latency_ms_p50: backend.latency_ms_p50,
+    success_rate: backend.success_rate,
+    win_rate: backend.win_rate,
+    context_window: backend.context_window,
+    tags: backend.tags,
+  };
+}
+
+function buildLocalBackendStatus(state: ModelRouterStateRecord) {
+  const localBackends = state.backends.filter(isSelectableLocalBackend);
+  const selectedLocalBackend = localBackends.find((backend) => backend.backend_id === state.default_backend_id) ?? null;
+  return {
+    state,
+    default_backend_id: state.default_backend_id,
+    local_backend_count: localBackends.length,
+    local_backends: localBackends.map((backend) => summarizeLocalBackend(backend, state.default_backend_id)),
+    selected_local_backend: selectedLocalBackend ? summarizeLocalBackend(selectedLocalBackend, state.default_backend_id) : null,
+    cursor_local_first_mode: {
+      canonical_ingress: "autonomy.ide_ingress",
+      inspect_action: "model.router local_status",
+      select_action: "model.router select_local_backend",
+      guidance:
+        "Use MASTER-MOLD as the control plane and keep Cursor as an MCP client. Select local Ollama/MLX backends here instead of relying on ad hoc editor chat state.",
+    },
+  };
+}
+
 function shouldSuppressAutoBridgeEscalationForMissingLocalAttemptEvidence(
   routedBridgeAgentIds: string[],
   localAttemptRecorded: boolean,
@@ -744,6 +793,10 @@ export async function modelRouter(storage: Storage, input: z.infer<typeof modelR
     };
   }
 
+  if (input.action === "local_status") {
+    return buildLocalBackendStatus(loadModelRouterState(storage));
+  }
+
   if (input.action === "route") {
     return routeModelBackends(storage, {
       task_kind: input.task_kind,
@@ -774,6 +827,24 @@ export async function modelRouter(storage: Storage, input: z.infer<typeof modelR
             default_backend_id: input.default_backend_id ?? existing.default_backend_id,
             backends: existing.backends,
           }),
+        };
+      }
+
+      if (input.action === "select_local_backend") {
+        const backendId = input.backend_id!.trim();
+        const selectedBackend = existing.backends.find((backend) => backend.backend_id === backendId) ?? null;
+        if (!selectedBackend || !isSelectableLocalBackend(selectedBackend)) {
+          throw new Error(`backend_id must reference an enabled local backend: ${backendId}`);
+        }
+        const nextState = storage.setModelRouterState({
+          enabled: existing.enabled,
+          strategy: existing.strategy,
+          default_backend_id: selectedBackend.backend_id,
+          backends: existing.backends,
+        });
+        return {
+          ok: true,
+          ...buildLocalBackendStatus(nextState),
         };
       }
 

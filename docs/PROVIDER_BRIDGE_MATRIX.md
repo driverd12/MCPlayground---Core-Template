@@ -86,6 +86,7 @@ npm run codex:mcp:register -- master-mold
 - diagnoses bridge truth without conflating “configured” and “runtime connected”
 - refreshes stale CLI diagnose evidence into the shared cache so `status` and onboarding surfaces converge after a real operator check
 - keeps local Ollama/MLX winners as the default first-pass execution lane instead of auto-injecting near-top hosted bridges, unless the objective explicitly asks for hosted providers or named bridge agents
+- gives Cursor users an MCP-native local-model control surface through `model.router` actions `local_status` and `select_local_backend`, so local Ollama/MLX control stays in MASTER-MOLD instead of fragmented editor state
 - preserves `autonomy.ide_ingress` as the one canonical ingress lane
 
 ## Source References

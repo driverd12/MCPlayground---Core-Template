@@ -1343,6 +1343,7 @@ function buildClientStatuses(
       "Cursor can connect to the shared HTTP daemon or launch the server via stdio.",
       "For reliability, this repo installs both ~/.cursor/mcp.json and workspace-local .cursor/mcp.json.",
       "Outbound council consultation is available through bridges/cursor_bridge.py.",
+      "Use `model.router` actions `local_status` and `select_local_backend` from Cursor to inspect and choose local Ollama/MLX backends while keeping MASTER-MOLD as the canonical control plane.",
     ],
     "github-copilot-cli": [
       "Inbound MCP config is exportable/installable through ~/.copilot/mcp-config.json.",

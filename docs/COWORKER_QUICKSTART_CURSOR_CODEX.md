@@ -52,6 +52,8 @@ If your Cursor build uses file-based MCP config, edit:
 
 - `~/.cursor/mcp.json`
 
+For the recommended local-first Cursor workflow, keep Cursor as an MCP client and control local Ollama/MLX selection through MASTER-MOLD itself. See [CURSOR_LOCAL_FIRST_MODE.md](/Users/dan.driver/Documents/Playground/Agentic Playground/MASTER-MOLD/docs/CURSOR_LOCAL_FIRST_MODE.md).
+
 ## 5) Codex Setup
 
 Add the same shared server via CLI:
