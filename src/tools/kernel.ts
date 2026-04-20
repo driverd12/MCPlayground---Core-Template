@@ -337,6 +337,7 @@ type WorkflowExportSummary = {
   bundle_count: number;
   metrics_count: number;
   argo_contract_count: number;
+  latest_router_suppression: Record<string, unknown> | null;
   latest_bundle: {
     artifact_id: string;
     created_at: string;
@@ -348,6 +349,7 @@ type WorkflowExportSummary = {
     task_count: number;
     run_count: number;
     bundle_sha256: string | null;
+    latest_router_suppression: Record<string, unknown> | null;
   } | null;
   latest_metrics: {
     artifact_id: string;
@@ -355,6 +357,7 @@ type WorkflowExportSummary = {
     uri: string | null;
     export_id: string | null;
     line_count: number;
+    latest_router_suppression: Record<string, unknown> | null;
   } | null;
   latest_argo_contract: {
     artifact_id: string;
@@ -362,6 +365,7 @@ type WorkflowExportSummary = {
     uri: string | null;
     export_id: string | null;
     contract_mode: string | null;
+    latest_router_suppression: Record<string, unknown> | null;
   } | null;
 };
 
@@ -726,11 +730,21 @@ function summarizeWorkflowExports(storage: Storage): WorkflowExportSummary {
   const latestBundleJson = isRecord(latestBundle?.content_json) ? latestBundle?.content_json : {};
   const latestMetricsJson = isRecord(latestMetrics?.content_json) ? latestMetrics?.content_json : {};
   const latestArgoJson = isRecord(latestArgoContract?.content_json) ? latestArgoContract?.content_json : {};
+  const latestBundleSuppression =
+    (isRecord(latestBundleJson.latest_router_suppression) ? latestBundleJson.latest_router_suppression : null) ??
+    (isRecord(latestBundle?.metadata?.latest_router_suppression) ? latestBundle?.metadata?.latest_router_suppression : null);
+  const latestMetricsSuppression =
+    (isRecord(latestMetricsJson.latest_router_suppression) ? latestMetricsJson.latest_router_suppression : null) ??
+    (isRecord(latestMetrics?.metadata?.latest_router_suppression) ? latestMetrics?.metadata?.latest_router_suppression : null);
+  const latestArgoSuppression =
+    (isRecord(latestArgoJson.latest_router_suppression) ? latestArgoJson.latest_router_suppression : null) ??
+    (isRecord(latestArgoContract?.metadata?.latest_router_suppression) ? latestArgoContract?.metadata?.latest_router_suppression : null);
 
   return {
     bundle_count: bundles.length,
     metrics_count: metrics.length,
     argo_contract_count: argoContracts.length,
+    latest_router_suppression: latestBundleSuppression ?? latestMetricsSuppression ?? latestArgoSuppression ?? null,
     latest_bundle: latestBundle
       ? {
           artifact_id: latestBundle.artifact_id,
@@ -743,6 +757,7 @@ function summarizeWorkflowExports(storage: Storage): WorkflowExportSummary {
           task_count: typeof latestBundleJson.task_count === "number" ? Math.max(0, Math.round(latestBundleJson.task_count)) : 0,
           run_count: typeof latestBundleJson.run_count === "number" ? Math.max(0, Math.round(latestBundleJson.run_count)) : 0,
           bundle_sha256: readString(latestBundleJson.bundle_sha256) ?? latestBundle.hash,
+          latest_router_suppression: latestBundleSuppression,
         }
       : null,
     latest_metrics: latestMetrics
@@ -752,6 +767,7 @@ function summarizeWorkflowExports(storage: Storage): WorkflowExportSummary {
           uri: latestMetrics.uri,
           export_id: readString(latestMetrics.metadata?.export_id),
           line_count: typeof latestMetricsJson.line_count === "number" ? Math.max(0, Math.round(latestMetricsJson.line_count)) : 0,
+          latest_router_suppression: latestMetricsSuppression,
         }
       : null,
     latest_argo_contract: latestArgoContract
@@ -761,6 +777,7 @@ function summarizeWorkflowExports(storage: Storage): WorkflowExportSummary {
           uri: latestArgoContract.uri,
           export_id: readString(latestArgoContract.metadata?.export_id),
           contract_mode: readString(latestArgoJson.contract_mode),
+          latest_router_suppression: latestArgoSuppression,
         }
       : null,
   };

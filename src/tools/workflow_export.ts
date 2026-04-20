@@ -63,6 +63,10 @@ function readString(value: unknown) {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function readLatestRouterSuppression(value: unknown): Record<string, unknown> | null {
+  return isRecord(value) ? value : null;
+}
+
 function stableStringify(value: unknown): string {
   return JSON.stringify(sortObject(value), null, 2);
 }
@@ -242,6 +246,28 @@ function collectRuntimeLedgers(storage: Storage, steps: PlanStepRecord[], tasks:
   };
 }
 
+function resolveLatestRouterSuppressionFromRunTimelines(
+  runTimelines: Array<{ run_id: string; events: ReturnType<Storage["getRunTimeline"]> }>
+) {
+  let latest: { created_at: string; payload: Record<string, unknown> } | null = null;
+  for (const timeline of runTimelines) {
+    for (const event of timeline.events) {
+      const payload = readLatestRouterSuppression(isRecord(event.details) ? event.details.latest_router_suppression : null);
+      if (!payload) {
+        continue;
+      }
+      const createdAt = String(event.created_at ?? "").trim() || "1970-01-01T00:00:00.000Z";
+      if (!latest || Date.parse(createdAt) >= Date.parse(latest.created_at)) {
+        latest = {
+          created_at: createdAt,
+          payload,
+        };
+      }
+    }
+  }
+  return latest?.payload ?? null;
+}
+
 function extractStepExecutionSummary(step: PlanStepRecord) {
   const metadata = isRecord(step.metadata) ? step.metadata : {};
   const taskExecution = isRecord(metadata.task_execution) ? metadata.task_execution : {};
@@ -294,6 +320,7 @@ function routeOutlookForPlan(storage: Storage, steps: PlanStepRecord[]) {
 function buildRunMetricsLines(input: {
   export_id: string;
   generated_at: string;
+  latest_router_suppression: Record<string, unknown> | null;
   goal: GoalRecord;
   plan: PlanRecord;
   steps: PlanStepRecord[];
@@ -311,6 +338,7 @@ function buildRunMetricsLines(input: {
       step_count: input.steps.length,
       task_count: input.tasks.length,
       run_count: input.run_timelines.length,
+      latest_router_suppression: input.latest_router_suppression,
     },
   ];
   for (const step of input.steps) {
@@ -476,6 +504,7 @@ export async function workflowExport(storage: Storage, input: z.infer<typeof wor
 
       const linkedTasks = collectLinkedTasks(storage, steps);
       const runtimeLedgers = collectRuntimeLedgers(storage, steps, linkedTasks);
+      const latestRouterSuppression = resolveLatestRouterSuppressionFromRunTimelines(runtimeLedgers.run_timelines);
       const artifactSnapshot = input.include_artifacts !== false ? collectScopedArtifacts(storage, goal, plan, steps) : { artifacts: [], links: [] };
 
       const repoRoot = process.cwd();
@@ -490,6 +519,7 @@ export async function workflowExport(storage: Storage, input: z.infer<typeof wor
       const bundle = sortObject({
         export_id: exportId,
         generated_at: generatedAt,
+        latest_router_suppression: latestRouterSuppression,
         target: {
           goal_id: goal.goal_id,
           plan_id: plan.plan_id,
@@ -555,6 +585,7 @@ export async function workflowExport(storage: Storage, input: z.infer<typeof wor
         const metricsText = buildRunMetricsLines({
           export_id: exportId,
           generated_at: generatedAt,
+          latest_router_suppression: latestRouterSuppression,
           goal,
           plan,
           steps,
@@ -609,6 +640,7 @@ export async function workflowExport(storage: Storage, input: z.infer<typeof wor
           artifact_link_count: artifactSnapshot.links.length,
           run_metrics_line_count: metricsLineCount,
         },
+        latest_router_suppression: latestRouterSuppression,
       };
       const manifestPath = path.join(outputDir, "workflow-export-manifest.json");
       fs.writeFileSync(manifestPath, `${stableStringify(manifest)}\n`, "utf8");
@@ -631,11 +663,13 @@ export async function workflowExport(storage: Storage, input: z.infer<typeof wor
           run_count: runtimeLedgers.run_timelines.length,
           artifact_count: artifactSnapshot.artifacts.length,
           bundle_sha256: bundleSha,
+          latest_router_suppression: latestRouterSuppression,
         },
         metadata: {
           export_id: exportId,
           manifest_path: manifestPath,
           repo_root: repoRoot,
+          latest_router_suppression: latestRouterSuppression,
         },
         source_client: input.source_client,
         source_model: input.source_model,
@@ -659,10 +693,12 @@ export async function workflowExport(storage: Storage, input: z.infer<typeof wor
             line_count: metricsLineCount,
             run_count: runtimeLedgers.run_timelines.length,
             task_timeline_count: runtimeLedgers.task_timelines.length,
+            latest_router_suppression: latestRouterSuppression,
           },
           metadata: {
             export_id: exportId,
             manifest_path: manifestPath,
+            latest_router_suppression: latestRouterSuppression,
           },
           source_client: input.source_client,
           source_model: input.source_model,
@@ -695,10 +731,12 @@ export async function workflowExport(storage: Storage, input: z.infer<typeof wor
             contract_mode: "argo-workflow-template-suspend-dag",
             step_count: steps.length,
             namespace: input.namespace?.trim() || "default",
+            latest_router_suppression: latestRouterSuppression,
           },
           metadata: {
             export_id: exportId,
             manifest_path: manifestPath,
+            latest_router_suppression: latestRouterSuppression,
           },
           source_client: input.source_client,
           source_model: input.source_model,
@@ -727,6 +765,7 @@ export async function workflowExport(storage: Storage, input: z.infer<typeof wor
           bundle_path: bundlePath,
           metrics_path: metricsPath,
           argo_path: argoPath,
+          latest_router_suppression: latestRouterSuppression,
         },
         source_client: input.source_client,
         source_model: input.source_model,
@@ -763,6 +802,7 @@ export async function workflowExport(storage: Storage, input: z.infer<typeof wor
           artifacts: artifactSnapshot.artifacts.length,
           links: artifactSnapshot.links.length,
         },
+        latest_router_suppression: latestRouterSuppression,
       };
     },
   });

@@ -140,6 +140,31 @@ function collectRelatedArtifactIds(links: Array<{ src_artifact_id: string; dst_a
   return [...related];
 }
 
+function readLatestRouterSuppression(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function extractArtifactLatestRouterSuppression(artifact: ArtifactRecord | null): Record<string, unknown> | null {
+  if (!artifact) {
+    return null;
+  }
+  return (
+    readLatestRouterSuppression((artifact.content_json as Record<string, unknown> | null)?.latest_router_suppression) ??
+    readLatestRouterSuppression((artifact.metadata as Record<string, unknown> | null)?.latest_router_suppression)
+  );
+}
+
+function resolveArtifactsLatestRouterSuppression(artifacts: ArtifactRecord[]) {
+  const ordered = [...artifacts].sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
+  for (const artifact of ordered) {
+    const snapshot = extractArtifactLatestRouterSuppression(artifact);
+    if (snapshot) {
+      return snapshot;
+    }
+  }
+  return null;
+}
+
 function artifactScopeFiltersForEntity(entityType: string, entityId: string): Record<string, string> | null {
   switch (entityType) {
     case "goal":
@@ -266,6 +291,7 @@ export function artifactGet(storage: Storage, input: z.infer<typeof artifactGetS
   return {
     found: true,
     artifact,
+    latest_router_suppression: extractArtifactLatestRouterSuppression(artifact),
     link_count: links.length,
     links,
     related_artifacts: relatedArtifacts,
@@ -361,6 +387,8 @@ export function artifactBundle(storage: Storage, input: z.infer<typeof artifactB
     return {
       found: true,
       artifact,
+      latest_router_suppression:
+        extractArtifactLatestRouterSuppression(artifact) ?? resolveArtifactsLatestRouterSuppression(relatedArtifacts),
       links,
       related_artifacts: relatedArtifacts,
     };
@@ -392,6 +420,7 @@ export function artifactBundle(storage: Storage, input: z.infer<typeof artifactB
     found: true,
     entity,
     count: artifactsById.size,
+    latest_router_suppression: resolveArtifactsLatestRouterSuppression([...artifactsById.values()] as ArtifactRecord[]),
     artifacts: [...artifactsById.values()],
     links,
   };
