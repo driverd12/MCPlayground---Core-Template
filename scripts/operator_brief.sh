@@ -107,5 +107,12 @@ import pathlib
 import sys
 
 data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+latest = data.get("latest_router_suppression") or {}
+if isinstance(latest, dict) and latest:
+    reason = str(latest.get("reason") or "suppressed").replace("_", " ")
+    backend = str(latest.get("selected_backend_id") or "n/a")
+    observed = str(latest.get("observed_at") or "n/a")
+    print(f"Router hold: reason={reason} backend={backend} observed_at={observed}")
+    print("")
 print(data.get("brief_markdown") or "# Operator Brief\n\nNo operator brief available.")
 PY

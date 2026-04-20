@@ -1141,6 +1141,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
       diagnostics: selectedProviderBridgeDiagnostics,
     })
   );
+  const routerSuppressionDecisions = buildRecentRouterSuppressionDecisions(storage);
   const providerBridgeOnboarding = buildProviderBridgeOnboardingSummary({
     clients: providerBridge.snapshot.clients,
     diagnostics: providerBridge.diagnostics.diagnostics,
@@ -1199,8 +1200,6 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     desktopControl,
     patientZero,
   });
-  const routerSuppressionDecisions = buildRecentRouterSuppressionDecisions(storage);
-
   return {
     generated_at: new Date().toISOString(),
     thread_id: threadId,
@@ -1224,6 +1223,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     provider_bridge: {
       ...providerBridge,
       onboarding: providerBridgeOnboarding,
+      latest_router_suppression: routerSuppressionDecisions[0] ?? null,
     },
     desktop_control: desktopControl,
     patient_zero: patientZero,
@@ -1283,6 +1283,7 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
           generated_at: liveProviderBridgeDiagnostics.generated_at,
           diagnostics_stale: liveProviderBridgeDiagnostics.stale === true,
         }),
+        latest_router_suppression: liveRouterSuppressionDecisions[0] ?? null,
       };
       const liveRoster = reconcileRosterProviderBridgeReadiness(asRecord(cachedPayload.roster), cachedProviderBridgePayload);
       const liveSetupDiagnostics = buildOfficeSetupDiagnostics({

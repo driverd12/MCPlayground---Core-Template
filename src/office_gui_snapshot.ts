@@ -847,6 +847,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         disconnected_count: providerEntries.filter((entry) => String(asDict(entry).status ?? "").trim().toLowerCase() === "disconnected").length,
         unavailable_count: providerEntries.filter((entry) => String(asDict(entry).status ?? "").trim().toLowerCase() === "unavailable").length,
         resource_gate: providerBridgeResourceGate,
+        latest_router_suppression: asDict(providerBridge.latest_router_suppression),
       },
       desktop_control: {
         enabled: Boolean(desktopControlSummary.enabled),
@@ -1055,6 +1056,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
       cached: Boolean(providerBridgeDiagnostics.cached),
       diagnostics: providerEntries.map((entry) => asDict(entry)),
       resource_gate: providerBridgeResourceGate,
+      latest_router_suppression: asDict(providerBridge.latest_router_suppression),
     },
   };
 }

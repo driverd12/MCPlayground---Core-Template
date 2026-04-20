@@ -1988,6 +1988,7 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
     operator_brief = as_dict(snapshot.operator_brief)
     operator_brief_delegation = as_dict(operator_brief.get("delegation_brief"))
     operator_brief_compile = as_dict(operator_brief.get("compile_brief_artifact"))
+    operator_brief_suppression = as_dict(operator_brief.get("latest_router_suppression"))
     current_objective = compact_single_line(
         str(
             operator_brief.get("current_objective")
@@ -2332,6 +2333,17 @@ def render_briefing_view(snapshot: DashboardSnapshot, width: int, height: int) -
                 width,
             )
         )
+    if operator_brief_suppression:
+        lines.append("")
+        lines.append(fit_text("Router hold:", width))
+        suppression_line = compact_single_line(
+            f"reason={operator_brief_suppression.get('reason') or 'suppressed'} "
+            f"backend={operator_brief_suppression.get('selected_backend_id') or 'n/a'} "
+            f"pressure={operator_brief_suppression.get('pressure_level') or 'n/a'} "
+            f"observed={operator_brief_suppression.get('observed_at') or 'n/a'}",
+            220,
+        )
+        lines.extend(wrap_lines(suppression_line, width, 4))
     if learning_top_agents:
         lines.append("")
         lines.append(fit_text("Most learned agents:", width))

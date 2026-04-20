@@ -527,7 +527,7 @@
     var recentRouterSuppressionDecisions = Array.isArray(state.snapshot.router_suppression_decisions)
       ? state.snapshot.router_suppression_decisions.slice(0, 1)
       : [];
-    var latestRouterSuppression = recentRouterSuppressionDecisions[0] || null;
+    var latestRouterSuppression = providers.latest_router_suppression || recentRouterSuppressionDecisions[0] || null;
     var providerResourceGate = providers.resource_gate || {};
     var providerResourceGateActive = !!providerResourceGate.active;
     var providerResourceGateLevel = providerResourceGateActive
