@@ -290,28 +290,14 @@ async function ensureHttp() {
 
 async function collectOfficeStatus() {
   const tokenConfigured = Boolean(String(process.env.MCP_HTTP_BEARER_TOKEN || "").trim());
-  const [listener, officeReady] = await Promise.all([listenerOk(), officePageOk()]);
-  if (officeReady) {
-    return {
-      health: true,
-      listener,
-      ready: false,
-      officeReady,
-      launchable: true,
-    };
-  }
-  const health = await healthOk();
-  if (!tokenConfigured ? health : health && listener) {
-    return {
-      health,
-      listener,
-      ready: false,
-      officeReady,
-      launchable: true,
-    };
-  }
-  const ready = await readyOk();
-  const effectiveHealth = health || ready;
+  const [listener, officeReady, health, readyProbe] = await Promise.all([
+    listenerOk(),
+    officePageOk(),
+    healthOk(),
+    tokenConfigured ? readyOk() : Promise.resolve(false),
+  ]);
+  const ready = tokenConfigured ? readyProbe : health;
+  const effectiveHealth = health || readyProbe || officeReady;
   return {
     health: effectiveHealth,
     listener,

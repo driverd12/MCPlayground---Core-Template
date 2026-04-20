@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { summarizeDesktopControlState } from "../desktop_control_plane.js";
 import { summarizePatientZeroState } from "../patient_zero_plane.js";
+import { buildOfficeGuiSnapshot } from "../office_gui_snapshot.js";
 import {
   type AgentSessionRecord,
   type RuntimeWorkerSessionRecord,
@@ -1327,4 +1328,69 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
       duration_ms: null,
     },
   };
+}
+
+export function officeRealtimeSnapshot(storage: Storage, input: { thread_id?: string; theme: string }) {
+  const threadId = input.thread_id?.trim() || OFFICE_SNAPSHOT_DEFAULT_THREAD_ID;
+  const warmCacheState = storage.getWarmCacheState();
+  const cached = readWarmCacheEntry(officeSnapshotWarmCacheKey(threadId), warmCacheState.ttl_seconds * 1000);
+  if (cached && cached.payload && typeof cached.payload === "object" && !Array.isArray(cached.payload)) {
+    const cachedPayload = cached.payload as Record<string, unknown>;
+    const liveAutonomyMaintain = summarizeAutonomyMaintainState(storage);
+    const liveAutonomyMaintainState = asRecord(liveAutonomyMaintain.state);
+    const cachedProviderBridge = asRecord(cachedPayload.provider_bridge);
+    const cachedProviderBridgeSnapshot = asRecord(cachedProviderBridge.snapshot);
+    const liveProviderBridgeDiagnostics = buildPersistedProviderBridgeDiagnostics(liveAutonomyMaintainState);
+    const liveProviderBridgeSnapshot = applyProviderBridgeDiagnosticsToSnapshot(
+      {
+        ...cachedProviderBridgeSnapshot,
+        clients: Array.isArray(cachedProviderBridgeSnapshot.clients) ? cachedProviderBridgeSnapshot.clients : [],
+        server_name: String(cachedProviderBridgeSnapshot.server_name ?? "master-mold"),
+      } as ProviderBridgePayload["snapshot"],
+      liveProviderBridgeDiagnostics
+    );
+    const liveProviderBridgePayload = {
+      ...cachedProviderBridge,
+      snapshot: liveProviderBridgeSnapshot,
+      diagnostics: liveProviderBridgeDiagnostics,
+      onboarding:
+        cachedProviderBridge.onboarding && typeof cachedProviderBridge.onboarding === "object"
+          ? cachedProviderBridge.onboarding
+          : {},
+      latest_router_suppression: cachedProviderBridge.latest_router_suppression ?? null,
+    };
+    const liveRoster = reconcileRosterProviderBridgeReadiness(asRecord(cachedPayload.roster), liveProviderBridgePayload);
+    return buildOfficeGuiSnapshot(
+      {
+        ...cachedPayload,
+        roster: liveRoster,
+        autonomy_maintain: {
+          ...asRecord(cachedPayload.autonomy_maintain),
+          ...(liveAutonomyMaintain as Record<string, unknown>),
+        },
+        provider_bridge: liveProviderBridgePayload,
+        source: "office.realtime",
+      },
+      { theme: input.theme }
+    );
+  }
+
+  return buildOfficeGuiSnapshot(
+    officeSnapshot(storage, {
+      thread_id: threadId,
+      turn_limit: 12,
+      task_limit: 24,
+      session_limit: 50,
+      event_limit: 24,
+      learning_limit: 120,
+      runtime_worker_limit: 20,
+      include_kernel: true,
+      include_learning: true,
+      include_bus: true,
+      include_adapter: true,
+      include_runtime_workers: true,
+      metadata: { source: "http.realtime" },
+    }) as Record<string, unknown>,
+    { theme: input.theme }
+  );
 }

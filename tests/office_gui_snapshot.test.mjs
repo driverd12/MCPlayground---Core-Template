@@ -1645,6 +1645,131 @@ test("office gui snapshot keeps blocked provider signals blocked even for active
   assert.equal(copilot.evidence_source, "provider_bridge");
 });
 
+test("office gui snapshot maps Claude bridge diagnostics onto the Claude agent", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    {
+      roster: {
+        active_agent_ids: [],
+        agents: [{ agent_id: "claude", display_name: "Claude", coordination_tier: "support", role_lane: "critic" }],
+      },
+      workboard: {},
+      tmux: {},
+      task_summary: { counts: {} },
+      task_running: {},
+      task_pending: {},
+      agent_sessions: { sessions: [] },
+      adapter: {},
+      bus_tail: {},
+      trichat_summary: {},
+      learning: {},
+      autopilot: {},
+      runtime_workers: { summary: {}, sessions: [] },
+      kernel: {
+        overview: {},
+        worker_fabric: { hosts: [] },
+        model_router: { backends: [] },
+        runtime_workers: {},
+        autonomy_maintain: {},
+        reaction_engine: {},
+        observability: {},
+        swarm: {},
+        workflow_exports: {},
+      },
+      autonomy_maintain: { state: {}, runtime: {}, due: {} },
+      provider_bridge: {
+        diagnostics: {
+          generated_at: new Date().toISOString(),
+          cached: true,
+          diagnostics: [
+            {
+              client_id: "claude-cli",
+              display_name: "Claude CLI",
+              status: "connected",
+              detail: "connected",
+            },
+          ],
+        },
+      },
+    },
+    { theme: "dark" }
+  );
+
+  const claude = snapshot.agents.find((entry) => entry.agent.agent_id === "claude");
+  assert.ok(claude);
+  assert.equal(claude.state, "ready");
+  assert.equal(claude.evidence_source, "provider_bridge");
+});
+
+test("office gui snapshot keeps Claude configured instead of offline when bridge diagnostics are stale", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    {
+      roster: {
+        active_agent_ids: [],
+        agents: [{ agent_id: "claude", display_name: "Claude", coordination_tier: "support", role_lane: "critic" }],
+      },
+      workboard: {},
+      tmux: {},
+      task_summary: { counts: {} },
+      task_running: {},
+      task_pending: {},
+      agent_sessions: { sessions: [] },
+      adapter: {},
+      bus_tail: {},
+      trichat_summary: {},
+      learning: {},
+      autopilot: {},
+      runtime_workers: { summary: {}, sessions: [] },
+      kernel: {
+        overview: {},
+        worker_fabric: { hosts: [] },
+        model_router: { backends: [] },
+        runtime_workers: {},
+        autonomy_maintain: {},
+        reaction_engine: {},
+        observability: {},
+        swarm: {},
+        workflow_exports: {},
+      },
+      autonomy_maintain: { state: {}, runtime: {}, due: {} },
+      provider_bridge: {
+        snapshot: {
+          clients: [
+            {
+              client_id: "claude-cli",
+              display_name: "Claude CLI",
+              office_agent_id: "claude",
+              installed: true,
+              binary_present: true,
+              config_present: true,
+            },
+          ],
+        },
+        diagnostics: {
+          generated_at: new Date(Date.now() - 60_000).toISOString(),
+          cached: true,
+          stale: true,
+          diagnostics: [
+            {
+              client_id: "claude-cli",
+              display_name: "Claude CLI",
+              status: "disconnected",
+              detail: "stale disconnected bridge state",
+            },
+          ],
+        },
+      },
+    },
+    { theme: "dark" }
+  );
+
+  const claude = snapshot.agents.find((entry) => entry.agent.agent_id === "claude");
+  assert.ok(claude);
+  assert.equal(claude.state, "sleeping");
+  assert.equal(claude.evidence_source, "provider_bridge");
+  assert.match(claude.activity, /stale/i);
+  assert.notEqual(claude.state, "offline");
+});
+
 test("office gui snapshot downgrades fallback-only active roster presence to sleeping", () => {
   const snapshot = buildOfficeGuiSnapshot(
     {
@@ -1694,6 +1819,48 @@ test("office gui snapshot downgrades fallback-only active roster presence to sle
   assert.equal(agent.location, "sofa");
   assert.equal(agent.evidence_source, "roster");
   assert.equal(agent.evidence_detail, "config-fallback");
+});
+
+test("office gui snapshot keeps fetched_at_iso aligned with generated_at", () => {
+  const generatedAt = "2026-04-20T23:45:12.000Z";
+  const snapshot = buildOfficeGuiSnapshot(
+    {
+      generated_at: generatedAt,
+      roster: {
+        active_agent_ids: [],
+        agents: [],
+      },
+      workboard: {},
+      tmux: {},
+      task_summary: { counts: {} },
+      task_running: {},
+      task_pending: {},
+      agent_sessions: { sessions: [] },
+      adapter: {},
+      bus_tail: {},
+      trichat_summary: {},
+      learning: {},
+      autopilot: {},
+      runtime_workers: { summary: {}, sessions: [] },
+      kernel: {
+        overview: {},
+        worker_fabric: { hosts: [] },
+        model_router: { backends: [] },
+        runtime_workers: {},
+        autonomy_maintain: {},
+        reaction_engine: {},
+        observability: {},
+        swarm: {},
+        workflow_exports: {},
+      },
+      autonomy_maintain: { state: {}, runtime: {}, due: {} },
+      provider_bridge: { diagnostics: { generated_at: "", cached: false, diagnostics: [] } },
+    },
+    { theme: "dark" }
+  );
+
+  assert.equal(snapshot.fetched_at, Date.parse(generatedAt) / 1000);
+  assert.equal(snapshot.fetched_at_iso, generatedAt);
 });
 
 test("roster-only inactive agent is never ready or connected", () => {

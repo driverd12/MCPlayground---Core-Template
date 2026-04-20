@@ -179,6 +179,21 @@ button:hover,
   color: var(--text);
 }
 
+.chip--good {
+  border-color: rgba(127, 201, 156, 0.48);
+  background: rgba(127, 201, 156, 0.1);
+}
+
+.chip--warn {
+  border-color: rgba(217, 179, 95, 0.48);
+  background: rgba(217, 179, 95, 0.1);
+}
+
+.chip--bad {
+  border-color: rgba(217, 108, 108, 0.48);
+  background: rgba(217, 108, 108, 0.1);
+}
+
 .tabs {
   display: flex;
   gap: 8px;

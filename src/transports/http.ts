@@ -20,6 +20,10 @@ export type HttpOptions = {
   autonomyMaintainSnapshot?: () => { enabled: boolean; runtime_running: boolean } | Promise<{ enabled: boolean; runtime_running: boolean }>;
   officeSnapshot?: (input: { threadId: string; theme: string; forceLive?: boolean }) => unknown | Promise<unknown>;
   officeRawSnapshot?: (input: { threadId: string; theme: string }) => unknown | Promise<unknown>;
+  officeRealtimeSnapshot?: (input: { threadId: string; theme: string }) => unknown | Promise<unknown>;
+  officeRealtimeSignals?: () =>
+    | { generated_at?: string | null; diagnostics?: unknown[]; stale?: boolean }
+    | Promise<{ generated_at?: string | null; diagnostics?: unknown[]; stale?: boolean }>;
 };
 
 type SessionBinding = {
@@ -70,6 +74,7 @@ const officeRawSnapshotInflight = new Map<string, Promise<string>>();
 const officeActionInflight = new Map<string, Promise<void>>();
 const officeActionStatus = new Map<string, OfficeActionRuntimeState>();
 const officeRawSnapshotCache = new Map<string, { body: string; capturedAt: number }>();
+const officeRealtimeCache = new Map<string, { payload: Record<string, unknown>; capturedAt: number }>();
 let lastReadySnapshotCache: ReadySnapshotCacheEntry | null = null;
 let readySnapshotInflight: Promise<{ payload: ReadySnapshotPayload; source: "live" | "cache-fallback" | "cache-stale" | "error" | "default" }> | null =
   null;
@@ -80,6 +85,7 @@ function resetOfficeSnapshotRuntimeState() {
   officeNodeSnapshotInflight.clear();
   officeRawSnapshotInflight.clear();
   officeRawSnapshotCache.clear();
+  officeRealtimeCache.clear();
 }
 
 function readySnapshotTimeoutMs() {
@@ -292,6 +298,24 @@ function officeRawSnapshotCacheMaxAgeMs() {
   return Math.max(1_000, Math.min(10_000, Math.round(baseSeconds * 1_500)));
 }
 
+function officeRealtimeIntervalMs() {
+  const override = Number(process.env.TRICHAT_OFFICE_LIVE_STATUS_INTERVAL_MS || "");
+  if (Number.isFinite(override) && override > 0) {
+    return Math.max(500, Math.min(10_000, Math.round(override)));
+  }
+  const refreshSeconds = Number(process.env.TRICHAT_OFFICE_REFRESH_SECONDS || "2");
+  const baseSeconds = Number.isFinite(refreshSeconds) && refreshSeconds > 0 ? refreshSeconds : 2;
+  return Math.max(750, Math.min(2_500, Math.round(baseSeconds * 600)));
+}
+
+function officeRealtimeCacheMaxAgeMs() {
+  const override = Number(process.env.TRICHAT_OFFICE_REALTIME_CACHE_MAX_AGE_MS || "");
+  if (Number.isFinite(override) && override > 0) {
+    return Math.max(100, Math.min(10_000, Math.round(override)));
+  }
+  return Math.max(500, Math.min(4_000, Math.round(officeRealtimeIntervalMs() * 1.25)));
+}
+
 function readOfficeRawSnapshotCache(inflightKey: string) {
   const entry = officeRawSnapshotCache.get(inflightKey);
   if (!entry) {
@@ -304,6 +328,25 @@ function readOfficeRawSnapshotCache(inflightKey: string) {
   }
   return {
     body: entry.body,
+    ageSeconds: ageMs / 1000,
+  };
+}
+
+function readOfficeRealtimeCache(inflightKey: string) {
+  const entry = officeRealtimeCache.get(inflightKey);
+  if (!entry) {
+    return null;
+  }
+  const ageMs = Date.now() - entry.capturedAt;
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > officeRealtimeCacheMaxAgeMs()) {
+    officeRealtimeCache.delete(inflightKey);
+    return null;
+  }
+  return {
+    payload: {
+      ...entry.payload,
+      source: "live-cache",
+    },
     ageSeconds: ageMs / 1000,
   };
 }
@@ -379,6 +422,228 @@ function parseOfficeSnapshotPayload(raw: string): OfficeSnapshotPayload | null {
   }
 }
 
+function buildOfficeRealtimePayload(snapshot: OfficeSnapshotPayload | null, source: string) {
+  const record =
+    snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      ? (snapshot as Record<string, unknown>)
+      : {};
+  const baseFetchedAt = typeof record.fetched_at === "number" ? record.fetched_at : Number(record.fetched_at || 0);
+  const baseFetchedAtIso = String(record.fetched_at_iso ?? "").trim();
+  return {
+    ok: true,
+    source,
+    sampled_at: new Date().toISOString(),
+    thread_id: String(record.thread_id ?? "ring-leader-main").trim() || "ring-leader-main",
+    theme: String(record.theme ?? (process.env.TRICHAT_OFFICE_THEME || "night")).trim() || "night",
+    errors: Array.isArray(record.errors) ? record.errors : [],
+    agents: Array.isArray(record.agents) ? record.agents : [],
+    rooms: record.rooms && typeof record.rooms === "object" && !Array.isArray(record.rooms) ? record.rooms : {},
+    summary: record.summary && typeof record.summary === "object" && !Array.isArray(record.summary) ? record.summary : {},
+    provider_bridge:
+      record.provider_bridge && typeof record.provider_bridge === "object" && !Array.isArray(record.provider_bridge)
+        ? record.provider_bridge
+        : {},
+    router_suppression_decisions: Array.isArray(record.router_suppression_decisions)
+      ? record.router_suppression_decisions
+      : [],
+    base_snapshot: {
+      fetched_at: Number.isFinite(baseFetchedAt) && baseFetchedAt > 0 ? baseFetchedAt : null,
+      fetched_at_iso: baseFetchedAtIso || null,
+      cache: record.cache && typeof record.cache === "object" && !Array.isArray(record.cache) ? record.cache : null,
+    },
+  };
+}
+
+function applyRealtimeSignalsToOfficeSnapshot(
+  snapshot: OfficeSnapshotPayload | null,
+  input: {
+    generatedAt: string;
+    diagnostics: unknown[];
+    stale?: boolean;
+    maintain?: { enabled: boolean; runtime_running: boolean } | null;
+  }
+) {
+  const record =
+    snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      ? ({ ...(snapshot as Record<string, unknown>) } as Record<string, unknown>)
+      : null;
+  if (!record) {
+    return null;
+  }
+
+  const diagnostics = Array.isArray(input.diagnostics) ? input.diagnostics : [];
+  const diagnosticsStale = input.stale === true;
+  const counts = {
+    connected: 0,
+    configured: 0,
+    disconnected: 0,
+    unavailable: 0,
+  };
+  const agentIdsByClient: Record<string, string[]> = {
+    codex: ["codex"],
+    "claude-cli": ["claude"],
+    cursor: ["cursor"],
+    "gemini-cli": ["gemini"],
+    "github-copilot-cli": ["github-copilot"],
+    "github-copilot-vscode": ["github-copilot"],
+  };
+  const liveAgentSignals = new Map<
+    string,
+    {
+      state: string;
+      activity: string;
+      detail: string;
+      location: string;
+      actions: string[];
+    }
+  >();
+
+  for (const entryRaw of diagnostics) {
+    const entry =
+      entryRaw && typeof entryRaw === "object" && !Array.isArray(entryRaw)
+        ? (entryRaw as Record<string, unknown>)
+        : {};
+    const clientId = String(entry.client_id ?? "").trim();
+    const displayName = String(entry.display_name ?? (clientId || "provider")).trim() || "provider";
+    const status = String(entry.status ?? "").trim().toLowerCase();
+    const detail = String(entry.detail ?? (status || "provider bridge")).trim() || "provider bridge";
+    if (status === "connected") counts.connected += 1;
+    else if (status === "configured") counts.configured += 1;
+    else if (status === "disconnected") counts.disconnected += 1;
+    else if (status === "unavailable") counts.unavailable += 1;
+
+    const mappedAgentIds = agentIdsByClient[clientId] || [];
+    if (!mappedAgentIds.length) {
+      continue;
+    }
+    let signal:
+      | {
+          state: string;
+          activity: string;
+          detail: string;
+          location: string;
+          actions: string[];
+        }
+      | null = null;
+    if (diagnosticsStale) {
+      signal = {
+        state: "sleeping",
+        activity: `${displayName} bridge diagnostics stale`,
+        detail: detail || "runtime verification is stale",
+        location: "sofa",
+        actions: ["ops", "configured"],
+      };
+    } else if (status === "connected") {
+      signal = {
+        state: "ready",
+        activity: `${displayName} bridge connected`,
+        detail,
+        location: "ops",
+        actions: ["ops", "ready"],
+      };
+    } else if (status === "configured") {
+      signal = {
+        state: "sleeping",
+        activity: `${displayName} bridge configured`,
+        detail,
+        location: "lounge",
+        actions: ["ops", "configured"],
+      };
+    } else if (status === "disconnected") {
+      signal = {
+        state: "blocked",
+        activity: `${displayName} bridge disconnected`,
+        detail,
+        location: "ops",
+        actions: ["ops", "blocked"],
+      };
+    } else if (status === "unavailable") {
+      signal = {
+        state: "offline",
+        activity: `${displayName} bridge unavailable`,
+        detail,
+        location: "ops",
+        actions: ["ops", "offline"],
+      };
+    }
+    if (!signal) {
+      continue;
+    }
+    for (const agentId of mappedAgentIds) {
+      liveAgentSignals.set(agentId, signal);
+    }
+  }
+
+  const agents = Array.isArray(record.agents) ? record.agents : [];
+  record.agents = agents.map((entryRaw) => {
+    const entry =
+      entryRaw && typeof entryRaw === "object" && !Array.isArray(entryRaw)
+        ? ({ ...(entryRaw as Record<string, unknown>) } as Record<string, unknown>)
+        : {};
+    const agent =
+      entry.agent && typeof entry.agent === "object" && !Array.isArray(entry.agent)
+        ? (entry.agent as Record<string, unknown>)
+        : {};
+    const agentId = String(agent.agent_id ?? "").trim().toLowerCase();
+    const patch = liveAgentSignals.get(agentId);
+    if (!patch) {
+      return entryRaw;
+    }
+    return {
+      ...entry,
+      state: patch.state,
+      activity: patch.activity,
+      location: patch.location,
+      actions: patch.actions,
+      evidence_source: "provider_bridge",
+      evidence_detail: patch.detail,
+    };
+  });
+
+  const summary =
+    record.summary && typeof record.summary === "object" && !Array.isArray(record.summary)
+      ? ({ ...(record.summary as Record<string, unknown>) } as Record<string, unknown>)
+      : {};
+  const summaryProviderBridge =
+    summary.provider_bridge && typeof summary.provider_bridge === "object" && !Array.isArray(summary.provider_bridge)
+      ? ({ ...(summary.provider_bridge as Record<string, unknown>) } as Record<string, unknown>)
+      : {};
+  summary.provider_bridge = {
+    ...summaryProviderBridge,
+    generated_at: input.generatedAt,
+    cached: true,
+    connected_count: counts.connected,
+    configured_count: counts.configured,
+    disconnected_count: counts.disconnected,
+    unavailable_count: counts.unavailable,
+  };
+  if (input.maintain) {
+    const summaryMaintain =
+      summary.maintain && typeof summary.maintain === "object" && !Array.isArray(summary.maintain)
+        ? ({ ...(summary.maintain as Record<string, unknown>) } as Record<string, unknown>)
+        : {};
+    summary.maintain = {
+      ...summaryMaintain,
+      enabled: input.maintain.enabled,
+      running: input.maintain.runtime_running,
+    };
+  }
+  record.summary = summary;
+
+  const providerBridge =
+    record.provider_bridge && typeof record.provider_bridge === "object" && !Array.isArray(record.provider_bridge)
+      ? ({ ...(record.provider_bridge as Record<string, unknown>) } as Record<string, unknown>)
+      : {};
+  record.provider_bridge = {
+    ...providerBridge,
+    generated_at: input.generatedAt,
+    cached: true,
+    diagnostics,
+  };
+
+  return record as OfficeSnapshotPayload;
+}
+
 function parseJsonCandidate(raw: string): { ok: true; value: unknown } | { ok: false } {
   try {
     return { ok: true, value: JSON.parse(raw) };
@@ -451,6 +716,12 @@ function buildOfficeMutation(action: string) {
   };
 }
 
+function setNoStoreHeaders(res: http.ServerResponse) {
+  res.setHeader("cache-control", "no-store, no-cache, must-revalidate");
+  res.setHeader("pragma", "no-cache");
+  res.setHeader("expires", "0");
+}
+
 function writeOfficeSnapshotCache(payload: unknown) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return;
@@ -519,6 +790,7 @@ function sendCachedOfficeSnapshot(
 ) {
   res.statusCode = 200;
   res.setHeader("content-type", "application/json; charset=utf-8");
+  setNoStoreHeaders(res);
   res.setHeader("x-office-snapshot-source", source);
   res.setHeader("x-office-snapshot-age-seconds", snapshot.ageSeconds.toFixed(3));
   res.setHeader("x-office-snapshot-stale", snapshot.stale ? "true" : "false");
@@ -913,6 +1185,7 @@ function officeSnapshotEnv(origin: string) {
 function sendJson(res: http.ServerResponse, statusCode: number, body: unknown) {
   res.statusCode = statusCode;
   res.setHeader("content-type", "application/json; charset=utf-8");
+  setNoStoreHeaders(res);
   res.end(JSON.stringify(body));
 }
 
@@ -1161,6 +1434,9 @@ async function maybeHandleOfficeRequest(
     });
     return true;
   }
+  if (pathname.startsWith("/office/api/")) {
+    setNoStoreHeaders(res);
+  }
 
   const origin = `${requestUrl.protocol}//${requestUrl.host}`;
   if (pathname === "/office/api/action-status" && method === "GET") {
@@ -1189,8 +1465,105 @@ async function maybeHandleOfficeRequest(
       default_thread_id: "ring-leader-main",
       default_theme: process.env.TRICHAT_OFFICE_THEME || "night",
       refresh_interval_seconds: Number(process.env.TRICHAT_OFFICE_REFRESH_SECONDS || "2"),
+      live_status_interval_ms: officeRealtimeIntervalMs(),
       dispatch_runtime: process.env.TRICHAT_OFFICE_TMUX_SESSION_NAME ? "tmux" : "launchd",
       tmux_session_name: process.env.TRICHAT_OFFICE_TMUX_SESSION_NAME || null,
+    });
+    return true;
+  }
+
+  if (pathname === "/office/api/realtime" && method === "GET") {
+    const theme = String(requestUrl.searchParams.get("theme") || process.env.TRICHAT_OFFICE_THEME || "night").trim() || "night";
+    const requestedThreadId = String(requestUrl.searchParams.get("thread_id") || "").trim();
+    const effectiveThreadId = requestedThreadId || "ring-leader-main";
+    const inflightKey = officeSnapshotInflightKey(theme, requestedThreadId || null);
+    const cachedRealtime = readOfficeRealtimeCache(inflightKey);
+    if (cachedRealtime) {
+      res.setHeader("x-office-realtime-source", "live-cache");
+      res.setHeader("x-office-realtime-age-seconds", cachedRealtime.ageSeconds.toFixed(3));
+      sendJson(res, 200, cachedRealtime.payload);
+      return true;
+    }
+    try {
+      const cachedOfficeSnapshot =
+        readOfficeSnapshotCache(theme, requestedThreadId || null, { allowStale: true }) ??
+        readOfficeSnapshotCache(theme, requestedThreadId || null, { allowStale: true, allowExpired: true });
+      const parsedCachedOfficeSnapshot = cachedOfficeSnapshot ? parseOfficeSnapshotPayload(cachedOfficeSnapshot.body) : null;
+      const liveSignals = options.officeRealtimeSignals
+        ? await withTimeout(Promise.resolve(options.officeRealtimeSignals()), officeSnapshotNodeTimeoutMs(), "office realtime signals")
+        : null;
+      const maintainState = options.autonomyMaintainSnapshot
+        ? await withTimeout(
+            Promise.resolve(options.autonomyMaintainSnapshot()),
+            officeSnapshotNodeTimeoutMs(),
+            "office maintain status"
+          )
+        : null;
+      const liveSignalsRecord =
+        liveSignals && typeof liveSignals === "object" && !Array.isArray(liveSignals)
+          ? (liveSignals as Record<string, unknown>)
+          : {};
+      const liveSignalsGeneratedAt = String(liveSignalsRecord.generated_at ?? "").trim() || new Date().toISOString();
+      const liveSignalsStale = liveSignalsRecord.stale === true;
+      const liveSignalsDiagnostics = Array.isArray(liveSignalsRecord.diagnostics) ? liveSignalsRecord.diagnostics : [];
+      const patchedCachedSnapshot =
+        parsedCachedOfficeSnapshot && liveSignalsDiagnostics.length
+          ? applyRealtimeSignalsToOfficeSnapshot(parsedCachedOfficeSnapshot, {
+              generatedAt: liveSignalsGeneratedAt,
+              diagnostics: liveSignalsDiagnostics,
+              stale: liveSignalsStale,
+              maintain: maintainState ?? null,
+            })
+          : null;
+      const parsed = patchedCachedSnapshot
+        ? patchedCachedSnapshot
+        : options.officeRealtimeSnapshot
+          ? ((await withTimeout(
+              Promise.resolve(
+                options.officeRealtimeSnapshot({
+                  threadId: effectiveThreadId,
+                  theme,
+                })
+              ),
+              officeSnapshotNodeTimeoutMs(),
+              "office realtime snapshot"
+            )) as OfficeSnapshotPayload | null)
+          : (await startOfficeNodeSnapshotRefresh(inflightKey, options, {
+              threadId: effectiveThreadId,
+              theme,
+              forceLive: false,
+            })).parsed;
+      if (parsed) {
+        const payload = buildOfficeRealtimePayload(parsed, "live");
+        officeRealtimeCache.set(inflightKey, {
+          payload,
+          capturedAt: Date.now(),
+        });
+        res.setHeader("x-office-realtime-source", "live");
+        sendJson(res, 200, payload);
+        return true;
+      }
+    } catch {
+      // Fall through to truthful cache fallback below.
+    }
+    const fallbackSnapshot =
+      readOfficeSnapshotCache(theme, requestedThreadId || null, { allowStale: true }) ??
+      readOfficeSnapshotCache(theme, requestedThreadId || null, { allowStale: true, allowExpired: true });
+    const fallbackParsed = fallbackSnapshot ? parseOfficeSnapshotPayload(fallbackSnapshot.body) : null;
+    if (fallbackParsed) {
+      const fallbackSource = fallbackSnapshot?.expired ? "cache-expired-fallback" : "cache-fallback";
+      const payload = buildOfficeRealtimePayload(fallbackParsed, fallbackSource);
+      res.setHeader("x-office-realtime-source", fallbackSource);
+      if (fallbackSnapshot) {
+        res.setHeader("x-office-realtime-age-seconds", fallbackSnapshot.ageSeconds.toFixed(3));
+      }
+      sendJson(res, 200, payload);
+      return true;
+    }
+    sendJson(res, 503, {
+      ok: false,
+      error: "realtime_unavailable",
+      detail: "No live or cached Office status snapshot is currently available.",
     });
     return true;
   }
@@ -1247,6 +1620,7 @@ async function maybeHandleOfficeRequest(
         const rawBody = await pendingRawSnapshot;
         res.statusCode = 200;
         res.setHeader("content-type", "application/json; charset=utf-8");
+        setNoStoreHeaders(res);
         res.setHeader("x-office-snapshot-source", "direct-node-raw");
         res.end(rawBody);
         return true;
@@ -1339,6 +1713,7 @@ async function maybeHandleOfficeRequest(
         }
         res.statusCode = 200;
         res.setHeader("content-type", "application/json; charset=utf-8");
+        setNoStoreHeaders(res);
         res.setHeader("x-office-snapshot-source", "direct-node");
         res.end(directBody);
         return true;

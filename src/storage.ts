@@ -7967,7 +7967,7 @@ export class Storage {
     const recover = this.db.transaction(() => {
       const expiredRows = this.db
         .prepare(
-          `SELECT t.task_id, t.attempt_count, t.max_attempts, l.owner_id, l.lease_expires_at
+          `SELECT t.task_id, t.attempt_count, t.max_attempts, t.available_at, l.owner_id, l.lease_expires_at
            FROM tasks t
            INNER JOIN task_leases l ON l.task_id = t.task_id
            WHERE t.status = 'running'
@@ -7993,11 +7993,12 @@ export class Storage {
         const taskId = String(row.task_id ?? "");
         const previousOwnerId = asNullableString(row.owner_id);
         const leaseExpiresAt = asNullableString(row.lease_expires_at);
+        const currentAvailableAt = asNullableString(row.available_at);
         const attemptCount = Number(row.attempt_count ?? 0);
         const maxAttempts = Number(row.max_attempts ?? 3);
         const exhaustAttempts = attemptCount >= maxAttempts;
         const nextStatus: TaskStatus = exhaustAttempts ? "failed" : "pending";
-        const availableAt = exhaustAttempts ? null : now;
+        const availableAt = exhaustAttempts ? currentAvailableAt ?? now : now;
         const reason = exhaustAttempts ? "lease_expired_max_attempts_exceeded" : "lease_expired_requeued";
 
         this.db

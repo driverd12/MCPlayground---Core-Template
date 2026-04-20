@@ -266,7 +266,7 @@ import { autonomyIdeIngress, autonomyIdeIngressSchema } from "./tools/autonomy_i
 import { providerBridge, providerBridgeSchema } from "./tools/provider_bridge.js";
 import { runtimeWorker, runtimeWorkerSchema } from "./tools/runtime_worker.js";
 import { notifierSend, notifierSendSchema } from "./tools/notifier.js";
-import { officeSnapshot, officeSnapshotSchema } from "./tools/office_snapshot.js";
+import { officeRealtimeSnapshot, officeSnapshot, officeSnapshotSchema } from "./tools/office_snapshot.js";
 import { operatorBrief, operatorBriefSchema } from "./tools/operator_brief.js";
 import {
   budgetLedgerControl,
@@ -3607,6 +3607,28 @@ async function main() {
           include_runtime_workers: true,
           metadata: { source: "http.raw" },
         }),
+      officeRealtimeSnapshot: ({ threadId, theme }) =>
+        officeRealtimeSnapshot(storage, {
+          thread_id: threadId,
+          theme,
+        }),
+      officeRealtimeSignals: () => {
+        const autonomyState = storage.getAutonomyMaintainState();
+        const lastCheckAt = String(autonomyState?.last_provider_bridge_check_at ?? "").trim();
+        const intervalSecondsRaw = Number(autonomyState?.interval_seconds ?? 120);
+        const intervalSeconds = Number.isFinite(intervalSecondsRaw) && intervalSecondsRaw > 0 ? intervalSecondsRaw : 120;
+        const parsedLastCheckAt = Date.parse(lastCheckAt);
+        const stale =
+          !Number.isFinite(parsedLastCheckAt) ||
+          Date.now() - parsedLastCheckAt > Math.max(intervalSeconds * 3_000, 300_000);
+        return {
+          generated_at: autonomyState?.last_provider_bridge_check_at ?? autonomyState?.updated_at ?? new Date().toISOString(),
+          stale,
+          diagnostics: Array.isArray(autonomyState?.provider_bridge_diagnostics)
+            ? autonomyState?.provider_bridge_diagnostics
+            : [],
+        };
+      },
     });
     if (startupConvergenceDelayMs > 0) {
       const timer = setTimeout(() => {

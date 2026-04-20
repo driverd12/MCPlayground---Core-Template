@@ -192,18 +192,73 @@ function buildChatSignals(busTail: Record<string, unknown>, nowSeconds: number) 
 function buildProviderSignals(raw: Record<string, unknown>) {
   const providerBridge = asDict(raw.provider_bridge);
   const diagnosticsPayload = asDict(providerBridge.diagnostics);
-  if (diagnosticsPayload.stale === true) {
-    return new Map();
-  }
+  const diagnosticsStale = diagnosticsPayload.stale === true;
   const diagnostics = asList(diagnosticsPayload.diagnostics);
+  const snapshotPayload = asDict(providerBridge.snapshot);
+  const snapshotClients = asList(snapshotPayload.clients);
   const agentIdsByClient: Record<string, string[]> = {
     codex: ["codex"],
+    "claude-cli": ["claude"],
     cursor: ["cursor"],
     "gemini-cli": ["gemini"],
     "github-copilot-cli": ["github-copilot"],
     "github-copilot-vscode": ["github-copilot"],
   };
   const signals = new Map<string, { state: string; activity: string; detail: string; location: string; priority: number }>();
+  for (const entryRaw of snapshotClients) {
+    const entry = asDict(entryRaw);
+    const clientId = String(entry.client_id ?? "").trim();
+    const displayName = String((entry.display_name ?? clientId) || "provider").trim() || "provider";
+    const mappedAgentIds = agentIdsByClient[clientId] || [];
+    if (!mappedAgentIds.length) {
+      continue;
+    }
+    const installed = entry.installed === true;
+    const binaryPresent = entry.binary_present === true;
+    const configPresent = entry.config_present === true;
+    let signal:
+      | { state: string; activity: string; detail: string; location: string; priority: number }
+      | null = null;
+    if (installed || configPresent) {
+      signal = {
+        state: "sleeping",
+        activity: diagnosticsStale ? `${displayName} bridge diagnostics stale` : `${displayName} bridge configured`,
+        detail: diagnosticsStale ? "runtime verification is stale" : "runtime connectivity is not confirmed",
+        location: "sofa",
+        priority: 1,
+      };
+    } else if (binaryPresent) {
+      signal = {
+        state: "offline",
+        activity: `${displayName} bridge not configured`,
+        detail: "bridge config missing",
+        location: "ops",
+        priority: 0,
+      };
+    }
+    if (!signal) {
+      continue;
+    }
+    for (const agentId of mappedAgentIds) {
+      const current = signals.get(agentId);
+      if (!current || signal.priority >= current.priority) {
+        signals.set(agentId, signal);
+      }
+    }
+  }
+  if (diagnosticsStale) {
+    return new Map(
+      [...signals.entries()].map(([agentId, signal]) => [
+        agentId,
+        {
+          state: signal.state,
+          activity: signal.activity,
+          detail: signal.detail,
+          location: signal.location,
+        },
+      ])
+    );
+  }
   for (const entryRaw of diagnostics) {
     const entry = asDict(entryRaw);
     const clientId = String(entry.client_id ?? "").trim();
@@ -743,10 +798,17 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const workbenchStep = asDict(workbenchActiveExecution.step);
   const workbenchTask = asDict(workbenchActiveExecution.task);
 
+  const fetchedAt = parseAnyFloat(
+    raw.generated_at ? new Date(String(raw.generated_at)).getTime() / 1000 : Date.now() / 1000,
+    Date.now() / 1000
+  );
+  const fetchedAtIso =
+    Number.isFinite(fetchedAt) && fetchedAt > 0 ? new Date(fetchedAt * 1000).toISOString() : new Date().toISOString();
+
   return {
     thread_id: threadId,
-    fetched_at: parseAnyFloat(raw.generated_at ? new Date(String(raw.generated_at)).getTime() / 1000 : Date.now() / 1000, Date.now() / 1000),
-    fetched_at_iso: new Date().toISOString(),
+    fetched_at: fetchedAt,
+    fetched_at_iso: fetchedAtIso,
     theme: input.theme,
     errors: asList(raw.errors).map((entry) => String(entry)),
     counts,

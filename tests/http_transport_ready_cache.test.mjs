@@ -556,6 +556,240 @@ test("/office/api/snapshot ignores dashboard cache files and uses the web cache 
   }
 });
 
+test("/office/api/realtime overlays live provider diagnostics onto cached office truth and memoizes the live payload", { concurrency: false }, async () => {
+  const previousCacheDir = process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR;
+  const previousLiveInterval = process.env.TRICHAT_OFFICE_LIVE_STATUS_INTERVAL_MS;
+  const tempCacheDir = await mkdtemp(path.join(os.tmpdir(), "mcp-office-realtime-cache-"));
+  process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR = tempCacheDir;
+  process.env.TRICHAT_OFFICE_LIVE_STATUS_INTERVAL_MS = "5000";
+
+  const fetchedAt = Date.now() / 1000 - 30;
+  const cachedSnapshot = {
+    thread_id: "ring-leader-main",
+    theme: "night",
+    fetched_at: fetchedAt,
+    fetched_at_iso: new Date(fetchedAt * 1000).toISOString(),
+    agents: [
+      {
+        agent: { agent_id: "gemini", display_name: "Gemini", tier: "support", role: "support" },
+        state: "sleeping",
+        activity: "waiting for provider heartbeat",
+        location: "sofa",
+        actions: ["coffee", "sleep"],
+        evidence_source: "roster",
+        evidence_detail: "active-agent-pool",
+      },
+    ],
+    rooms: { lounge: ["gemini"] },
+    summary: {
+      provider_bridge: {
+        generated_at: "",
+        cached: false,
+        connected_count: 0,
+        configured_count: 0,
+        disconnected_count: 0,
+        unavailable_count: 0,
+      },
+    },
+    provider_bridge: {
+      generated_at: "",
+      cached: false,
+      diagnostics: [],
+    },
+    errors: [],
+  };
+
+  for (const cacheFile of ["latest--theme-night.json", "thread-ring-leader-main--theme-night.json"]) {
+    await mkdir(path.dirname(officeHttpCachePath(tempCacheDir, cacheFile)), { recursive: true });
+    await writeFile(officeHttpCachePath(tempCacheDir, cacheFile), JSON.stringify(cachedSnapshot), "utf8");
+  }
+
+  let signalCalls = 0;
+  const port = await reservePort();
+  const server = await startHttpTransport(
+    () =>
+      new Server(
+        {
+          name: "http-office-realtime-overlay-test",
+          version: "1.0.0",
+        },
+        {
+          capabilities: {
+            tools: {},
+          },
+        }
+      ),
+    {
+      host: "127.0.0.1",
+      port,
+      allowedOrigins: ["http://127.0.0.1"],
+      bearerToken: "office-realtime-overlay-token",
+      autonomyMaintainSnapshot: async () => ({
+        enabled: true,
+        runtime_running: false,
+      }),
+      officeRealtimeSignals: async () => {
+        signalCalls += 1;
+        return {
+          generated_at: "2026-04-20T23:15:00.000Z",
+          diagnostics: [
+            {
+              client_id: "gemini-cli",
+              display_name: "Gemini CLI",
+              status: "disconnected",
+              detail: "auth expired",
+            },
+          ],
+        };
+      },
+    }
+  );
+
+  try {
+    const live = await fetchHttpJsonResponse(port, "/office/api/realtime");
+    assert.equal(live.statusCode, 200);
+    assert.equal(live.headers["x-office-realtime-source"], "live");
+    assert.equal(signalCalls, 1);
+    assert.equal(live.body.ok, true);
+    assert.equal(live.body.source, "live");
+    assert.equal(live.body.base_snapshot.fetched_at, fetchedAt);
+    assert.equal(live.body.base_snapshot.fetched_at_iso, cachedSnapshot.fetched_at_iso);
+    assert.equal(live.body.agents[0].state, "blocked");
+    assert.equal(live.body.agents[0].evidence_source, "provider_bridge");
+    assert.equal(live.body.summary.provider_bridge.disconnected_count, 1);
+    assert.equal(live.body.summary.maintain.enabled, true);
+    assert.equal(live.body.summary.maintain.running, false);
+    assert.equal(live.body.provider_bridge.generated_at, "2026-04-20T23:15:00.000Z");
+    assert.equal(live.body.provider_bridge.cached, true);
+    assert.equal(live.body.provider_bridge.diagnostics[0].client_id, "gemini-cli");
+
+    const cached = await fetchHttpJsonResponse(port, "/office/api/realtime");
+    assert.equal(cached.statusCode, 200);
+    assert.equal(cached.headers["x-office-realtime-source"], "live-cache");
+    assert.equal(signalCalls, 1);
+    assert.equal(cached.body.source, "live-cache");
+    assert.equal(cached.body.agents[0].state, "blocked");
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+    if (previousCacheDir === undefined) {
+      delete process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR;
+    } else {
+      process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR = previousCacheDir;
+    }
+    if (previousLiveInterval === undefined) {
+      delete process.env.TRICHAT_OFFICE_LIVE_STATUS_INTERVAL_MS;
+    } else {
+      process.env.TRICHAT_OFFICE_LIVE_STATUS_INTERVAL_MS = previousLiveInterval;
+    }
+    await rm(tempCacheDir, { recursive: true, force: true });
+  }
+});
+
+test("/office/api/realtime does not drift Claude to offline when bridge diagnostics are stale", { concurrency: false }, async () => {
+  const previousCacheDir = process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR;
+  const tempCacheDir = await mkdtemp(path.join(os.tmpdir(), "mcp-office-realtime-claude-stale-"));
+  process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR = tempCacheDir;
+
+  const cachedSnapshot = {
+    thread_id: "ring-leader-main",
+    theme: "night",
+    fetched_at: Date.now() / 1000 - 15,
+    fetched_at_iso: new Date(Date.now() - 15_000).toISOString(),
+    agents: [
+      {
+        agent: { agent_id: "claude", display_name: "Claude", tier: "support", role: "critic" },
+        state: "offline",
+        activity: "not in the current working set",
+        location: "ops",
+        actions: ["ops", "offline"],
+        evidence_source: "roster",
+        evidence_detail: "inactive",
+      },
+    ],
+    rooms: { ops: ["claude"] },
+    summary: {},
+    provider_bridge: {
+      generated_at: "",
+      cached: true,
+      diagnostics: [],
+    },
+    errors: [],
+  };
+
+  for (const cacheFile of ["latest--theme-night.json", "thread-ring-leader-main--theme-night.json"]) {
+    await mkdir(path.dirname(officeHttpCachePath(tempCacheDir, cacheFile)), { recursive: true });
+    await writeFile(officeHttpCachePath(tempCacheDir, cacheFile), JSON.stringify(cachedSnapshot), "utf8");
+  }
+
+  const port = await reservePort();
+  const server = await startHttpTransport(
+    () =>
+      new Server(
+        {
+          name: "http-office-realtime-claude-stale-test",
+          version: "1.0.0",
+        },
+        {
+          capabilities: {
+            tools: {},
+          },
+        }
+      ),
+    {
+      host: "127.0.0.1",
+      port,
+      allowedOrigins: ["http://127.0.0.1"],
+      bearerToken: "office-realtime-claude-stale-token",
+      officeRealtimeSignals: async () => ({
+        generated_at: new Date(Date.now() - 600_000).toISOString(),
+        stale: true,
+        diagnostics: [
+          {
+            client_id: "claude-cli",
+            display_name: "Claude CLI",
+            status: "disconnected",
+            detail: "stale disconnected bridge state",
+          },
+        ],
+      }),
+    }
+  );
+
+  try {
+    const response = await fetchHttpJsonResponse(port, "/office/api/realtime");
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers["x-office-realtime-source"], "live");
+    assert.equal(response.body.agents[0].agent.agent_id, "claude");
+    assert.equal(response.body.agents[0].state, "sleeping");
+    assert.equal(response.body.agents[0].evidence_source, "provider_bridge");
+    assert.match(String(response.body.agents[0].activity || ""), /stale/i);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+    if (previousCacheDir === undefined) {
+      delete process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR;
+    } else {
+      process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR = previousCacheDir;
+    }
+    await rm(tempCacheDir, { recursive: true, force: true });
+  }
+});
+
 test("/ready coalesces concurrent live health snapshot polls into a single in-flight read", { concurrency: false }, async () => {
   const previousTimeout = process.env.MCP_HTTP_READY_TIMEOUT_MS;
   process.env.MCP_HTTP_READY_TIMEOUT_MS = "500";

@@ -4,9 +4,13 @@
     bootstrap: null,
     snapshot: null,
     snapshotFingerprint: "",
+    snapshotMeta: null,
     selectedAgentId: "",
     refreshHandle: null,
+    realtimeHandle: null,
     snapshotRequest: false,
+    realtime: null,
+    realtimeRequest: false,
     patientZeroNoteDraft: "",
     patientZeroNoteDirty: false,
     patientZeroLastSavedNote: "",
@@ -40,7 +44,7 @@
   };
 
   var MASTER_MOLD_MODE_LABEL = "MASTER-MOLD MODE";
-  var MASTER_MOLD_MODE_HERO_ASSET = "/office/master-mold-mode-banner.svg?v=20260420c";
+  var MASTER_MOLD_MODE_HERO_ASSET = "/office/master-mold-mode-banner.svg?v=20260420d";
 
   function setBootState(value) {
     if (document.body) {
@@ -90,6 +94,54 @@
     var minutes = String(Math.floor((seconds % 3600) / 60));
     if (minutes.length < 2) minutes = "0" + minutes;
     return Math.floor(seconds / 3600) + "h" + minutes + "m";
+  }
+
+  function ageSeconds(isoValue) {
+    var stamp = new Date(isoValue || 0).getTime();
+    if (!Number.isFinite(stamp) || stamp <= 0) return null;
+    return Math.max(0, (Date.now() - stamp) / 1000);
+  }
+
+  function chipToneClass(tone) {
+    return tone ? " chip--" + tone : "";
+  }
+
+  function humanizeSource(value) {
+    return String(value || "live").replace(/-/g, " ");
+  }
+
+  function latestProviderBridgeGeneratedAt(snapshot) {
+    var summary = snapshot && snapshot.summary ? snapshot.summary : {};
+    var providerBridgeSummary = summary.provider_bridge || {};
+    if (providerBridgeSummary.generated_at) {
+      return providerBridgeSummary.generated_at;
+    }
+    var providerBridge = snapshot && snapshot.provider_bridge ? snapshot.provider_bridge : {};
+    return providerBridge.generated_at || "";
+  }
+
+  function overlayRealtimeSnapshot(snapshot) {
+    if (!state.realtime) {
+      return snapshot;
+    }
+    var base = snapshot && typeof snapshot === "object" ? snapshot : {};
+    var merged = Object.assign({}, base);
+    var realtime = state.realtime || {};
+    var baseSnapshot = realtime.base_snapshot || {};
+    if (realtime.thread_id) merged.thread_id = realtime.thread_id;
+    if (realtime.theme) merged.theme = realtime.theme;
+    if (baseSnapshot.fetched_at != null) merged.fetched_at = baseSnapshot.fetched_at;
+    if (baseSnapshot.fetched_at_iso) merged.fetched_at_iso = baseSnapshot.fetched_at_iso;
+    if (baseSnapshot.cache) merged.cache = baseSnapshot.cache;
+    if (Array.isArray(realtime.errors)) merged.errors = realtime.errors;
+    if (Array.isArray(realtime.agents)) merged.agents = realtime.agents;
+    if (realtime.rooms && typeof realtime.rooms === "object") merged.rooms = realtime.rooms;
+    if (realtime.summary && typeof realtime.summary === "object") merged.summary = realtime.summary;
+    if (realtime.provider_bridge && typeof realtime.provider_bridge === "object") merged.provider_bridge = realtime.provider_bridge;
+    if (Array.isArray(realtime.router_suppression_decisions)) {
+      merged.router_suppression_decisions = realtime.router_suppression_decisions;
+    }
+    return merged;
   }
 
   function statusClass(value) {
@@ -544,11 +596,40 @@
     var patientZero = summary.patient_zero || {};
     var privilegedAccess = summary.privileged_access || {};
     var officeAction = activeOfficeActionState();
+    var detailAgeLabel = relativeTime(state.snapshot.fetched_at_iso);
+    var liveAgeLabel = state.realtime && state.realtime.sampled_at ? relativeTime(state.realtime.sampled_at) : "n/a";
+    var bridgeGeneratedAt = latestProviderBridgeGeneratedAt(state.snapshot);
+    var bridgeAgeLabel = bridgeGeneratedAt ? relativeTime(bridgeGeneratedAt) : "n/a";
+    var liveSource = state.realtime ? String(state.realtime.source || "live").trim() || "live" : "pending";
+    var detailSource = state.snapshotMeta && state.snapshotMeta.snapshotSource
+      ? String(state.snapshotMeta.snapshotSource)
+      : "direct-node";
+    var liveAge = state.realtime && state.realtime.sampled_at ? ageSeconds(state.realtime.sampled_at) : null;
+    var bridgeAge = bridgeGeneratedAt ? ageSeconds(bridgeGeneratedAt) : null;
+    var freshnessTone = liveSource.indexOf("cache") === 0
+      ? "warn"
+      : liveAge == null
+        ? "bad"
+        : liveAge <= 3 && (bridgeAge == null || bridgeAge <= 5)
+          ? "good"
+          : liveAge <= 10
+            ? "warn"
+            : "bad";
     var chips = [];
     if (state.snapshot.errors && state.snapshot.errors.length) {
       chips.push(["Snapshot", String(state.snapshot.errors.length) + " partial errors"]);
     }
     chips.push(
+      [
+        "Freshness",
+        "detail " + detailAgeLabel + " | live " + liveAgeLabel + " | bridge " + bridgeAgeLabel,
+        freshnessTone
+      ],
+      [
+        "Live Lane",
+        humanizeSource(liveSource) + " | detail " + humanizeSource(detailSource),
+        liveSource === "live" || liveSource === "live-cache" ? "good" : "warn"
+      ],
       ["Kernel", String(kernel.state || "n/a") + " | healthy " + String(kernel.healthy || 0) + " | degraded " + String(kernel.degraded || 0)],
       ["Tasks", "run " + String(tasks.running || 0) + " | queue " + String(tasks.pending || 0) + " | fail " + String(tasks.failed || 0)],
       ["Host", "cpu " + Math.round((host.cpu_utilization || 0) * 100) + "% | ram " + fmt(host.ram_available_gb) + " / " + fmt(host.ram_total_gb) + " GB | swap " + fmt(host.swap_used_gb) + " GB"],
@@ -594,7 +675,7 @@
     );
     els.statusStrip.innerHTML = chips
       .map(function (entry) {
-        return '<div class="chip"><strong>' + escapeHtml(entry[0]) + "</strong><span>" + escapeHtml(entry[1]) + "</span></div>";
+        return '<div class="chip' + chipToneClass(entry[2]) + '"><strong>' + escapeHtml(entry[0]) + "</strong><span>" + escapeHtml(entry[1]) + "</span></div>";
       })
       .join("");
   }
@@ -1548,8 +1629,18 @@
     if (els.subtitle) {
       var actionState = activeOfficeActionState();
       var subtitle = state.snapshot
-        ? "Thread " + state.snapshot.thread_id + " · data age " + relativeTime(state.snapshot.fetched_at_iso)
+        ? "Thread " +
+          state.snapshot.thread_id +
+          " · detail " +
+          relativeTime(state.snapshot.fetched_at_iso) +
+          " · live lane " +
+          (state.realtime && state.realtime.sampled_at ? relativeTime(state.realtime.sampled_at) : "pending") +
+          " · bridge " +
+          relativeTime(latestProviderBridgeGeneratedAt(state.snapshot))
         : "Connecting to live MCP operator surface";
+      if (state.snapshotMeta && state.snapshotMeta.snapshotSource && state.snapshotMeta.snapshotSource !== "direct-node") {
+        subtitle += " · " + humanizeSource(state.snapshotMeta.snapshotSource);
+      }
       if (actionState && actionState.running) {
         subtitle += " · " + actionState.action + " running " + relativeTime(actionState.startedAt) + " ago";
       }
@@ -1597,6 +1688,9 @@
             snapshotSource: response.headers.get("x-office-snapshot-source") || "",
             snapshotStale: response.headers.get("x-office-snapshot-stale") || "",
             refreshState: response.headers.get("x-office-refresh-state") || "",
+            snapshotAgeSeconds: response.headers.get("x-office-snapshot-age-seconds") || "",
+            realtimeSource: response.headers.get("x-office-realtime-source") || "",
+            realtimeAgeSeconds: response.headers.get("x-office-realtime-age-seconds") || "",
           },
         };
       });
@@ -1664,8 +1758,20 @@
   }
 
   function settleActionRefresh() {
-    fetchSnapshot().catch(function (error) {
-      setResultText(String(error));
+    Promise.all([
+      fetchLiveStatus().catch(function (error) {
+        return error;
+      }),
+      fetchSnapshot().catch(function (error) {
+        return error;
+      }),
+    ]).then(function (results) {
+      var error = results.find(function (entry) {
+        return entry instanceof Error;
+      });
+      if (error) {
+        setResultText(String(error));
+      }
     });
   }
 
@@ -1734,28 +1840,30 @@
       .then(function (result) {
         var payload = result.payload;
         var meta = result.meta || {};
-        var nextFingerprint = snapshotFingerprint(payload);
+        var mergedPayload = overlayRealtimeSnapshot(payload);
+        var nextFingerprint = snapshotFingerprint(mergedPayload);
         var shouldRenderAll = nextFingerprint !== state.snapshotFingerprint;
-        state.snapshot = payload;
+        state.snapshotMeta = meta;
+        state.snapshot = mergedPayload;
         state.snapshotFingerprint = nextFingerprint;
         var patientZeroNote =
-          payload &&
-          payload.summary &&
-          payload.summary.patient_zero &&
-          typeof payload.summary.patient_zero.last_operator_note === "string"
-            ? payload.summary.patient_zero.last_operator_note
+          mergedPayload &&
+          mergedPayload.summary &&
+          mergedPayload.summary.patient_zero &&
+          typeof mergedPayload.summary.patient_zero.last_operator_note === "string"
+            ? mergedPayload.summary.patient_zero.last_operator_note
             : "";
         state.patientZeroLastSavedNote = patientZeroNote;
         if (!state.patientZeroNoteDirty) {
           state.patientZeroNoteDraft = patientZeroNote;
         }
-        if (!state.selectedAgentId && payload.agents && payload.agents.length && payload.agents[0].agent) {
-          state.selectedAgentId = payload.agents[0].agent.agent_id || "";
+        if (!state.selectedAgentId && mergedPayload.agents && mergedPayload.agents.length && mergedPayload.agents[0].agent) {
+          state.selectedAgentId = mergedPayload.agents[0].agent.agent_id || "";
         }
         if (meta.refreshState === "pending") {
-          setResultText(forceLive ? "Live refresh started." : "Snapshot refresh started.");
-        } else if (meta.snapshotSource === "cache-refreshing-stale") {
-          setResultText("Showing cached office data while a fresh snapshot loads.");
+          setResultText(forceLive ? "Live refresh started; the status lane stays current." : "Snapshot refresh started; the status lane stays current.");
+        } else if (meta.snapshotSource === "cache-refreshing-stale" || meta.snapshotSource === "cache-expired-refreshing") {
+          setResultText("Detail panels are cached while a fresh snapshot loads. Live status is still updating.");
         } else if (forceLive) {
           setResultText("Live refresh complete.");
         } else {
@@ -1765,8 +1873,9 @@
           renderAll();
         } else {
           renderSubtitle();
+          renderStatusStrip();
         }
-        return payload;
+        return mergedPayload;
       }, function (error) {
         state.snapshotRequest = false;
         throw error;
@@ -1776,6 +1885,41 @@
         return payload;
       });
     return state.snapshotRequest;
+  }
+
+  function fetchLiveStatus() {
+    if (state.realtimeRequest) {
+      return state.realtimeRequest;
+    }
+    var threadId = "";
+    if (state.snapshot && state.snapshot.thread_id) {
+      threadId = state.snapshot.thread_id;
+    } else if (state.bootstrap && state.bootstrap.default_thread_id) {
+      threadId = state.bootstrap.default_thread_id;
+    }
+    var params = new URLSearchParams();
+    if (threadId) {
+      params.set("thread_id", threadId);
+    }
+    state.realtimeRequest = getJsonWithResponse("/office/api/realtime?" + params.toString())
+      .then(function (result) {
+        var payload = result.payload || {};
+        state.realtime = payload;
+        state.snapshot = overlayRealtimeSnapshot(state.snapshot || {});
+        if (!state.selectedAgentId && state.snapshot && state.snapshot.agents && state.snapshot.agents.length && state.snapshot.agents[0].agent) {
+          state.selectedAgentId = state.snapshot.agents[0].agent.agent_id || "";
+        }
+        renderAll();
+        return payload;
+      }, function (error) {
+        state.realtimeRequest = false;
+        throw error;
+      })
+      .then(function (payload) {
+        state.realtimeRequest = false;
+        return payload;
+      });
+    return state.realtimeRequest;
   }
 
   function renderLoadingShell(message) {
@@ -1796,6 +1940,22 @@
         setResultText("Snapshot refresh degraded: " + String(error));
         if (!state.snapshot) {
           renderLoadingShell("Snapshot retrying after a partial failure.");
+        }
+      });
+    }, intervalMs);
+  }
+
+  function ensureRealtimeLoop() {
+    if (state.realtimeHandle) return;
+    var intervalMs =
+      state.bootstrap && state.bootstrap.live_status_interval_ms
+        ? Number(state.bootstrap.live_status_interval_ms)
+        : 1250;
+    intervalMs = Math.max(750, intervalMs);
+    state.realtimeHandle = setInterval(function () {
+      fetchLiveStatus().catch(function (error) {
+        if (!state.snapshot) {
+          setResultText("Live status lane degraded: " + String(error));
         }
       });
     }, intervalMs);
@@ -1933,8 +2093,20 @@
     }
     if (els.refreshButton) {
       els.refreshButton.addEventListener("click", function () {
-        fetchSnapshot({ forceLive: true, explicitForceLive: true }).catch(function (error) {
-          setResultText(String(error));
+        Promise.all([
+          fetchLiveStatus().catch(function (error) {
+            return error;
+          }),
+          fetchSnapshot({ forceLive: true, explicitForceLive: true }).catch(function (error) {
+            return error;
+          }),
+        ]).then(function (results) {
+          var error = results.find(function (entry) {
+            return entry instanceof Error;
+          });
+          if (error) {
+            setResultText(String(error));
+          }
         });
       });
     }
@@ -1961,6 +2133,12 @@
       })
       .then(function () {
         ensureRefreshLoop();
+        ensureRealtimeLoop();
+        fetchLiveStatus().catch(function (error) {
+          if (!state.snapshot) {
+            setResultText("Live status lane degraded: " + String(error));
+          }
+        });
         return fetchSnapshot().catch(function (error) {
           setResultText(String(error));
           renderLoadingShell("Snapshot retrying after a partial failure.");
