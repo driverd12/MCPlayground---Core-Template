@@ -85,6 +85,7 @@ npm run codex:mcp:register -- master-mold
 - installs the supported local client config paths for Claude CLI, Cursor, Gemini CLI, and GitHub Copilot CLI, including workspace-local `.cursor/mcp.json`
 - diagnoses bridge truth without conflating “configured” and “runtime connected”
 - refreshes stale CLI diagnose evidence into the shared cache so `status` and onboarding surfaces converge after a real operator check
+- keeps local Ollama/MLX winners as the default first-pass execution lane instead of auto-injecting near-top hosted bridges, unless the objective explicitly asks for hosted providers or named bridge agents
 - preserves `autonomy.ide_ingress` as the one canonical ingress lane
 
 ## Source References

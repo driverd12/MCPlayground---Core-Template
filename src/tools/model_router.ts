@@ -631,6 +631,25 @@ function resolveBridgeAgentIdsForBackend(backend: ModelRouterBackendRecord) {
   ];
 }
 
+function objectiveExplicitlyRequestsHostedBridge(preferredTags: string[]) {
+  const normalizedTags = preferredTags.map((entry) => entry.toLowerCase());
+  return normalizedTags.includes("hosted");
+}
+
+function shouldSuppressAutoBridgeEscalation(
+  selectedBackend: ModelRouterBackendRecord | null,
+  preferredTags: string[]
+) {
+  if (!selectedBackend) {
+    return false;
+  }
+  if (objectiveExplicitlyRequestsHostedBridge(preferredTags)) {
+    return false;
+  }
+  const provider = String(selectedBackend.provider || "").trim().toLowerCase();
+  return selectedBackend.locality === "local" && ["ollama", "mlx", "llama.cpp", "vllm"].includes(provider);
+}
+
 export function routeObjectiveBackends(
   storage: Storage,
   input: {
@@ -666,11 +685,15 @@ export function routeObjectiveBackends(
   const topScore = typeof route.ranked_backends[0]?.score === "number" ? route.ranked_backends[0].score : null;
   const bridgeMargin =
     typeof input.bridge_margin === "number" && Number.isFinite(input.bridge_margin) ? Math.max(0, input.bridge_margin) : 0.08;
-  const routedBridgeAgentIds = route.ranked_backends
-    .filter((entry) => topScore === null || entry.score >= topScore - bridgeMargin)
-    .flatMap((entry) => resolveBridgeAgentIdsForBackend(entry.backend));
+  const explicitAgentIds = normalizeStringArray(input.explicit_agent_ids);
+  const suppressAutoBridgeEscalation = shouldSuppressAutoBridgeEscalation(route.selected_backend, preferredTags);
+  const routedBridgeAgentIds = suppressAutoBridgeEscalation
+    ? []
+    : route.ranked_backends
+        .filter((entry) => topScore === null || entry.score >= topScore - bridgeMargin)
+        .flatMap((entry) => resolveBridgeAgentIdsForBackend(entry.backend));
   const effectiveAgentIds = [
-    ...new Set([...(input.explicit_agent_ids ?? []), ...routedBridgeAgentIds].map((entry) => String(entry ?? "").trim()).filter(Boolean)),
+    ...new Set([...explicitAgentIds, ...routedBridgeAgentIds].map((entry) => String(entry ?? "").trim()).filter(Boolean)),
   ];
   return {
     task_kind: taskKind,
@@ -678,6 +701,7 @@ export function routeObjectiveBackends(
     route,
     routed_bridge_agent_ids: [...new Set(routedBridgeAgentIds)],
     effective_agent_ids: effectiveAgentIds,
+    auto_bridge_suppressed_for_local_first: suppressAutoBridgeEscalation,
   };
 }
 

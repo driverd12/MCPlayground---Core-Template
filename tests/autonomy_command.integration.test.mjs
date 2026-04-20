@@ -236,6 +236,51 @@ test("autonomy.command uses routed bridge candidates to augment research intake 
   }
 });
 
+test("autonomy.command keeps local-first intake on the local backend when the objective does not explicitly request hosted bridges", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-command-local-first-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+  const ollama = await startFakeOllamaServer({
+    models: [{ name: "llama3.2:3b" }],
+  });
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+    TRICHAT_OLLAMA_URL: ollama.url,
+    GOOGLE_API_KEY: "test-gemini-key",
+    TRICHAT_RING_LEADER_AUTOSTART: "1",
+    TRICHAT_RING_LEADER_BRIDGE_DRY_RUN: "1",
+    TRICHAT_RING_LEADER_EXECUTE_ENABLED: "0",
+    TRICHAT_RING_LEADER_INTERVAL_SECONDS: "600",
+  });
+
+  try {
+    const intake = await callTool(session.client, "autonomy.command", {
+      mutation: nextMutation("autonomy-command-local-first", "autonomy.command", () => mutationCounter++),
+      objective: "Fix local Ollama routing reliability and implement tighter MLX fallback behavior on this Mac.",
+      title: "Local routing hardening intake",
+      trichat_bridge_dry_run: true,
+      dispatch_limit: 12,
+      max_passes: 3,
+    });
+
+    assert.equal(intake.ok, true);
+    assert.ok(intake.model_router);
+    assert.equal(intake.model_router.task_kind, "coding");
+    assert.equal(intake.model_router.route?.selected_backend?.provider, "ollama");
+    assert.equal(intake.model_router.auto_bridge_suppressed_for_local_first, true);
+    assert.deepEqual(intake.model_router.routed_bridge_agent_ids, []);
+    assert.ok(intake.model_router.effective_agent_ids.includes("implementation-director"));
+    assert.equal(intake.model_router.effective_agent_ids.includes("gemini"), false);
+    assert.deepEqual(intake.goal.metadata.routed_bridge_agent_ids, []);
+  } finally {
+    await session.client.close().catch(() => {});
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("autonomy.command selects a swarm profile, reuses prior memory, and records checkpoint artifacts", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-command-swarm-"));
   const dbPath = path.join(tempDir, "hub.sqlite");
