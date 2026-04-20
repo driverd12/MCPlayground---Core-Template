@@ -365,6 +365,15 @@ type WorkflowExportSummary = {
   } | null;
 };
 
+type RouterSuppressionSummary = {
+  decision_id: string | null;
+  observed_at: string | null;
+  reason: "local_first_required" | "local_evidence_missing" | "laptop_pressure";
+  selected_backend_id: string | null;
+  pressure_level: string | null;
+  suppressed_agent_ids: string[];
+};
+
 type SetupDiagnosticsSummary = {
   platform: {
     platform: string;
@@ -386,6 +395,7 @@ type SetupDiagnosticsSummary = {
     unavailable_count: number;
     stale: boolean;
     degraded: boolean;
+    latest_router_suppression: RouterSuppressionSummary | null;
   };
   desktop_lane: {
     enabled: boolean;
@@ -1618,6 +1628,7 @@ function summarizeSetupDiagnostics(params: {
   provider_bridge_entries: Array<Record<string, unknown>>;
   provider_bridge_generated_at: string | null;
   provider_bridge_stale: boolean;
+  latest_router_suppression: RouterSuppressionSummary | null;
   desktop_control: ReturnType<typeof summarizeDesktopControlState>;
   patient_zero: ReturnType<typeof summarizePatientZeroState>;
 }): SetupDiagnosticsSummary {
@@ -1725,6 +1736,7 @@ function summarizeSetupDiagnostics(params: {
       unavailable_count: providerBridgeUnavailableCount,
       stale: params.provider_bridge_stale,
       degraded: providerBridgeDegraded,
+      latest_router_suppression: params.latest_router_suppression,
     },
     desktop_lane: {
       enabled: params.desktop_control.enabled,
@@ -1767,6 +1779,56 @@ function summarizeSetupDiagnostics(params: {
     },
     next_actions: nextActions,
   };
+}
+
+function buildRecentRouterSuppressionDecisions(storage: Storage, params?: { limit?: number; max_age_seconds?: number }) {
+  const limit =
+    typeof params?.limit === "number" && Number.isFinite(params.limit) ? Math.max(1, Math.min(8, Math.trunc(params.limit))) : 5;
+  const maxAgeSeconds =
+    typeof params?.max_age_seconds === "number" && Number.isFinite(params.max_age_seconds)
+      ? Math.max(300, Math.trunc(params.max_age_seconds))
+      : 21600;
+  const now = Date.now();
+  const events = storage.listRuntimeEvents({
+    event_type: "autonomy.command",
+    limit: Math.max(40, limit * 10),
+  });
+  const entries: RouterSuppressionSummary[] = [];
+  for (let index = events.length - 1; index >= 0 && entries.length < limit; index -= 1) {
+    const event = events[index];
+    const details = isRecord(event.details) ? event.details : {};
+    const reason =
+      details.model_router_auto_bridge_suppressed_for_resource_gate === true
+        ? "laptop_pressure"
+        : details.model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence === true
+          ? "local_evidence_missing"
+          : details.model_router_auto_bridge_suppressed_for_local_first === true
+            ? "local_first_required"
+            : null;
+    if (!reason) {
+      continue;
+    }
+    const observedAt = readString(event.created_at);
+    const observedStamp = observedAt ? Date.parse(observedAt) : Number.NaN;
+    if (Number.isFinite(observedStamp) && now - observedStamp > maxAgeSeconds * 1000) {
+      continue;
+    }
+    entries.push({
+      decision_id: readString(details.model_router_suppression_decision_id),
+      observed_at: observedAt,
+      reason,
+      selected_backend_id: readString(details.model_router_backend_id),
+      pressure_level: readString(isRecord(details.model_router_resource_gate) ? details.model_router_resource_gate.severity : null),
+      suppressed_agent_ids: Array.isArray(details.model_router_auto_bridge_suppressed_agent_ids)
+        ? [
+            ...new Set(
+              details.model_router_auto_bridge_suppressed_agent_ids.map((entry) => String(entry ?? "").trim()).filter(Boolean)
+            ),
+          ]
+        : [],
+    });
+  }
+  return entries;
 }
 
 function summarizeMaintenanceSubsystem(params: {
@@ -2224,6 +2286,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       : false) ||
     ((providerBridgeAgeSeconds ?? Number.POSITIVE_INFINITY) >
       Math.max((autonomyMaintainState?.interval_seconds ?? 120) * 3, 300));
+  const latestRouterSuppression = buildRecentRouterSuppressionDecisions(storage, { limit: 1 })[0] ?? null;
   const desktopControlState = storage.getDesktopControlState();
   const desktopControlSummary = summarizeDesktopControlState(desktopControlState);
   const patientZeroState = storage.getPatientZeroState();
@@ -2240,6 +2303,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     provider_bridge_entries: providerBridgeEntries as Array<Record<string, unknown>>,
     provider_bridge_generated_at: providerBridgeDiagnostics.generated_at,
     provider_bridge_stale: providerBridgeStale,
+    latest_router_suppression: latestRouterSuppression,
     desktop_control: desktopControlSummary,
     patient_zero: patientZeroSummary,
   });
@@ -2803,6 +2867,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       disconnected_count: providerBridgeDisconnectedCount,
       unavailable_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "unavailable").length,
       stale: providerBridgeStale,
+      latest_router_suppression: latestRouterSuppression,
     },
     learning: {
       ...learningOverview,

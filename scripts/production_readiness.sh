@@ -513,6 +513,7 @@ data = json.loads(pathlib.Path(sys.argv[1]).read_text())
 brief_markdown = str(data.get("brief_markdown") or "").strip()
 current_objective = data.get("current_objective") or "n/a"
 source = data.get("source") or "n/a"
+latest = data.get("latest_router_suppression") or ((data.get("control_plane_summary") or {}).get("latest_router_suppression")) or {}
 if source != "operator.brief":
     raise SystemExit(f"operator.brief returned unexpected source {source!r}")
 if not brief_markdown:
@@ -522,6 +523,14 @@ print(
     f"source={source} "
     f"current_objective={current_objective}"
 )
+if isinstance(latest, dict) and latest:
+    print(
+        "[production] router hold: "
+        f"reason={latest.get('reason') or 'suppressed'} "
+        f"backend={latest.get('selected_backend_id') or 'n/a'} "
+        f"pressure={latest.get('pressure_level') or 'n/a'} "
+        f"observed_at={latest.get('observed_at') or 'n/a'}"
+    )
 PY
 
 kernel_ok=0

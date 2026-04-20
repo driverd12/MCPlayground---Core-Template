@@ -361,6 +361,7 @@ function summarizeControlPlane(
     step: PlanStepRecord | null;
     task: TaskRecord | null;
     session: AgentSessionRecord | null;
+    latest_router_suppression: Record<string, unknown> | null;
   }
 ) {
   const permission = resolvePermissionProfileChain(storage, {
@@ -376,6 +377,11 @@ function summarizeControlPlane(
   const desktopControlRecord: Record<string, unknown> = isRecord(kernel?.desktop_control) ? kernel!.desktop_control : {};
   const patientZeroRecord: Record<string, unknown> = isRecord(kernel?.patient_zero) ? kernel!.patient_zero : {};
   const privilegedAccessRecord: Record<string, unknown> = isRecord(kernel?.privileged_access) ? kernel!.privileged_access : {};
+  const providerBridgeRecord: Record<string, unknown> = isRecord(kernel?.provider_bridge) ? kernel!.provider_bridge : {};
+  const setupDiagnosticsRecord: Record<string, unknown> = isRecord(kernel?.setup_diagnostics) ? kernel!.setup_diagnostics : {};
+  const setupDiagnosticsProviderBridgeRecord: Record<string, unknown> = isRecord(setupDiagnosticsRecord.provider_bridge)
+    ? setupDiagnosticsRecord.provider_bridge
+    : {};
   const desktopControlSummaryRecord: Record<string, unknown> = isRecord(desktopControlRecord.summary)
     ? desktopControlRecord.summary
     : {};
@@ -446,6 +452,13 @@ function summarizeControlPlane(
         : false,
     last_verification_error: readString(privilegedAccessSummaryRecord.last_verification_error),
   };
+  const latestRouterSuppression =
+    params.latest_router_suppression ??
+    (isRecord(providerBridgeRecord.latest_router_suppression)
+      ? providerBridgeRecord.latest_router_suppression
+      : isRecord(setupDiagnosticsProviderBridgeRecord.latest_router_suppression)
+        ? setupDiagnosticsProviderBridgeRecord.latest_router_suppression
+        : null);
   return {
     permission_profile: permission.resolved_profile_id,
     permission_chain: permission.chain,
@@ -455,6 +468,7 @@ function summarizeControlPlane(
     desktop_control: desktopControl,
     patient_zero: patientZero,
     privileged_access: privilegedAccess,
+    latest_router_suppression: latestRouterSuppression,
   };
 }
 
@@ -546,6 +560,7 @@ export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBr
     step,
     task,
     session: ringLeaderSession,
+    latest_router_suppression: latestRouterSuppression,
   });
 
   const briefMarkdown = [
