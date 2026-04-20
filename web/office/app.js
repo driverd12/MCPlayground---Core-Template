@@ -39,6 +39,9 @@
     actionButtons: Array.prototype.slice.call(document.querySelectorAll("[data-action]")),
   };
 
+  var MASTER_MOLD_MODE_LABEL = "MASTER-MOLD MODE";
+  var MASTER_MOLD_MODE_BANNER_ASSET = "/office/master-mold-mode-banner.svg?v=20260420b";
+
   function setBootState(value) {
     if (document.body) {
       document.body.setAttribute("data-office-boot", value);
@@ -57,6 +60,20 @@
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;");
+  }
+
+  function operatorFacingText(value) {
+    return String(value == null ? "" : value)
+      .replace(/patient zero/gi, MASTER_MOLD_MODE_LABEL)
+      .replace(/patient-zero/gi, MASTER_MOLD_MODE_LABEL);
+  }
+
+  function masterMoldModeState(enabled) {
+    return enabled ? "enabled" : "disabled";
+  }
+
+  function masterMoldModePosture(enabled) {
+    return enabled ? "ENABLED" : "DISABLED";
   }
 
   function fmt(value, digits) {
@@ -123,24 +140,8 @@
     );
   }
 
-  function patientZeroSkullSvg(enabled) {
-    var fill = enabled ? "#f1dfd4" : "#cfb9ad";
-    var accent = enabled ? "#b43c3c" : "#6c3030";
-    return (
-      '<svg viewBox="0 0 96 96" aria-hidden="true">' +
-      '<rect x="24" y="20" width="48" height="10" fill="' + accent + '" />' +
-      '<rect x="18" y="30" width="60" height="28" rx="6" fill="' + fill + '" />' +
-      '<rect x="26" y="58" width="44" height="14" rx="4" fill="' + fill + '" />' +
-      '<rect x="30" y="38" width="12" height="12" fill="#0f1116" />' +
-      '<rect x="54" y="38" width="12" height="12" fill="#0f1116" />' +
-      '<polygon points="48,44 40,58 56,58" fill="' + accent + '" />' +
-      '<rect x="34" y="62" width="6" height="12" fill="#0f1116" />' +
-      '<rect x="44" y="62" width="6" height="12" fill="#0f1116" />' +
-      '<rect x="54" y="62" width="6" height="12" fill="#0f1116" />' +
-      '<rect x="28" y="74" width="8" height="10" fill="' + accent + '" />' +
-      '<rect x="60" y="74" width="8" height="10" fill="' + accent + '" />' +
-      "</svg>"
-    );
+  function masterMoldModeBannerMarkup() {
+    return '<img src="' + MASTER_MOLD_MODE_BANNER_ASSET + '" alt="' + MASTER_MOLD_MODE_LABEL + ' banner art" />';
   }
 
   function getSnapshotAgents() {
@@ -334,10 +335,10 @@
           String(providers.disconnected_count || 0),
       },
       {
-        label: "Patient Zero",
+        label: MASTER_MOLD_MODE_LABEL,
         tone: gateTone(patientZero.enabled !== true, patientZero.autonomous_control_enabled !== true),
         detail:
-          (patientZero.enabled ? "armed" : "standby") +
+          masterMoldModeState(patientZero.enabled) +
           " · autonomy " +
           (patientZero.autonomous_control_enabled ? "enabled" : "bounded"),
       },
@@ -577,8 +578,8 @@
       ["Bridge Gate", providerResourceGateLevel + " | " + providerResourceGateDetail],
       ["Desktop", (desktop.enabled ? "enabled" : "disabled") + " | eyes " + (desktop.observe_ready ? "yes" : "no") + " | hands " + (desktop.act_ready ? "yes" : "no") + " | ears " + (desktop.listen_ready ? "yes" : "no")],
       [
-        "Patient Zero",
-        (patientZero.enabled ? "armed" : "standby") +
+        MASTER_MOLD_MODE_LABEL,
+        masterMoldModeState(patientZero.enabled) +
           " | autonomy " + (patientZero.autonomous_control_enabled ? "yes" : "no") +
           " | browser " + (patientZero.browser_ready ? "yes" : "no") +
           " | root " + (patientZero.root_shell_enabled ? "yes" : "manual")
@@ -706,7 +707,7 @@
       '<div class="metric"><span>Maintain self-drive</span><strong>' + (maintain.self_drive_enabled ? (maintain.self_drive_last_run_at ? ("last " + relativeTime(maintain.self_drive_last_run_at)) : "armed") : "off") + '</strong></div>' +
       '<div class="metric"><span>Providers</span><strong>' + String(providers.connected_count || 0) + " connected / " + String((providers.connected_count || 0) + (providers.configured_count || 0) + (providers.disconnected_count || 0) + (providers.unavailable_count || 0)) + ' total</strong></div>' +
       '<div class="metric"><span>Desktop</span><strong>' + escapeHtml((desktop.enabled ? "enabled" : "disabled") + " · " + (desktop.observe_ready ? "eyes" : "no-eyes") + " / " + (desktop.act_ready ? "hands" : "no-hands") + " / " + (desktop.listen_ready ? "ears" : "no-ears")) + '</strong></div>' +
-      '<div class="metric"><span>Patient Zero control</span><strong>' + escapeHtml((summary.patient_zero && summary.patient_zero.full_control_authority) ? "full authority" : ((summary.patient_zero && summary.patient_zero.autonomous_control_enabled) ? "autonomy armed" : "bounded")) + '</strong></div>' +
+      '<div class="metric"><span>' + escapeHtml(MASTER_MOLD_MODE_LABEL + " control") + '</span><strong>' + escapeHtml((summary.patient_zero && summary.patient_zero.full_control_authority) ? "full authority" : ((summary.patient_zero && summary.patient_zero.autonomous_control_enabled) ? "autonomy enabled" : "bounded")) + '</strong></div>' +
       '<div class="metric"><span>Swarm profiles</span><strong>' + String(swarm.active_profile_count || 0) + '</strong></div>' +
       '<div class="metric"><span>Workflow exports</span><strong>' + String(workflowExports.bundle_count || 0) + "</strong></div>" +
       "</div></section>" +
@@ -910,8 +911,8 @@
         detail: (desktop.observe_ready ? "eyes" : "no-eyes") + " / " + (desktop.act_ready ? "hands" : "no-hands"),
       },
       {
-        label: "Patient Zero",
-        value: patientZero.enabled ? "armed" : "standby",
+        label: MASTER_MOLD_MODE_LABEL,
+        value: masterMoldModeState(patientZero.enabled),
         tone: patientZero.enabled && privilegedAccess.root_execution_ready ? "good" : patientZero.enabled ? "warn" : "neutral",
         detail: privilegedAccess.root_execution_ready ? "root lane ready" : "root lane manual",
       },
@@ -1339,7 +1340,7 @@
     var toolkit = patientZero.toolkit || {};
     var report = patientZero.report || {};
     var enabled = !!patientZero.enabled;
-    var posture = enabled ? "ARMED" : "STANDBY";
+    var posture = masterMoldModePosture(enabled);
     var capabilityRows = [
       ["Eyes", desktop.observe_ready ? "Live observe path available." : "Observe lane not ready."],
       ["Hands", desktop.act_ready ? "Keyboard and pointer actuation available." : "Actuation lane not ready."],
@@ -1348,26 +1349,26 @@
       [
         "Autonomy",
         patientZero.autonomous_control_enabled
-          ? "Maintain self-drive and autopilot execution are armed for independent local work."
-          : "Autonomous execution is not fully armed yet."
+          ? "Maintain self-drive and autopilot execution are enabled for independent local work."
+          : "Autonomous execution is not fully enabled yet."
       ],
       [
         "CLI Toolkit",
         (toolkit.terminal_toolkit_ready
           ? "codex / cursor / gemini / gh available for autonomous terminal execution."
-          : "CLI toolkit is not fully armed yet.")
+          : "CLI toolkit is not fully enabled yet.")
       ],
       [
         "Office Agents",
         (toolkit.local_agent_spawn_ready
           ? "Local directors and leaf agents are available for delegation and follow-through."
-          : "Local agent pool is not fully armed yet.")
+          : "Local agent pool is not fully enabled yet.")
       ],
       [
         "Imprint",
         toolkit.imprint_ready
           ? "Local Imprint is in the active specialist pool."
-          : "Local Imprint is not currently armed in the specialist pool."
+          : "Local Imprint is not currently enabled in the specialist pool."
       ],
       [
         "Root Shell",
@@ -1384,27 +1385,27 @@
     els.patientZeroView.innerHTML =
       '<div class="patient-zero-grid">' +
       '<section class="patient-zero-banner">' +
-      '<div class="patient-zero-banner__icon">' + patientZeroSkullSvg(enabled) + '</div>' +
+      '<div class="patient-zero-banner__hero">' + masterMoldModeBannerMarkup() + '</div>' +
       '<div class="patient-zero-banner__copy">' +
-      '<div class="section-title">Explicit High-Risk Local Control</div>' +
-      '<h2>' + escapeHtml(posture + " · Patient Zero") + '</h2>' +
-      '<p>' + escapeHtml(report.scope_notice || "Operator-visible elevated control surface for local execution.") + '</p>' +
+      '<div class="section-title">Operator-Escalated Local Control</div>' +
+      '<h2>' + escapeHtml(posture + " · " + MASTER_MOLD_MODE_LABEL) + '</h2>' +
+      '<p>' + escapeHtml(operatorFacingText(report.scope_notice || "Operator-visible elevated control surface for local execution.")) + '</p>' +
       '<div class="patient-zero-banner__meta">' +
       '<span class="tag ' + (enabled ? "tag--block" : "tag--talk") + '">' + escapeHtml(String(patientZero.permission_profile || "high_risk")) + '</span>' +
       '<span class="tag">' + escapeHtml("authority " + (patientZero.full_control_authority ? "full" : (patientZero.autonomous_control_enabled ? "autonomous" : "partial"))) + '</span>' +
-      '<span class="tag">' + escapeHtml("armed_by " + (patientZero.armed_by || "n/a")) + '</span>' +
-      '<span class="tag">' + escapeHtml("armed_at " + (patientZero.armed_at || "n/a")) + '</span>' +
+      '<span class="tag">' + escapeHtml("enabled_by " + (patientZero.armed_by || "n/a")) + '</span>' +
+      '<span class="tag">' + escapeHtml("enabled_at " + (patientZero.armed_at || "n/a")) + '</span>' +
       "</div>" +
       "</div>" +
       '<div class="patient-zero-banner__actions">' +
-      '<button class="patient-zero-button patient-zero-button--arm" data-patient-zero-action="patient_zero_enable">ENABLE PATIENT ZERO</button>' +
-      '<button class="patient-zero-button patient-zero-button--disarm" data-patient-zero-action="patient_zero_disable">DISABLE PATIENT ZERO</button>' +
+      '<button class="patient-zero-button patient-zero-button--arm" data-patient-zero-action="patient_zero_enable">ENABLE ' + escapeHtml(MASTER_MOLD_MODE_LABEL) + '</button>' +
+      '<button class="patient-zero-button patient-zero-button--disarm" data-patient-zero-action="patient_zero_disable">DISABLE ' + escapeHtml(MASTER_MOLD_MODE_LABEL) + '</button>' +
       "</div>" +
       "</section>" +
       '<section class="patient-zero-card">' +
       '<div class="section-title">Operator Note</div>' +
       '<textarea class="patient-zero-note" data-patient-zero-note rows="4" placeholder="Record intent for the audit trail.">' + escapeHtml(noteValue) + '</textarea>' +
-      '<div class="patient-zero-note__hint">This note is stored with the arm or disarm event.</div>' +
+      '<div class="patient-zero-note__hint">This note is stored with the mode-enable or mode-disable event.</div>' +
       "</section>" +
       '<section class="patient-zero-card">' +
       '<div class="section-title">Capabilities</div>' +
@@ -1456,7 +1457,7 @@
       '<div class="events-list">' +
       (activitySummary.length
         ? activitySummary.map(function (entry) {
-            return '<article class="event-row"><div>' + escapeHtml(entry) + "</div></article>";
+            return '<article class="event-row"><div>' + escapeHtml(operatorFacingText(entry)) + "</div></article>";
           }).join("")
         : '<article class="event-row"><div>No recent activity summary recorded.</div></article>') +
       "</div>" +
@@ -1563,8 +1564,8 @@
     var autoOption = els.intakeMode.querySelector('option[value=""]');
     if (autoOption) {
       autoOption.textContent = patientZeroEnabled
-        ? "auto (Patient Zero full control)"
-        : "auto (bounded unless Patient Zero is armed)";
+        ? "auto (" + MASTER_MOLD_MODE_LABEL + " enabled)"
+        : "auto (bounded unless " + MASTER_MOLD_MODE_LABEL + " is enabled)";
     }
     if (!state.intakeModeDirty) {
       els.intakeMode.value = "";

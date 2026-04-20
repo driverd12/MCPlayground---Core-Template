@@ -192,8 +192,17 @@ button:hover,
 }
 
 .tabs__button--patient-zero {
-  border-color: rgba(185, 73, 73, 0.55);
-  background: linear-gradient(180deg, rgba(120, 24, 24, 0.18), rgba(120, 24, 24, 0.06));
+  border-color: rgba(114, 230, 221, 0.38);
+  background: linear-gradient(180deg, rgba(79, 98, 150, 0.2), rgba(79, 98, 150, 0.08));
+  color: #f5f1fb;
+}
+
+.tabs__button--patient-zero:hover,
+.tabs__button--patient-zero.is-active {
+  border-color: rgba(114, 230, 221, 0.72);
+  background:
+    linear-gradient(180deg, rgba(200, 131, 200, 0.18), rgba(200, 131, 200, 0.05)),
+    rgba(34, 41, 64, 0.92);
 }
 
 .workspace {
@@ -966,52 +975,57 @@ textarea {
 
 .patient-zero-banner,
 .patient-zero-card {
-  border: 1px solid rgba(185, 73, 73, 0.35);
+  border: 1px solid rgba(114, 230, 221, 0.24);
   border-radius: 16px;
   background:
+    radial-gradient(circle at top right, rgba(200, 131, 200, 0.12), transparent 42%),
     linear-gradient(180deg, rgba(255,255,255,0.02), transparent),
-    rgba(22, 11, 12, 0.92);
-  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.35);
+    rgba(19, 24, 37, 0.94);
+  box-shadow: 0 18px 36px rgba(4, 9, 20, 0.42);
 }
 
 .patient-zero-banner {
   padding: 18px;
   display: grid;
-  grid-template-columns: 108px minmax(0, 1fr) minmax(220px, 280px);
+  grid-template-columns: minmax(320px, 440px) minmax(0, 1fr) minmax(220px, 280px);
   gap: 18px;
-  align-items: center;
+  align-items: stretch;
 }
 
-.patient-zero-banner__icon {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 108px;
+.patient-zero-banner__hero {
+  overflow: hidden;
   border-radius: 14px;
-  border: 1px solid rgba(185, 73, 73, 0.35);
-  background: radial-gradient(circle at top, rgba(185, 73, 73, 0.22), transparent 58%), rgba(0,0,0,0.32);
+  border: 1px solid rgba(114, 230, 221, 0.22);
+  background:
+    radial-gradient(circle at center, rgba(255, 244, 181, 0.12), transparent 48%),
+    rgba(8, 11, 18, 0.76);
+  min-height: 208px;
 }
 
-.patient-zero-banner__icon svg {
-  width: 82px;
-  height: 82px;
-  filter: drop-shadow(0 8px 16px rgba(0,0,0,0.35));
+.patient-zero-banner__hero img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  object-position: center;
 }
 
 .patient-zero-banner__copy {
   display: grid;
   gap: 10px;
+  align-content: center;
 }
 
 .patient-zero-banner__copy h2 {
   margin: 0;
   font-size: 1.35rem;
   letter-spacing: 0.08em;
+  color: #f6f4fb;
 }
 
 .patient-zero-banner__copy p {
   margin: 0;
-  color: #d5c2bc;
+  color: #d8d5e7;
   line-height: 1.5;
 }
 
@@ -1024,6 +1038,7 @@ textarea {
 .patient-zero-banner__actions {
   display: grid;
   gap: 10px;
+  align-content: center;
 }
 
 .patient-zero-button {
@@ -1035,13 +1050,17 @@ textarea {
 }
 
 .patient-zero-button--arm {
-  border-color: rgba(185, 73, 73, 0.7);
-  background: linear-gradient(180deg, rgba(160, 40, 40, 0.28), rgba(160, 40, 40, 0.12));
+  border-color: rgba(114, 230, 221, 0.65);
+  background:
+    linear-gradient(180deg, rgba(114, 230, 221, 0.2), rgba(114, 230, 221, 0.08)),
+    rgba(38, 58, 75, 0.94);
 }
 
 .patient-zero-button--disarm {
-  border-color: rgba(110, 118, 132, 0.65);
-  background: linear-gradient(180deg, rgba(62, 66, 74, 0.38), rgba(62, 66, 74, 0.16));
+  border-color: rgba(200, 131, 200, 0.45);
+  background:
+    linear-gradient(180deg, rgba(200, 131, 200, 0.16), rgba(200, 131, 200, 0.05)),
+    rgba(36, 33, 51, 0.94);
 }
 
 .patient-zero-card {
@@ -1053,7 +1072,7 @@ textarea {
 .patient-zero-note {
   min-height: 96px;
   background: rgba(9, 10, 12, 0.8);
-  border-color: rgba(185, 73, 73, 0.3);
+  border-color: rgba(114, 230, 221, 0.24);
 }
 
 .patient-zero-note__hint {
@@ -1071,20 +1090,20 @@ textarea {
   display: grid;
   gap: 6px;
   padding: 12px;
-  border: 1px solid rgba(185, 73, 73, 0.22);
+  border: 1px solid rgba(114, 230, 221, 0.18);
   border-radius: 12px;
   background: rgba(255,255,255,0.02);
 }
 
 .patient-zero-capability strong {
-  color: #f0ddd6;
+  color: #f1edf8;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   font-size: 0.75rem;
 }
 
 .patient-zero-capability span {
-  color: #cdbab3;
+  color: #cdd5e3;
   line-height: 1.45;
 }
 
@@ -1095,32 +1114,38 @@ textarea {
 
 body[data-patient-zero="enabled"] {
   background:
-    radial-gradient(circle at top, rgba(185, 73, 73, 0.16), transparent 42%),
-    linear-gradient(180deg, #110a0c 0%, #08090d 100%);
+    radial-gradient(circle at top, rgba(255, 244, 181, 0.16), transparent 20%),
+    radial-gradient(circle at top left, rgba(114, 230, 221, 0.12), transparent 36%),
+    radial-gradient(circle at top right, rgba(200, 131, 200, 0.12), transparent 34%),
+    linear-gradient(180deg, #120f1d 0%, #090c13 100%);
 }
 
 body[data-patient-zero="enabled"] .topbar,
 body[data-patient-zero="enabled"] .status-strip,
 body[data-patient-zero="enabled"] .tabs,
 body[data-patient-zero="enabled"] .panel {
-  border-color: rgba(185, 73, 73, 0.3);
-  background: linear-gradient(180deg, rgba(255,255,255,0.015), transparent), #161015;
+  border-color: rgba(114, 230, 221, 0.24);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.015), transparent),
+    rgba(19, 23, 36, 0.96);
 }
 
 body[data-patient-zero="enabled"] .brand__icon {
-  background: #311519;
-  border-color: rgba(185, 73, 73, 0.45);
+  background: #24223a;
+  border-color: rgba(114, 230, 221, 0.4);
 }
 
 body[data-patient-zero="enabled"] .brand__icon span,
 body[data-patient-zero="enabled"] .brand__icon span::before,
 body[data-patient-zero="enabled"] .brand__icon span::after {
-  background: #d96c6c;
+  background: #72e6dd;
 }
 
 body[data-patient-zero="enabled"] .tabs__button--patient-zero.is-active {
-  border-color: rgba(225, 116, 116, 0.8);
-  background: linear-gradient(180deg, rgba(140, 32, 32, 0.42), rgba(140, 32, 32, 0.18));
+  border-color: rgba(255, 244, 181, 0.72);
+  background:
+    linear-gradient(180deg, rgba(200, 131, 200, 0.22), rgba(200, 131, 200, 0.08)),
+    rgba(31, 40, 61, 0.98);
 }
 
 @media (max-width: 1120px) {
