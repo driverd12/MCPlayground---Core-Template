@@ -524,6 +524,10 @@
     var maintain = summary.maintain || {};
     var autopilot = summary.autopilot || {};
     var providers = summary.provider_bridge || {};
+    var recentRouterSuppressionDecisions = Array.isArray(state.snapshot.router_suppression_decisions)
+      ? state.snapshot.router_suppression_decisions.slice(0, 1)
+      : [];
+    var latestRouterSuppression = recentRouterSuppressionDecisions[0] || null;
     var providerResourceGate = providers.resource_gate || {};
     var providerResourceGateActive = !!providerResourceGate.active;
     var providerResourceGateLevel = providerResourceGateActive
@@ -550,6 +554,16 @@
       ["Workers", "active " + String(runtimeWorkers.active_count || 0) + " | sessions " + String(runtimeWorkers.session_count || 0)],
       ["Maintain", (maintain.running ? "running" : "idle") + " | eval_due " + (maintain.eval_due ? "yes" : "no")],
       ["Providers", "connected " + String(providers.connected_count || 0) + " | disconnected " + String(providers.disconnected_count || 0)],
+      [
+        "Router Hold",
+        latestRouterSuppression
+          ? String(latestRouterSuppression.reason || "suppressed").replace(/_/g, " ") +
+            " | " +
+            String(latestRouterSuppression.selected_backend_id || "n/a") +
+            " | " +
+            (latestRouterSuppression.observed_at ? relativeTime(latestRouterSuppression.observed_at) + " ago" : "n/a")
+          : "none recent"
+      ],
       ["Bridge Gate", providerResourceGateLevel + " | " + providerResourceGateDetail],
       ["Desktop", (desktop.enabled ? "enabled" : "disabled") + " | eyes " + (desktop.observe_ready ? "yes" : "no") + " | hands " + (desktop.act_ready ? "yes" : "no") + " | ears " + (desktop.listen_ready ? "yes" : "no")],
       [

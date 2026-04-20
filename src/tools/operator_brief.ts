@@ -458,6 +458,57 @@ function summarizeControlPlane(
   };
 }
 
+function buildRecentRouterSuppressionDecisions(storage: Storage, params?: { limit?: number; max_age_seconds?: number }) {
+  const limit =
+    typeof params?.limit === "number" && Number.isFinite(params.limit) ? Math.max(1, Math.min(8, Math.trunc(params.limit))) : 5;
+  const maxAgeSeconds =
+    typeof params?.max_age_seconds === "number" && Number.isFinite(params.max_age_seconds)
+      ? Math.max(300, Math.trunc(params.max_age_seconds))
+      : 21600;
+  const now = Date.now();
+  const events = storage.listRuntimeEvents({
+    event_type: "autonomy.command",
+    limit: Math.max(40, limit * 10),
+  });
+  const entries: Array<{
+    decision_id: string | null;
+    observed_at: string | null;
+    reason: "local_first_required" | "local_evidence_missing" | "laptop_pressure";
+    selected_backend_id: string | null;
+    pressure_level: string | null;
+    suppressed_agent_ids: string[];
+  }> = [];
+  for (let index = events.length - 1; index >= 0 && entries.length < limit; index -= 1) {
+    const event = events[index];
+    const details = isRecord(event.details) ? event.details : {};
+    const reason =
+      details.model_router_auto_bridge_suppressed_for_resource_gate === true
+        ? "laptop_pressure"
+        : details.model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence === true
+          ? "local_evidence_missing"
+          : details.model_router_auto_bridge_suppressed_for_local_first === true
+            ? "local_first_required"
+            : null;
+    if (!reason) {
+      continue;
+    }
+    const observedAt = readString(event.created_at);
+    const observedStamp = observedAt ? Date.parse(observedAt) : Number.NaN;
+    if (Number.isFinite(observedStamp) && now - observedStamp > maxAgeSeconds * 1000) {
+      continue;
+    }
+    entries.push({
+      decision_id: readString(details.model_router_suppression_decision_id),
+      observed_at: observedAt,
+      reason,
+      selected_backend_id: readString(details.model_router_backend_id),
+      pressure_level: readString(isRecord(details.model_router_resource_gate) ? details.model_router_resource_gate.severity : null),
+      suppressed_agent_ids: readStringArray(details.model_router_auto_bridge_suppressed_agent_ids),
+    });
+  }
+  return entries;
+}
+
 export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBriefSchema>) {
   const threadId = input.thread_id?.trim() || null;
   const sessions = storage.listAgentSessions({ limit: 50 });
@@ -487,6 +538,7 @@ export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBr
   const executionBacklog = readStringArray(ringLeaderSession?.metadata.last_execution_task_ids);
   const runningTasks = storage.listTasks({ status: "running", limit: 25 });
   const pendingTasks = storage.listTasks({ status: "pending", limit: 25 });
+  const routerSuppressionDecisions = buildRecentRouterSuppressionDecisions(storage);
   const controlPlaneSummary = summarizeControlPlane(storage, kernel, {
     goal,
     plan,
@@ -532,6 +584,17 @@ export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBr
         ? `ready via ${controlPlaneSummary.privileged_access.account}`
         : `not-ready (patient_zero=${controlPlaneSummary.privileged_access.patient_zero_armed ? "armed" : "standby"}, secret=${controlPlaneSummary.privileged_access.secret_present ? "yes" : "no"}, helper=${controlPlaneSummary.privileged_access.helper_ready ? "yes" : "no"}, verified=${controlPlaneSummary.privileged_access.credential_verified ? "yes" : "no"}, error=${controlPlaneSummary.privileged_access.last_verification_error ?? "none"})`
     }`,
+    "",
+    renderBulletSection(
+      "Recent router suppression decisions",
+      routerSuppressionDecisions.map((entry) => {
+        const observedAt = entry.observed_at ?? "unknown";
+        const backendId = entry.selected_backend_id ?? "n/a";
+        const pressureLevel = entry.pressure_level ?? "n/a";
+        const suppressedAgents = entry.suppressed_agent_ids.length > 0 ? entry.suppressed_agent_ids.join(", ") : "none";
+        return `${observedAt} | ${entry.reason} | backend=${backendId} | pressure=${pressureLevel} | agents=${suppressedAgents}`;
+      })
+    ),
     "",
     renderBulletSection("Success criteria", delegationBrief.success_criteria),
     "",
@@ -583,6 +646,7 @@ export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBr
     kernel: input.compact ? null : kernel,
     kernel_summary: summarizeKernel(kernel),
     control_plane_summary: controlPlaneSummary,
+    router_suppression_decisions: routerSuppressionDecisions,
     brief_markdown: briefMarkdown,
     source: "operator.brief",
   };
