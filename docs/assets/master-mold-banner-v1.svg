@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">MASTER-MOLD mechanized citadel banner</title>
+  <desc id="desc">Banner showing a towering purple mechanized citadel and giant sentinel-like operator figure under a moon, alongside MASTER-MOLD control-plane text and client lanes.</desc>
+
+  <rect width="1200" height="360" fill="#10131c"/>
+  <rect width="1200" height="360" fill="url(#grid)"/>
+  <rect x="34" y="34" width="1132" height="292" rx="18" fill="#141926" stroke="#394058" stroke-width="2"/>
+  <rect x="34" y="34" width="1132" height="292" rx="18" fill="url(#panelSheen)"/>
+
+  <rect x="54" y="58" width="306" height="244" rx="16" fill="url(#sky)" stroke="#48506b" stroke-width="2"/>
+  <rect x="380" y="58" width="760" height="130" rx="16" fill="#171d2a" stroke="#394058" stroke-width="2"/>
+  <rect x="380" y="204" width="760" height="98" rx="16" fill="#171d2a" stroke="#394058" stroke-width="2"/>
+
+  <circle cx="208" cy="112" r="70" fill="#fff4b5" opacity="0.96"/>
+  <circle cx="208" cy="112" r="102" fill="#9ff6ee" opacity="0.16"/>
+
+  <path d="M56 92 C96 62, 154 70, 188 102 C132 112, 96 126, 56 136 Z" fill="#4d5470" opacity="0.82"/>
+  <path d="M172 82 C212 56, 280 58, 334 96 C294 112, 238 122, 176 118 Z" fill="#2e8184" opacity="0.86"/>
+  <path d="M248 128 C282 110, 326 112, 360 138 L360 176 C322 160, 286 154, 246 154 Z" fill="#555d7a" opacity="0.78"/>
+  <path d="M54 178 C102 156, 162 160, 214 190 C162 206, 106 216, 54 214 Z" fill="#59607c" opacity="0.78"/>
+
+  <g opacity="0.92">
+    <path d="M142 166 L152 148 L168 136 L186 130 L230 130 L246 138 L260 154 L268 172 L268 222 L142 222 Z" fill="#875ca3"/>
+    <path d="M152 156 L164 140 L186 128 L226 128 L246 138 L258 154 L258 178 L152 178 Z" fill="#9162ae"/>
+    <rect x="168" y="106" width="82" height="34" rx="7" fill="#714b8e"/>
+    <rect x="158" y="112" width="12" height="20" rx="4" fill="#8353a3"/>
+    <rect x="248" y="112" width="12" height="20" rx="4" fill="#8353a3"/>
+    <path d="M176 108 L188 100 L228 100 L242 108 L242 118 L176 118 Z" fill="#6a4587"/>
+    <path d="M186 118 L204 112 L222 112 L236 118 L236 140 L182 140 Z" fill="#2d3242"/>
+    <path d="M194 140 L202 130 L220 130 L228 140 L228 164 L194 164 Z" fill="#494f64"/>
+    <rect x="194" y="126" width="10" height="4" rx="2" fill="#f5e86d"/>
+    <rect x="218" y="126" width="10" height="4" rx="2" fill="#f5e86d"/>
+    <rect x="207" y="146" width="8" height="12" rx="3" fill="#1c202e"/>
+    <rect x="180" y="170" width="50" height="12" rx="4" fill="#6e4a8a"/>
+    <rect x="184" y="184" width="42" height="12" rx="4" fill="#6b4788"/>
+    <rect x="192" y="198" width="26" height="24" rx="5" fill="#514562"/>
+  </g>
+
+  <g opacity="0.96">
+    <rect x="76" y="198" width="48" height="84" rx="10" fill="#c08abb"/>
+    <rect x="62" y="214" width="22" height="62" rx="8" fill="#7a6688"/>
+    <rect x="294" y="198" width="48" height="84" rx="10" fill="#c08abb"/>
+    <rect x="334" y="214" width="18" height="62" rx="8" fill="#7a6688"/>
+    <path d="M84 194 L88 184 L106 166 L118 166 L126 176 L116 194 Z" fill="#935db0"/>
+    <path d="M294 194 L304 176 L314 166 L328 166 L340 180 L342 194 Z" fill="#935db0"/>
+    <path d="M74 192 C76 174, 88 160, 106 150" fill="none" stroke="#cf9fd0" stroke-width="6" stroke-linecap="round"/>
+    <path d="M326 150 C344 160, 354 176, 352 196" fill="none" stroke="#cf9fd0" stroke-width="6" stroke-linecap="round"/>
+  </g>
+
+  <g opacity="0.98">
+    <path d="M128 224 L292 224 L312 302 L108 302 Z" fill="#b68cb8"/>
+    <path d="M148 230 L272 230 L286 302 L134 302 Z" fill="#92739f"/>
+    <path d="M166 238 L254 238 L264 302 L156 302 Z" fill="#756785"/>
+    <rect x="158" y="248" width="104" height="54" rx="8" fill="#8f7d87"/>
+    <rect x="188" y="264" width="42" height="38" fill="#090a10"/>
+    <path d="M178 246 L186 230 L194 246" fill="none" stroke="#534960" stroke-width="3"/>
+    <rect x="142" y="248" width="12" height="32" rx="3" fill="#7f7084"/>
+    <rect x="266" y="248" width="12" height="32" rx="3" fill="#7f7084"/>
+    <rect x="148" y="252" width="6" height="12" fill="#61546a"/>
+    <rect x="266" y="252" width="6" height="12" fill="#61546a"/>
+    <path d="M120 290 L140 272 L150 302 Z" fill="#7d6a7d"/>
+    <path d="M300 290 L280 272 L270 302 Z" fill="#7d6a7d"/>
+    <rect x="168" y="238" width="10" height="10" fill="#685774"/>
+    <rect x="182" y="238" width="10" height="10" fill="#685774"/>
+    <rect x="196" y="238" width="10" height="10" fill="#685774"/>
+    <rect x="210" y="238" width="10" height="10" fill="#685774"/>
+    <rect x="224" y="238" width="10" height="10" fill="#685774"/>
+    <rect x="238" y="238" width="10" height="10" fill="#685774"/>
+  </g>
+
+  <rect x="78" y="74" width="178" height="3" fill="#ff8f7b"/>
+  <rect x="78" y="284" width="178" height="3" fill="#72e6dd"/>
+  <text x="82" y="266" fill="#f1edf7" font-family="Menlo, Monaco, Consolas, monospace" font-size="17" letter-spacing="2">MASTER-MOLD</text>
+  <text x="82" y="286" fill="#72e6dd" font-family="Menlo, Monaco, Consolas, monospace" font-size="12">LOCAL-FIRST CONTROL CITADEL</text>
+
+  <g opacity="0.12">
+    <circle cx="950" cy="112" r="58" fill="#fff4b5"/>
+    <path d="M840 150 C900 92, 980 86, 1086 122 L1086 188 L840 188 Z" fill="#7c5d96"/>
+    <rect x="876" y="116" width="122" height="52" rx="10" fill="#2e3446"/>
+  </g>
+
+  <g transform="translate(404 88)">
+    <text x="0" y="0" fill="#ff9a84" font-family="Menlo, Monaco, Consolas, monospace" font-size="18" letter-spacing="3">MASTER-MOLD</text>
+    <text x="0" y="52" fill="#f6f4fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="52" font-weight="700">SHARED MCP CONTROL PLANE</text>
+    <text x="0" y="92" fill="#d7cee8" font-family="Menlo, Monaco, Consolas, monospace" font-size="26" font-weight="700">DURABLE MEMORY • OFFICE ORCHESTRATION</text>
+    <text x="0" y="124" fill="#aeb1c8" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">LOCAL-FIRST ROUTING • OPERATOR-VISIBLE AI WORK</text>
+  </g>
+
+  <g transform="translate(404 232)">
+    <text x="0" y="0" fill="#efeaf7" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">CODEX • VISIBLE CLAUDE • CURSOR • OLLAMA • SQLITE • EVENTS</text>
+    <text x="0" y="28" fill="#efeaf7" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">AUTONOMY.INGRESS • MODEL.ROUTER • AGENT OFFICE • LAUNCHD</text>
+    <rect x="0" y="46" width="704" height="2" fill="#404861"/>
+    <text x="0" y="72" fill="#72e6dd" font-family="Menlo, Monaco, Consolas, monospace" font-size="15">Patient Zero is optional. MASTER-MOLD is the durable base system.</text>
+  </g>
+
+  <g transform="translate(400 198)">
+    <rect x="0" y="0" width="118" height="84" rx="10" fill="#1b2230" stroke="#4c5470" stroke-width="2"/>
+    <text x="59" y="64" text-anchor="middle" fill="#f5f1fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">codex</text>
+    <rect x="28" y="18" width="62" height="24" rx="6" fill="#6fd5ff" opacity="0.22"/>
+    <rect x="40" y="24" width="38" height="3" fill="#6fd5ff"/>
+    <rect x="40" y="31" width="24" height="3" fill="#6fd5ff"/>
+  </g>
+
+  <g transform="translate(530 198)">
+    <rect x="0" y="0" width="118" height="84" rx="10" fill="#1b2230" stroke="#4c5470" stroke-width="2"/>
+    <text x="59" y="64" text-anchor="middle" fill="#f5f1fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">claude</text>
+    <rect x="24" y="18" width="70" height="24" rx="6" fill="#ff9a84" opacity="0.22"/>
+    <rect x="38" y="24" width="42" height="3" fill="#ff9a84"/>
+    <rect x="38" y="31" width="28" height="3" fill="#ff9a84"/>
+  </g>
+
+  <g transform="translate(660 198)">
+    <rect x="0" y="0" width="118" height="84" rx="10" fill="#1b2230" stroke="#4c5470" stroke-width="2"/>
+    <text x="59" y="64" text-anchor="middle" fill="#f5f1fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">cursor</text>
+    <rect x="28" y="18" width="62" height="24" rx="6" fill="#96dd95" opacity="0.22"/>
+    <rect x="40" y="24" width="38" height="3" fill="#96dd95"/>
+    <rect x="40" y="31" width="24" height="3" fill="#96dd95"/>
+  </g>
+
+  <g transform="translate(790 198)">
+    <rect x="0" y="0" width="118" height="84" rx="10" fill="#1b2230" stroke="#4c5470" stroke-width="2"/>
+    <text x="59" y="64" text-anchor="middle" fill="#f5f1fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">ollama</text>
+    <rect x="28" y="18" width="62" height="24" rx="6" fill="#ffe280" opacity="0.22"/>
+    <circle cx="50" cy="30" r="6" fill="#ffe280"/>
+    <rect x="60" y="23" width="16" height="4" fill="#ffe280"/>
+    <rect x="60" y="31" width="12" height="4" fill="#ffe280"/>
+  </g>
+
+  <g transform="translate(920 198)">
+    <rect x="0" y="0" width="194" height="84" rx="10" fill="#1b2230" stroke="#4c5470" stroke-width="2"/>
+    <text x="97" y="64" text-anchor="middle" fill="#f5f1fb" font-family="Menlo, Monaco, Consolas, monospace" font-size="14">sqlite • memory • events</text>
+    <rect x="20" y="18" width="48" height="24" rx="6" fill="#c883c8" opacity="0.22"/>
+    <rect x="78" y="18" width="48" height="24" rx="6" fill="#6fd5ff" opacity="0.18"/>
+    <rect x="136" y="18" width="38" height="24" rx="6" fill="#96dd95" opacity="0.18"/>
+    <rect x="32" y="24" width="24" height="3" fill="#c883c8"/>
+    <rect x="90" y="24" width="24" height="3" fill="#6fd5ff"/>
+    <rect x="146" y="24" width="16" height="3" fill="#96dd95"/>
+  </g>
+
+  <defs>
+    <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+      <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#1a2130" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="panelSheen" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#48637e"/>
+      <stop offset="45%" stop-color="#32767d"/>
+      <stop offset="70%" stop-color="#5d4f73"/>
+      <stop offset="100%" stop-color="#372b45"/>
+    </linearGradient>
+  </defs>
+</svg>

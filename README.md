@@ -1,408 +1,269 @@
-# MASTER MOLD: The Autonomous Multi-Agent MCP Runtime
+# MASTER MOLD: Shared Local MCP Control Plane for Operator-Visible AI Work
 
-<img src="./docs/assets/patient-zero-banner-v2.svg" alt="Patient Zero pixel-art banner showing Agent Office, MCP Server, and the local agent crew" width="100%" />
+<img src="./docs/assets/master-mold-banner-v1.svg" alt="MASTER-MOLD pixel-art banner showing a generic sentinel-like operator robot, shared MCP control-plane lanes, and local-first routing" width="100%" />
 
-Like its comic-book namesake, **MASTER MOLD** isn't just a single operative—it's the durable, self-aware command center that builds, orchestrates, and unleashes your agentic workforce. Designed as a local-first Model Context Protocol (MCP) server, it provides the heavy-lifting infrastructure—state continuity, multi-agent councils, and root-capable host control—so your AI models can stop chatting and start building.
+`MASTER-MOLD` is a local-first Model Context Protocol runtime that gives multiple AI clients one shared system instead of a pile of disconnected chat tabs. It combines a shared MCP control plane, durable memory and state, orchestration, office/operator surfaces, local-first model routing, and optional local host-control lanes.
 
-The repository is intentionally split into two layers:
+If you need to present this repo quickly, read sections `1` through `9` in order. The rest of this README is setup, commands, and deeper operator detail.
 
-1. Core runtime: durable memory, transcripts, tasks, run ledgers, governance, ADRs, and safety checks.
-2. Domain packs: optional modules that register domain-specific MCP tools without modifying core infrastructure.
+## 60-Second Pitch
 
-This repository ships with one workflow pack by default:
+`MASTER-MOLD` is the shared local layer beneath the agents. Codex, visible Claude Code in Terminal, Cursor, and local model lanes can all connect through the same runtime. Objectives come in through one ingress path, state lands in SQLite, artifacts, runs, events, and memory instead of disappearing into chat history, local inference gets first pass before hosted escalation, and the operator can watch or steer the system through Agent Office and other local surfaces. It is useful today, but not every bridge or Office surface is equally reliable, and live office rally under heavy load is still not fully solved.
 
-- `agentic` GSD/autoresearch-inspired planner and verifier hooks for local development workflows.
+## 1. What MASTER-MOLD Is
 
-The runtime also includes first-class office/orchestration tools (`trichat.*` under the hood) for multi-agent turns, autonomous loops, and tmux-backed nested execution control, plus the newer local control-plane surfaces:
+At repo level, `MASTER-MOLD` does four jobs:
 
-- `tool.search` for live capability discovery from the registered MCP tool registry
-- `permission.profile` for durable session permission inheritance across goals, plans, tasks, and sessions
-- `budget.ledger` for append-only token/cost tracking and operator budget summaries
-- `warm.cache` for startup prefetch and cached operator surfaces
-- `feature.flag` for durable rollout state
-- `desktop.*`, `patient.zero`, and `privileged.exec` for explicit local desktop and privileged execution lanes
+- shared MCP control plane for multiple clients and operator surfaces
+- durable memory and state layer for goals, plans, tasks, runs, events, artifacts, ledgers, and continuity
+- orchestration layer for office turns, worker routing, councils, and background execution
+- local-first AI toolbench for Ollama/MLX-first routing before hosted escalation
 
-## Patient Zero End-State
+Repository shape:
 
-`Patient Zero` is the intended end-state of this repo: a local-first operator partner that can take full bounded control of the host when explicitly armed.
+- Core runtime: durable memory, transcripts, tasks, run ledgers, governance, ADRs, safety checks, operator surfaces, and routing infrastructure
+- Domain packs: optional modules that register domain-specific MCP tools without rewriting core infrastructure
+- Default workflow pack: `agentic`
 
-When enabled, Patient Zero is the mode that ties the stack together:
+Important scope boundary:
 
-- office and council orchestration
-- autonomous continuation through `autonomy.maintain`
-- CLI and IDE bridge usage across Codex, Claude CLI, Cursor, Gemini CLI, GitHub Copilot CLI, and `gh`
-- local desktop/browser/root-capable host-control lanes
-- full auditability through runtime events, runs, ledgers, and operator surfaces
+- `MASTER-MOLD` is the base system
+- `Patient Zero` is the optional fully armed local-control posture on top of that base system
+
+`Patient Zero` matters, but it should not be the first mental model. The first mental model is shared control plane plus durable state. The fully armed desktop/browser/root posture is a later, explicit escalation.
+
+## 2. Why It Is Worth Having
+
+This repo exists because most multi-agent setups lose time and trust in the same places:
+
+- context has to be reloaded separately in every client
+- orchestration logic lives in chat transcripts instead of durable state
+- model routing is ad hoc and hard to inspect
+- operator visibility is weaker than the autonomy being claimed
+- local inference is available but not treated as the default first-pass lane
+
+What `MASTER-MOLD` buys in practical terms:
+
+- continuity across sessions and clients
+- less repeated setup and less repeated context loading
+- more controlled orchestration through one ingress and one state authority
+- better operator visibility through Office, status tools, and explicit bridge truth
+- cheaper local inference where local models are good enough
+- launchd-backed resilience instead of relying on a single live shell session
+
+## 3. Ground-Up Runtime Stack
+
+```mermaid
+flowchart TD
+  Operator["Operator surfaces<br/>README, docs, Agent Office, tmux, shell wrappers"] --> Clients["Clients<br/>Codex, visible Claude lane, Cursor, terminal wrappers, MCP-capable tools"]
+  Clients --> Transport["Shared transport<br/>HTTP, STDIO, launchd, app launchers"]
+  Transport --> Kernel["MASTER-MOLD kernel<br/>tool registry, goal, plan, task, operator.brief, office snapshot, action-status"]
+  Kernel --> Control["Control plane<br/>permission.profile, tool.search, warm.cache, feature.flag, budget.ledger"]
+  Kernel --> Orchestration["Orchestration<br/>office council, runtime.worker, worker.fabric, model.router, provider.bridge"]
+  Kernel --> Autonomy["Autonomy<br/>autonomy.ide_ingress, autonomy.command, autonomy.maintain, eval, optimizer"]
+  Kernel --> Local["Optional local-control lanes<br/>desktop.*, patient.zero, privileged.exec"]
+  Control --> State["Durable local state<br/>SQLite, artifacts, runs, events, memory, cache, daemon configs, secrets"]
+  Orchestration --> State
+  Autonomy --> State
+  Local --> State
+```
+
+Read this stack from top to bottom:
+
+1. The operator works through local surfaces and connected clients.
+2. Those clients share one transport and one runtime instead of keeping separate hidden state.
+3. The runtime turns chat-like requests into goals, plans, tasks, events, artifacts, and memory.
+4. That state stays durable on disk and becomes reusable across future sessions.
+
+## 4. How Day-to-Day Work Changes
+
+The canonical operator and IDE ingress is `autonomy.ide_ingress`. That is the lane that turns a one-off request into durable work.
+
+```mermaid
+flowchart LR
+  Objective["Objective from Codex, visible Claude, Cursor, or Office intake"] --> Ingress["autonomy.ide_ingress"]
+  Ingress --> Continuity["Continuity layer<br/>transcript, memory, thread mirroring, operator brief"]
+  Ingress --> Planning["Execution layer<br/>goal, plan, task, office council"]
+  Planning --> Router["Routing layer<br/>model.router and provider.bridge"]
+  Router --> Local["Local first pass<br/>Ollama or MLX"]
+  Router --> Hosted["Hosted escalation<br/>only when explicit or evidence-driven"]
+  Local --> Evidence["Evidence and outcomes<br/>runs, artifacts, events, decisions"]
+  Hosted --> Evidence
+  Continuity --> State["Durable state<br/>SQLite and cache"]
+  Planning --> State
+  Evidence --> State
+  Evidence --> Office["Operator surfaces<br/>Agent Office, kernel.summary, /office/api/action-status"]
+```
+
+In practical day-to-day terms:
+
+1. The operator gives the system an objective.
+2. The objective enters through one real ingress path.
+3. The runtime mirrors that work into continuity, office surfaces, and durable state.
+4. The router prefers local inference first.
+5. Hosted bridges are added intentionally, not by default theater.
+6. The outcome stays queryable later through memory, artifacts, runs, events, and operator surfaces.
+
+## 5. How the Main Clients and Model Lanes Connect
+
+```mermaid
+flowchart LR
+  subgraph Clients["Operator-facing clients"]
+    Codex["Codex IDE"]
+    ClaudeVisible["Visible Claude Code terminal plus ingress wrapper"]
+    Cursor["Cursor MCP client and local-model-facing IDE"]
+    OfficeUI["Agent Office GUI and tmux"]
+  end
+
+  subgraph Transport["Shared local transport"]
+    STDIO["STDIO MCP"]
+    HTTP["HTTP MCP and /office/api/*"]
+    Launchd["launchd-backed runners"]
+  end
+
+  subgraph Runtime["MASTER-MOLD runtime"]
+    Kernel["tool registry, goal, plan, task, operator.brief"]
+    Office["office.snapshot, bootstrap, action-status"]
+    Router["model.router and provider.bridge"]
+    LocalCtl["desktop.*, patient.zero, privileged.exec"]
+    State["SQLite, artifacts, events, memory, cache"]
+  end
+
+  subgraph Models["Model lanes"]
+    Ollama["Ollama on this host<br/>qwen3.5:35b-a3b-coding-nvfp4<br/>llama3.2:3b"]
+    MLX["MLX local lane<br/>supported in repo"]
+    Hosted["Hosted bridge lanes<br/>Claude, Codex, Gemini, others as supported"]
+  end
+
+  Codex --> STDIO
+  Cursor --> STDIO
+  ClaudeVisible --> HTTP
+  OfficeUI --> HTTP
+  Launchd --> HTTP
+  STDIO --> Kernel
+  HTTP --> Kernel
+  Kernel --> Office
+  Kernel --> Router
+  Kernel --> State
+  Kernel --> LocalCtl
+  Router --> Ollama
+  Router --> MLX
+  Router --> Hosted
+  Office --> State
+  LocalCtl --> State
+```
+
+What that means for the main operator lanes:
+
+- Codex: connects into the same MCP runtime and can also be targeted through bridge-backed orchestration paths
+- visible Claude Code in Terminal: the visible terminal lane is real on this repo, but durable execution should still go through the MCP ingress path rather than staying as chat-only terminal history
+- Cursor: works best here as an MCP client and local-model-facing IDE, with local backend selection staying durable in `MASTER-MOLD` instead of disappearing into editor state
+- local Ollama and MLX: the repo supports local-first routing through `model.router`; local backends should be the first-pass lane before hosted escalation
+- office and control-plane surfaces: `/office/`, `/office/api/bootstrap`, `/office/api/action-status`, `office.snapshot`, and `operator.brief` exist to keep the operator in the loop
+- durable state: SQLite, artifacts, runs, events, memory, cache, and related records are the long-lived system of record
+
+## 6. Current Operator Host Snapshot (April 20, 2026)
+
+This section is intentionally host-specific and date-specific.
+
+Primary operator focus on this machine:
+
+- Codex IDE
+- visible Claude Code in Terminal
+- local Ollama models
+- Cursor as an MCP client and local-model-facing IDE
+
+Verified local Ollama models on this host as of April 20, 2026:
+
+- `qwen3.5:35b-a3b-coding-nvfp4`
+- `llama3.2:3b`
+
+Reality boundary:
+
+- the repo supports MLX and hosted bridge lanes
+- this README only claims the Ollama inventory above as locally verified on this host
+
+## 7. What Is Real Today
+
+These claims are grounded in the current repo docs and implementation, not aspiration:
+
+- There is one real shared MCP runtime that can be reached through STDIO or HTTP.
+- `autonomy.ide_ingress` is the canonical shared intake path for operator and IDE objectives.
+- Durable state is real: goals, plans, tasks, runs, events, artifacts, memory, and caches live in local state instead of staying trapped in one client transcript.
+- Visible Claude Code in Terminal is real on this repo, and explicit target-agent ingress for `claude`, `codex`, `cursor`, and `gemini` is implemented.
+- Cursor local-first mode is real: `model.router` exposes `local_status` and `select_local_backend`, and the durable control plane remains `MASTER-MOLD`, not Cursor chat state.
+- Provider bridge truth is real: the repo distinguishes installable, configured, connected, export-only, and remote-only paths instead of flattening them into one claim.
+- Agent Office is real as an operator visibility surface, with HTTP and tmux-backed lanes.
+- Launchd-backed resilience is real, and launcher truth has been hardened so stale repo-bound LaunchAgents are surfaced and rewritten instead of being treated as healthy by default.
+- Office action tracking is real: office actions expose `/office/api/action-status`, and the GUI no longer depends on an immediate post-submit snapshot refresh to show progress.
+- Truthful cache fallback is real: the HTTP readiness and office snapshot paths prefer explicit cache and stale markers over blocking the whole surface when live snapshot work is slow.
+- `Patient Zero` is real as an optional posture for explicit local-control lanes, but it is permission-gated and auditable, not magic.
+
+## 8. Current Gaps / What Is Still Not Fully Solved
+
+These gaps should be said plainly:
+
+- Under heavy live intake or office rally load, `/health`, `/office/`, and `/office/api/bootstrap` can still transiently stall.
+- During that window, `/office/api/action-status` is the more reliable rally signal.
+- The Office GUI is useful and increasingly truthful, but it is not perfect; some flows still degrade to cached or stale-but-explicit snapshot reads.
+- Not every provider or bridge is equally reliable, and `configured` does not mean `authenticated`, `connected`, or `runtime-ready`.
+- Not every automation or autonomy surface is production-perfect yet.
+- Live office rally under load is improved, but it is not fully solved.
+- `Patient Zero` full authority is gated by macOS-owned permissions and root-helper readiness; an armed posture does not bypass OS blockers.
+- MLX, adapter, and broader local-model lanes exist in the repo, but host-specific reality still has to be verified before claiming a given lane is live.
+
+## 9. Why This Still Matters Despite the Gaps
+
+Even with those caveats, `MASTER-MOLD` already changes the operator experience in ways that are hard to get back once you have them:
+
+- shared context across Codex, visible Claude, Cursor, and office surfaces
+- durable memory and state instead of chat-only context
+- local-first inference before hosted escalation
+- more controlled orchestration with one ingress and one state authority
+- better operator visibility into what the system is actually doing
+- cheaper and more inspectable local inference where the local lane is good enough
+- more resilience than a purely manual, shell-only setup
+
+## 10. Guided Walkthrough
+
+If you need to present this repo quickly, use this order:
+
+1. Start with sections `1` and `2`: define `MASTER-MOLD` as shared control plane, memory layer, orchestration layer, and local-first toolbench.
+2. Show section `3`: explain the stack from operator surface down to durable state.
+3. Show section `4`: explain how an objective turns into durable work through `autonomy.ide_ingress`.
+4. Show section `5`: connect Codex, visible Claude Code, Cursor, and local model lanes through one runtime.
+5. Call out section `6`: keep the host-specific model inventory and operator focus concrete.
+6. Say section `7` before section `8`: lead with what is proven, then say what is incomplete.
+7. End on section `9`: explain why the investment still pays off despite the gaps.
+
+Useful demo commands if you want to move from explanation into live proof:
+
+```bash
+npm run providers:status
+npm run trichat:office:web
+npm run claude:terminal
+npm run autonomy:ide -- "Take this objective, mirror it into continuity and the office, let the local-first council attempt it first, and continue in the background."
+```
 
 ## Documentation Hub
 
-Start here if you want the current docs map:
+Use this README as the guided operator story. Use the docs below for source detail and deeper implementation context:
 
 - [Documentation Index](./docs/README.md)
 - [Quick Setup](./docs/SETUP.md)
 - [System Interconnects](./docs/SYSTEM_INTERCONNECTS.md)
 - [IDE + Agent Setup Guide](./docs/IDE_AGENT_SETUP.md)
-- [Transport Connection Guide](./docs/CONNECT.md)
+- [Claude CLI + Codex Symbiosis](./docs/CLAUDE_CODEX_SYMBIOSIS.md)
+- [Cursor Local-First Mode](./docs/CURSOR_LOCAL_FIRST_MODE.md)
 - [Provider Bridge Matrix](./docs/PROVIDER_BRIDGE_MATRIX.md)
+- [Transport Connection Guide](./docs/CONNECT.md)
+- [Presentation Runbook](./docs/PRESENTATION_RUNBOOK.md)
 - [TriChat Compatibility Reference](./docs/TRICHAT_COMPATIBILITY_REFERENCE.md)
 
 Root-level companion files intentionally left outside `docs/`:
 
 - `AGENTS.md` for coding-agent operating instructions
 - `GEMINI.md` for Gemini-specific local notes
-
-## Layered Runtime Map
-
-```mermaid
-flowchart TD
-  Operator["Operator Surfaces<br/>README / docs / Agent Office GUI / tmux / shell wrappers"] --> Clients["IDE + Terminal Clients<br/>Codex / Claude CLI / Cursor / Gemini CLI / GitHub Copilot CLI / shell sessions / gh"]
-  Clients --> Transport["MCP Transport Layer<br/>HTTP / STDIO / launchd / app launchers"]
-  Transport --> Kernel["MCP Kernel Layer<br/>toolRegistry / server.ts / core tools / office snapshot / office action-status"]
-  Kernel --> Control["Control-Plane Layer<br/>goal.* / plan.* / task.* / kernel.summary / operator.brief / tool.search / permission.profile / warm.cache / feature.flag / budget.ledger"]
-  Kernel --> Autonomy["Autonomy Fabric Layer<br/>autonomy.maintain / autonomy.command / goal.autorun / reaction.engine / eval / optimizer"]
-  Kernel --> Orchestration["Orchestration Fabric Layer<br/>office council / tmux controller / runtime.worker / worker.fabric / model.router / provider.bridge"]
-  Kernel --> Local["Local Host Control Layer<br/>desktop.* / patient.zero / privileged.exec"]
-  Control --> State["Durable State Layer<br/>SQLite / warm cache / artifacts / runs / events / daemon configs / local secrets"]
-  Autonomy --> State
-  Orchestration --> State
-  Local --> State
-```
-
-## MCP Capability Wireframe
-
-This is the operator-facing map of the current server surface.
-
-```mermaid
-flowchart TD
-  Clients["Codex / Cursor / IDE / HTTP Clients"] --> Transport["MCP Transports<br/>stdio / HTTP / launchd"]
-  Transport --> Kernel["MASTER MOLD Server"]
-
-  Kernel --> Memory["Continuity + Knowledge<br/>memory.* / transcript.* / who_knows / knowledge.query / retrieval.hybrid / imprint.*"]
-  Kernel --> Control["Execution Control Plane<br/>goal.* / plan.* / dispatch.autorun / goal.autorun* / playbook.*"]
-  Kernel --> Worker["Durable Worker Ops<br/>agent.session.* / agent.claim_next / agent.report_result / task.* / run.* / lock.* / event.*"]
-  Kernel --> Evidence["Evidence + Governance<br/>artifact.* / experiment.* / policy.evaluate / preflight.check / postflight.verify / adr.create / decision.link / incident.*"]
-  Kernel --> Office["Office + Orchestration Ops<br/>trichat.thread* / trichat.turn* / trichat.autopilot / trichat.tmux_controller / trichat.bus / trichat.adapter_telemetry / trichat.slo / trichat.chaos / office action-status"]
-  Kernel --> Health["Runtime + Recovery<br/>kernel.summary / health.* / migration.status / backups / corruption quarantine"]
-  Kernel --> Learning["Bounded Agent Learning<br/>agent.learning_* / mentorship notes / MCP memory / ADR trail"]
-
-  Office --> Dashboard["Agent Office Dashboard<br/>curses TUI + tmux war room + macOS app"]
-  Worker --> Packs["Domain Packs + Hooks<br/>agentic pack / pack.plan.generate / pack.verify.run"]
-  Evidence --> Packs
-  Learning --> Office
-  Learning --> Worker
-```
-
-## Agent Spawn Wireframe
-
-This is the current ring-leader spawning and delegation shape.
-
-```mermaid
-flowchart TD
-  User["User / Operator"] --> Ring["Ring Leader<br/>lead agent / council selector / confidence gate / GSD planner"]
-
-  Ring --> DirImpl["implementation-director<br/>implementation planner"]
-  Ring --> DirResearch["research-director<br/>research planner"]
-  Ring --> DirVerify["verification-director<br/>verification planner"]
-  Ring --> LocalImprint["local-imprint<br/>local memory + continuity lane"]
-  Ring --> Codex["codex<br/>frontier review / hard problems / integration lane"]
-
-  DirImpl --> CodeSmith["code-smith<br/>leaf SME for implementation slices"]
-  DirResearch --> ResearchScout["research-scout<br/>leaf SME for bounded research"]
-  DirVerify --> QualityGuard["quality-guard<br/>leaf SME for verification and release checks"]
-
-  Ring --> Claim["agent.claim_next<br/>claim bounded work"]
-  Claim --> Council["Office council turn<br/>confidence + plan substance + policy gates"]
-  Council --> Execute["Execution router<br/>direct command / tmux dispatch / fallback task batch"]
-  Execute --> Leafs["Leaf / SME agents<br/>single-owner bounded tasks"]
-  Leafs --> Report["agent.report_result<br/>artifacts / evidence / outcomes / learning signal"]
-  Report --> Learn["Bounded learning ledger<br/>prefer / avoid / proof bars / rollback discipline"]
-  Learn --> Ring
-
-  Execute --> Tmux["office tmux controller<br/>worker lanes / queue discipline / office telemetry"]
-  Tmux --> Dashboard["Agent Office Dashboard<br/>desk work / chat / break / sleep sprites"]
-```
-
-## System Interconnects
-
-This is the current end-to-end local topology: launchers, IDEs, terminal bridges, the MCP runtime, the autonomy fabric, and the local-control lanes.
-
-```mermaid
-flowchart LR
-  subgraph Operator["Operator Surfaces"]
-    OfficeGUI["Agent Office GUI<br/>/office/"]
-    OfficeTUI["Agent Office TUI / tmux"]
-    Suite["Agentic Suite.app"]
-    Shell["Shell wrappers<br/>autonomy_*.sh / provider_bridge.sh"]
-  end
-
-  subgraph Clients["IDE + Bridge Clients"]
-    Codex["Codex"]
-    Claude["Claude CLI"]
-    Cursor["Cursor"]
-    Gemini["Gemini CLI"]
-    Copilot["GitHub Copilot CLI"]
-    Browser["Safari"]
-  end
-
-  subgraph Transport["Local MCP Transport"]
-    HTTP["HTTP transport<br/>/ready /office/api/* / MCP bearer auth"]
-    STDIO["STDIO transport<br/>single-client / helper calls"]
-  end
-
-  subgraph Kernel["MASTER MOLD MCP Server"]
-    Registry["toolRegistry + tool.search"]
-    Control["goal.* / plan.* / task.* / agent.session.* / operator.brief / kernel.summary"]
-    Fabric["office orchestration / worker.fabric / runtime.worker / model.router / provider.bridge"]
-    Flags["permission.profile / feature.flag / budget.ledger / warm.cache"]
-    Local["desktop.* / patient.zero / privileged.exec"]
-  end
-
-  subgraph State["Durable Local State"]
-    SQLite["SQLite state authority<br/>goals / plans / tasks / runs / events / ledgers / daemon configs"]
-    Cache["Warm cache + office snapshot cache"]
-    Secret["Local secret file<br/>~/.codex/secrets/mcagent_admin_password"]
-  end
-
-  subgraph Host["Local Host Capabilities"]
-    Desktop["Desktop control<br/>observe / act / listen"]
-    Admin["mcagent -> root lane"]
-    Runtime["launchd / tmux / local workers"]
-  end
-
-  OfficeGUI --> HTTP
-  OfficeTUI --> HTTP
-  Suite --> HTTP
-  Shell --> HTTP
-  Codex --> STDIO
-  Cursor --> STDIO
-  Gemini --> STDIO
-  Copilot --> STDIO
-  Browser --> HTTP
-
-  HTTP --> Registry
-  HTTP --> Control
-  HTTP --> Fabric
-  STDIO --> Registry
-  STDIO --> Control
-  STDIO --> Fabric
-
-  Registry --> Flags
-  Control --> SQLite
-  Fabric --> SQLite
-  Flags --> SQLite
-  Local --> SQLite
-  Control --> Cache
-  HTTP --> Cache
-
-  Fabric --> Runtime
-  Fabric --> Desktop
-  Local --> Desktop
-  Local --> Admin
-  Admin --> Secret
-```
-
-Full diagrams for demos and technical walk-throughs: [System Interconnects](./docs/SYSTEM_INTERCONNECTS.md)
-
-## IDE, CLI, and Office Flow
-
-```mermaid
-flowchart LR
-  subgraph Entry["Entry Points"]
-    OfficeGUI["Agent Office GUI"]
-    OfficeTUI["Agent Office tmux"]
-    Suite["Agentic Suite.app"]
-    Shell["Terminal sessions<br/>bash / zsh / shell wrappers"]
-    Codex["Codex"]
-    Claude["Claude CLI"]
-    Cursor["Cursor"]
-    Gemini["Gemini CLI"]
-    Copilot["GitHub Copilot CLI"]
-    GH["GitHub CLI (gh)"]
-  end
-
-  subgraph MCP["Local MCP Surfaces"]
-    HTTP["HTTP<br/>/ready /office/api/* / MCP POST"]
-    STDIO["STDIO<br/>client-launched MCP sessions"]
-  end
-
-  subgraph Runtime["MASTER MOLD Runtime"]
-    Registry["tool registry + capability discovery"]
-    Brief["kernel.summary / operator.brief / office.snapshot"]
-    Council["office council + autopilot"]
-    Workers["runtime.worker / worker.fabric / tmux lanes"]
-    LocalCtl["desktop.* / patient.zero / privileged.exec"]
-  end
-
-  subgraph State["State + Evidence"]
-    DB["SQLite"]
-    Cache["warm cache"]
-    Events["event trail / runs / artifacts / learning"]
-  end
-
-  OfficeGUI --> HTTP
-  OfficeTUI --> HTTP
-  Suite --> HTTP
-  Shell --> HTTP
-  Shell --> STDIO
-  Codex --> STDIO
-  Cursor --> STDIO
-  Gemini --> STDIO
-  Copilot --> STDIO
-  GH --> Shell
-
-  HTTP --> Registry
-  STDIO --> Registry
-  Registry --> Brief
-  Registry --> Council
-  Registry --> Workers
-  Registry --> LocalCtl
-  Brief --> DB
-  Council --> DB
-  Workers --> DB
-  LocalCtl --> DB
-  Brief --> Cache
-  Council --> Events
-  Workers --> Events
-  LocalCtl --> Events
-```
-
-## Patient Zero Toolkit Flow
-
-```mermaid
-flowchart TD
-  Operator["Operator"] --> Arm["patient.zero enable"]
-  Arm --> PZ["Patient Zero posture"]
-
-  PZ --> Desktop["Desktop lanes<br/>observe / act / listen / Safari"]
-  PZ --> Root["Privileged lane<br/>mcagent -> root"]
-  PZ --> Maintain["autonomy.maintain<br/>self-drive on"]
-  PZ --> Autopilot["office autopilot<br/>trichat.autopilot execute enabled"]
-
-  Autopilot --> Toolkit["Terminal toolkit<br/>codex / claude / cursor / gemini / gh"]
-  Autopilot --> Bridges["Bridge-capable agents<br/>codex / claude / cursor / gemini / github-copilot"]
-  Autopilot --> Locals["Local office agents<br/>directors / leaves / local-imprint"]
-
-  Desktop --> Audit["event.* / run.* / operator surfaces"]
-  Root --> Audit
-  Maintain --> Audit
-  Autopilot --> Audit
-  Toolkit --> Audit
-  Bridges --> Audit
-  Locals --> Audit
-```
-
-## Why This Template Exists
-
-Most MCP projects repeat the same infrastructure work:
-
-- durability and state continuity
-- safe/idempotent writes
-- local governance and auditability
-- task orchestration
-- cross-client interoperability
-
-This template centralizes those concerns so teams can build domain tools directly.
-
-## Client-Ready Architecture Pitch
-
-Use this framing with stakeholders:
-
-- This is not a single-purpose assistant.
-- This is a local MCP platform with reusable reliability primitives.
-- Domain value is delivered through packs, not by rewriting runtime infrastructure.
-
-```mermaid
-flowchart LR
-  A["Cursor / Codex / IDE Clients"] --> K["Local MCP Kernel"]
-  B["Inbox Workers / tmux / Background Automation"] --> K
-  C["Office / Council UI"] --> K
-  D["Future External Adapters"] --> K
-
-  K --> E["Control Plane
-  agent.session.*
-  goal.*
-  plan.*
-  dispatch.autorun"]
-  K --> F["Execution + Audit
-  task.*
-  run.*
-  lock.*
-  event.*"]
-  K --> G["Evidence + Methodology
-  artifact.*
-  experiment.*
-  playbook.*
-  pack hooks"]
-
-  G --> H["GSD Delivery Flow"]
-  G --> I["autoresearch Optimization Loop"]
-  K --> J[("SQLite + local runtime state")]
-```
-
-More detail: [Architecture Pitch](./docs/ARCHITECTURE_PITCH.md)
-
-Methodology automation: [Automated GSD + autoresearch Pipeline](./docs/AUTOMATED_GSD_AUTORESEARCH_PIPELINE.md)
-
-Execution roadmap: [Bleeding-Edge Execution Roadmap](./docs/BLEEDING_EDGE_EXECUTION_ROADMAP.md)
-
-Execution substrate additions now shipped in core:
-
-- `worker.fabric` for host registry, telemetry, and resource-aware lane routing
-- `cluster.topology` for the durable lab plan: active Mac control plane plus planned future CPU-heavy and GPU-heavy nodes
-- `model.router` for measured backend selection across local and remote model runtimes, plus topology-backed future placement recommendations for planned hosts
-- `benchmark.*` and `eval.*` for isolated execution scoring and router-aware eval suites
-- `task.compile` for durable DAG-style plan compilation with owner/evidence/rollback contracts
-- `org.program` for versioned ring leader, director, SME, and leaf operating doctrine
-
-Practical entrypoint:
-- use `playbook.run` to instantiate a GSD/autoresearch workflow and immediately enter `goal.execute`
-- let `agent.report_result` feed artifacts, experiment observations, evidence gates, and bounded `goal.autorun` continuation back into the kernel
-- use `kernel.summary` for one-shot operator state and `goal.autorun_daemon` for bounded unattended continuation
-
-## Operator Briefing
-
-The canonical live brief surface is `operator.brief`.
-
-- `task.compile` writes a durable `compile.brief` artifact for the active plan
-- `runtime.worker` writes a concrete handoff `session_brief.md` into the worker workspace
-- `office.snapshot` includes `operator_brief` so the office dashboard and GUI can consume the same canonical brief
-- `operator.brief` merges current objective, delegation contract, compile brief, runtime handoff brief, and execution backlog into one operator-facing payload
-
-Shell entrypoint:
-
-```bash
-npm run brief:current
-# compact JSON for scripts / dashboards
-npm run brief:current -- --json --compact
-```
-
-Raw MCP example:
-
-```bash
-node ./scripts/mcp_tool_call.mjs --tool operator.brief --args '{}' --transport http --url http://127.0.0.1:8787/ --origin http://127.0.0.1 --cwd .
-```
-
-## Provider Bridge Diagnostics
-
-Use the provider bridge to distinguish three different states:
-
-- client config is installed
-- a provider runtime is present on this host
-- the provider can actually see the shared MCP server right now
-
-Commands:
-
-```bash
-npm run providers:status
-npm run providers:diagnose -- claude-cli gemini-cli cursor github-copilot-cli
-```
-
-Notes:
-
-- Claude CLI now defaults to a resilient stdio proxy on this host: it targets the MCP HTTP daemon first and falls back to a local stdio server path if the daemon is unhealthy, while still mapping to the `claude` office agent and `autonomy.ide_ingress`.
-- Claude model use still depends on Claude Code being authenticated on the host; `provider.bridge diagnose` distinguishes configured MCP install from live authenticated runtime.
-- Gemini CLI now installs with an explicit trusted stdio proxy config, working directory, timeout, and HTTP-to-stdio fallback in `~/.gemini/settings.json`.
-- Cursor is validated as configured on this host, but runtime MCP status still has to be checked in the Cursor UI because Cursor does not expose a local MCP status CLI on this machine.
 
 ## Quick Start
 
