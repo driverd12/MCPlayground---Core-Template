@@ -51,6 +51,7 @@ Do not invent a second ingress path for shell, office, or external clients.
 - `autonomy.ide_ingress` remains the durable source of truth for operator and IDE work.
 - On macOS, when `TRICHAT_VISIBLE_CLAUDE_MIRROR_ON_INGRESS=1`, explicit Claude-targeted ingress may mirror the already-persisted objective into the visible Claude terminal.
 - Treat that terminal as an operator-visible sidecar only. Critical critique, evidence requests, and decisions still need to land back in MCP artifacts and SQLite-backed state.
+- Keep mirrored replies short and structured: exactly the bounded critique, missing evidence, and next action needed for Codex to rehydrate the response into MCP memory.
 
 **Critique workflow (Claude-specific):**
 When reviewing council proposals or plan steps, apply the five-check gate:
@@ -74,6 +75,8 @@ Try in this order before escalating to remote/hosted providers:
 Prefer **director-to-leaf delegation chains** before jumping straight to leaf SMEs.
 
 Local Ollama/MLX is the first-pass lane for cheap bounded execution. Escalate to hosted bridges only when explicitly requested or when the local lane cannot satisfy the evidence bar.
+
+Do not self-start speculative work from the visible terminal alone. Self-start only from persisted ingress, explicit routed work, or bounded recovery/keepalive logic that already has an MCP record.
 
 ---
 

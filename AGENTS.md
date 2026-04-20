@@ -49,6 +49,7 @@ Do not invent a second ingress path for shell, office, or external clients.
 - `autonomy.ide_ingress` is the durable source of truth for operator and IDE intake.
 - On macOS, when `TRICHAT_VISIBLE_CLAUDE_MIRROR_ON_INGRESS=1`, explicit Claude-targeted ingress may mirror the already-persisted objective into the visible Claude terminal for operator-visible collaboration.
 - That visible Claude terminal is a sidecar only. Durable state, continuity, and work evidence must still land in MCP artifacts, TriChat records, and SQLite-backed state.
+- Sidecar prompts and replies should stay short and structured so Codex can rehydrate critique and next actions back into MCP memory instead of leaving reasoning stranded in a terminal.
 
 **Health checks (call these before assuming something is broken):**
 - `health.tools`, `health.storage`, `migration.status`
@@ -69,6 +70,7 @@ Do not invent a second ingress path for shell, office, or external clients.
 - Keep the office TUI cute, informative, and operationally honest: sprite states should reflect real MCP/tmux/telemetry signals, not fake activity.
 - Treat `autonomy.ide_ingress` as the one canonical operator and IDE intake lane. Do not invent a second ingress path for shell, office, or external clients.
 - Keep agent collaboration MCP-first: visible terminals, chat panes, and IDE bridges are collaboration surfaces, not alternate durable stores.
+- Permit self-starting bridge collaboration only from persisted ingress, explicit routed work, or bounded recovery logic. Never start speculative recursive bridge loops.
 - For IDE-originated work, let the local-first council try first: `implementation-director`, `research-director`, `verification-director`, `local-imprint`, unless an explicit agent override is provided.
 - Make the control plane self-maintaining in the background: launchd keepalive should drive real `autonomy.maintain` upkeep so readiness, autorun, learning visibility, and eval freshness continue without slash-command babysitting.
 - Separate inbound client federation from outbound council capability. Cursor, Codex, and Gemini can be real council participants here; GitHub Copilot is an inbound MCP client today, not a fake outbound council bridge.

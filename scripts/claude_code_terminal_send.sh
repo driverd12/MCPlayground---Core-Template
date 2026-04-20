@@ -14,6 +14,8 @@ Options:
   --model <name>             Claude model used if a visible session must be opened.
   --permission-mode <mode>   Claude permission mode used if a visible session must be opened.
   --wait-seconds <seconds>   Wait before capturing output. Default: 8.
+  --capture-file <path>      Write captured terminal history tail to a file.
+  --capture-tail-lines <n>   Tail lines written to --capture-file. Default: 160.
   --capture                  Print terminal history after sending the prompt.
   --open-if-missing          Open a visible Claude session first if none is found. Default.
   --no-open-if-missing       Fail instead of opening a new visible Claude session.
@@ -27,9 +29,11 @@ SESSION_NAME="${CLAUDE_VISIBLE_SESSION_NAME:-MASTER-MOLD Visible Claude}"
 MODEL="${CLAUDE_VISIBLE_MODEL:-opus}"
 PERMISSION_MODE="${CLAUDE_VISIBLE_PERMISSION_MODE:-bypassPermissions}"
 WAIT_SECONDS="${CLAUDE_VISIBLE_CAPTURE_WAIT_SECONDS:-8}"
+CAPTURE_TAIL_LINES="${CLAUDE_VISIBLE_CAPTURE_TAIL_LINES:-160}"
 PROMPT_TEXT=""
 PROMPT_FILE=""
 PROMPT_TEMP_FILE=""
+CAPTURE_FILE=""
 CAPTURE=0
 OPEN_IF_MISSING=1
 
@@ -61,6 +65,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --wait-seconds)
       WAIT_SECONDS="${2:-}"
+      shift 2
+      ;;
+    --capture-file)
+      CAPTURE_FILE="${2:-}"
+      shift 2
+      ;;
+    --capture-tail-lines)
+      CAPTURE_TAIL_LINES="${2:-}"
       shift 2
       ;;
     --capture)
@@ -156,7 +168,13 @@ if [[ "$(find_visible_claude_session)" != "1" ]]; then
   sleep 3
 fi
 
-osascript - "${SESSION_NAME}" "${PROMPT_FILE}" "${WAIT_SECONDS}" "${CAPTURE}" <<'OSA'
+NEEDS_CAPTURE=0
+if [[ "${CAPTURE}" == "1" || -n "${CAPTURE_FILE}" ]]; then
+  NEEDS_CAPTURE=1
+fi
+
+CAPTURE_TEXT="$(
+osascript - "${SESSION_NAME}" "${PROMPT_FILE}" "${WAIT_SECONDS}" "${NEEDS_CAPTURE}" <<'OSA'
 on findMatchingTab(sessionName)
   tell application "Terminal"
     repeat with w in windows
@@ -214,3 +232,15 @@ on run argv
   return "sent"
 end run
 OSA
+)"
+
+if [[ -n "${CAPTURE_FILE}" ]]; then
+  mkdir -p "$(dirname "${CAPTURE_FILE}")"
+  printf '%s\n' "${CAPTURE_TEXT}" | tail -n "${CAPTURE_TAIL_LINES}" > "${CAPTURE_FILE}"
+fi
+
+if [[ "${CAPTURE}" == "1" ]]; then
+  printf '%s\n' "${CAPTURE_TEXT}"
+else
+  printf 'sent\n'
+fi

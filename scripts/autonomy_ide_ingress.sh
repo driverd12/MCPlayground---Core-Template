@@ -34,6 +34,12 @@ Environment:
                         Claude-targeted ingress into the visible Claude terminal.
                         This is operator-visible only; MCP artifacts remain
                         canonical.
+  TRICHAT_VISIBLE_CLAUDE_MIRROR_DEDUPE_WINDOW_SECONDS
+                        Skip repeated mirrors for the same objective within this
+                        window. Default: 900.
+  TRICHAT_VISIBLE_CLAUDE_MIRROR_MIN_INTERVAL_SECONDS
+                        Global burst throttle between visible Claude mirrors.
+                        Default: 20.
 USAGE
 }
 
@@ -311,14 +317,181 @@ visible_claude_mirror_enabled() {
   esac
   [[ "$(uname -s)" == "Darwin" ]] || return 1
   [[ -x "${REPO_ROOT}/scripts/claude_code_terminal_send.sh" ]] || return 1
+  [[ "${DRY_RUN}" != "1" ]] || return 1
   has_explicit_claude_target
+}
+
+visible_claude_mirror_state_dir() {
+  printf '%s\n' "${REPO_ROOT}/data/runtime/visible_claude_mirror"
+}
+
+visible_claude_mirror_hash() {
+  node --input-type=module - "${OBJECTIVE}" "${TITLE}" "${RISK_TIER}" "${THREAD_ID}" "${SESSION_ID}" "${TARGET_AGENTS_JSON}" <<'NODE'
+import crypto from "node:crypto";
+
+const [objective, title, riskTier, threadId, sessionId, targetAgentsJson] = process.argv.slice(2);
+const hash = crypto
+  .createHash("sha256")
+  .update(
+    JSON.stringify({
+      objective,
+      title,
+      riskTier,
+      threadId,
+      sessionId,
+      targetAgents: JSON.parse(targetAgentsJson || "[]"),
+    }),
+  )
+  .digest("hex");
+process.stdout.write(hash);
+NODE
+}
+
+visible_claude_mirror_file_age_seconds() {
+  local path="$1"
+  local now_ts=""
+  local modified_ts=""
+  [[ -f "${path}" ]] || return 1
+  now_ts="$(date +%s)"
+  modified_ts="$(stat -f %m "${path}" 2>/dev/null || true)"
+  [[ -n "${modified_ts}" ]] || return 1
+  printf '%s\n' "$(( now_ts - modified_ts ))"
+}
+
+should_skip_visible_claude_mirror() {
+  local mirror_id="$1"
+  local state_dir=""
+  local dedupe_file=""
+  local burst_file=""
+  local dedupe_window="${TRICHAT_VISIBLE_CLAUDE_MIRROR_DEDUPE_WINDOW_SECONDS:-900}"
+  local min_interval="${TRICHAT_VISIBLE_CLAUDE_MIRROR_MIN_INTERVAL_SECONDS:-20}"
+  local dedupe_age=""
+  local last_sent_at=""
+  local now_ts="$(date +%s)"
+  state_dir="$(visible_claude_mirror_state_dir)"
+  dedupe_file="${state_dir}/${mirror_id}.stamp"
+  burst_file="${state_dir}/last_sent_at"
+  mkdir -p "${state_dir}"
+  dedupe_age="$(visible_claude_mirror_file_age_seconds "${dedupe_file}" || true)"
+  if [[ -n "${dedupe_age}" && "${dedupe_age}" -lt "${dedupe_window}" ]]; then
+    return 0
+  fi
+  if [[ -f "${burst_file}" ]]; then
+    last_sent_at="$(tr -cd '0-9' < "${burst_file}" || true)"
+    if [[ -n "${last_sent_at}" && $(( now_ts - last_sent_at )) -lt "${min_interval}" ]]; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+mark_visible_claude_mirror_sent() {
+  local mirror_id="$1"
+  local state_dir=""
+  state_dir="$(visible_claude_mirror_state_dir)"
+  mkdir -p "${state_dir}"
+  : > "${state_dir}/${mirror_id}.stamp"
+  printf '%s\n' "$(date +%s)" > "${state_dir}/last_sent_at"
+}
+
+extract_visible_claude_feedback() {
+  local capture_file="$1"
+  local mirror_id="$2"
+  node --input-type=module - "${capture_file}" "${mirror_id}" <<'NODE'
+import fs from "node:fs";
+
+const [captureFile, mirrorId] = process.argv.slice(2);
+const raw = fs.readFileSync(captureFile, "utf8");
+const marker = `Mirror ID: ${mirrorId}.`;
+const markerIndex = raw.lastIndexOf(marker);
+if (markerIndex < 0) process.exit(0);
+const tail = raw.slice(markerIndex);
+const assistantIndex = tail.indexOf("⏺");
+if (assistantIndex < 0) process.exit(0);
+let response = tail.slice(assistantIndex).trim();
+const nextPromptIndex = response.indexOf("\n❯");
+if (nextPromptIndex >= 0) {
+  response = response.slice(0, nextPromptIndex).trim();
+}
+response = response.replace(/^⏺\s*/u, "").trim();
+response = response.replace(/\n{3,}/g, "\n\n");
+if (!response) process.exit(0);
+process.stdout.write(response);
+NODE
+}
+
+persist_visible_claude_feedback() {
+  local raw_response_file="$1"
+  local mirror_id="$2"
+  local feedback_file="$3"
+  local args_json=""
+  [[ -s "${feedback_file}" ]] || return 0
+  args_json="$(node --input-type=module - "${raw_response_file}" "${feedback_file}" "${mirror_id}" "${OBJECTIVE}" "${TITLE}" "${RISK_TIER}" <<'NODE'
+import fs from "node:fs";
+
+const [rawResponseFile, feedbackFile, mirrorId, objective, title, riskTier] = process.argv.slice(2);
+const response = JSON.parse(fs.readFileSync(rawResponseFile, "utf8"));
+const feedback = fs.readFileSync(feedbackFile, "utf8").trim();
+if (!feedback) process.exit(0);
+const effectiveAgentIds = Array.isArray(response.effective_trichat_agent_ids)
+  ? response.effective_trichat_agent_ids
+  : [];
+process.stdout.write(
+  JSON.stringify({
+    mutation: {
+      idempotency_key: `visible-claude-feedback-${mirrorId}`,
+      side_effect_fingerprint: `visible-claude-feedback-${mirrorId}`,
+      confirm: true,
+    },
+    content: [
+      "Visible Claude sidecar critique captured after durable autonomy.ide_ingress succeeded.",
+      title ? `Title: ${title}.` : null,
+      `Risk: ${riskTier || "medium"}.`,
+      response.session_id ? `Session: ${response.session_id}.` : null,
+      response.thread_id ? `Thread: ${response.thread_id}.` : null,
+      effectiveAgentIds.length > 0 ? `Agents: ${effectiveAgentIds.join(", ")}.` : null,
+      `Mirror ID: ${mirrorId}.`,
+      `Objective: ${objective}.`,
+      `Claude feedback: ${feedback}`,
+    ]
+      .filter(Boolean)
+      .join(" "),
+    keywords: [
+      "claude",
+      "codex",
+      "visible-sidecar",
+      "autonomy-ide-ingress",
+      "mirror-feedback",
+      `mirror-${mirrorId.slice(0, 12)}`,
+    ],
+  }),
+);
+NODE
+)" || return 0
+  [[ -n "${args_json// }" ]] || return 0
+  node ./scripts/mcp_tool_call.mjs \
+    --tool memory.append \
+    --args "${args_json}" \
+    --transport "${TRANSPORT}" \
+    --url "${TRICHAT_MCP_URL:-http://127.0.0.1:8787/}" \
+    --origin "${TRICHAT_MCP_ORIGIN:-http://127.0.0.1}" \
+    --stdio-command "${TRICHAT_MCP_STDIO_COMMAND:-node}" \
+    --stdio-args "${TRICHAT_MCP_STDIO_ARGS:-dist/server.js}" \
+    --cwd "${REPO_ROOT}" >/dev/null 2>&1 || true
 }
 
 maybe_mirror_visible_claude() {
   local raw_response_file="$1"
   local prompt=""
+  local mirror_id=""
+  local capture_file=""
+  local feedback_file=""
   visible_claude_mirror_enabled || return 0
-  prompt="$(node --input-type=module - "${raw_response_file}" "${OBJECTIVE}" "${TITLE}" "${RISK_TIER}" <<'NODE'
+  mirror_id="$(visible_claude_mirror_hash)"
+  should_skip_visible_claude_mirror "${mirror_id}" && return 0
+  capture_file="$(mktemp "${TMPDIR:-/tmp}/visible-claude-capture.XXXXXX.txt")"
+  feedback_file="$(mktemp "${TMPDIR:-/tmp}/visible-claude-feedback.XXXXXX.txt")"
+  prompt="$(TRICHAT_VISIBLE_CLAUDE_ACTIVE_MIRROR_ID="${mirror_id}" node --input-type=module - "${raw_response_file}" "${OBJECTIVE}" "${TITLE}" "${RISK_TIER}" <<'NODE'
 import fs from "node:fs";
 
 const [rawResponseFile, objective, title, riskTier] = process.argv.slice(2);
@@ -340,12 +513,28 @@ if (title && title.trim()) {
 }
 segments.push(`Risk: ${(riskTier || "medium").trim()}.`);
 segments.push(`Objective: ${String(objective || "").trim()}.`);
+segments.push(`Mirror ID: ${process.env.TRICHAT_VISIBLE_CLAUDE_ACTIVE_MIRROR_ID || ""}.`);
 segments.push("Reply with exactly three bullets: critique, missing evidence, next bounded action.");
 process.stdout.write(segments.join(" "));
 NODE
-)" || return 0
-  [[ -n "${prompt// }" ]] || return 0
-  "${REPO_ROOT}/scripts/claude_code_terminal_send.sh" --prompt "${prompt}" >/dev/null 2>&1 || true
+)" || { rm -f "${capture_file}" "${feedback_file}"; return 0; }
+  if [[ -z "${prompt// }" ]]; then
+    rm -f "${capture_file}" "${feedback_file}"
+    return 0
+  fi
+  if ! "${REPO_ROOT}/scripts/claude_code_terminal_send.sh" \
+      --prompt "${prompt}" \
+      --wait-seconds "${TRICHAT_VISIBLE_CLAUDE_CAPTURE_WAIT_SECONDS:-8}" \
+      --capture-file "${capture_file}" \
+      --capture-tail-lines "${TRICHAT_VISIBLE_CLAUDE_CAPTURE_TAIL_LINES:-160}" >/dev/null 2>&1; then
+    rm -f "${capture_file}" "${feedback_file}"
+    return 0
+  fi
+  mark_visible_claude_mirror_sent "${mirror_id}"
+  if extract_visible_claude_feedback "${capture_file}" "${mirror_id}" > "${feedback_file}" 2>/dev/null; then
+    persist_visible_claude_feedback "${raw_response_file}" "${mirror_id}" "${feedback_file}"
+  fi
+  rm -f "${capture_file}" "${feedback_file}"
 }
 
 RAW_RESPONSE_FILE="$(mktemp "${TMPDIR:-/tmp}/autonomy-ide-ingress-response.XXXXXX.json")"
