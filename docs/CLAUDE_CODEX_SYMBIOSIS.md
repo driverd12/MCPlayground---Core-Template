@@ -7,9 +7,10 @@ Use this document as the handoff note for other threads. The capability exists. 
 ## What now exists
 
 1. A visible Claude Code launcher for macOS Terminal.
-2. Explicit agent-targeted MCP ingress for `claude`, `codex`, `cursor`, and `gemini`.
-3. Agent Office intake controls that surface those explicit bridge targets in the GUI.
-4. A shared path for routing targeted objectives into `autonomy.ide_ingress`.
+2. A visible Claude prompt-injection path that can focus the live Claude tab, type a prompt, and press Enter.
+3. Explicit agent-targeted MCP ingress for `claude`, `codex`, `cursor`, and `gemini`.
+4. Agent Office intake controls that surface those explicit bridge targets in the GUI.
+5. A shared path for routing targeted objectives into `autonomy.ide_ingress`.
 
 ## Primary operator paths
 
@@ -52,7 +53,38 @@ What this wrapper does:
 3. Sets `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`.
 4. Opens a visible macOS Terminal session so the operator can see Claude activity directly.
 
-### 2. Target Claude and Codex through MCP ingress
+### 2. Send a prompt into the existing visible Claude session
+
+Use the repo wrapper:
+
+```bash
+npm run claude:terminal:send -- --prompt "Inspect provider bridge truth and report the smallest coherent fix."
+```
+
+Prompt from file:
+
+```bash
+./scripts/claude_code_terminal_send.sh --prompt-file /absolute/path/to/prompt.txt
+```
+
+Capture the visible tab after Claude has had a few seconds to reply:
+
+```bash
+./scripts/claude_code_terminal_send.sh \
+  --capture \
+  --wait-seconds 10 \
+  --prompt "Summarize what you changed and what still looks risky."
+```
+
+What this wrapper does:
+
+1. Finds the live Claude Terminal tab by session name.
+2. Opens a visible Claude session first if one is missing.
+3. Focuses the real Terminal tab so the operator can watch the prompt go in.
+4. Clears the current input line, types the prompt, and presses Enter.
+5. Optionally returns the visible terminal history after a bounded wait.
+
+### 3. Target Claude and Codex through MCP ingress
 
 Use the shell ingress with explicit agent selection:
 
@@ -81,7 +113,7 @@ What `--agent` does:
 2. Sends them into the `autonomy.ide_ingress` tool payload.
 3. Avoids relying on implicit routing when the operator wants named bridges.
 
-### 3. Use the same capability from Agent Office
+### 4. Use the same capability from Agent Office
 
 The Agent Office intake desk now exposes a `Bridge targets` section.
 
@@ -120,11 +152,28 @@ Expected transport behavior:
 3. `scripts/autonomy_ide_ingress.sh` forwards them to `autonomy.ide_ingress`.
 4. The control plane sees an explicitly targeted ingress request.
 
+## Durable MCP-first collaboration
+
+The visible Claude terminal is an operator-visible collaboration lane, not a replacement for durable MCP intake.
+
+When the work should become durable continuity, goals, plans, tasks, or artifacts:
+
+1. use Agent Office intake with `Bridge targets`
+2. or run `./scripts/autonomy_ide_ingress.sh --agent claude --agent codex -- "..."`
+3. or have visible Claude invoke the same ingress path from the terminal
+
+That keeps the shared work in the MCP layer and SQLite-backed continuity instead of leaving it as ephemeral terminal chat.
+
 ## Files that implement this capability
 
 Visible Claude launcher:
 
 1. `scripts/claude_code_terminal_open.sh`
+2. `package.json`
+
+Visible Claude control:
+
+1. `scripts/claude_code_terminal_send.sh`
 2. `package.json`
 
 Explicit targeted ingress:
@@ -179,15 +228,18 @@ When the goal is visible Claude + Codex coordination:
 
 1. Start the managed stack and confirm the office listener is up.
 2. Open a visible Claude terminal with `npm run claude:terminal`.
-3. Use Agent Office `Bridge targets` or `./scripts/autonomy_ide_ingress.sh --agent ...` to target `codex` and `claude`.
-4. Watch the visible Claude terminal for Claude-side activity.
-5. Use the office snapshot and transport logs to confirm ingress/dispatch behavior.
+3. Send bounded Claude prompts with `npm run claude:terminal:send -- --prompt "..."`
+4. Use Agent Office `Bridge targets` or `./scripts/autonomy_ide_ingress.sh --agent ...` to target `codex` and `claude`.
+5. Keep real execution and durable continuity on the MCP ingress lane.
+6. Watch the visible Claude terminal for Claude-side activity.
+7. Use the office snapshot and transport logs to confirm ingress/dispatch behavior.
 
 ## Guidance for other threads
 
 Other threads should assume:
 
 1. Visible Claude Code launching is a supported repo capability.
-2. Explicit Claude/Codex targeting through the MCP/office ingress layer is supported.
-3. The correct extension points are the files listed above.
-4. If behavior is missing, investigate runtime health first before re-implementing the feature.
+2. Visible Claude prompt injection is also a supported repo capability on macOS.
+3. Explicit Claude/Codex targeting through the MCP/office ingress layer is supported.
+4. The correct extension points are the files listed above.
+5. If behavior is missing, investigate runtime health first before re-implementing the feature.

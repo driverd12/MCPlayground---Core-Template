@@ -45,7 +45,7 @@ test("provider.bridge status trusts Claude config state without shelling out to 
     JSON.stringify(
       {
         mcpServers: {
-          mcplayground: {
+          "master-mold": {
             type: "http",
             url: "http://127.0.0.1:8787/",
           },
@@ -202,24 +202,24 @@ test("provider.bridge export_bundle and install create real client config artifa
     assert.ok(installed.installs.some((entry) => entry.client_id === "claude-cli"));
     assert.equal(fs.existsSync(path.join(homeDir, ".claude.json")), true);
     const claudeConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".claude.json"), "utf8"));
-    assert.equal(claudeConfig.mcpServers?.mcplayground?.type, "http");
-    assert.equal(claudeConfig.mcpServers?.mcplayground?.url, "http://127.0.0.1:8787/");
+    assert.equal(claudeConfig.mcpServers?.master-mold?.type, "http");
+    assert.equal(claudeConfig.mcpServers?.master-mold?.url, "http://127.0.0.1:8787/");
 
     const cursorConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".cursor", "mcp.json"), "utf8"));
-    assert.ok(cursorConfig.mcpServers?.mcplayground?.url);
+    assert.ok(cursorConfig.mcpServers?.master-mold?.url);
     const cursorWorkspaceConfig = JSON.parse(
       fs.readFileSync(path.join(workspaceRoot, ".cursor", "mcp.json"), "utf8")
     );
-    assert.ok(cursorWorkspaceConfig.mcpServers?.mcplayground?.url);
+    assert.ok(cursorWorkspaceConfig.mcpServers?.master-mold?.url);
 
     const geminiConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".gemini", "settings.json"), "utf8"));
-    assert.ok(geminiConfig.mcpServers?.mcplayground?.url);
+    assert.ok(geminiConfig.mcpServers?.master-mold?.url);
 
     const copilotConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".copilot", "mcp-config.json"), "utf8"));
-    assert.equal(copilotConfig.mcpServers?.mcplayground?.type, "http");
+    assert.equal(copilotConfig.mcpServers?.master-mold?.type, "http");
 
     const vscodeConfig = JSON.parse(fs.readFileSync(path.join(workspaceRoot, ".vscode", "mcp.json"), "utf8"));
-    assert.ok(vscodeConfig.servers?.mcplayground?.url);
+    assert.ok(vscodeConfig.servers?.master-mold?.url);
   } finally {
     await session.client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -255,14 +255,14 @@ test("provider.bridge installs Gemini CLI via stdio when transport is auto", { c
     assert.equal(installed.installs[0].transport_used, "stdio");
 
     const geminiConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".gemini", "settings.json"), "utf8"));
-    assert.equal(typeof geminiConfig.mcpServers?.mcplayground?.command, "string");
-    assert.ok(Array.isArray(geminiConfig.mcpServers?.mcplayground?.args));
-    assert.match(geminiConfig.mcpServers?.mcplayground?.args?.[0] || "", /provider_stdio_bridge\.mjs$/);
-    assert.equal(geminiConfig.mcpServers?.mcplayground?.type, "stdio");
-    assert.equal(geminiConfig.mcpServers?.mcplayground?.cwd, workspaceRoot);
-    assert.equal(geminiConfig.mcpServers?.mcplayground?.trust, true);
-    assert.equal(geminiConfig.mcpServers?.mcplayground?.timeout, 600000);
-    assert.equal(typeof geminiConfig.mcpServers?.mcplayground?.env?.MCP_PROXY_HTTP_URL, "string");
+    assert.equal(typeof geminiConfig.mcpServers?.master-mold?.command, "string");
+    assert.ok(Array.isArray(geminiConfig.mcpServers?.master-mold?.args));
+    assert.match(geminiConfig.mcpServers?.master-mold?.args?.[0] || "", /provider_stdio_bridge\.mjs$/);
+    assert.equal(geminiConfig.mcpServers?.master-mold?.type, "stdio");
+    assert.equal(geminiConfig.mcpServers?.master-mold?.cwd, workspaceRoot);
+    assert.equal(geminiConfig.mcpServers?.master-mold?.trust, true);
+    assert.equal(geminiConfig.mcpServers?.master-mold?.timeout, 600000);
+    assert.equal(typeof geminiConfig.mcpServers?.master-mold?.env?.MCP_PROXY_HTTP_URL, "string");
     assert.equal(installed.clients[0].preferred_transport, "stdio");
   } finally {
     await session.client.close().catch(() => {});
@@ -303,15 +303,15 @@ test("provider.bridge installs Claude CLI via stdio proxy when transport is auto
     assert.equal(installed.installs[0].transport_used, "stdio");
 
     const claudeConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".claude.json"), "utf8"));
-    assert.equal(claudeConfig.mcpServers?.mcplayground?.type, "stdio");
-    assert.equal(typeof claudeConfig.mcpServers?.mcplayground?.command, "string");
-    assert.ok(Array.isArray(claudeConfig.mcpServers?.mcplayground?.args));
-    assert.match(String(claudeConfig.mcpServers?.mcplayground?.args?.[0] ?? ""), /provider_stdio_bridge\.mjs$/);
-    assert.equal(claudeConfig.mcpServers?.mcplayground?.cwd, workspaceRoot);
-    assert.equal(claudeConfig.mcpServers?.mcplayground?.trust, true);
-    assert.equal(claudeConfig.mcpServers?.mcplayground?.timeout, 600000);
-    assert.equal(claudeConfig.mcpServers?.mcplayground?.env?.MCP_PROXY_HTTP_URL, "http://127.0.0.1:8787/");
-    assert.equal(typeof claudeConfig.mcpServers?.mcplayground?.env?.MCP_PROXY_STDIO_COMMAND, "string");
+    assert.equal(claudeConfig.mcpServers?.master-mold?.type, "stdio");
+    assert.equal(typeof claudeConfig.mcpServers?.master-mold?.command, "string");
+    assert.ok(Array.isArray(claudeConfig.mcpServers?.master-mold?.args));
+    assert.match(String(claudeConfig.mcpServers?.master-mold?.args?.[0] ?? ""), /provider_stdio_bridge\.mjs$/);
+    assert.equal(claudeConfig.mcpServers?.master-mold?.cwd, workspaceRoot);
+    assert.equal(claudeConfig.mcpServers?.master-mold?.trust, true);
+    assert.equal(claudeConfig.mcpServers?.master-mold?.timeout, 600000);
+    assert.equal(claudeConfig.mcpServers?.master-mold?.env?.MCP_PROXY_HTTP_URL, "http://127.0.0.1:8787/");
+    assert.equal(typeof claudeConfig.mcpServers?.master-mold?.env?.MCP_PROXY_STDIO_COMMAND, "string");
     assert.equal(installed.clients[0].preferred_transport, "stdio");
   } finally {
     await session.client.close().catch(() => {});
@@ -379,7 +379,7 @@ test("provider.bridge diagnose keeps Gemini configured until runtime is actually
     JSON.stringify(
       {
         mcpServers: {
-          mcplayground: {
+          "master-mold": {
             type: "stdio",
             command: "node",
             args: ["/tmp/provider_stdio_bridge.mjs"],
@@ -460,7 +460,7 @@ test("provider.bridge status reuses cached diagnostics so operator readiness sta
     JSON.stringify(
       {
         mcpServers: {
-          mcplayground: {
+          "master-mold": {
             type: "stdio",
             command: "node",
             args: ["/tmp/provider_stdio_bridge.mjs"],
@@ -546,7 +546,7 @@ test("provider.bridge diagnose treats Copilot as disconnected from recent auth l
     JSON.stringify(
       {
         mcpServers: {
-          mcplayground: {
+          "master-mold": {
             type: "http",
             url: "http://127.0.0.1:8787/",
           },
@@ -609,7 +609,7 @@ test("provider.bridge diagnose treats Copilot as connected from config metadata 
     JSON.stringify(
       {
         mcpServers: {
-          mcplayground: {
+          "master-mold": {
             type: "http",
             url: "http://127.0.0.1:8787/",
           },
@@ -718,7 +718,7 @@ test("provider.bridge diagnose treats Claude as connected from MCP config plus a
     assert.equal(claude.status, "connected");
     assert.equal(claude.connected, true);
     assert.match(claude.detail, /authentication is active/i);
-    assert.match(claude.command, /claude mcp get mcplayground \+ claude auth status/i);
+    assert.match(claude.command, /claude mcp get master-mold \+ claude auth status/i);
   } finally {
     await session.client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -796,6 +796,43 @@ test("provider.bridge diagnose force_live bypasses cache and runs live probes", 
     assert.equal(second.ok, true);
     assert.equal(second.cached, false);
     assert.equal(second.stale, false);
+  } finally {
+    await session.client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("provider.bridge diagnose refreshes stale cache automatically over stdio", { concurrency: false, timeout: 45_000 }, async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-provider-bridge-diagnose-stale-refresh-"));
+  const homeDir = path.join(tempDir, "home");
+  fs.mkdirSync(homeDir, { recursive: true });
+
+  const session = await openClient({
+    ANAMNESIS_HUB_DB_PATH: path.join(tempDir, "hub.sqlite"),
+    HOME: homeDir,
+    MCP_HTTP_BEARER_TOKEN: "provider-bridge-diagnose-stale-refresh-token",
+    TRICHAT_MCP_URL: "http://127.0.0.1:8787/",
+    TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
+    PROVIDER_BRIDGE_DIAGNOSTICS_CACHE_SECONDS: "1",
+  });
+
+  try {
+    const first = await callTool(session.client, "provider.bridge", {
+      action: "diagnose",
+      force_live: true,
+    });
+    assert.equal(first.ok, true);
+    assert.equal(first.cached, false);
+
+    await new Promise((resolve) => setTimeout(resolve, 5_500));
+
+    const second = await callTool(session.client, "provider.bridge", {
+      action: "diagnose",
+    });
+    assert.equal(second.ok, true);
+    assert.equal(second.cached, false);
+    assert.equal(second.stale, false);
+    assert.ok(second.diagnostics.length > 0, "stale diagnose should refresh live diagnostics over stdio");
   } finally {
     await session.client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

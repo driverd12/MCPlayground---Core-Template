@@ -13,6 +13,7 @@ flowchart LR
     TUI["Agent Office TUI / tmux"]
     Suite["Agentic Suite.app"]
     App["Agent Office.app"]
+    ClaudeVisibleCtl["Visible Claude controller<br/>claude_code_terminal_open.sh / claude_code_terminal_send.sh"]
     Launcher["Native office launcher<br/>scripts/agent_office_gui.mjs"]
     SuiteLauncher["Native suite launcher<br/>scripts/agentic_suite_launch.mjs"]
     CLI["Shell wrappers<br/>autonomy_ctl.sh / provider_bridge.sh / operator_brief.sh"]
@@ -67,6 +68,8 @@ flowchart LR
   TUI --> HTTP
   Suite --> SuiteLauncher
   App --> Launcher
+  CLI --> ClaudeVisibleCtl
+  ClaudeVisibleCtl --> Claude
   Launcher --> HTTP
   Launcher --> BrowserOpen
   Launcher --> Manifest
@@ -153,6 +156,7 @@ flowchart TD
 flowchart LR
   subgraph Sessions["Sessions and Clients"]
     Shell["Terminal shells"]
+    VisibleClaude["Visible Claude control<br/>claude_code_terminal_open.sh / claude_code_terminal_send.sh"]
     Codex["Codex app / CLI session"]
     Claude["Claude CLI"]
     Cursor["Cursor IDE"]
@@ -177,6 +181,8 @@ flowchart LR
 
   Shell --> HTTP
   Shell --> STDIO
+  Shell --> VisibleClaude
+  VisibleClaude --> Claude
   Codex --> STDIO
   Claude --> STDIO
   Cursor --> STDIO
@@ -226,6 +232,7 @@ flowchart TD
   subgraph Execution["Execution Lanes"]
     LocalTools["Local MCP tools"]
     CLI["Terminal CLI toolkit<br/>codex / claude / cursor / gemini / gh"]
+    LocalInference["Local inference lane<br/>Ollama / MLX / adapter primary"]
     Agents["Local office agents<br/>directors / leaves / local-imprint"]
     Desktop["desktop.* / patient.zero / privileged.exec"]
   end
@@ -250,10 +257,12 @@ flowchart TD
   Council --> Router
   Council --> Workers
   Router --> CLI
+  Router --> LocalInference
   Workers --> Agents
   Workers --> LocalTools
   Desktop --> Events
   CLI --> Events
+  LocalInference --> Events
   Agents --> Events
   LocalTools --> Events
   Events --> DB
@@ -271,11 +280,13 @@ flowchart LR
   end
 
   subgraph Bridges["Live Client Bridges and Clients"]
+    ClaudeVisible["Visible Claude terminal"]
     CursorBridge["Cursor bridge"]
     GeminiBridge["Gemini bridge"]
     CopilotClient["GitHub Copilot inbound MCP client"]
     CodexLane["Codex lane"]
     ImprintLane["Local Imprint lane"]
+    LocalInference["Local Ollama / MLX backends"]
   end
 
   subgraph Fabric["Autonomy Fabric"]
@@ -291,6 +302,7 @@ flowchart LR
   Snapshot --> Sessions
   Actions --> Fabric
 
+  Sessions --> ClaudeVisible
   Provider --> CursorBridge
   Provider --> GeminiBridge
   Provider --> CopilotClient
@@ -300,6 +312,7 @@ flowchart LR
   RuntimeWorkers --> CursorBridge
   RuntimeWorkers --> GeminiBridge
   RuntimeWorkers --> ImprintLane
+  Router --> LocalInference
   Router --> Provider
 ```
 
@@ -343,9 +356,12 @@ flowchart TD
 - `scripts/agent_office_gui.mjs` is the cross-platform office launcher path for macOS, Linux, and win32. It prefers launchd on macOS when available and falls back to the detached Node HTTP runner everywhere else.
 - `Agent Office.app` and `Agentic Suite.app` are thin installed wrappers that invoke the Node launchers; they do not bypass the launcher logic or talk to the MCP HTTP listener directly.
 - `scripts/agentic_suite_launch.mjs` is the cross-platform suite/app launcher. It first ensures the office surface is available, then tries requested IDE windows, then reuses the office launcher for browser fallback, while `status` emits machine-readable readiness with next actions.
+- `scripts/claude_code_terminal_open.sh` opens an operator-visible Claude Code Terminal session on macOS so the operator can watch Claude directly.
+- `scripts/claude_code_terminal_send.sh` focuses that live Claude tab, clears the current line, types a bounded prompt, and presses Enter. Use it when you want Codex-to-Claude collaboration to stay readable in the Terminal instead of hiding behind one-shot shell calls.
 - `scripts/bootstrap_doctor.mjs` reads `scripts/platform_manifest.json` as the bootstrap source of truth for browser detection order, launcher entrypoints, install profiles, and platform capability notes.
 - `scripts/bootstrap_install.mjs` is the platform-aware first-run installer path used by `npm run bootstrap:env:install`; it consumes the same manifest and can install pinned Node/npm/Python/Git/tmux prerequisites for supported hosts.
 - `scripts/bootstrap_guard.sh` is sourced by cold-start shell wrappers such as `provider_bridge.sh` and `autonomy_ctl.sh`. It fails early with `npm run bootstrap:env` guidance when Node MCP client dependencies or `dist/server.js` are missing, instead of leaking low-level Node import/build errors.
+- `npm run providers:diagnose -- <client>` now refreshes stale bridge evidence live over stdio/CLI when it is safe to do so. The shared HTTP daemon still prefers cached truth for responsiveness, so operator-triggered diagnose and daemon-facing status no longer have to make the same latency tradeoff.
 - `scripts/open_browser.mjs` now prefers the OS default browser handler first (`open`, `xdg-open`, `start`) and only falls back to named browser detection when needed, while still supporting `%LOCALAPPDATA%` and registry-backed win32 browser installs.
 - GitHub Copilot is represented as an inbound MCP client surface in `provider.bridge`; it is not routed as an outbound council/model-router backend until a real outbound bridge contract exists.
 - `scripts/agent_office_gui.sh` remains as a thin compatibility wrapper around the Node launcher for older shell entrypoints.

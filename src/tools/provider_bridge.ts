@@ -2088,6 +2088,8 @@ export function resolveProviderBridgeDiagnostics(
   const { workspaceRoot, transport, serverName, cacheKey } = providerBridgeDiagnosticsCacheKey(input);
   const cached = providerBridgeDiagnosticCache.get(cacheKey);
   const ttlMs = providerBridgeDiagnosticsCacheTtlMs();
+  const cachedIsFresh = Boolean(cached && Date.now() - cached.captured_at <= ttlMs);
+  const refreshStaleCacheLive = Boolean(!input.bypass_cache && cached && !cachedIsFresh && !isHttpServing());
   if (!input.bypass_cache && cached && Date.now() - cached.captured_at <= ttlMs) {
     return {
       generated_at: new Date(cached.captured_at).toISOString(),
@@ -2100,14 +2102,16 @@ export function resolveProviderBridgeDiagnostics(
   // return the stale entry immediately so the HTTP server is never blocked by
   // synchronous CLI probes on the request path.
   if (!input.bypass_cache && cached) {
-    return {
-      generated_at: new Date(cached.captured_at).toISOString(),
-      cached: true,
-      stale: true,
-      diagnostics: cached.diagnostics,
-    };
+    if (!refreshStaleCacheLive) {
+      return {
+        generated_at: new Date(cached.captured_at).toISOString(),
+        cached: true,
+        stale: true,
+        diagnostics: cached.diagnostics,
+      };
+    }
   }
-  const statuses = input.bypass_cache
+  const statuses = input.bypass_cache || refreshStaleCacheLive
     ? buildClientStatuses(workspaceRoot, transport, serverName)
     : buildClientStatusesCached(workspaceRoot, transport, serverName);
   const diagnostics = runProviderDiagnostics(workspaceRoot, serverName, statuses, input.probe_timeout_ms ?? 5000);
