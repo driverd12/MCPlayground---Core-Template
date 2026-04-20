@@ -161,14 +161,31 @@ function resolveLocalFirstRoutingState(metadata: Record<string, unknown>) {
     : isRecord(metadata.local_first_attempt_evidence)
       ? metadata.local_first_attempt_evidence
       : null;
+  const resourceGateSuppressed =
+    readBoolean(metadata.model_router_auto_bridge_suppressed_for_resource_gate) === true ||
+    readBoolean(metadata.local_first_auto_bridge_suppressed_for_resource_gate) === true;
+  const resourceGateReason =
+    readString(metadata.model_router_auto_bridge_resource_gate_reason) ??
+    readString(metadata.local_first_auto_bridge_resource_gate_reason);
+  const resourceGateSuppressedAgentIds = dedupeStrings(
+    Array.isArray(metadata.model_router_auto_bridge_resource_gate_suppressed_agent_ids)
+      ? metadata.model_router_auto_bridge_resource_gate_suppressed_agent_ids
+      : Array.isArray(metadata.local_first_auto_bridge_resource_gate_suppressed_agent_ids)
+        ? metadata.local_first_auto_bridge_resource_gate_suppressed_agent_ids
+        : []
+  );
   const hostedBridgeEscalationReason =
     readString(metadata.model_router_hosted_bridge_escalation_reason) ??
     readString(metadata.local_first_escalation_reason) ??
+    (resourceGateSuppressed ? "resource_gate_pressure" : null) ??
     (localAttemptBypassed ? "local_attempt_bypassed" : null);
   return {
     local_attempt_recorded: localAttemptRecorded,
     local_attempt_bypassed: localAttemptBypassed,
     local_attempt_evidence: localAttemptEvidence,
+    resource_gate_suppressed: resourceGateSuppressed,
+    resource_gate_reason: resourceGateReason,
+    resource_gate_suppressed_agent_ids: resourceGateSuppressedAgentIds,
     hosted_bridge_escalation_reason: hostedBridgeEscalationReason,
   };
 }
@@ -393,6 +410,28 @@ export async function autonomyCommand(
         local_attempt_recorded: localFirstRoutingState.local_attempt_recorded,
         local_attempt_bypassed: localFirstRoutingState.local_attempt_bypassed,
       });
+      const modelRouterMetadata = {
+        model_router_task_kind: modelRouterSelection.task_kind,
+        model_router_preferred_tags: modelRouterSelection.preferred_tags,
+        model_router_backend_id: modelRouterSelection.route.selected_backend?.backend_id ?? null,
+        model_router_local_attempt_recorded: modelRouterSelection.local_attempt_recorded,
+        model_router_local_attempt_bypassed: modelRouterSelection.local_attempt_bypassed,
+        model_router_local_attempt_evidence: localFirstRoutingState.local_attempt_evidence,
+        model_router_auto_bridge_suppressed_for_resource_gate:
+          modelRouterSelection.auto_bridge_suppressed_for_resource_gate || localFirstRoutingState.resource_gate_suppressed,
+        model_router_auto_bridge_resource_gate_reason:
+          modelRouterSelection.auto_bridge_resource_gate_reason ?? localFirstRoutingState.resource_gate_reason,
+        model_router_auto_bridge_resource_gate_suppressed_agent_ids:
+          modelRouterSelection.auto_bridge_resource_gate_suppressed_agent_ids.length > 0
+            ? modelRouterSelection.auto_bridge_resource_gate_suppressed_agent_ids
+            : localFirstRoutingState.resource_gate_suppressed_agent_ids,
+        model_router_resource_gate: modelRouterSelection.resource_gate,
+        model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence:
+          modelRouterSelection.auto_bridge_suppressed_for_missing_local_attempt_evidence,
+        model_router_hosted_bridge_escalation_reason:
+          modelRouterSelection.auto_bridge_escalation_reason ?? localFirstRoutingState.hosted_bridge_escalation_reason,
+        routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
+      };
       const effectiveTriChatAgentIds = modelRouterSelection.effective_agent_ids;
       const swarmProfileResult = (await invokeTool("swarm.profile", {
         objective: input.objective,
@@ -450,17 +489,7 @@ export async function autonomyCommand(
           matched_specialist_domains: matchedDomains,
           specialist_agent_ids: specialistAgentIds,
           support_agent_ids: bridgeReadySupportAgentIds,
-          model_router_task_kind: modelRouterSelection.task_kind,
-          model_router_preferred_tags: modelRouterSelection.preferred_tags,
-          model_router_backend_id: modelRouterSelection.route.selected_backend?.backend_id ?? null,
-          model_router_local_attempt_recorded: modelRouterSelection.local_attempt_recorded,
-          model_router_local_attempt_bypassed: modelRouterSelection.local_attempt_bypassed,
-          model_router_local_attempt_evidence: localFirstRoutingState.local_attempt_evidence,
-          model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence:
-            modelRouterSelection.auto_bridge_suppressed_for_missing_local_attempt_evidence,
-          model_router_hosted_bridge_escalation_reason:
-            modelRouterSelection.auto_bridge_escalation_reason ?? localFirstRoutingState.hosted_bridge_escalation_reason,
-          routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
+          ...modelRouterMetadata,
           swarm_profile: effectiveSwarmProfile,
           memory_preflight: memoryPreflight,
           ...intakeMetadata,
@@ -478,6 +507,12 @@ export async function autonomyCommand(
         details: {
           matched_specialist_domains: matchedDomains,
           routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
+          model_router_auto_bridge_suppressed_for_resource_gate:
+            modelRouterSelection.auto_bridge_suppressed_for_resource_gate,
+          model_router_auto_bridge_resource_gate_reason:
+            modelRouterSelection.auto_bridge_resource_gate_reason,
+          model_router_auto_bridge_resource_gate_suppressed_agent_ids:
+            modelRouterSelection.auto_bridge_resource_gate_suppressed_agent_ids,
         },
         ...source,
       });
@@ -501,17 +536,7 @@ export async function autonomyCommand(
             matched_specialist_domains: matchedDomains,
             specialist_agent_ids: specialistAgentIds,
             support_agent_ids: bridgeReadySupportAgentIds,
-            model_router_task_kind: modelRouterSelection.task_kind,
-            model_router_preferred_tags: modelRouterSelection.preferred_tags,
-            model_router_backend_id: modelRouterSelection.route.selected_backend?.backend_id ?? null,
-            model_router_local_attempt_recorded: modelRouterSelection.local_attempt_recorded,
-            model_router_local_attempt_bypassed: modelRouterSelection.local_attempt_bypassed,
-            model_router_local_attempt_evidence: localFirstRoutingState.local_attempt_evidence,
-            model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence:
-              modelRouterSelection.auto_bridge_suppressed_for_missing_local_attempt_evidence,
-            model_router_hosted_bridge_escalation_reason:
-              modelRouterSelection.auto_bridge_escalation_reason ?? localFirstRoutingState.hosted_bridge_escalation_reason,
-            routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
+            ...modelRouterMetadata,
             swarm_profile: effectiveSwarmProfile,
             memory_preflight: memoryPreflight,
             ...intakeMetadata,
@@ -617,14 +642,7 @@ export async function autonomyCommand(
           matched_specialist_domains: matchedDomains,
           specialist_agent_ids: specialistAgentIds,
           support_agent_ids: bridgeReadySupportAgentIds,
-          model_router_backend_id: modelRouterSelection.route.selected_backend?.backend_id ?? null,
-          model_router_local_attempt_recorded: modelRouterSelection.local_attempt_recorded,
-          model_router_local_attempt_bypassed: modelRouterSelection.local_attempt_bypassed,
-          model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence:
-            modelRouterSelection.auto_bridge_suppressed_for_missing_local_attempt_evidence,
-          model_router_hosted_bridge_escalation_reason:
-            modelRouterSelection.auto_bridge_escalation_reason ?? localFirstRoutingState.hosted_bridge_escalation_reason,
-          routed_bridge_agent_ids: modelRouterSelection.routed_bridge_agent_ids,
+          ...modelRouterMetadata,
           dry_run: input.dry_run ?? false,
         },
         ...source,

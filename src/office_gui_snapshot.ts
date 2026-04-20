@@ -611,6 +611,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const maintainSelfDrive = asDict(maintain.self_drive);
   const providerBridge = asDict(raw.provider_bridge);
   const providerBridgeDiagnostics = asDict(providerBridge.diagnostics);
+  const providerBridgeResourceGate = asDict(providerBridge.resource_gate);
   const providerEntries = asList(providerBridgeDiagnostics.diagnostics);
   const rawDesktopControl = asDict(raw.desktop_control);
   const desktopControlSummary = asDict(kernelDesktopControl.summary || rawDesktopControl.summary);
@@ -844,6 +845,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         configured_count: providerEntries.filter((entry) => String(asDict(entry).status ?? "").trim().toLowerCase() === "configured").length,
         disconnected_count: providerEntries.filter((entry) => String(asDict(entry).status ?? "").trim().toLowerCase() === "disconnected").length,
         unavailable_count: providerEntries.filter((entry) => String(asDict(entry).status ?? "").trim().toLowerCase() === "unavailable").length,
+        resource_gate: providerBridgeResourceGate,
       },
       desktop_control: {
         enabled: Boolean(desktopControlSummary.enabled),
@@ -1050,6 +1052,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
       generated_at: String(providerBridgeDiagnostics.generated_at ?? ""),
       cached: Boolean(providerBridgeDiagnostics.cached),
       diagnostics: providerEntries.map((entry) => asDict(entry)),
+      resource_gate: providerBridgeResourceGate,
     },
   };
 }

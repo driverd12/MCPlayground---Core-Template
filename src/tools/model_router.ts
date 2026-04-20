@@ -8,7 +8,7 @@ import {
 } from "../storage.js";
 import { planClusterTopologyBackends } from "./cluster_topology.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
-import { computeHostHealthScore, resolveEffectiveWorkerFabric } from "./worker_fabric.js";
+import { computeHostHealthScore, resolveEffectiveWorkerFabric, resolveLocalBridgeResourceGate } from "./worker_fabric.js";
 
 const recordSchema = z.record(z.unknown());
 
@@ -731,6 +731,12 @@ export function routeObjectiveBackends(
       ...normalizeStringArray(input.preferred_tags),
     ]),
   ];
+  const resourceGate = resolveLocalBridgeResourceGate({
+    storage,
+    fallback_workspace_root: input.fallback_workspace_root ?? process.cwd(),
+    fallback_worker_count: input.fallback_worker_count ?? 1,
+    fallback_shell: input.fallback_shell ?? "/bin/zsh",
+  });
   const route = routeModelBackends(storage, {
     task_kind: taskKind,
     preferred_tags: preferredTags,
@@ -757,8 +763,12 @@ export function routeObjectiveBackends(
       localAttemptRecorded,
       localAttemptBypassed
     );
+  const suppressAutoBridgeEscalationForResourceGate =
+    rawRoutedBridgeAgentIds.length > 0 && resourceGate.recommendations.suppress_outbound_bridges === true;
   const routedBridgeAgentIds =
-    suppressAutoBridgeEscalation || suppressAutoBridgeEscalationForMissingLocalAttemptEvidence
+    suppressAutoBridgeEscalation ||
+    suppressAutoBridgeEscalationForMissingLocalAttemptEvidence ||
+    suppressAutoBridgeEscalationForResourceGate
       ? []
       : rawRoutedBridgeAgentIds;
   const effectiveAgentIds = [
@@ -768,20 +778,30 @@ export function routeObjectiveBackends(
     task_kind: taskKind,
     preferred_tags: preferredTags,
     route,
+    resource_gate: resourceGate,
     routed_bridge_agent_ids: [...new Set(routedBridgeAgentIds)],
     effective_agent_ids: effectiveAgentIds,
     local_attempt_recorded: localAttemptRecorded,
     local_attempt_bypassed: localAttemptBypassed,
     auto_bridge_suppressed_for_local_first: suppressAutoBridgeEscalation,
+    auto_bridge_suppressed_for_resource_gate: suppressAutoBridgeEscalationForResourceGate,
+    auto_bridge_resource_gate_reason:
+      suppressAutoBridgeEscalationForResourceGate
+        ? resourceGate.detail ?? resourceGate.reason ?? "local_resource_gate_active"
+        : null,
+    auto_bridge_resource_gate_suppressed_agent_ids:
+      suppressAutoBridgeEscalationForResourceGate ? [...new Set(rawRoutedBridgeAgentIds)] : [],
     auto_bridge_suppressed_for_missing_local_attempt_evidence:
       suppressAutoBridgeEscalationForMissingLocalAttemptEvidence,
-    auto_bridge_escalation_reason: suppressAutoBridgeEscalationForMissingLocalAttemptEvidence
-      ? "local_attempt_required_before_auto_bridge"
-      : localAttemptBypassed
-        ? "local_attempt_bypassed"
-        : localAttemptRecorded
-          ? "local_attempt_recorded"
-          : null,
+    auto_bridge_escalation_reason: suppressAutoBridgeEscalationForResourceGate
+      ? "resource_gate_pressure"
+      : suppressAutoBridgeEscalationForMissingLocalAttemptEvidence
+        ? "local_attempt_required_before_auto_bridge"
+        : localAttemptBypassed
+          ? "local_attempt_bypassed"
+          : localAttemptRecorded
+            ? "local_attempt_recorded"
+            : null,
   };
 }
 

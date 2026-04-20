@@ -524,6 +524,16 @@
     var maintain = summary.maintain || {};
     var autopilot = summary.autopilot || {};
     var providers = summary.provider_bridge || {};
+    var providerResourceGate = providers.resource_gate || {};
+    var providerResourceGateActive = !!providerResourceGate.active;
+    var providerResourceGateLevel = providerResourceGateActive
+      ? String(providerResourceGate.severity || "moderate").toLowerCase() === "high"
+        ? "critical"
+        : "elevated"
+      : "normal";
+    var providerResourceGateDetail = providerResourceGateActive
+      ? compactIntakeText(providerResourceGate.detail || providerResourceGate.reason || "bridges shed", 84)
+      : "bridges available";
     var desktop = summary.desktop_control || {};
     var patientZero = summary.patient_zero || {};
     var privilegedAccess = summary.privileged_access || {};
@@ -540,6 +550,7 @@
       ["Workers", "active " + String(runtimeWorkers.active_count || 0) + " | sessions " + String(runtimeWorkers.session_count || 0)],
       ["Maintain", (maintain.running ? "running" : "idle") + " | eval_due " + (maintain.eval_due ? "yes" : "no")],
       ["Providers", "connected " + String(providers.connected_count || 0) + " | disconnected " + String(providers.disconnected_count || 0)],
+      ["Bridge Gate", providerResourceGateLevel + " | " + providerResourceGateDetail],
       ["Desktop", (desktop.enabled ? "enabled" : "disabled") + " | eyes " + (desktop.observe_ready ? "yes" : "no") + " | hands " + (desktop.act_ready ? "yes" : "no") + " | ears " + (desktop.listen_ready ? "yes" : "no")],
       [
         "Patient Zero",
@@ -775,6 +786,29 @@
     var reactionEngine = controlPlane.reaction_engine || {};
     var autopilot = controlPlane.autopilot || {};
     var providers = controlPlane.provider_bridge || {};
+    var providerResourceGate = providers.resource_gate || {};
+    var providerResourceGateActive = !!providerResourceGate.active;
+    var providerResourceGateSeverity = String(providerResourceGate.severity || "none").toLowerCase();
+    var providerResourceGateTone = !providerResourceGateActive ? "good" : providerResourceGateSeverity === "high" ? "bad" : "warn";
+    var providerResourceGateValue = !providerResourceGateActive
+      ? "normal"
+      : providerResourceGateSeverity === "high"
+        ? "critical"
+        : "elevated";
+    var providerResourceGateActions = [];
+    if (providerResourceGate.recommendations && providerResourceGate.recommendations.suppress_outbound_bridges) {
+      providerResourceGateActions.push("bridges shed");
+    }
+    if (providerResourceGate.recommendations && providerResourceGate.recommendations.pause_visible_sidecars) {
+      providerResourceGateActions.push("sidecars paused");
+    }
+    var providerResourceGateDetail = providerResourceGateActive
+      ? compactIntakeText(
+          (providerResourceGate.detail || providerResourceGate.reason || "local pressure detected") +
+            (providerResourceGateActions.length ? " · " + providerResourceGateActions.join(" · ") : ""),
+          110
+        )
+      : "bridges open · sidecars live";
     var desktop = controlPlane.desktop_control || {};
     var patientZero = controlPlane.patient_zero || {};
     var privilegedAccess = controlPlane.privileged_access || {};
@@ -836,6 +870,12 @@
         value: String(providers.connected_count || 0) + " connected",
         tone: (providers.disconnected_count || 0) > 0 ? "warn" : "good",
         detail: String(providers.disconnected_count || 0) + " disconnected",
+      },
+      {
+        label: "Bridge Gate",
+        value: providerResourceGateValue,
+        tone: providerResourceGateTone,
+        detail: providerResourceGateDetail,
       },
       {
         label: "Desktop",
@@ -982,6 +1022,7 @@
       '<div class="workbench-hero__meta">' +
       '<div class="workbench-status ' + statusClassName + '">' + escapeHtml(String(workbench.status || "ready").toUpperCase()) + '</div>' +
       '<div class="metric"><span>Focus</span><strong>' + escapeHtml(workbench.focus_area || "intake") + '</strong></div>' +
+      '<div class="metric"><span>Bridge Gate</span><strong>' + escapeHtml(providerResourceGateValue) + '</strong></div>' +
       '<div class="metric"><span>Blockers</span><strong>' + String(blockers.length) + '</strong></div>' +
       '<div class="metric"><span>Suggestions</span><strong>' + String(suggestions.length) + "</strong></div>" +
       "</div>" +
