@@ -46,6 +46,8 @@ This repository uses the local MCP server as its **primary control plane**. Alwa
 
 Do not invent a second ingress path for shell, office, or external clients.
 
+`autonomy.ide_ingress`, MCP artifacts, and SQLite-backed state are the durable source of truth. Visible terminals or IDE chat panes are collaboration surfaces only.
+
 **Health checks (call these before assuming something is broken):**
 - `health.tools`, `health.storage`, `migration.status`
 - `trichat.autopilot` `{"action":"status"}`, `trichat.tmux_controller` `{"action":"status"}`
@@ -62,6 +64,8 @@ Try in this order before escalating to remote/hosted providers:
 4. `local-imprint`
 
 Prefer **director-to-leaf delegation chains** before jumping straight to leaf SMEs.
+
+Local Ollama/MLX is the first-pass lane. Escalate to hosted bridges only when an objective explicitly requests them, a bridge agent is explicitly targeted, or the local lane cannot meet the evidence bar.
 
 ---
 
@@ -81,6 +85,7 @@ Prefer **director-to-leaf delegation chains** before jumping straight to leaf SM
 
 - **GitHub Copilot** is an **inbound MCP client** — not an outbound council bridge. Do not model it as a fake council participant.
 - **Cursor, Codex, Gemini** can be real council participants and outbound contributors.
+- On macOS, explicit Claude-targeted ingress may mirror the already-persisted objective into the visible Claude terminal when `TRICHAT_VISIBLE_CLAUDE_MIRROR_ON_INGRESS=1`; that mirror is operator-visible only, not canonical state.
 - **ChatGPT/OpenAI custom MCP** is remote-only until a real remote MCP surface exists. Never present it as a pure local install.
 - Keep inbound client federation separate from outbound council capability.
 

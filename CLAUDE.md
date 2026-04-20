@@ -47,6 +47,11 @@ Do not invent a second ingress path for shell, office, or external clients.
 - `health.tools`, `health.storage`, `migration.status`
 - `trichat.autopilot` `{"action":"status"}`, `trichat.tmux_controller` `{"action":"status"}`
 
+**Visible Claude sidecar:**
+- `autonomy.ide_ingress` remains the durable source of truth for operator and IDE work.
+- On macOS, when `TRICHAT_VISIBLE_CLAUDE_MIRROR_ON_INGRESS=1`, explicit Claude-targeted ingress may mirror the already-persisted objective into the visible Claude terminal.
+- Treat that terminal as an operator-visible sidecar only. Critical critique, evidence requests, and decisions still need to land back in MCP artifacts and SQLite-backed state.
+
 **Critique workflow (Claude-specific):**
 When reviewing council proposals or plan steps, apply the five-check gate:
 1. **Owner clarity** — who owns the work?
@@ -67,6 +72,8 @@ Try in this order before escalating to remote/hosted providers:
 4. `local-imprint`
 
 Prefer **director-to-leaf delegation chains** before jumping straight to leaf SMEs.
+
+Local Ollama/MLX is the first-pass lane for cheap bounded execution. Escalate to hosted bridges only when explicitly requested or when the local lane cannot satisfy the evidence bar.
 
 ---
 

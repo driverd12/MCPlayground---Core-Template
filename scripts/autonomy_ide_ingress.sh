@@ -27,6 +27,13 @@ Options:
   --no-transcript        Do not append transcript continuity.
   --no-thread            Do not mirror the objective into a TriChat thread.
   -h, --help             Show help.
+
+Environment:
+  TRICHAT_VISIBLE_CLAUDE_MIRROR_ON_INGRESS=1
+                        On macOS, after durable intake succeeds, mirror explicit
+                        Claude-targeted ingress into the visible Claude terminal.
+                        This is operator-visible only; MCP artifacts remain
+                        canonical.
 USAGE
 }
 
@@ -282,6 +289,71 @@ process.stdout.write(
 NODE
 )"
 
+has_explicit_claude_target() {
+  local agent_id=""
+  for agent_id in "${TARGET_AGENTS[@]-}"; do
+    case "${agent_id,,}" in
+      *claude*)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+visible_claude_mirror_enabled() {
+  case "${TRICHAT_VISIBLE_CLAUDE_MIRROR_ON_INGRESS:-0}" in
+    1|true|TRUE|yes|YES|on|ON)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  [[ "$(uname -s)" == "Darwin" ]] || return 1
+  [[ -x "${REPO_ROOT}/scripts/claude_code_terminal_send.sh" ]] || return 1
+  has_explicit_claude_target
+}
+
+maybe_mirror_visible_claude() {
+  local raw_response_file="$1"
+  local prompt=""
+  visible_claude_mirror_enabled || return 0
+  prompt="$(node --input-type=module - "${raw_response_file}" "${OBJECTIVE}" "${TITLE}" "${RISK_TIER}" <<'NODE'
+import fs from "node:fs";
+
+const [rawResponseFile, objective, title, riskTier] = process.argv.slice(2);
+const raw = fs.readFileSync(rawResponseFile, "utf8").trim();
+if (!raw) process.exit(0);
+const parsed = JSON.parse(raw);
+if (parsed?.ok !== true) process.exit(0);
+const effectiveAgentIds = Array.isArray(parsed.effective_trichat_agent_ids) ? parsed.effective_trichat_agent_ids : [];
+if (!effectiveAgentIds.some((value) => String(value || "").toLowerCase().includes("claude"))) {
+  process.exit(0);
+}
+const segments = [
+  "Codex routed and persisted a MASTER-MOLD objective through autonomy.ide_ingress.",
+  "Treat MCP artifacts, TriChat records, and SQLite-backed state as the source of truth.",
+  "Use this visible terminal as an operator-facing sidecar only.",
+];
+if (title && title.trim()) {
+  segments.push(`Title: ${title.trim()}.`);
+}
+segments.push(`Risk: ${(riskTier || "medium").trim()}.`);
+segments.push(`Objective: ${String(objective || "").trim()}.`);
+segments.push("Reply with exactly three bullets: critique, missing evidence, next bounded action.");
+process.stdout.write(segments.join(" "));
+NODE
+)" || return 0
+  [[ -n "${prompt// }" ]] || return 0
+  "${REPO_ROOT}/scripts/claude_code_terminal_send.sh" --prompt "${prompt}" >/dev/null 2>&1 || true
+}
+
+RAW_RESPONSE_FILE="$(mktemp "${TMPDIR:-/tmp}/autonomy-ide-ingress-response.XXXXXX.json")"
+cleanup() {
+  rm -f "${RAW_RESPONSE_FILE}"
+}
+trap cleanup EXIT
+
 node ./scripts/mcp_tool_call.mjs \
   --tool autonomy.ide_ingress \
   --args "${ARGS_JSON}" \
@@ -290,7 +362,9 @@ node ./scripts/mcp_tool_call.mjs \
   --origin "${TRICHAT_MCP_ORIGIN:-http://127.0.0.1}" \
   --stdio-command "${TRICHAT_MCP_STDIO_COMMAND:-node}" \
   --stdio-args "${TRICHAT_MCP_STDIO_ARGS:-dist/server.js}" \
-  --cwd "${REPO_ROOT}" | node --input-type=module -e '
+  --cwd "${REPO_ROOT}" > "${RAW_RESPONSE_FILE}"
+
+node --input-type=module -e '
 import fs from "node:fs";
 
 function summarizeRecord(value, keys) {
@@ -344,4 +418,6 @@ const payload = {
 };
 
 process.stdout.write(`${JSON.stringify(payload)}\n`);
-'
+' < "${RAW_RESPONSE_FILE}"
+
+maybe_mirror_visible_claude "${RAW_RESPONSE_FILE}"

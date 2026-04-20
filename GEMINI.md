@@ -6,6 +6,7 @@ MASTER MOLD is a **local-first MCP server runtime** designed for high-confidence
 
 - **MCP First**: Always prefer existing MCP tools over ad hoc shell workflows.
 - **One Ingress Lane**: Route all new operator/IDE objectives through `autonomy.ide_ingress`. Do not invent second ingress paths.
+- **Durable Truth**: `autonomy.ide_ingress`, MCP artifacts, and SQLite-backed state are canonical. Visible terminals are collaboration surfaces, not alternate stores.
 - **Evidence-Driven**: Do not treat vague plans or prompt echoes as success. Require explicit evidence for all completed work.
 - **Anti-Recursive**: `autonomy.maintain` is for bounded upkeep only. It must **not** perform recursive self-improvement or auto-promote org programs.
 
@@ -29,6 +30,7 @@ npm run production:doctor      # Full production readiness check
     - `research-director`
     - `verification-director`
     - `local-imprint`
+    - Local Ollama/MLX is the default first-pass lane; escalate to hosted bridges only when explicit or when local evidence is insufficient.
 4.  **Execute**: Use GSD-style work packets via `task.compile` or `autonomy.command`.
 
 ## Execution Rules (Non-Negotiables)
@@ -67,6 +69,7 @@ data/hub.sqlite         → Primary durable state store (SQLite)
 - **Learning**: `agent.learning_summary` and `kernel.summary.learning` are the canonical surfaces for bounded per-agent lessons.
 - **Truth Boundary**: Cursor, Codex, Claude CLI, Gemini CLI, and GitHub Copilot CLI are valid MCP clients. ChatGPT/OpenAI custom MCP is remote-only.
 - **Operator Surface**: Prefer the visible office launchers (`npm run trichat:office:web`, `npm run agentic:suite`) when humans need reassurance about live agent activity.
+- **Visible Claude Mirror**: On macOS, explicit Claude-targeted ingress may mirror into the visible Claude terminal when `TRICHAT_VISIBLE_CLAUDE_MIRROR_ON_INGRESS=1`, but that mirror is still non-canonical.
 
 ## Setup Validation Checklist
 

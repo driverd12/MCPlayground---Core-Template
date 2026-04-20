@@ -45,6 +45,11 @@ This repository uses the local MCP server as its **primary control plane**. Alwa
 
 Do not invent a second ingress path for shell, office, or external clients.
 
+**Durable collaboration boundary:**
+- `autonomy.ide_ingress` is the durable source of truth for operator and IDE intake.
+- On macOS, when `TRICHAT_VISIBLE_CLAUDE_MIRROR_ON_INGRESS=1`, explicit Claude-targeted ingress may mirror the already-persisted objective into the visible Claude terminal for operator-visible collaboration.
+- That visible Claude terminal is a sidecar only. Durable state, continuity, and work evidence must still land in MCP artifacts, TriChat records, and SQLite-backed state.
+
 **Health checks (call these before assuming something is broken):**
 - `health.tools`, `health.storage`, `migration.status`
 - `trichat.autopilot` `{"action":"status"}`, `trichat.tmux_controller` `{"action":"status"}`
@@ -63,6 +68,7 @@ Do not invent a second ingress path for shell, office, or external clients.
 - Preserve continuity in MCP artifacts, memory, and local repo guidance whenever strategy or long-term goals meaningfully evolve.
 - Keep the office TUI cute, informative, and operationally honest: sprite states should reflect real MCP/tmux/telemetry signals, not fake activity.
 - Treat `autonomy.ide_ingress` as the one canonical operator and IDE intake lane. Do not invent a second ingress path for shell, office, or external clients.
+- Keep agent collaboration MCP-first: visible terminals, chat panes, and IDE bridges are collaboration surfaces, not alternate durable stores.
 - For IDE-originated work, let the local-first council try first: `implementation-director`, `research-director`, `verification-director`, `local-imprint`, unless an explicit agent override is provided.
 - Make the control plane self-maintaining in the background: launchd keepalive should drive real `autonomy.maintain` upkeep so readiness, autorun, learning visibility, and eval freshness continue without slash-command babysitting.
 - Separate inbound client federation from outbound council capability. Cursor, Codex, and Gemini can be real council participants here; GitHub Copilot is an inbound MCP client today, not a fake outbound council bridge.
@@ -80,6 +86,8 @@ Try in this order before escalating to remote/hosted providers:
 2. `research-director`
 3. `verification-director`
 4. `local-imprint`
+
+Local Ollama/MLX is the cheap first-pass lane. Escalate to hosted bridges only when an objective explicitly asks for them, an explicit bridge agent override is present, or the local lane cannot meet the evidence bar.
 
 **Client role boundaries:**
 - **Claude** is both an inbound MCP client and an outbound council **critic** (safety review, tradeoff analysis, counterarguments). Routed via `claude_bridge.py`.
