@@ -446,6 +446,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const maintain = asDict(raw.autonomy_maintain);
   const runtimeWorkers = asDict(raw.runtime_workers);
   const workbench = asDict(raw.workbench);
+  const routerSuppressionDecisions = asList(raw.router_suppression_decisions).map((entry) => asDict(entry)).slice(0, 5);
 
   const catalog = buildCatalog(roster);
   const fallbackRoster = isFallbackRoster(roster);
@@ -1048,6 +1049,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
     },
     events: asList(busTail.events).slice(0, 20),
     runtime_sessions: asList(runtimeWorkers.sessions).slice(0, 20),
+    router_suppression_decisions: routerSuppressionDecisions,
     provider_bridge: {
       generated_at: String(providerBridgeDiagnostics.generated_at ?? ""),
       cached: Boolean(providerBridgeDiagnostics.cached),

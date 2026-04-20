@@ -1220,6 +1220,9 @@
     var localHost = summary.local_host || {};
     var routingOutlook = Array.isArray(router.routing_outlook) ? router.routing_outlook.slice(0, 6) : [];
     var runtimeSessions = Array.isArray(state.snapshot.runtime_sessions) ? state.snapshot.runtime_sessions.slice(0, 10) : [];
+    var routerSuppressionDecisions = Array.isArray(state.snapshot.router_suppression_decisions)
+      ? state.snapshot.router_suppression_decisions.slice(0, 5)
+      : [];
     var providerBridge = state.snapshot.provider_bridge || {};
     var providerDiagnostics = Array.isArray(providerBridge.diagnostics) ? providerBridge.diagnostics.slice(0, 8) : [];
     var providerResourceGate = providerBridge.resource_gate || {};
@@ -1267,11 +1270,26 @@
       }
       return '<div class="metric"><span>' + escapeHtml(label) + '</span><strong>' + escapeHtml(detail) + "</strong></div>";
     }).join("");
+    var suppressionHtml = routerSuppressionDecisions.map(function (entry) {
+      var reason = String(entry.reason || "unknown").replace(/_/g, " ");
+      var backendId = String(entry.selected_backend_id || "n/a");
+      var pressureLevel = String(entry.pressure_level || "n/a");
+      var suppressedAgents = Array.isArray(entry.suppressed_agent_ids) && entry.suppressed_agent_ids.length
+        ? entry.suppressed_agent_ids.join(", ")
+        : "none";
+      var observedAt = entry.observed_at ? relativeTime(entry.observed_at) + " ago" : "n/a";
+      return '<div class="metric"><span>' +
+        escapeHtml(observedAt + " · " + reason) +
+        '</span><strong>' +
+        escapeHtml(backendId + " · pressure " + pressureLevel + " · agents " + suppressedAgents) +
+        "</strong></div>";
+    }).join("");
     els.workersView.innerHTML =
       '<div class="workers-grid">' +
       '<section class="brief-card"><div class="section-title">Hybrid Routing Outlook</div><div class="metric-list">' + (routingHtml || '<div class="metric"><span>Routing</span><strong>no outlook entries</strong></div>') + "</div></section>" +
       '<section class="brief-card"><div class="section-title">Runtime Sessions</div><div class="metric-list">' + (sessionsHtml || '<div class="metric"><span>Runtime workers</span><strong>no active sessions</strong></div>') + "</div></section>" +
       '<section class="brief-card"><div class="section-title">Provider Bridges</div><div class="metric-list">' + providerGateHtml + (providersHtml || '<div class="metric"><span>Provider bridge</span><strong>no diagnostics</strong></div>') + "</div></section>" +
+      '<section class="brief-card"><div class="section-title">Recent Router Suppression Decisions</div><div class="metric-list">' + (suppressionHtml || '<div class="metric"><span>Router suppression</span><strong>none recent</strong></div>') + "</div></section>" +
       '<section class="brief-card"><div class="section-title">Local Host</div><div class="metric-list">' +
       '<div class="metric"><span>CPU</span><strong>' + Math.round((localHost.cpu_utilization || 0) * 100) + '%</strong></div>' +
       '<div class="metric"><span>RAM</span><strong>' + fmt(localHost.ram_available_gb) + " / " + fmt(localHost.ram_total_gb) + ' GB</strong></div>' +

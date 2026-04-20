@@ -876,6 +876,57 @@ function buildKernelPayload(storage: Storage, summary: TaskSummaryPayload, sessi
   });
 }
 
+function buildRecentRouterSuppressionDecisions(storage: Storage, params?: { limit?: number; max_age_seconds?: number }) {
+  const limit =
+    typeof params?.limit === "number" && Number.isFinite(params.limit) ? Math.max(1, Math.min(12, Math.trunc(params.limit))) : 5;
+  const maxAgeSeconds =
+    typeof params?.max_age_seconds === "number" && Number.isFinite(params.max_age_seconds)
+      ? Math.max(300, Math.trunc(params.max_age_seconds))
+      : 21600;
+  const now = Date.now();
+  const events = storage.listRuntimeEvents({
+    event_type: "autonomy.command",
+    limit: Math.max(40, limit * 10),
+  });
+  const entries: Array<Record<string, unknown>> = [];
+  for (let index = events.length - 1; index >= 0 && entries.length < limit; index -= 1) {
+    const event = events[index];
+    const details = asRecord(event.details);
+    const reason =
+      details.model_router_auto_bridge_suppressed_for_resource_gate === true
+        ? "laptop_pressure"
+        : details.model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence === true
+          ? "local_evidence_missing"
+          : details.model_router_auto_bridge_suppressed_for_local_first === true
+            ? "local_first_required"
+            : null;
+    if (!reason) {
+      continue;
+    }
+    const observedAt = String(event.created_at ?? "").trim() || null;
+    const observedStamp = observedAt ? Date.parse(observedAt) : Number.NaN;
+    if (Number.isFinite(observedStamp) && now - observedStamp > maxAgeSeconds * 1000) {
+      continue;
+    }
+    const gate = asRecord(details.model_router_resource_gate);
+    entries.push({
+      decision_id: String(details.model_router_suppression_decision_id ?? "").trim() || null,
+      event_id: String(event.event_id ?? "").trim() || null,
+      observed_at: observedAt,
+      reason,
+      selected_backend_id: String(details.model_router_backend_id ?? "").trim() || null,
+      pressure_level: String(gate.severity ?? "").trim() || null,
+      pressure_reason:
+        String(details.model_router_auto_bridge_resource_gate_reason ?? gate.reason ?? "").trim() || null,
+      suppressed_agent_ids: Array.isArray(details.model_router_auto_bridge_suppressed_agent_ids)
+        ? [...new Set(details.model_router_auto_bridge_suppressed_agent_ids.map((entry) => String(entry ?? "").trim()).filter(Boolean))]
+        : [],
+      objective: String(details.objective ?? "").trim() || null,
+    });
+  }
+  return entries;
+}
+
 export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof officeSnapshotSchema>) {
   const threadId = input.thread_id?.trim() || "ring-leader-main";
   const errors: string[] = [];
@@ -1148,6 +1199,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     desktopControl,
     patientZero,
   });
+  const routerSuppressionDecisions = buildRecentRouterSuppressionDecisions(storage);
 
   return {
     generated_at: new Date().toISOString(),
@@ -1178,6 +1230,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     privileged_access: privilegedAccess,
     setup_diagnostics: setupDiagnostics,
     workbench,
+    router_suppression_decisions: routerSuppressionDecisions,
     source: "office.snapshot",
   };
 }
@@ -1211,6 +1264,7 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
       const cachedProviderBridge = asRecord(cachedPayload.provider_bridge);
       const cachedProviderBridgeSnapshot = asRecord(cachedProviderBridge.snapshot);
       const liveProviderBridgeDiagnostics = buildPersistedProviderBridgeDiagnostics(liveAutonomyMaintainState);
+      const liveRouterSuppressionDecisions = buildRecentRouterSuppressionDecisions(storage);
       const liveProviderBridgeSnapshot = applyProviderBridgeDiagnosticsToSnapshot(
         {
           ...cachedProviderBridgeSnapshot,
@@ -1252,6 +1306,7 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
         patient_zero: livePatientZero,
         privileged_access: livePrivilegedAccess,
         setup_diagnostics: liveSetupDiagnostics,
+        router_suppression_decisions: liveRouterSuppressionDecisions,
         cache: {
           hit: true,
           key: cached.key,

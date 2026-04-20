@@ -1220,6 +1220,65 @@ function deriveOptimizerPlan(storage: Storage, intervalSeconds: number) {
   };
 }
 
+function buildRecentRouterSuppressionSummary(storage: Storage, params?: { limit?: number; max_age_seconds?: number }) {
+  const limit =
+    typeof params?.limit === "number" && Number.isFinite(params.limit) ? Math.max(1, Math.min(12, Math.trunc(params.limit))) : 5;
+  const maxAgeSeconds =
+    typeof params?.max_age_seconds === "number" && Number.isFinite(params.max_age_seconds)
+      ? Math.max(300, Math.trunc(params.max_age_seconds))
+      : 21600;
+  const now = Date.now();
+  const events = storage.listRuntimeEvents({
+    event_type: "autonomy.command",
+    limit: Math.max(40, limit * 10),
+  });
+  const entries: Array<{
+    decision_id: string | null;
+    observed_at: string | null;
+    reason: "local_first_required" | "local_evidence_missing" | "laptop_pressure";
+    selected_backend_id: string | null;
+    pressure_level: string | null;
+    pressure_reason: string | null;
+    suppressed_agent_ids: string[];
+  }> = [];
+  for (let index = events.length - 1; index >= 0 && entries.length < limit; index -= 1) {
+    const event = events[index];
+    const details = asRecord(event.details);
+    const reason =
+      readBoolean(details.model_router_auto_bridge_suppressed_for_resource_gate) === true
+        ? "laptop_pressure"
+        : readBoolean(details.model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence) === true
+          ? "local_evidence_missing"
+          : readBoolean(details.model_router_auto_bridge_suppressed_for_local_first) === true
+            ? "local_first_required"
+            : null;
+    if (!reason) {
+      continue;
+    }
+    const observedAt = readString(event.created_at);
+    const observedStamp = observedAt ? Date.parse(observedAt) : Number.NaN;
+    if (Number.isFinite(observedStamp) && now - observedStamp > maxAgeSeconds * 1000) {
+      continue;
+    }
+    const gate = asRecord(details.model_router_resource_gate);
+    entries.push({
+      decision_id: readString(details.model_router_suppression_decision_id),
+      observed_at: observedAt,
+      reason,
+      selected_backend_id: readString(details.model_router_backend_id),
+      pressure_level: readString(gate.severity),
+      pressure_reason:
+        readString(details.model_router_auto_bridge_resource_gate_reason) ?? readString(gate.reason) ?? null,
+      suppressed_agent_ids: dedupeStrings(details.model_router_auto_bridge_suppressed_agent_ids),
+    });
+  }
+  return {
+    entries,
+    latest_attention: entries[0] ? `model.router.auto_bridge_suppressed.${entries[0].reason}` : null,
+    latest_reason: entries[0]?.reason ?? null,
+  };
+}
+
 async function buildStatus(
   storage: Storage,
   invokeTool: InvokeTool,
@@ -1304,6 +1363,7 @@ async function buildStatus(
   const providerBridgeEntries = Array.isArray(providerBridgeDiagnostics.diagnostics)
     ? providerBridgeDiagnostics.diagnostics
     : [];
+  const recentRouterSuppression = buildRecentRouterSuppressionSummary(storage);
   const desktopControlState = storage.getDesktopControlState();
   const desktopControlSummary = summarizeDesktopControlState(desktopControlState);
   const due = {
@@ -1348,6 +1408,9 @@ async function buildStatus(
       continue;
     }
     attention.push(`provider.bridge.${clientId}.disconnected`);
+  }
+  if (recentRouterSuppression.latest_attention) {
+    attention.push(recentRouterSuppression.latest_attention);
   }
   if (desktopControlSummary.enabled && desktopControlSummary.stale) {
     attention.push("desktop.control.stale");
@@ -1652,6 +1715,7 @@ async function executeAutonomyMaintainPass(
       config_path: readString(entry.config_path),
     } satisfies ProviderBridgeDiagnosticSnapshotRecord))
     .filter((entry): entry is ProviderBridgeDiagnosticSnapshotRecord => entry.client_id.length > 0 && entry.display_name.length > 0);
+  const recentRouterSuppression = buildRecentRouterSuppressionSummary(storage);
   actions.push("provider.bridge.heartbeat");
   const desktopControlState = storage.getDesktopControlState();
   let desktopControlHeartbeat: Record<string, unknown> | null = null;
@@ -1683,6 +1747,9 @@ async function executeAutonomyMaintainPass(
       continue;
     }
     attention.push(`provider.bridge.${clientId}.disconnected`);
+  }
+  if (recentRouterSuppression.latest_attention) {
+    attention.push(recentRouterSuppression.latest_attention);
   }
   let runtimeWorkerStatus = asRecord(await invokeTool("runtime.worker", { action: "status", limit: 20 }));
   let runtimeWorkerSpawnResult: Record<string, unknown> | null = null;
