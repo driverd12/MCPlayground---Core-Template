@@ -487,6 +487,9 @@ maybe_mirror_visible_claude() {
   local capture_file=""
   local feedback_file=""
   visible_claude_mirror_enabled || return 0
+  if visible_claude_mirror_paused_by_resource_gate >/dev/null 2>&1; then
+    return 0
+  fi
   mirror_id="$(visible_claude_mirror_hash)"
   should_skip_visible_claude_mirror "${mirror_id}" && return 0
   capture_file="$(mktemp "${TMPDIR:-/tmp}/visible-claude-capture.XXXXXX.txt")"
@@ -535,6 +538,47 @@ NODE
     persist_visible_claude_feedback "${raw_response_file}" "${mirror_id}" "${feedback_file}"
   fi
   rm -f "${capture_file}" "${feedback_file}"
+}
+
+visible_claude_mirror_paused_by_resource_gate() {
+  local args_json=""
+  local raw_gate=""
+  args_json="$(node --input-type=module - "${REPO_ROOT}" "${SHELL:-/bin/zsh}" <<'NODE'
+const [workspaceRoot, shell] = process.argv.slice(2);
+process.stdout.write(JSON.stringify({
+  action: "status",
+  fallback_workspace_root: workspaceRoot,
+  fallback_worker_count: 1,
+  fallback_shell: shell || "/bin/zsh",
+}));
+NODE
+)" || return 1
+  raw_gate="$(node ./scripts/mcp_tool_call.mjs \
+    --tool worker.fabric \
+    --args "${args_json}" \
+    --transport "${TRANSPORT}" \
+    --url "${TRICHAT_MCP_URL:-http://127.0.0.1:8787/}" \
+    --origin "${TRICHAT_MCP_ORIGIN:-http://127.0.0.1}" \
+    --stdio-command "${TRICHAT_MCP_STDIO_COMMAND:-node}" \
+    --stdio-args "${TRICHAT_MCP_STDIO_ARGS:-dist/server.js}" \
+    --cwd "${REPO_ROOT}" 2>/dev/null)" || return 1
+  node --input-type=module - <<'NODE' <<<"${raw_gate}" >/dev/null 2>&1
+import fs from "node:fs";
+
+const raw = fs.readFileSync(0, "utf8").trim();
+if (!raw) process.exit(1);
+let parsed;
+try {
+  parsed = JSON.parse(raw);
+} catch {
+  process.exit(1);
+}
+const gate = parsed?.resource_gate ?? parsed?.result?.resource_gate ?? null;
+if (gate?.recommendations?.pause_visible_sidecars === true) {
+  process.exit(0);
+}
+process.exit(1);
+NODE
 }
 
 RAW_RESPONSE_FILE="$(mktemp "${TMPDIR:-/tmp}/autonomy-ide-ingress-response.XXXXXX.json")"

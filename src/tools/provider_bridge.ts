@@ -7,6 +7,7 @@ import { z } from "zod";
 import { Storage } from "../storage.js";
 import { getTriChatAgent, getTriChatBridgeCandidates } from "../trichat_roster.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
+import { resolveLocalBridgeResourceGate, type LocalBridgeResourceGate } from "./worker_fabric.js";
 
 const providerBridgeClientSchema = z.enum([
   "codex",
@@ -70,6 +71,8 @@ type ProviderBridgeClientStatus = {
   outbound_council_supported: boolean;
   outbound_agent_id: string | null;
   outbound_bridge_ready: boolean;
+  resource_gate_blocked: boolean;
+  resource_gate_reason: string | null;
   requires_internet_for_model: boolean;
   notes: string[];
 };
@@ -138,6 +141,7 @@ type ProviderBridgeSnapshot = {
   workspace_root: string;
   server_name: string;
   transport: "http" | "stdio";
+  resource_gate: LocalBridgeResourceGate;
   outbound_council_agents: Array<{
     client_id: ProviderBridgeClientId;
     agent_id: string | null;
@@ -947,7 +951,9 @@ function buildRouterBackendCandidates(statuses: ProviderBridgeClientStatus[]): P
     .map((status) => {
       const runtimeReady = isRuntimeReadyClient(status);
       const reason =
-        runtimeReady
+        status.resource_gate_blocked
+          ? status.resource_gate_reason ?? "local resource gate is active"
+          : runtimeReady
           ? null
           : status.client_id === "gemini-cli" && status.outbound_bridge_ready
             ? "missing gemini CLI binary and API key"
@@ -985,6 +991,8 @@ function buildRouterBackendCandidates(statuses: ProviderBridgeClientStatus[]): P
             installed: status.installed,
             config_present: status.config_present,
             binary_present: status.binary_present,
+            resource_gate_blocked: status.resource_gate_blocked,
+            resource_gate_reason: status.resource_gate_reason,
             requires_internet_for_model: status.requires_internet_for_model,
           },
         },
@@ -992,7 +1000,58 @@ function buildRouterBackendCandidates(statuses: ProviderBridgeClientStatus[]): P
     });
 }
 
+function formatLocalResourceGateReason(resourceGate: LocalBridgeResourceGate) {
+  if (!resourceGate.active) {
+    return null;
+  }
+  const metricSummary = [
+    resourceGate.metrics.cpu_utilization !== null
+      ? `cpu=${Math.round(resourceGate.metrics.cpu_utilization * 100)}%`
+      : null,
+    resourceGate.metrics.ram_free_ratio !== null
+      ? `ram_free=${Math.round(resourceGate.metrics.ram_free_ratio * 100)}%`
+      : null,
+    resourceGate.metrics.gpu_memory_free_ratio !== null
+      ? `gpu_mem_free=${Math.round(resourceGate.metrics.gpu_memory_free_ratio * 100)}%`
+      : null,
+    `active_tasks=${resourceGate.metrics.active_tasks}`,
+    `queue_depth=${resourceGate.metrics.queue_depth}`,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  return [
+    resourceGate.detail ?? "Local resource gate is active.",
+    metricSummary ? `Current metrics: ${metricSummary}.` : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function applyLocalBridgeResourceGateToStatuses(
+  statuses: ProviderBridgeClientStatus[],
+  resourceGate: LocalBridgeResourceGate
+) {
+  const resourceGateReason = formatLocalResourceGateReason(resourceGate);
+  return statuses.map((status) => {
+    if (!status.outbound_council_supported || !resourceGate.recommendations.suppress_outbound_bridges) {
+      return {
+        ...status,
+        resource_gate_blocked: false,
+        resource_gate_reason: null,
+      } satisfies ProviderBridgeClientStatus;
+    }
+    return {
+      ...status,
+      outbound_bridge_ready: false,
+      resource_gate_blocked: true,
+      resource_gate_reason: resourceGateReason,
+      notes: resourceGateReason ? [...status.notes, resourceGateReason] : status.notes,
+    } satisfies ProviderBridgeClientStatus;
+  });
+}
+
 export function resolveProviderBridgeSnapshot(input: {
+  storage?: Storage | null;
   workspace_root?: string;
   transport?: "auto" | "http" | "stdio";
   http_url?: string;
@@ -1013,7 +1072,16 @@ export function resolveProviderBridgeSnapshot(input: {
     workspace_root: workspaceRoot,
   });
   const serverName = input.server_name?.trim() || "master-mold";
-  const clients = buildClientStatusesCached(workspaceRoot, transport, serverName);
+  const resourceGate = resolveLocalBridgeResourceGate({
+    storage: input.storage ?? null,
+    fallback_workspace_root: workspaceRoot,
+    fallback_worker_count: 1,
+    fallback_shell: "/bin/zsh",
+  });
+  const clients = applyLocalBridgeResourceGateToStatuses(
+    buildClientStatusesCached(workspaceRoot, transport, serverName),
+    resourceGate
+  );
   const routerBackendCandidates = buildRouterBackendCandidates(clients);
   return {
     canonical_ingress_tool: "autonomy.ide_ingress",
@@ -1021,6 +1089,7 @@ export function resolveProviderBridgeSnapshot(input: {
     workspace_root: workspaceRoot,
     server_name: serverName,
     transport: transport.mode,
+    resource_gate: resourceGate,
     outbound_council_agents: clients
       .filter((entry) => entry.outbound_council_supported)
       .map((entry) => ({
@@ -1381,6 +1450,8 @@ function buildClientStatuses(
       outbound_council_supported: true,
       outbound_agent_id: rosterAgentIds.codex,
       outbound_bridge_ready: resolveOutboundBridgeReady(rosterAgentIds.codex),
+      resource_gate_blocked: false,
+      resource_gate_reason: null,
       requires_internet_for_model: true,
       notes: notes.codex,
     },
@@ -1399,6 +1470,8 @@ function buildClientStatuses(
       outbound_council_supported: true,
       outbound_agent_id: rosterAgentIds["claude-cli"],
       outbound_bridge_ready: resolveOutboundBridgeReady(rosterAgentIds["claude-cli"]),
+      resource_gate_blocked: false,
+      resource_gate_reason: null,
       requires_internet_for_model: true,
       notes: notes["claude-cli"],
     },
@@ -1419,6 +1492,8 @@ function buildClientStatuses(
       outbound_council_supported: true,
       outbound_agent_id: rosterAgentIds.cursor,
       outbound_bridge_ready: resolveOutboundBridgeReady(rosterAgentIds.cursor),
+      resource_gate_blocked: false,
+      resource_gate_reason: null,
       requires_internet_for_model: true,
       notes: notes.cursor,
     },
@@ -1437,6 +1512,8 @@ function buildClientStatuses(
       outbound_council_supported: false,
       outbound_agent_id: null,
       outbound_bridge_ready: false,
+      resource_gate_blocked: false,
+      resource_gate_reason: null,
       requires_internet_for_model: true,
       notes: notes["github-copilot-cli"],
     },
@@ -1455,6 +1532,8 @@ function buildClientStatuses(
       outbound_council_supported: false,
       outbound_agent_id: null,
       outbound_bridge_ready: false,
+      resource_gate_blocked: false,
+      resource_gate_reason: null,
       requires_internet_for_model: true,
       notes: notes["github-copilot-vscode"],
     },
@@ -1473,6 +1552,8 @@ function buildClientStatuses(
       outbound_council_supported: true,
       outbound_agent_id: rosterAgentIds["gemini-cli"],
       outbound_bridge_ready: resolveOutboundBridgeReady(rosterAgentIds["gemini-cli"]),
+      resource_gate_blocked: false,
+      resource_gate_reason: null,
       requires_internet_for_model: true,
       notes: notes["gemini-cli"],
     },
@@ -1491,6 +1572,8 @@ function buildClientStatuses(
       outbound_council_supported: false,
       outbound_agent_id: null,
       outbound_bridge_ready: false,
+      resource_gate_blocked: false,
+      resource_gate_reason: null,
       requires_internet_for_model: true,
       notes: notes["chatgpt-developer-mode"],
     },
@@ -2385,6 +2468,7 @@ export async function providerBridge(
 ) {
   const execute = async () => {
     const snapshot = resolveProviderBridgeSnapshot({
+      storage: _storage,
       workspace_root: input.workspace_root,
       transport: input.transport,
       http_url: input.http_url,
@@ -2431,6 +2515,7 @@ export async function providerBridge(
         workspace_root: truthySnapshot.workspace_root,
         server_name: truthySnapshot.server_name,
         transport: truthySnapshot.transport,
+        resource_gate: truthySnapshot.resource_gate,
         outbound_council_agents: truthySnapshot.outbound_council_agents.filter((entry) => clients.includes(entry.client_id)),
         router_backend_candidates: selectedRouterBackends,
         eligible_router_backends: selectedRouterBackends.filter((entry) => entry.eligible).map((entry) => entry.backend),
@@ -2480,6 +2565,7 @@ export async function providerBridge(
         generated_at: diagnostics.generated_at,
         cached: diagnostics.cached,
         stale: diagnostics.stale ?? false,
+        resource_gate: snapshot.resource_gate,
         diagnostics: selectedDiagnostics,
         clients: selectedStatus,
         onboarding,
@@ -2508,6 +2594,7 @@ export async function providerBridge(
         local_first_ide_agent_ids: snapshot.local_first_ide_agent_ids,
         server_name: serverName,
         transport: transport.mode,
+        resource_gate: snapshot.resource_gate,
         bundle,
         router_backend_candidates: selectedRouterBackends,
         clients: selectedStatus,
@@ -2595,17 +2682,27 @@ export async function providerBridge(
     // Invalidate status cache after install so subsequent status/diagnose calls
     // pick up the freshly installed config.
     providerBridgeStatusCache.clear();
-    const postInstallStatus = buildClientStatuses(workspaceRoot, transport, serverName).filter((entry) =>
-      clients.includes(entry.client_id)
-    );
+    const postInstallSnapshot = resolveProviderBridgeSnapshot({
+      storage: _storage,
+      workspace_root: input.workspace_root,
+      transport: input.transport,
+      http_url: input.http_url,
+      http_origin: input.http_origin,
+      stdio_command: input.stdio_command,
+      stdio_args: input.stdio_args,
+      db_path: input.db_path,
+      server_name: input.server_name,
+    });
+    const postInstallStatus = postInstallSnapshot.clients.filter((entry) => clients.includes(entry.client_id));
     return {
       ok: true,
-      canonical_ingress_tool: snapshot.canonical_ingress_tool,
-      local_first_ide_agent_ids: snapshot.local_first_ide_agent_ids,
+      canonical_ingress_tool: postInstallSnapshot.canonical_ingress_tool,
+      local_first_ide_agent_ids: postInstallSnapshot.local_first_ide_agent_ids,
       server_name: serverName,
       transport: transport.mode,
+      resource_gate: postInstallSnapshot.resource_gate,
       installs,
-      router_backend_candidates: selectedRouterBackends,
+      router_backend_candidates: postInstallSnapshot.router_backend_candidates.filter((entry) => clients.includes(entry.client_id)),
       clients: postInstallStatus,
       onboarding: buildProviderBridgeOnboardingSummary({
         clients: postInstallStatus,

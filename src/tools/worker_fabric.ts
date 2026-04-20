@@ -143,6 +143,39 @@ export type TaskExecutionRouting = {
   }>;
 };
 
+export type LocalBridgeResourceGate = {
+  active: boolean;
+  severity: "none" | "moderate" | "high";
+  reason: string | null;
+  detail: string | null;
+  host_id: string | null;
+  health_score: number | null;
+  metrics: {
+    cpu_utilization: number | null;
+    ram_available_gb: number | null;
+    ram_total_gb: number | null;
+    ram_free_ratio: number | null;
+    gpu_utilization: number | null;
+    gpu_memory_available_gb: number | null;
+    gpu_memory_total_gb: number | null;
+    gpu_memory_free_ratio: number | null;
+    thermal_pressure: WorkerFabricHostTelemetryRecord["thermal_pressure"] | null;
+    queue_depth: number;
+    active_tasks: number;
+  };
+  thresholds: {
+    cpu_utilization_max: number;
+    ram_free_ratio_min: number;
+    gpu_memory_free_ratio_min: number;
+    local_model_concurrency_max: number | null;
+    queue_depth_max: number | null;
+  };
+  recommendations: {
+    suppress_outbound_bridges: boolean;
+    pause_visible_sidecars: boolean;
+  };
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -527,6 +560,201 @@ export function resolveEffectiveWorkerFabric(storage: Storage, input: {
   } satisfies WorkerFabricStateRecord;
 }
 
+function buildEffectiveWorkerFabricWithoutStorage(input: {
+  fallback_workspace_root: string;
+  fallback_worker_count: number;
+  fallback_shell: string;
+}) {
+  const implicit = buildImplicitLocalWorkerFabric({
+    workspace_root: input.fallback_workspace_root,
+    worker_count: input.fallback_worker_count,
+    shell: input.fallback_shell,
+  });
+  const effectiveHosts = implicit.hosts.map((host) => overlayEffectiveLocalHost(normalizeHost(host), host.host_id));
+  return {
+    ...implicit,
+    hosts: effectiveHosts,
+    default_host_id: effectiveHosts[0]?.host_id ?? implicit.default_host_id,
+  } satisfies WorkerFabricStateRecord;
+}
+
+export function resolveLocalBridgeResourceGate(input: {
+  storage?: Storage | null;
+  fallback_workspace_root: string;
+  fallback_worker_count: number;
+  fallback_shell: string;
+}): LocalBridgeResourceGate {
+  const state = input.storage
+    ? resolveEffectiveWorkerFabric(input.storage, {
+        fallback_workspace_root: input.fallback_workspace_root,
+        fallback_worker_count: input.fallback_worker_count,
+        fallback_shell: input.fallback_shell,
+      })
+    : buildEffectiveWorkerFabricWithoutStorage({
+        fallback_workspace_root: input.fallback_workspace_root,
+        fallback_worker_count: input.fallback_worker_count,
+        fallback_shell: input.fallback_shell,
+      });
+  const localHosts = state.hosts.filter((host) => host.enabled !== false && host.transport === "local");
+  const localHost = localHosts.find((host) => host.host_id === state.default_host_id) ?? localHosts[0] ?? null;
+  if (!localHost) {
+    return {
+      active: false,
+      severity: "none",
+      reason: null,
+      detail: null,
+      host_id: null,
+      health_score: null,
+      metrics: {
+        cpu_utilization: null,
+        ram_available_gb: null,
+        ram_total_gb: null,
+        ram_free_ratio: null,
+        gpu_utilization: null,
+        gpu_memory_available_gb: null,
+        gpu_memory_total_gb: null,
+        gpu_memory_free_ratio: null,
+        thermal_pressure: null,
+        queue_depth: 0,
+        active_tasks: 0,
+      },
+      thresholds: {
+        cpu_utilization_max: 0.92,
+        ram_free_ratio_min: 0.12,
+        gpu_memory_free_ratio_min: 0.12,
+        local_model_concurrency_max: null,
+        queue_depth_max: null,
+      },
+      recommendations: {
+        suppress_outbound_bridges: false,
+        pause_visible_sidecars: false,
+      },
+    };
+  }
+
+  const telemetry = localHost.telemetry;
+  const capacity = resolveHostCapacityProfile(localHost);
+  const healthScore = computeHostHealthScore(telemetry);
+  const ramFreeRatio =
+    telemetry.ram_available_gb === null || telemetry.ram_total_gb === null || telemetry.ram_total_gb <= 0
+      ? null
+      : Math.max(0, Math.min(1, telemetry.ram_available_gb / telemetry.ram_total_gb));
+  const gpuMemoryFreeRatio =
+    telemetry.gpu_memory_available_gb === null || telemetry.gpu_memory_total_gb === null || telemetry.gpu_memory_total_gb <= 0
+      ? null
+      : Math.max(0, Math.min(1, telemetry.gpu_memory_available_gb / telemetry.gpu_memory_total_gb));
+  const localModelConcurrencyMax =
+    capacity.max_local_model_concurrency !== null && Number.isFinite(capacity.max_local_model_concurrency)
+      ? Math.max(1, Math.round(capacity.max_local_model_concurrency))
+      : capacity.recommended_runtime_worker_max_active !== null && Number.isFinite(capacity.recommended_runtime_worker_max_active)
+        ? Math.max(1, Math.round(capacity.recommended_runtime_worker_max_active))
+        : null;
+  const queueDepthMax =
+    capacity.safe_max_queue_per_worker !== null && Number.isFinite(capacity.safe_max_queue_per_worker)
+      ? Math.max(1, Math.round(capacity.safe_max_queue_per_worker * localHost.worker_count))
+      : capacity.recommended_runtime_worker_limit !== null && Number.isFinite(capacity.recommended_runtime_worker_limit)
+        ? Math.max(1, Math.round(capacity.recommended_runtime_worker_limit))
+        : null;
+
+  const triggers: Array<{ severity: "moderate" | "high"; reason: string; detail: string }> = [];
+  if (telemetry.thermal_pressure === "critical") {
+    triggers.push({
+      severity: "high",
+      reason: "thermal_pressure_critical",
+      detail: "Local host thermal pressure is critical; pause sidecars and suppress outbound bridge routing.",
+    });
+  } else if (telemetry.thermal_pressure === "serious") {
+    triggers.push({
+      severity: "high",
+      reason: "thermal_pressure_serious",
+      detail: "Local host thermal pressure is serious; reduce bridge and sidecar load immediately.",
+    });
+  }
+  if (telemetry.cpu_utilization !== null && telemetry.cpu_utilization >= 0.92) {
+    triggers.push({
+      severity: "high",
+      reason: "cpu_saturated",
+      detail: "CPU utilization is saturated on the local host; suppress outbound bridges until load drops.",
+    });
+  }
+  if (ramFreeRatio !== null && ramFreeRatio < 0.12) {
+    triggers.push({
+      severity: "high",
+      reason: "ram_pressure",
+      detail: "Available RAM is below the safe threshold for concurrent local models plus bridge sidecars.",
+    });
+  }
+  if (gpuMemoryFreeRatio !== null && gpuMemoryFreeRatio < 0.12) {
+    triggers.push({
+      severity: "high",
+      reason: "gpu_memory_pressure",
+      detail: "Available GPU memory is below the safe threshold for concurrent local inference and bridge work.",
+    });
+  }
+  if (localModelConcurrencyMax !== null && telemetry.active_tasks >= localModelConcurrencyMax) {
+    triggers.push({
+      severity: "moderate",
+      reason: "local_model_concurrency_saturated",
+      detail: "Active local tasks already meet or exceed the safe local-model concurrency budget.",
+    });
+  }
+  if (queueDepthMax !== null && telemetry.queue_depth >= queueDepthMax) {
+    triggers.push({
+      severity: "moderate",
+      reason: "worker_queue_saturated",
+      detail: "Worker queue depth already meets or exceeds the safe local queue budget.",
+    });
+  }
+  if (healthScore < 0.45) {
+    triggers.push({
+      severity: "high",
+      reason: "host_health_degraded",
+      detail: "The computed local host health score is below the minimum safe threshold for bridge escalation.",
+    });
+  }
+
+  const primaryTrigger = triggers[0] ?? null;
+  const severity = primaryTrigger
+    ? triggers.some((entry) => entry.severity === "high")
+      ? "high"
+      : "moderate"
+    : "none";
+  const active = primaryTrigger !== null;
+
+  return {
+    active,
+    severity,
+    reason: primaryTrigger?.reason ?? null,
+    detail: primaryTrigger?.detail ?? null,
+    host_id: localHost.host_id,
+    health_score: healthScore,
+    metrics: {
+      cpu_utilization: telemetry.cpu_utilization,
+      ram_available_gb: telemetry.ram_available_gb,
+      ram_total_gb: telemetry.ram_total_gb,
+      ram_free_ratio: ramFreeRatio,
+      gpu_utilization: telemetry.gpu_utilization,
+      gpu_memory_available_gb: telemetry.gpu_memory_available_gb,
+      gpu_memory_total_gb: telemetry.gpu_memory_total_gb,
+      gpu_memory_free_ratio: gpuMemoryFreeRatio,
+      thermal_pressure: telemetry.thermal_pressure,
+      queue_depth: telemetry.queue_depth,
+      active_tasks: telemetry.active_tasks,
+    },
+    thresholds: {
+      cpu_utilization_max: 0.92,
+      ram_free_ratio_min: 0.12,
+      gpu_memory_free_ratio_min: 0.12,
+      local_model_concurrency_max: localModelConcurrencyMax,
+      queue_depth_max: queueDepthMax,
+    },
+    recommendations: {
+      suppress_outbound_bridges: active,
+      pause_visible_sidecars: active,
+    },
+  };
+}
+
 export function buildWorkerFabricSlots(
   storage: Storage,
   input: {
@@ -713,17 +941,26 @@ export function rankWorkerFabricSlots(
 
 export function workerFabric(storage: Storage, input: z.infer<typeof workerFabricSchema>) {
   if (input.action === "status") {
+    const fallbackWorkspaceRoot = input.fallback_workspace_root ?? process.cwd();
+    const fallbackWorkerCount = input.fallback_worker_count ?? 1;
+    const fallbackShell = input.fallback_shell ?? "/bin/zsh";
     const state = resolveEffectiveWorkerFabric(storage, {
-      fallback_workspace_root: input.fallback_workspace_root ?? process.cwd(),
-      fallback_worker_count: input.fallback_worker_count ?? 1,
-      fallback_shell: input.fallback_shell ?? "/bin/zsh",
+      fallback_workspace_root: fallbackWorkspaceRoot,
+      fallback_worker_count: fallbackWorkerCount,
+      fallback_shell: fallbackShell,
     });
     return {
       state,
       slots: buildWorkerFabricSlots(storage, {
-        fallback_workspace_root: input.fallback_workspace_root ?? process.cwd(),
-        fallback_worker_count: input.fallback_worker_count ?? 1,
-        fallback_shell: input.fallback_shell ?? "/bin/zsh",
+        fallback_workspace_root: fallbackWorkspaceRoot,
+        fallback_worker_count: fallbackWorkerCount,
+        fallback_shell: fallbackShell,
+      }),
+      resource_gate: resolveLocalBridgeResourceGate({
+        storage,
+        fallback_workspace_root: fallbackWorkspaceRoot,
+        fallback_worker_count: fallbackWorkerCount,
+        fallback_shell: fallbackShell,
       }),
       hosts_summary: state.hosts.map((host) => ({
         ...resolveHostCapacityProfile(host),
