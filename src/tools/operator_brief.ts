@@ -539,6 +539,7 @@ export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBr
   const runningTasks = storage.listTasks({ status: "running", limit: 25 });
   const pendingTasks = storage.listTasks({ status: "pending", limit: 25 });
   const routerSuppressionDecisions = buildRecentRouterSuppressionDecisions(storage);
+  const latestRouterSuppression = routerSuppressionDecisions[0] ?? null;
   const controlPlaneSummary = summarizeControlPlane(storage, kernel, {
     goal,
     plan,
@@ -646,6 +647,7 @@ export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBr
     kernel: input.compact ? null : kernel,
     kernel_summary: summarizeKernel(kernel),
     control_plane_summary: controlPlaneSummary,
+    latest_router_suppression: latestRouterSuppression,
     router_suppression_decisions: routerSuppressionDecisions,
     brief_markdown: briefMarkdown,
     source: "operator.brief",
