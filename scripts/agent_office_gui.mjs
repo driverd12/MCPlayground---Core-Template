@@ -139,6 +139,21 @@ async function readyOk() {
 }
 
 async function officePageOk() {
+  const bootstrapUrl = new URL("office/api/bootstrap", PROBE_BASE_URL);
+  if (await fetchOk(bootstrapUrl, { timeoutMs: 5000 })) {
+    return true;
+  }
+  const headers = originHeaders();
+  const bootstrapOk =
+    Object.keys(headers).length > 0
+      ? await fetchOk(bootstrapUrl, {
+          headers,
+          timeoutMs: 5000,
+        })
+      : false;
+  if (bootstrapOk) {
+    return true;
+  }
   return await fetchOk(new URL("office/", PROBE_BASE_URL), {
     timeoutMs: 5000,
   });
@@ -268,18 +283,42 @@ async function ensureHttp() {
   return await waitForLaunchable(30000);
 }
 
-async function launchableOk() {
-  const [rawHealth, listener, ready, officeReady] = await Promise.all([
-    healthOk(),
-    listenerOk(),
-    readyOk(),
-    officePageOk(),
-  ]);
-  const health = rawHealth || ready;
-  if (!String(process.env.MCP_HTTP_BEARER_TOKEN || "").trim()) {
-    return health || officeReady;
+async function collectOfficeStatus() {
+  const tokenConfigured = Boolean(String(process.env.MCP_HTTP_BEARER_TOKEN || "").trim());
+  const [listener, officeReady] = await Promise.all([listenerOk(), officePageOk()]);
+  if (officeReady) {
+    return {
+      health: true,
+      listener,
+      ready: false,
+      officeReady,
+      launchable: true,
+    };
   }
-  return ready || officeReady || (health && listener);
+  const health = await healthOk();
+  if (!tokenConfigured ? health : health && listener) {
+    return {
+      health,
+      listener,
+      ready: false,
+      officeReady,
+      launchable: true,
+    };
+  }
+  const ready = await readyOk();
+  const effectiveHealth = health || ready;
+  return {
+    health: effectiveHealth,
+    listener,
+    ready,
+    officeReady,
+    launchable: ready || officeReady || (!tokenConfigured ? effectiveHealth : effectiveHealth && listener),
+  };
+}
+
+async function launchableOk() {
+  const status = await collectOfficeStatus();
+  return status.launchable;
 }
 
 async function detectMode({ health, listener, ready, officeReady }) {
@@ -315,15 +354,8 @@ async function detectMode({ health, listener, ready, officeReady }) {
 }
 
 async function printStatus() {
-  const [rawHealth, listener, ready, officeReady] = await Promise.all([
-    healthOk(),
-    listenerOk(),
-    readyOk(),
-    officePageOk(),
-  ]);
-  const health = rawHealth || ready;
+  const { health, listener, ready, officeReady, launchable } = await collectOfficeStatus();
   const mode = await detectMode({ health, listener, ready, officeReady });
-  const launchable = ready || officeReady || (health && listener);
   process.stdout.write(
     `${JSON.stringify(
       {

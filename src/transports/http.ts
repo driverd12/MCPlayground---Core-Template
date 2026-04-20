@@ -472,10 +472,10 @@ function invalidateOfficeSnapshotCaches() {
   lastReadySnapshotCache = null;
   readySnapshotInflight = null;
   resetOfficeSnapshotRuntimeState();
-  scheduleOfficeSnapshotCachePurge();
+  scheduleOfficeSnapshotCacheDemotion();
 }
 
-function scheduleOfficeSnapshotCachePurge() {
+function scheduleOfficeSnapshotCacheDemotion() {
   if (officeSnapshotCachePurgeInflight) {
     return;
   }
@@ -483,15 +483,27 @@ function scheduleOfficeSnapshotCachePurge() {
     .then(() => new Promise((resolve) => setTimeout(resolve, 0)))
     .then(async () => {
       const cacheDir = officeSnapshotCacheDir();
+      const staleFetchedAt = Date.now() / 1000 - officeSnapshotCacheMaxAgeSeconds() - 1;
       try {
         const entries = await fs.promises.readdir(cacheDir, { withFileTypes: true });
-        await Promise.all(
-          entries
-            .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-            .map((entry) => fs.promises.rm(path.join(cacheDir, entry.name), { force: true }))
-        );
+        await Promise.all(entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map(async (entry) => {
+          const cachePath = path.join(cacheDir, entry.name);
+          try {
+            const parsed = JSON.parse(await fs.promises.readFile(cachePath, "utf8"));
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+              return;
+            }
+            const next = {
+              ...parsed,
+              fetched_at: staleFetchedAt,
+            };
+            await fs.promises.writeFile(cachePath, JSON.stringify(next), "utf8");
+          } catch {
+            // Cache demotion is best-effort only.
+          }
+        }));
       } catch {
-        // Snapshot cache invalidation is best-effort only.
+        // Snapshot cache demotion is best-effort only.
       }
     })
     .finally(() => {
@@ -546,10 +558,10 @@ function startOfficeNodeSnapshotRefresh(
 
 function officeSnapshotRefreshMode() {
   const override = String(process.env.MCP_HTTP_OFFICE_SNAPSHOT_REFRESH_MODE || "").trim().toLowerCase();
-  if (override === "stdio" || override === "external" || override === "child") {
-    return "stdio" as const;
+  if (override === "inline") {
+    return "inline" as const;
   }
-  return "inline" as const;
+  return "stdio" as const;
 }
 
 function officeSnapshotChildEnv() {
@@ -1146,6 +1158,25 @@ async function maybeHandleOfficeRequest(
   }
 
   const origin = `${requestUrl.protocol}//${requestUrl.host}`;
+  if (pathname === "/office/api/action-status" && method === "GET") {
+    const requestedAction = String(requestUrl.searchParams.get("action") || "").trim();
+    const state = requestedAction ? officeActionStatus.get(requestedAction) ?? null : null;
+    const actions = requestedAction
+      ? state
+        ? [state]
+        : []
+      : Array.from(officeActionStatus.values()).sort((left, right) =>
+          String(right.startedAt || "").localeCompare(String(left.startedAt || ""))
+        );
+    sendJson(res, 200, {
+      ok: true,
+      action: requestedAction || null,
+      state,
+      actions,
+    });
+    return true;
+  }
+
   if (pathname === "/office/api/bootstrap" && method === "GET") {
     sendJson(res, 200, {
       ok: true,
@@ -1153,7 +1184,8 @@ async function maybeHandleOfficeRequest(
       default_thread_id: "ring-leader-main",
       default_theme: process.env.TRICHAT_OFFICE_THEME || "night",
       refresh_interval_seconds: Number(process.env.TRICHAT_OFFICE_REFRESH_SECONDS || "2"),
-      tmux_session_name: process.env.TRICHAT_OFFICE_TMUX_SESSION_NAME || "agent-office",
+      dispatch_runtime: process.env.TRICHAT_OFFICE_TMUX_SESSION_NAME ? "tmux" : "launchd",
+      tmux_session_name: process.env.TRICHAT_OFFICE_TMUX_SESSION_NAME || null,
     });
     return true;
   }

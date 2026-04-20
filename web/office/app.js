@@ -752,7 +752,8 @@
       }),
     }).then(function (result) {
       setResultText(JSON.stringify(result, null, 2));
-      return fetchSnapshot({ forceLive: true, explicitForceLive: true });
+      waitForActionToSettle("intake", 1500);
+      return result;
     });
   }
 
@@ -1598,6 +1599,60 @@
     });
   }
 
+  function fetchActionStatus(action) {
+    var params = new URLSearchParams();
+    if (action) {
+      params.set("action", action);
+    }
+    return getJson("/office/api/action-status?" + params.toString());
+  }
+
+  function settleActionRefresh() {
+    fetchSnapshot().catch(function (error) {
+      setResultText(String(error));
+    });
+  }
+
+  function waitForActionToSettle(action, delayMs) {
+    var startedAt = Date.now();
+    var intervalMs = 1500;
+    var maxWaitMs = 90000;
+
+    function scheduleNextPoll() {
+      if (Date.now() - startedAt >= maxWaitMs) {
+        return;
+      }
+      window.setTimeout(poll, intervalMs);
+    }
+
+    function poll() {
+      fetchActionStatus(action)
+        .then(function (payload) {
+          var state = payload && payload.state ? payload.state : null;
+          if (!state) {
+            scheduleNextPoll();
+            return;
+          }
+          if (state.running) {
+            setResultText(action + " is still running.");
+            scheduleNextPoll();
+            return;
+          }
+          if (typeof state.code === "number" && state.code !== 0) {
+            setResultText(action + " failed: " + String(state.stderr || state.code));
+            return;
+          }
+          setResultText(action + " complete.");
+          settleActionRefresh();
+        })
+        .catch(function () {
+          scheduleNextPoll();
+        });
+    }
+
+    window.setTimeout(poll, Math.max(0, Number(delayMs) || 0));
+  }
+
   function fetchSnapshot(options) {
     var fetchOptions = options || {};
     var forceLive = !!fetchOptions.forceLive;
@@ -1700,7 +1755,8 @@
         state.patientZeroNoteDirty = false;
       }
       setResultText(JSON.stringify(result, null, 2));
-      return fetchSnapshot({ forceLive: true, explicitForceLive: true });
+      waitForActionToSettle(action, 1000);
+      return result;
     });
   }
 
@@ -1725,7 +1781,8 @@
     }).then(function (result) {
       setResultText(JSON.stringify(result, null, 2));
       renderIntakeDesk();
-      return fetchSnapshot({ forceLive: true, explicitForceLive: true });
+      waitForActionToSettle("intake", 1500);
+      return result;
     });
   }
 
