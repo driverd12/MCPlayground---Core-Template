@@ -392,7 +392,7 @@ export function applyProviderBridgeDiagnosticsToSnapshot(
         ...entry.backend,
         metadata: {
           ...entry.backend.metadata,
-          runtime_ready: entry.eligible && runtimeReady,
+          runtime_ready: runtimeReady,
           runtime_ready_source:
             diagnosticsState.diagnostics.length > 0
               ? diagnosticsState.cached
