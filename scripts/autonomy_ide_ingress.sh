@@ -12,6 +12,7 @@ Options:
   --session <id>         Continuity/transcript session id.
   --thread <id>          TriChat thread id to mirror into.
   --thread-title <text>  TriChat thread title to mirror into.
+  --agent <id>           Explicit TriChat/bridge agent target. Repeatable.
   --risk <tier>          low | medium | high | critical.
   --mode <mode>          observe | recommend | stage | execute_bounded | execute_destructive_with_approval.
                          Omit to use the control-plane default (Patient Zero elevates this automatically).
@@ -43,6 +44,7 @@ APPEND_TRANSCRIPT=1
 MIRROR_TO_THREAD=1
 OBJECTIVE_PARTS=()
 declare -a TAGS=()
+declare -a TARGET_AGENTS=()
 declare -a ACCEPTANCE=()
 declare -a CONSTRAINTS=()
 declare -a ASSUMPTIONS=()
@@ -63,6 +65,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --thread-title)
       THREAD_TITLE="${2:-}"
+      shift 2
+      ;;
+    --agent)
+      TARGET_AGENTS+=("${2:-}")
       shift 2
       ;;
     --risk)
@@ -189,6 +195,7 @@ IDEMPOTENCY_KEY="autonomy-ide-ingress-${NOW_TS}-${RAND_SUFFIX}"
 FINGERPRINT="autonomy-ide-ingress-fingerprint-${NOW_TS}-${RAND_SUFFIX}"
 
 TAGS_JSON="$(array_to_json "${TAGS[@]-}")"
+TARGET_AGENTS_JSON="$(array_to_json "${TARGET_AGENTS[@]-}")"
 ACCEPTANCE_JSON="$(array_to_json "${ACCEPTANCE[@]-}")"
 CONSTRAINTS_JSON="$(array_to_json "${CONSTRAINTS[@]-}")"
 ASSUMPTIONS_JSON="$(array_to_json "${ASSUMPTIONS[@]-}")"
@@ -210,6 +217,7 @@ ARGS_JSON="$(node --input-type=module - <<'NODE' \
 "${APPEND_TRANSCRIPT}" \
 "${MIRROR_TO_THREAD}" \
 "${TAGS_JSON}" \
+"${TARGET_AGENTS_JSON}" \
 "${ACCEPTANCE_JSON}" \
 "${CONSTRAINTS_JSON}" \
 "${ASSUMPTIONS_JSON}"
@@ -237,10 +245,12 @@ const [
   appendTranscript,
   mirrorToThread,
   tagsArg,
+  targetAgentsArg,
   acceptanceArg,
   constraintsArg,
   assumptionsArg,
 ] = process.argv.slice(2);
+const targetAgentIds = JSON.parse(targetAgentsArg || "[]");
 
 process.stdout.write(
   JSON.stringify({
@@ -262,6 +272,7 @@ process.stdout.write(
     append_transcript: parseBoolean(appendTranscript, true),
     mirror_to_thread: parseBoolean(mirrorToThread, true),
     tags: JSON.parse(tagsArg || "[]"),
+    trichat_agent_ids: Array.isArray(targetAgentIds) && targetAgentIds.length > 0 ? targetAgentIds : undefined,
     acceptance_criteria: JSON.parse(acceptanceArg || "[]"),
     constraints: JSON.parse(constraintsArg || "[]"),
     assumptions: JSON.parse(assumptionsArg || "[]"),

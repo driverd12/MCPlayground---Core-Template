@@ -309,6 +309,30 @@ button:hover,
   gap: 8px;
 }
 
+.intake-console__agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.intake-console__agent {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  text-align: left;
+}
+
+.intake-console__agent span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.intake-console__agent--selected {
+  border-color: rgba(215, 142, 88, 0.55);
+  background: rgba(215, 142, 88, 0.1);
+  color: var(--ink);
+}
+
 .intake-console__meta {
   display: flex;
   gap: 8px;

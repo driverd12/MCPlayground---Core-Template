@@ -35,9 +35,8 @@ is_valid_repo_root() {
   local candidate="\${1:-}"
   [[ -n "\${candidate}" ]] || return 1
   [[ -d "\${candidate}" ]] || return 1
-  [[ -f "\${candidate}/package.json" ]] || return 1
+  [[ -f "\${candidate}/scripts/mcp_http_runner.mjs" ]] || return 1
   [[ -f "\${candidate}/scripts/launchd_install.sh" ]] || return 1
-  grep -Fq '"name": "master-mold"' "\${candidate}/package.json" 2>/dev/null
 }
 
 persist_repo_root() {
@@ -165,7 +164,10 @@ case "\${MODE}" in
     for arg in "\$@"; do
       EXPANDED_ARGS+=("\$(resolve_existing_path "\$(expand_arg "\${arg}")")")
     done
-    exec "\${NODE_BIN}" "\${REPO_ROOT}/\${SCRIPT_REL}" "\${EXPANDED_ARGS[@]}"
+    if (( \${#EXPANDED_ARGS[@]} )); then
+      exec "\${NODE_BIN}" "\${REPO_ROOT}/\${SCRIPT_REL}" "\${EXPANDED_ARGS[@]}"
+    fi
+    exec "\${NODE_BIN}" "\${REPO_ROOT}/\${SCRIPT_REL}"
     ;;
   shell-script)
     SCRIPT_REL="\${1:-}"
@@ -175,7 +177,10 @@ case "\${MODE}" in
     for arg in "\$@"; do
       EXPANDED_ARGS+=("\$(resolve_existing_path "\$(expand_arg "\${arg}")")")
     done
-    exec "\${REPO_ROOT}/\${SCRIPT_REL}" "\${EXPANDED_ARGS[@]}"
+    if (( \${#EXPANDED_ARGS[@]} )); then
+      exec "\${REPO_ROOT}/\${SCRIPT_REL}" "\${EXPANDED_ARGS[@]}"
+    fi
+    exec "\${REPO_ROOT}/\${SCRIPT_REL}"
     ;;
   python-module)
     PYTHON_PATH="\${1:-}"
@@ -188,7 +193,10 @@ case "\${MODE}" in
     for arg in "\$@"; do
       EXPANDED_ARGS+=("\$(resolve_existing_path "\$(expand_arg "\${arg}")")")
     done
-    exec "\${RESOLVED_PYTHON}" -m "\${MODULE_NAME}" "\${EXPANDED_ARGS[@]}"
+    if (( \${#EXPANDED_ARGS[@]} )); then
+      exec "\${RESOLVED_PYTHON}" -m "\${MODULE_NAME}" "\${EXPANDED_ARGS[@]}"
+    fi
+    exec "\${RESOLVED_PYTHON}" -m "\${MODULE_NAME}"
     ;;
   *)
     echo "usage: run_from_repo.sh <node-script|shell-script|python-module> ..." >&2

@@ -5,22 +5,28 @@ import path from "node:path";
 import process from "node:process";
 import { openSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { repoRootFromMeta, loadRunnerEnv } from "./mcp_runner_support.mjs";
 
 const ACTION = String(process.argv[2] || "open").trim() || "open";
 const REPO_ROOT = repoRootFromMeta(import.meta.url);
 loadRunnerEnv(REPO_ROOT);
 
+export function resolveOfficeGuiProbeBase(configuredUrl) {
+  return new URL("/", new URL(configuredUrl)).toString();
+}
+
 const configuredUrl = String(process.env.TRICHAT_MCP_URL || process.env.ANAMNESIS_INBOX_MCP_URL || "").trim();
 const TRICHAT_HTTP_URL = configuredUrl || `http://127.0.0.1:${process.env.MCP_HTTP_PORT || process.env.ANAMNESIS_MCP_HTTP_PORT || "8787"}/`;
 const HTTP_ENDPOINT = new URL(TRICHAT_HTTP_URL);
+const PROBE_BASE_URL = resolveOfficeGuiProbeBase(TRICHAT_HTTP_URL);
 const MCP_PORT = Number.parseInt(
   String(HTTP_ENDPOINT.port || process.env.MCP_HTTP_PORT || process.env.ANAMNESIS_MCP_HTTP_PORT || "8787"),
   10
 );
 const MCP_HOST = HTTP_ENDPOINT.hostname || "127.0.0.1";
 const TRICHAT_HTTP_ORIGIN = String(process.env.TRICHAT_MCP_ORIGIN || "http://127.0.0.1");
-const GUI_URL = new URL("office/", TRICHAT_HTTP_URL).toString();
+const GUI_URL = new URL("office/", PROBE_BASE_URL).toString();
 const LOG_DIR = path.join(REPO_ROOT, "data", "imprint", "logs");
 const PID_DIR = path.join(REPO_ROOT, "data", "imprint", "run");
 const PID_FILE = path.join(PID_DIR, "agent-office-http-runner.pid");
@@ -93,35 +99,47 @@ async function fetchOk(url, { headers = {}, timeoutMs = 5000 } = {}) {
   }
 }
 
+function originHeaders() {
+  const origin = String(TRICHAT_HTTP_ORIGIN || "").trim();
+  return origin ? { Origin: origin } : {};
+}
+
 async function healthOk() {
-  return await fetchOk(new URL("health", TRICHAT_HTTP_URL), {
-    headers: { Origin: TRICHAT_HTTP_ORIGIN },
+  const url = new URL("health", PROBE_BASE_URL);
+  if (await fetchOk(url, { timeoutMs: 5000 })) {
+    return true;
+  }
+  const headers = originHeaders();
+  if (Object.keys(headers).length === 0) {
+    return false;
+  }
+  return await fetchOk(url, {
+    headers,
     timeoutMs: 5000,
   });
 }
 
 async function readyOk() {
   const token = String(process.env.MCP_HTTP_BEARER_TOKEN || "").trim();
-  if (!token) {
-    return await fetchOk(new URL("ready", TRICHAT_HTTP_URL), {
-      headers: { Origin: TRICHAT_HTTP_ORIGIN },
-      timeoutMs: 12000,
-    });
+  const url = new URL("ready", PROBE_BASE_URL);
+  const primaryHeaders = token ? { Authorization: `Bearer ${token}` } : {};
+  if (await fetchOk(url, { headers: primaryHeaders, timeoutMs: 12000 })) {
+    return true;
   }
-  return await fetchOk(new URL("ready", TRICHAT_HTTP_URL), {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Origin: TRICHAT_HTTP_ORIGIN,
-    },
+  const fallbackHeaders = token
+    ? { Authorization: `Bearer ${token}`, ...originHeaders() }
+    : originHeaders();
+  if (Object.keys(fallbackHeaders).length === Object.keys(primaryHeaders).length) {
+    return false;
+  }
+  return await fetchOk(url, {
+    headers: fallbackHeaders,
     timeoutMs: 12000,
   });
 }
 
 async function officePageOk() {
-  return await fetchOk(new URL("office/", TRICHAT_HTTP_URL), {
-    headers: {
-      Origin: TRICHAT_HTTP_ORIGIN,
-    },
+  return await fetchOk(new URL("office/", PROBE_BASE_URL), {
     timeoutMs: 5000,
   });
 }
@@ -167,7 +185,7 @@ function kickstartMcpViaDarwinLaunchd() {
   };
   spawnSync("launchctl", ["bootstrap", LAUNCHD_DOMAIN, MCP_LAUNCH_AGENT_PLIST], launchctlOptions);
   spawnSync("launchctl", ["enable", `${LAUNCHD_DOMAIN}/${MCP_LABEL}`], launchctlOptions);
-  const kickstart = spawnSync("launchctl", ["kickstart", "-k", `${LAUNCHD_DOMAIN}/${MCP_LABEL}`], launchctlOptions);
+  const kickstart = spawnSync("launchctl", ["kickstart", `${LAUNCHD_DOMAIN}/${MCP_LABEL}`], launchctlOptions);
   return kickstart.status === 0 || launchdLoaded();
 }
 
@@ -386,7 +404,9 @@ async function main() {
   await openBrowser();
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  });
+}

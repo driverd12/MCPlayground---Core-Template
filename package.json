@@ -82,6 +82,7 @@
     "providers:diagnose": "node ./scripts/run_sh.mjs ./scripts/provider_bridge.sh diagnose",
     "providers:export": "node ./scripts/run_sh.mjs ./scripts/provider_bridge.sh export",
     "providers:install": "node ./scripts/run_sh.mjs ./scripts/provider_bridge.sh install",
+    "claude:terminal": "node ./scripts/run_sh.mjs ./scripts/claude_code_terminal_open.sh",
     "dell:r450:doctor": "node ./scripts/run_sh.mjs ./scripts/dell_serial_doctor.sh",
     "dell:r450:serial": "node ./scripts/run_sh.mjs ./scripts/dell_r450_serial_console.sh",
     "dell:r450:ssh": "node ./scripts/run_sh.mjs ./scripts/dell_r450_ssh_ready.sh",

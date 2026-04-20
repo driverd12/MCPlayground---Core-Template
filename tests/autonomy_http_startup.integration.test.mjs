@@ -75,6 +75,18 @@ test("http daemon self-converges the autonomy bootstrap on startup", async () =>
     });
     assert.equal(maintain.runtime.running, true);
     assert.equal(maintain.runtime.last_error ?? null, null);
+    assert.equal(maintain.state.last_run_at, null);
+    assert.equal(maintain.awaiting_first_tick, true);
+
+    const readyResponse = await fetchHttpResponse(`http://127.0.0.1:${httpPort}/ready`, {
+      Authorization: `Bearer ${bearerToken}`,
+      Origin: "http://127.0.0.1",
+    });
+    assert.equal(readyResponse.statusCode, 503);
+    const readyPayload = JSON.parse(readyResponse.body);
+    assert.equal(readyPayload.ready, false);
+    assert.equal(readyPayload.autonomy_maintain.awaiting_first_tick, true);
+    assert.ok(readyPayload.attention.includes("autonomy_maintain.awaiting_first_tick"));
   } finally {
     await stopChildProcess(child);
     await ollama.close();
@@ -89,6 +101,16 @@ test("http daemon starts autonomy maintain even when bootstrap-on-start is disab
   const dbPath = path.join(tempDir, "hub.sqlite");
   const busPath = path.join(tempDir, "trichat.bus.sock");
   const bearerToken = "test-autonomy-http-maintain-token";
+  const seededLastRunAt = "2026-01-01T00:00:00.000Z";
+  const storage = new Storage(dbPath);
+  storage.init();
+  storage.setAutonomyMaintainState({
+    enabled: false,
+    interval_seconds: 120,
+    learning_review_interval_seconds: 300,
+    eval_interval_seconds: 21600,
+    last_run_at: seededLastRunAt,
+  });
   const ollama = await startFakeOllamaServer({
     models: [{ name: "llama3.2:3b" }],
   });
@@ -121,7 +143,7 @@ test("http daemon starts autonomy maintain even when bootstrap-on-start is disab
     });
     assert.equal(maintain.runtime.running, true);
     assert.equal(maintain.state.enabled, true);
-    assert.equal(typeof maintain.state.last_run_at, "string");
+    assert.equal(maintain.state.last_run_at, seededLastRunAt);
   } finally {
     await stopChildProcess(child);
     await ollama.close();
@@ -312,6 +334,68 @@ test("office action maintain returns immediately with 202 instead of blocking on
     assert.equal(forbiddenPayload.ok, false);
     assert.equal(forbiddenPayload.error, "forbidden_origin");
     assert.match(String(forbiddenPayload.detail || ""), /origin/i);
+
+    const health = JSON.parse(await fetchHttpText(`http://127.0.0.1:${httpPort}/health`));
+    assert.equal(health.ok, true);
+    assert.equal(health.status, "ok");
+  } finally {
+    await stopChildProcess(child);
+    await ollama.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("office intake dry run returns immediately with 202 instead of blocking on autonomy ingress", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-http-office-intake-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const busPath = path.join(tempDir, "trichat.bus.sock");
+  const bearerToken = "test-autonomy-http-office-intake-token";
+  const ollama = await startFakeOllamaServer({
+    models: [{ name: "llama3.2:3b" }],
+  });
+  const httpPort = await reservePort();
+  const child = spawn("node", ["dist/server.js", "--http", "--http-port", String(httpPort)], {
+    cwd: REPO_ROOT,
+    env: inheritedEnv({
+      MCP_HTTP: "1",
+      MCP_HTTP_PORT: String(httpPort),
+      MCP_HTTP_HOST: "127.0.0.1",
+      MCP_HTTP_BEARER_TOKEN: bearerToken,
+      ANAMNESIS_HUB_DB_PATH: dbPath,
+      TRICHAT_BUS_SOCKET_PATH: busPath,
+      TRICHAT_OLLAMA_URL: ollama.url,
+      TRICHAT_RING_LEADER_AUTOSTART: "0",
+      MCP_AUTONOMY_BOOTSTRAP_ON_START: "0",
+      MCP_AUTONOMY_MAINTAIN_ON_START: "0",
+    }),
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  try {
+    const startupHealth = JSON.parse(await waitForHttpText(`http://127.0.0.1:${httpPort}/health`));
+    assert.equal(startupHealth.ok, true);
+
+    const startedAt = Date.now();
+    const response = await postHttpJson(`http://127.0.0.1:${httpPort}/office/api/intake`, {
+      title: "Office intake dry run",
+      objective: "Validate office intake can acknowledge dry-run dispatch without blocking.",
+      risk: "medium",
+      dry_run: true,
+    }, {
+      Authorization: `Bearer ${bearerToken}`,
+      Origin: `http://127.0.0.1:${httpPort}`,
+      "Content-Type": "application/json",
+    });
+    const durationMs = Date.now() - startedAt;
+
+    assert.equal(response.statusCode, 202);
+    const payload = JSON.parse(response.body);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.action, "intake");
+    assert.equal(payload.dry_run, true);
+    assert.equal(typeof payload.started_at, "string");
+    assert.match(String(payload.objective_preview || ""), /Validate office intake/);
+    assert.ok(durationMs < 10_000, `expected intake dry run to return without long blocking, got ${durationMs}ms`);
 
     const health = JSON.parse(await fetchHttpText(`http://127.0.0.1:${httpPort}/health`));
     assert.equal(health.ok, true);
@@ -580,7 +664,7 @@ test("/ready stays green when the last accepted eval passes but the next eval is
         run_immediately: false,
       },
     });
-    await callHttpToolJson({
+    const maintainStart = await callHttpToolJson({
       url: `http://127.0.0.1:${httpPort}/`,
       origin: "http://127.0.0.1",
       bearerToken,
@@ -597,6 +681,16 @@ test("/ready stays green when the last accepted eval passes but the next eval is
         run_immediately: false,
       },
     });
+    assert.equal(maintainStart.status.awaiting_first_tick, true);
+    assert.equal(maintainStart.status.attention.includes("autonomy_maintain.awaiting_first_tick"), true);
+    const readinessWhileAwaiting = await fetchHttpResponse(`http://127.0.0.1:${httpPort}/ready`, {
+      Authorization: `Bearer ${bearerToken}`,
+      Origin: "http://127.0.0.1",
+    });
+    const awaitingReady = JSON.parse(readinessWhileAwaiting.body);
+    assert.equal(awaitingReady.ready, false);
+    assert.equal(awaitingReady.autonomy_maintain.awaiting_first_tick, true);
+    assert.equal(awaitingReady.attention.includes("autonomy_maintain.awaiting_first_tick"), true);
     const storage = new Storage(dbPath);
     const suiteId = "autonomy.control-plane";
     const dependencyFingerprint = computeEvalDependencyFingerprint(storage, suiteId);
@@ -640,6 +734,7 @@ test("/ready stays green when the last accepted eval passes but the next eval is
     assert.equal(ready.autonomy_maintain.eval_due, true);
     assert.equal(ready.autonomy_maintain.eval_health.operational, true);
     assert.equal(ready.autonomy_maintain.eval_health.healthy, true);
+    assert.equal(ready.autonomy_maintain.awaiting_first_tick, false);
     assert.equal(ready.attention.includes("autonomy_eval.unhealthy"), false);
   } finally {
     await stopChildProcess(child);

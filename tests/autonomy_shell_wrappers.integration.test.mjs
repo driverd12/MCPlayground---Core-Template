@@ -612,27 +612,34 @@ printf '{"ok":true,"ready":true}\\n'
   });
 
   const keepalivePlist = fs.readFileSync(
-    path.join(launchDir, "com.mcplayground.autonomy.keepalive.plist"),
+    path.join(launchDir, "com.master-mold.autonomy.keepalive.plist"),
     "utf8"
   );
   const autosnapshotPlist = fs.readFileSync(
-    path.join(launchDir, "com.mcplayground.imprint.autosnapshot.plist"),
+    path.join(launchDir, "com.master-mold.imprint.autosnapshot.plist"),
     "utf8"
   );
   const watchdogPlist = fs.readFileSync(
-    path.join(launchDir, "com.mcplayground.local-adapter.watchdog.plist"),
+    path.join(launchDir, "com.master-mold.local-adapter.watchdog.plist"),
     "utf8"
   );
   const mcpPlist = fs.readFileSync(
-    path.join(launchDir, "com.mcplayground.mcp.server.plist"),
+    path.join(launchDir, "com.master-mold.mcp.server.plist"),
     "utf8"
   );
+  const supportRunnerPath = path.join(
+    fakeHome,
+    "Library",
+    "Application Support",
+    "master-mold",
+    "bin",
+    "run_from_repo.sh"
+  );
 
-  assert.match(keepalivePlist, /<string>.*node.*<\/string>/);
   assert.match(
     keepalivePlist,
     new RegExp(
-      `<string>${escapeRegExp(path.join(REPO_ROOT, "scripts", "autonomy_keepalive_runner.mjs"))}<\\/string>`
+      `<string>${escapeRegExp(supportRunnerPath)}<\\/string>\\s*<string>node-script<\\/string>\\s*<string>scripts/autonomy_keepalive_runner\\.mjs<\\/string>`
     )
   );
   assert.doesNotMatch(keepalivePlist, /autonomy_keepalive\.sh/);
@@ -643,34 +650,32 @@ printf '{"ok":true,"ready":true}\\n'
     /<key>KeepAlive<\/key>\s*<dict>\s*<key>SuccessfulExit<\/key>\s*<false\/>\s*<\/dict>/
   );
   assert.match(keepalivePlist, /<key>ThrottleInterval<\/key>\s*<integer>10<\/integer>/);
-  assert.match(watchdogPlist, /<string>.*node.*<\/string>/);
   assert.match(
     watchdogPlist,
     new RegExp(
-      `<string>${escapeRegExp(path.join(REPO_ROOT, "scripts", "local_adapter_watchdog.mjs"))}<\\/string>`
+      `<string>${escapeRegExp(supportRunnerPath)}<\\/string>\\s*<string>node-script<\\/string>\\s*<string>scripts/local_adapter_watchdog\\.mjs<\\/string>`
     )
   );
   assert.match(watchdogPlist, /<string>--transport<\/string>\s*<string>http<\/string>/);
   assert.match(watchdogPlist, /<string>--max-soak-age-minutes<\/string>\s*<string>240<\/string>/);
   assert.match(watchdogPlist, /<string>--cycles<\/string>\s*<string>1<\/string>/);
 
-  assert.match(autosnapshotPlist, /<string>.*node.*<\/string>/);
   assert.match(
     autosnapshotPlist,
     new RegExp(
-      `<string>${escapeRegExp(path.join(REPO_ROOT, "scripts", "imprint_auto_snapshot_runner.mjs"))}<\\/string>`
+      `<string>${escapeRegExp(supportRunnerPath)}<\\/string>\\s*<string>node-script<\\/string>\\s*<string>scripts/imprint_auto_snapshot_runner\\.mjs<\\/string>`
     )
   );
   assert.doesNotMatch(autosnapshotPlist, /imprint_auto_snapshot_ctl\.sh/);
-  assert.match(mcpPlist, /<key>MCP_AUTONOMY_BOOTSTRAP_ON_START<\/key>\s*<string>1<\/string>/);
-  assert.match(mcpPlist, /<key>MCP_AUTONOMY_MAINTAIN_ON_START<\/key>\s*<string>1<\/string>/);
+  assert.match(mcpPlist, /<key>MCP_AUTONOMY_BOOTSTRAP_ON_START<\/key>\s*<string>0<\/string>/);
+  assert.match(mcpPlist, /<key>MCP_AUTONOMY_MAINTAIN_ON_START<\/key>\s*<string>0<\/string>/);
   assert.match(mcpPlist, /<key>MCP_AUTONOMY_MAINTAIN_RUN_IMMEDIATELY_ON_START<\/key>\s*<string>0<\/string>/);
 
   const launchLog = fs.readFileSync(launchctlLog, "utf8");
-  const mcpKickstartIndex = launchLog.indexOf(`launchctl kickstart -k gui/${process.getuid()}/com.mcplayground.mcp.server`);
+  const mcpKickstartIndex = launchLog.indexOf(`launchctl kickstart -k gui/${process.getuid()}/com.master-mold.mcp.server`);
   const curlReadyIndex = launchLog.indexOf("curl attempt=2");
   const workerBootstrapIndex = launchLog.indexOf(
-    `launchctl bootstrap gui/${process.getuid()} ${path.join(launchDir, "com.mcplayground.imprint.inboxworker.plist")}`
+    `launchctl bootstrap gui/${process.getuid()} ${path.join(launchDir, "com.master-mold.imprint.inboxworker.plist")}`
   );
   assert.notEqual(mcpKickstartIndex, -1);
   assert.notEqual(curlReadyIndex, -1);
@@ -754,10 +759,10 @@ exit 0
 
     const launchLog = fs.readFileSync(launchctlLog, "utf8");
     const mcpServiceBootoutIndex = launchLog.indexOf(
-      `launchctl bootout gui/${process.getuid()}/com.mcplayground.mcp.server`
+      `launchctl bootout gui/${process.getuid()}/com.master-mold.mcp.server`
     );
     const mcpBootstrapIndex = launchLog.indexOf(
-      `launchctl bootstrap gui/${process.getuid()} ${path.join(launchDir, "com.mcplayground.mcp.server.plist")}`
+      `launchctl bootstrap gui/${process.getuid()} ${path.join(launchDir, "com.master-mold.mcp.server.plist")}`
     );
     assert.notEqual(mcpServiceBootoutIndex, -1);
     assert.notEqual(mcpBootstrapIndex, -1);

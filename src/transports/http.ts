@@ -1598,6 +1598,13 @@ async function maybeHandleOfficeRequest(
       sendJson(res, 400, { ok: false, error: "missing_objective" });
       return true;
     }
+    const requestedTriChatAgentIds = [
+      ...(Array.isArray(body.trichat_agent_ids) ? body.trichat_agent_ids : []),
+      ...(Array.isArray(body.agent_ids) ? body.agent_ids : []),
+    ]
+      .map((entry) => String(entry ?? "").trim())
+      .filter(Boolean)
+      .filter((entry, index, values) => values.indexOf(entry) === index);
     const args = [autonomyIngressScript];
     const pushOptional = (flag: string, value: unknown) => {
       const text = String(value ?? "").trim();
@@ -1610,6 +1617,7 @@ async function maybeHandleOfficeRequest(
     pushOptional("--thread-title", body.thread_title);
     pushOptional("--risk", body.risk);
     pushOptional("--mode", body.mode);
+    for (const agentId of requestedTriChatAgentIds) pushOptional("--agent", agentId);
     if (Array.isArray(body.tags)) {
       for (const tag of body.tags) pushOptional("--tag", tag);
     }
@@ -1624,23 +1632,26 @@ async function maybeHandleOfficeRequest(
     }
     if (body.dry_run === true) {
       args.push("--dry-run");
+      args.push("--no-ensure");
+      args.push("--no-daemon");
     }
     args.push("--", objective);
-    const result = await runLocalCommand(autonomyIngressScript, args.slice(1), {
+    const started = runOfficeActionInBackground("intake", autonomyIngressScript, args.slice(1), {
       cwd: repoRoot,
       env: officeEnv(origin),
       timeoutMs: 120000,
     });
-    let parsed: unknown = null;
-    try {
-      parsed = JSON.parse(result.stdout);
-    } catch {
-      parsed = { raw: result.stdout.trim() };
-    }
-    sendJson(res, result.code === 0 ? 200 : 500, {
-      ok: result.code === 0,
-      result: parsed,
-      stderr: result.stderr.trim(),
+    invalidateOfficeSnapshotCaches();
+    sendJson(res, 202, {
+      ok: true,
+      action: "intake",
+      accepted: started.accepted,
+      already_running: started.alreadyRunning,
+      status: started.alreadyRunning ? "already_running" : "started",
+      started_at: started.state.startedAt,
+      dry_run: body.dry_run === true,
+      requested_trichat_agent_ids: requestedTriChatAgentIds,
+      objective_preview: objective.slice(0, 120),
     });
     return true;
   }

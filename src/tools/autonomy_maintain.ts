@@ -152,6 +152,11 @@ type AutonomyMaintainRuntime = {
   config: AutonomyMaintainRuntimeConfig;
 };
 
+type AutonomyMaintainRuntimeStatusLike = {
+  running?: boolean | null;
+  last_tick_at?: string | null;
+};
+
 const DEFAULT_AUTONOMY_MAINTAIN_CONFIG: AutonomyMaintainRuntimeConfig = {
   local_host_id: "local",
   ensure_bootstrap: true,
@@ -1011,6 +1016,18 @@ export function getAutonomyMaintainRuntimeStatus() {
   return buildRuntimeStatus();
 }
 
+export function isAutonomyMaintainAwaitingFirstTick(
+  state: Pick<AutonomyMaintainStateRecord, "enabled" | "last_run_at"> | null | undefined,
+  runtime: AutonomyMaintainRuntimeStatusLike
+) {
+  return (
+    state?.enabled === true &&
+    runtime.running === true &&
+    !readString(state?.last_run_at) &&
+    !readString(runtime.last_tick_at)
+  );
+}
+
 function resolveProviderBridgeHeartbeat(
   state: AutonomyMaintainStateRecord | null,
   options: {
@@ -1237,7 +1254,7 @@ async function buildStatus(
       ? {
           ...rawState,
           enabled: true,
-          last_run_at: rawState.last_run_at ?? readString(runtime.last_tick_at) ?? readString(runtime.started_at),
+          last_run_at: rawState.last_run_at ?? readString(runtime.last_tick_at),
         }
       : rawState;
   const bootstrap = asRecord(
@@ -1365,6 +1382,11 @@ async function buildStatus(
       attention.push(`${subsystemKey}.error`);
     }
   }
+  const awaitingFirstTick = isAutonomyMaintainAwaitingFirstTick(state, runtime);
+  const dedupedAttention = [...new Set(attention)];
+  if (awaitingFirstTick && !dedupedAttention.includes("autonomy_maintain.awaiting_first_tick")) {
+    dedupedAttention.unshift("autonomy_maintain.awaiting_first_tick");
+  }
   return {
     state,
     runtime,
@@ -1425,7 +1447,8 @@ async function buildStatus(
     eval_health: evalHealth,
     due,
     guardrails: buildGuardrails(),
-    attention: [...new Set(attention)],
+    awaiting_first_tick: awaitingFirstTick,
+    attention: dedupedAttention,
   };
 }
 
@@ -1452,7 +1475,7 @@ function buildFastStatus(
       ? {
           ...rawState,
           enabled: true,
-          last_run_at: rawState.last_run_at ?? readString(runtime.last_tick_at) ?? readString(runtime.started_at),
+          last_run_at: rawState.last_run_at ?? readString(runtime.last_tick_at) ?? null,
         }
       : rawState;
   if (runtime.running !== true && state.enabled === true && !readString(runtime.last_error) && !readString(state.last_error)) {
@@ -1478,6 +1501,11 @@ function buildFastStatus(
     learning_review: learningReviewAgeSeconds > state.learning_review_interval_seconds,
     eval: evalHealth.due,
   };
+  const awaitingFirstTick = isAutonomyMaintainAwaitingFirstTick(state, runtime);
+  const attention = [...new Set((state.last_attention ?? []).map((entry) => String(entry ?? "").trim()).filter(Boolean))];
+  if (awaitingFirstTick) {
+    attention.unshift("autonomy_maintain.awaiting_first_tick");
+  }
   return {
     state: {
       enabled: state.enabled !== false,
@@ -1487,7 +1515,8 @@ function buildFastStatus(
     runtime,
     due,
     eval_health: evalHealth,
-    attention: [...new Set((state.last_attention ?? []).map((entry) => String(entry ?? "").trim()).filter(Boolean))],
+    awaiting_first_tick: awaitingFirstTick,
+    attention,
     fast: true,
     source: "autonomy.maintain.fast_status",
   };
@@ -3021,7 +3050,6 @@ export async function autonomyMaintain(
           });
         } else {
           const current = storage.getAutonomyMaintainState() ?? buildDefaultState(input);
-          const startedAt = autonomyMaintainRuntime.started_at ?? new Date().toISOString();
           storage.setAutonomyMaintainState({
             enabled: true,
             local_host_id: autonomyMaintainRuntime.config.local_host_id,
@@ -3033,7 +3061,7 @@ export async function autonomyMaintain(
             eval_interval_seconds: autonomyMaintainRuntime.config.eval_interval_seconds,
             eval_suite_id: autonomyMaintainRuntime.config.eval_suite_id,
             minimum_eval_score: autonomyMaintainRuntime.config.minimum_eval_score,
-            last_run_at: current.last_run_at ?? startedAt,
+            last_run_at: current.last_run_at ?? null,
             last_bootstrap_ready_at: current.last_bootstrap_ready_at,
             last_goal_autorun_daemon_at: current.last_goal_autorun_daemon_at,
             last_tmux_maintained_at: current.last_tmux_maintained_at,

@@ -216,9 +216,9 @@ cat >"${MCP_PLIST}" <<PLIST
       <key>TRICHAT_BUS_SOCKET_PATH</key>
       <string>${BUS_SOCKET_PATH}</string>
       <key>MCP_AUTONOMY_BOOTSTRAP_ON_START</key>
-      <string>1</string>
+      <string>0</string>
       <key>MCP_AUTONOMY_MAINTAIN_ON_START</key>
-      <string>1</string>
+      <string>0</string>
       <key>MCP_AUTONOMY_MAINTAIN_RUN_IMMEDIATELY_ON_START</key>
       <string>0</string>
       <key>PATH</key>

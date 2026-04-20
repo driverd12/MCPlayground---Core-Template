@@ -142,6 +142,28 @@ Truth boundary:
 - Claude CLI installs through the native `claude mcp` flow and now uses the resilient stdio proxy entry on this host, with truthful configured-vs-authenticated/runtime-ready reporting.
 - ChatGPT/OpenAI custom MCP is documented as a remote-only path, not a fake local install.
 
+## Claude CLI + Codex symbiosis
+
+This repo now supports a combined operator path where Claude Code can run visibly in Terminal while Claude and Codex are also targeted programmatically through the MCP ingress layer.
+
+Primary entrypoints:
+
+1. Visible Claude launcher: `npm run claude:terminal`
+2. Direct targeted ingress: `./scripts/autonomy_ide_ingress.sh --agent codex --agent claude -- "..." `
+3. Agent Office GUI: use the `Bridge targets` controls in the intake desk
+
+Reference guide:
+
+- [Claude CLI + Codex Symbiosis](./CLAUDE_CODEX_SYMBIOSIS.md)
+
+Use that guide for:
+
+1. exact shell commands
+2. HTTP payload shape with `trichat_agent_ids`
+3. files implementing the capability
+4. runtime prerequisites and current failure modes
+5. recommended operator workflow for visible Claude plus targeted Codex/Claude dispatch
+
 ## Common Troubleshooting
 
 - `Unknown tool`:

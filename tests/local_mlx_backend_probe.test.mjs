@@ -57,11 +57,16 @@ test("probeLocalMlxBackend measures real service and benchmark data", async () =
       model_id: "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit",
       benchmark: true,
     });
+    assert.equal(result.endpoint_ok, true);
     assert.equal(result.service_ok, true);
-    assert.equal(result.health_ok, true);
+    assert.equal(result.model_list_ok, true);
     assert.equal(result.model_known, true);
+    assert.equal(result.generation_ok, true);
     assert.equal(result.benchmark_ok, true);
     assert.equal(result.benchmark_attempted, true);
+    assert.equal(result.health_ok, true);
+    assert.equal(result.healthy, true);
+    assert.equal(result.failure_stage, null);
     assert.ok(result.benchmark_latency_ms !== null);
     assert.ok(result.benchmark_completion_tokens === 4);
     assert.ok(result.throughput_tps !== null);
@@ -105,11 +110,72 @@ test("probeLocalMlxBackend reports partial failures when health responds but inf
       model_id: "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit",
       benchmark: true,
     });
-    assert.equal(result.health_ok, true);
+    assert.equal(result.endpoint_ok, true);
     assert.equal(result.service_ok, true);
+    assert.equal(result.model_list_ok, false);
     assert.equal(result.model_known, false);
+    assert.equal(result.generation_ok, null);
     assert.equal(result.benchmark_attempted, true);
     assert.equal(result.benchmark_ok, false);
+    assert.equal(result.health_ok, false);
+    assert.equal(result.healthy, false);
+    assert.equal(result.failure_stage, "model_list");
+    assert.match(String(result.error), /origin is not allowed/i);
+    assert.deepEqual(requests, ["/health", "/v1/models"]);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("probeLocalMlxBackend reports generation failures when the model is listed but inference is unusable", async () => {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    requests.push(req.url);
+    if (req.url === "/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+    if (req.url === "/v1/models") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          object: "list",
+          data: [{ id: "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit" }],
+        })
+      );
+      return;
+    }
+    if (req.url === "/v1/chat/completions") {
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Origin is not allowed for this endpoint." } }));
+      return;
+    }
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "not found" }));
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const endpoint = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const result = await probeLocalMlxBackend({
+      endpoint,
+      model_id: "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit",
+      benchmark: true,
+    });
+    assert.equal(result.endpoint_ok, true);
+    assert.equal(result.service_ok, true);
+    assert.equal(result.model_list_ok, true);
+    assert.equal(result.model_known, true);
+    assert.equal(result.generation_ok, false);
+    assert.equal(result.benchmark_attempted, true);
+    assert.equal(result.benchmark_ok, false);
+    assert.equal(result.health_ok, false);
+    assert.equal(result.healthy, false);
+    assert.equal(result.failure_stage, "generation");
     assert.match(String(result.error), /origin is not allowed/i);
     assert.deepEqual(requests, ["/health", "/v1/models", "/v1/chat/completions"]);
   } finally {

@@ -16,6 +16,7 @@ import {
   buildIntegrationConsideration,
   buildOllamaCompanionName,
 } from "./local_adapter_promote.mjs";
+import { probeLocalMlxBackend } from "../dist/local_mlx_backend_probe.js";
 
 const REPO_ROOT = repoRootFromMeta(import.meta.url);
 const REGISTRY_PATH = path.join(REPO_ROOT, "data", "training", "model_registry.json");
@@ -259,48 +260,39 @@ async function fetchJson(url, init, timeoutMs) {
 
 async function probeMlxBackend({ endpoint, modelId, timeoutMs = 120_000 }) {
   const deadline = Date.now() + Math.max(5_000, timeoutMs);
-  let lastError = null;
+  let lastProbe = null;
   while (Date.now() < deadline) {
-    try {
-      await fetchJson(`${endpoint}/health`, { method: "GET" }, 4000);
-      const models = await fetchJson(`${endpoint}/v1/models`, { method: "GET" }, 4000);
-      const ids = Array.isArray(models?.data)
-        ? models.data
-            .map((entry) => readString(entry?.id))
-            .filter((entry) => Boolean(entry))
-        : [];
-      const generate = await fetchJson(
-        `${endpoint}/v1/chat/completions`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            model: modelId,
-            messages: [{ role: "user", content: "Respond with the single word: ready" }],
-            temperature: 0,
-            max_tokens: 8,
-            stream: false,
-          }),
-        },
-        20_000
-      );
+    const probe = await probeLocalMlxBackend({
+      endpoint,
+      model_id: modelId,
+      benchmark: true,
+      timeout_ms: 20_000,
+    });
+    lastProbe = probe;
+    if (probe.healthy) {
       return {
         ok: true,
         endpoint,
         model_id: modelId,
-        model_known: ids.includes(modelId),
-        known_models: ids,
-        response_preview: readString(generate?.choices?.[0]?.message?.content) || null,
+        model_known: probe.model_known,
+        known_models: probe.model_known ? [modelId] : [],
+        response_preview: null,
+        failure_stage: null,
+        probe,
       };
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-      await sleep(1000);
     }
+    await sleep(1000);
   }
   return {
     ok: false,
     endpoint,
     model_id: modelId,
-    error: lastError || "mlx_probe_failed",
+    failure_stage: lastProbe?.failure_stage ?? null,
+    error:
+      lastProbe?.failure_stage && lastProbe?.error
+        ? `${lastProbe.failure_stage}: ${lastProbe.error}`
+        : lastProbe?.error || "mlx_probe_failed",
+    probe: lastProbe,
   };
 }
 
@@ -483,8 +475,12 @@ async function runMlxIntegration({ manifest, registration, registrationPath, int
       modelId,
       timeoutMs: 180_000,
     });
-    if (!probe.ok || probe.model_known !== true) {
-      throw new Error(`MLX adapter backend did not become healthy: ${probe.error || "model_not_known"}`);
+    if (!probe.ok || probe.probe?.healthy !== true) {
+      throw new Error(
+        `MLX adapter backend did not become healthy at ${probe.failure_stage || probe.probe?.failure_stage || "unknown"}: ${
+          probe.error || "probe_failed"
+        }`
+      );
     }
 
     loadRunnerEnv(REPO_ROOT);

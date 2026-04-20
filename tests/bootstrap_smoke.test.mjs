@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { resolveOfficeGuiProbeBase } from "../scripts/agent_office_gui.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST_PATH = path.join(REPO_ROOT, "scripts", "platform_manifest.json");
@@ -318,6 +319,16 @@ test("agent_office_gui.mjs status emits machine-readable status without crashing
   assert.equal(typeof parsed.url, "string");
   assert.equal(parsed.platform, process.platform);
   assert.equal(typeof parsed.launchable, "boolean");
+});
+
+test("agent_office_gui.mjs normalizes probe paths when TRICHAT_MCP_URL includes a path", () => {
+  const configuredUrl = "http://127.0.0.1:4321/api/";
+  const probeBase = resolveOfficeGuiProbeBase(configuredUrl);
+
+  assert.equal(probeBase, "http://127.0.0.1:4321/");
+  assert.equal(new URL("health", probeBase).toString(), "http://127.0.0.1:4321/health");
+  assert.equal(new URL("ready", probeBase).toString(), "http://127.0.0.1:4321/ready");
+  assert.equal(new URL("office/", probeBase).toString(), "http://127.0.0.1:4321/office/");
 });
 
 test("agentic_suite_launch.mjs status emits machine-readable status without crashing", { timeout: 30_000 }, () => {

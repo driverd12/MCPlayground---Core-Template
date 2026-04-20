@@ -258,6 +258,7 @@ import {
   buildEvalHealth,
   computeEvalDependencyFingerprint,
   getAutonomyMaintainRuntimeStatus,
+  isAutonomyMaintainAwaitingFirstTick,
   initializeAutonomyMaintainDaemon,
 } from "./tools/autonomy_maintain.js";
 import { autonomyCommand, autonomyCommandSchema } from "./tools/autonomy_command.js";
@@ -3314,6 +3315,10 @@ function buildHttpHealthSnapshot() {
   const recentCriticalCount = countActionableRecentObservabilityDocuments(storage, recentObservabilityDocs, "critical");
   const recentErrorCount = countActionableRecentObservabilityDocuments(storage, recentObservabilityDocs, "error");
   const attention: string[] = [];
+  const autonomyAwaitingFirstTick = isAutonomyMaintainAwaitingFirstTick(autonomyState, {
+    running: autonomyRuntime.running,
+    last_tick_at: autonomyRuntime.last_tick_at,
+  });
   const autonomyStale =
     autonomyState?.enabled === true &&
     Date.now() - Date.parse(autonomyState.last_run_at ?? "") >
@@ -3335,6 +3340,9 @@ function buildHttpHealthSnapshot() {
     attention.push("autonomy_maintain.not_running");
   } else if (autonomyStale) {
     attention.push("autonomy_maintain.stale");
+  }
+  if (autonomyAwaitingFirstTick) {
+    attention.push("autonomy_maintain.awaiting_first_tick");
   }
   if (autonomyState?.last_error) {
     attention.push("autonomy_maintain.error");
@@ -3362,6 +3370,7 @@ function buildHttpHealthSnapshot() {
     autonomyState?.enabled === true &&
     autonomyRuntime.running === true &&
     !autonomyStale &&
+    !autonomyAwaitingFirstTick &&
     !autonomyState?.last_error &&
     evalHealth.operational &&
     reactionState?.enabled === true &&
@@ -3386,6 +3395,7 @@ function buildHttpHealthSnapshot() {
       enabled: autonomyState?.enabled === true,
       runtime_running: autonomyRuntime.running === true,
       stale: autonomyStale,
+      awaiting_first_tick: autonomyAwaitingFirstTick,
       last_run_at: autonomyState?.last_run_at ?? null,
       eval_due: evalHealth.due,
       eval_health: {
@@ -3556,6 +3566,10 @@ async function main() {
         return {
           enabled: autonomyState?.enabled === true,
           runtime_running: autonomyRuntime.running === true,
+          awaiting_first_tick: isAutonomyMaintainAwaitingFirstTick(autonomyState, {
+            running: autonomyRuntime.running,
+            last_tick_at: autonomyRuntime.last_tick_at,
+          }),
         };
       },
       officeSnapshot: ({ threadId, theme, forceLive }) =>

@@ -11,6 +11,7 @@
     patientZeroNoteDirty: false,
     patientZeroLastSavedNote: "",
     intakeModeDirty: false,
+    intakeTargetAgentIds: [],
   };
 
   var els = {
@@ -216,6 +217,25 @@
     return els.intakeConsole;
   }
 
+  function getBridgeIntakeAgents() {
+    var roster = state.snapshot && state.snapshot.roster && Array.isArray(state.snapshot.roster.agents) ? state.snapshot.roster.agents : [];
+    var preferredIds = ["codex", "claude", "cursor", "gemini"];
+    var byId = {};
+    roster.forEach(function (entry) {
+      if (!entry || typeof entry !== "object") return;
+      var agentId = String(entry.agent_id || "").trim();
+      if (!agentId || preferredIds.indexOf(agentId) === -1 || entry.enabled === false) return;
+      byId[agentId] = {
+        agent_id: agentId,
+        display_name: String(entry.display_name || agentId).trim() || agentId,
+        role_lane: String(entry.role_lane || entry.provider || agentId).trim(),
+      };
+    });
+    return preferredIds
+      .filter(function (agentId) { return !!byId[agentId]; })
+      .map(function (agentId) { return byId[agentId]; });
+  }
+
   function readIntakeDraft() {
     return {
       title: els.intakeTitle ? String(els.intakeTitle.value || "").trim() : "",
@@ -223,14 +243,18 @@
       risk: els.intakeRisk ? String(els.intakeRisk.value || "medium").trim() || "medium" : "medium",
       mode: els.intakeMode ? String(els.intakeMode.value || "").trim() : "",
       dryRun: els.intakeDryRun ? !!els.intakeDryRun.checked : false,
+      trichatAgentIds: state.intakeTargetAgentIds.slice().filter(Boolean),
     };
   }
 
   function compilerCommandPreview(draft) {
-    var parts = ["./scripts/autonomy_intake_shell.sh"];
+    var parts = ["./scripts/autonomy_ide_ingress.sh"];
     if (draft.title) parts.push("--title " + shellQuote(draft.title));
     if (draft.risk) parts.push("--risk " + shellQuote(draft.risk));
     if (draft.mode) parts.push("--mode " + shellQuote(draft.mode));
+    (draft.trichatAgentIds || []).forEach(function (agentId) {
+      parts.push("--agent " + shellQuote(agentId));
+    });
     if (draft.dryRun) parts.push("--dry-run");
     parts.push("-- " + shellQuote(draft.objective || "<bounded objective>"));
     return parts.join(" ");
@@ -273,6 +297,11 @@
     var dispatchReady = !!draft.objective;
     var modeLabel = draft.mode || "auto";
     var riskLabel = draft.risk || "medium";
+    var bridgeAgents = getBridgeIntakeAgents();
+    state.intakeTargetAgentIds = state.intakeTargetAgentIds.filter(function (agentId) {
+      return bridgeAgents.some(function (entry) { return entry.agent_id === agentId; });
+    });
+    draft.trichatAgentIds = state.intakeTargetAgentIds.slice();
     var focusArea = compactIntakeText(workbench.focus_area || "intake", 24);
     var statusLabel = compactIntakeText(workbench.status || (dispatchReady ? "ready" : "draft"), 24);
     var headline = compactIntakeText(
@@ -314,7 +343,14 @@
       {
         label: "Dispatch",
         tone: gateTone(dispatchReady, !!draft.title || !!draft.objective),
-        detail: (draft.dryRun ? "dry run" : "live dispatch") + " · mode " + modeLabel + " · risk " + riskLabel,
+        detail:
+          (draft.dryRun ? "dry run" : "live dispatch") +
+          " · mode " +
+          modeLabel +
+          " · risk " +
+          riskLabel +
+          " · agents " +
+          (draft.trichatAgentIds.length ? draft.trichatAgentIds.join(", ") : "auto"),
       },
     ];
 
@@ -392,6 +428,38 @@
       "</div>" +
       "</div>";
 
+    var targetsHtml =
+      '<div class="intake-console__section">' +
+      '<div class="intake-console__label">Bridge targets</div>' +
+      '<div class="intake-console__agent-grid">' +
+      (bridgeAgents.length
+        ? bridgeAgents
+            .map(function (entry) {
+              var selected = draft.trichatAgentIds.indexOf(entry.agent_id) >= 0;
+              return (
+                '<button type="button" class="button intake-console__agent' +
+                (selected ? " intake-console__agent--selected" : "") +
+                '" data-intake-agent-id="' +
+                escapeHtml(entry.agent_id) +
+                '">' +
+                '<strong>' + escapeHtml(entry.display_name) + "</strong>" +
+                '<span>' + escapeHtml(entry.role_lane || entry.agent_id) + "</span>" +
+                "</button>"
+              );
+            })
+            .join("")
+        : '<article class="intake-console__card"><strong>No bridge agents surfaced</strong><p>The roster has not exposed Claude/Codex bridge targets in this snapshot yet.</p></article>') +
+      "</div>" +
+      '<div class="intake-console__meta">' +
+      "<span>" +
+      escapeHtml(draft.trichatAgentIds.length ? ("explicit routing: " + draft.trichatAgentIds.join(", ")) : "routing: auto") +
+      "</span>" +
+      (draft.trichatAgentIds.length
+        ? '<button type="button" class="button intake-console__inline-action" data-intake-agent-clear="true">Clear explicit targets</button>'
+        : "") +
+      "</div>" +
+      "</div>";
+
     host.innerHTML =
       '<div class="intake-console__header">' +
       '<div class="intake-console__eyebrow">Objective Compiler</div>' +
@@ -418,6 +486,7 @@
       "</div>" +
       blockersHtml +
       nextActionsHtml +
+      targetsHtml +
       suggestionsHtml +
       '<div class="intake-console__section">' +
       '<div class="intake-console__label">Dispatch preview</div>' +
@@ -652,6 +721,7 @@
         objective: suggestion.objective || "",
         risk: suggestion.risk || "medium",
         mode: suggestion.mode || "",
+        trichat_agent_ids: state.intakeTargetAgentIds.slice(),
         thread_id: state.snapshot.thread_id || "",
         tags: ["workbench"],
       }),
@@ -1543,6 +1613,7 @@
         risk: els.intakeRisk ? els.intakeRisk.value : "medium",
         mode: els.intakeMode ? els.intakeMode.value : "",
         dry_run: els.intakeDryRun ? !!els.intakeDryRun.checked : false,
+        trichat_agent_ids: state.intakeTargetAgentIds.slice(),
       }),
     }).then(function (result) {
       setResultText(JSON.stringify(result, null, 2));
@@ -1591,6 +1662,24 @@
           els.intakeMode.value = suggestion.mode;
         }
         setResultText("Seeded objective from the workbench. Review the dispatch preview, then submit.");
+        renderIntakeDesk();
+        return;
+      }
+      var intakeAgentButton = target.closest("[data-intake-agent-id]");
+      if (intakeAgentButton) {
+        var agentId = String(intakeAgentButton.getAttribute("data-intake-agent-id") || "").trim();
+        if (!agentId) return;
+        if (state.intakeTargetAgentIds.indexOf(agentId) >= 0) {
+          state.intakeTargetAgentIds = state.intakeTargetAgentIds.filter(function (entry) { return entry !== agentId; });
+        } else {
+          state.intakeTargetAgentIds = state.intakeTargetAgentIds.concat([agentId]);
+        }
+        renderIntakeDesk();
+        return;
+      }
+      var clearAgentTargetsButton = target.closest("[data-intake-agent-clear]");
+      if (clearAgentTargetsButton) {
+        state.intakeTargetAgentIds = [];
         renderIntakeDesk();
         return;
       }

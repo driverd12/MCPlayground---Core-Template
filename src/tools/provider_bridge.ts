@@ -220,6 +220,7 @@ const defaultProviderClients: ProviderBridgeClientId[] = [
   "gemini-cli",
   "chatgpt-developer-mode",
 ];
+const legacyProviderServerNames = ["mcplayground"];
 const providerBridgeDiagnosticCache = new Map<
   string,
   {
@@ -2122,11 +2123,21 @@ export function resolveProviderBridgeDiagnostics(
   };
 }
 
-function mergeJsonServer(filePath: string, serverName: string, entry: Record<string, unknown>) {
+function mergeJsonServer(
+  filePath: string,
+  serverName: string,
+  entry: Record<string, unknown>,
+  options?: { removeLegacyServerNames?: string[] }
+) {
   const parsed = readJsonFile(filePath) as Record<string, unknown>;
   const current = parsed.mcpServers;
   const mcpServers =
     current && typeof current === "object" && !Array.isArray(current) ? { ...(current as Record<string, unknown>) } : {};
+  for (const legacyServerName of options?.removeLegacyServerNames ?? []) {
+    if (legacyServerName && legacyServerName !== serverName) {
+      delete mcpServers[legacyServerName];
+    }
+  }
   mcpServers[serverName] = entry;
   writeJsonFile(filePath, {
     ...parsed,
@@ -2520,8 +2531,17 @@ export async function providerBridge(
       }
       if (client === "cursor") {
         const clientTransport = resolveClientTransportConfig(client, transport, input.transport);
-        mergeJsonServer(configPaths.cursor, serverName, buildCursorOrGeminiEntry(clientTransport, serverName, true));
-        mergeJsonServer(configPaths.cursorWorkspace, serverName, buildCursorOrGeminiEntry(clientTransport, serverName, true));
+        mergeJsonServer(configPaths.cursor, serverName, buildCursorOrGeminiEntry(clientTransport, serverName, true), {
+          removeLegacyServerNames: legacyProviderServerNames,
+        });
+        mergeJsonServer(
+          configPaths.cursorWorkspace,
+          serverName,
+          buildCursorOrGeminiEntry(clientTransport, serverName, true),
+          {
+            removeLegacyServerNames: legacyProviderServerNames,
+          }
+        );
         installs.push({
           client_id: client,
           config_path: configPaths.cursor,
