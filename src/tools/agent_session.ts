@@ -126,6 +126,36 @@ export const agentReportResultSchema = z
     }
   });
 
+function buildAgentReportCompletionResult(
+  input: z.infer<typeof agentReportResultSchema>,
+  reportedArtifactIds: string[]
+): Record<string, unknown> | undefined {
+  const result = input.result ?? {};
+  if (input.outcome !== "completed" || reportedArtifactIds.length === 0) {
+    return input.result;
+  }
+  const existingEvidence =
+    result.completion_evidence && typeof result.completion_evidence === "object" && !Array.isArray(result.completion_evidence)
+      ? (result.completion_evidence as Record<string, unknown>)
+      : {};
+  const existingEvidenceRefs = Array.isArray(existingEvidence.evidence_refs)
+    ? existingEvidence.evidence_refs.map((entry) => String(entry ?? "").trim()).filter(Boolean)
+    : [];
+  const existingProducedArtifactIds = Array.isArray(existingEvidence.produced_artifact_ids)
+    ? existingEvidence.produced_artifact_ids.map((entry) => String(entry ?? "").trim()).filter(Boolean)
+    : [];
+  return {
+    ...result,
+    completion_evidence: {
+      ...existingEvidence,
+      evidence_refs: dedupeStrings([...existingEvidenceRefs, ...reportedArtifactIds.map((artifactId) => `artifact:${artifactId}`)]),
+      produced_artifact_ids: dedupeStrings([...existingProducedArtifactIds, ...reportedArtifactIds]),
+      ...(input.summary?.trim() ? { verification_summary: input.summary.trim() } : {}),
+      ...(input.run_id?.trim() ? { run_id: input.run_id.trim() } : {}),
+    },
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -2374,12 +2404,13 @@ export async function agentReportResult(
       }
 
       const reportedArtifactIds = dedupeStrings(input.produced_artifact_ids);
+      const completionResult = buildAgentReportCompletionResult(input, reportedArtifactIds);
       const outcomeResult =
         input.outcome === "completed"
           ? storage.completeTask({
               task_id: input.task_id,
               worker_id: session.session_id,
-              result: input.result,
+              result: completionResult,
               summary: input.summary,
             })
           : storage.failTask({
@@ -2394,6 +2425,10 @@ export async function agentReportResult(
         input.outcome === "completed"
           ? (outcomeResult as ReturnType<typeof storage.completeTask>).completed
           : (outcomeResult as ReturnType<typeof storage.failTask>).failed;
+      const autoReflection =
+        input.outcome === "failed"
+          ? (outcomeResult as ReturnType<typeof storage.failTask>).auto_reflection ?? null
+          : null;
       if (!reported) {
         return {
           reported: false,
@@ -2461,6 +2496,17 @@ export async function agentReportResult(
         expectedArtifactCheck !== null &&
         expectedArtifactCheck.expected_artifact_types.length > 0 &&
         !expectedArtifactCheck.satisfied;
+      const reasoningPolicyAudit = isRecord(task.result?.reasoning_policy_audit)
+        ? task.result.reasoning_policy_audit
+        : null;
+      const reasoningPolicyNeedsReview =
+        input.outcome === "completed" && reasoningPolicyAudit?.status === "needs_review";
+      const completionBlocked = missingExpectedArtifacts || reasoningPolicyNeedsReview;
+      const dispatchGateType = missingExpectedArtifacts
+        ? "artifact_evidence"
+        : reasoningPolicyNeedsReview
+          ? "reasoning_policy_review"
+          : null;
       const adaptiveReport = updateAdaptiveWorkerProfileOnReport(
         session,
         task,
@@ -2477,14 +2523,16 @@ export async function agentReportResult(
             plan_id: planContext.plan.plan_id,
             step_id: planContext.step.step_id,
             status:
-              input.outcome === "completed" ? (missingExpectedArtifacts ? "blocked" : "completed") : "failed",
+              input.outcome === "completed" ? (completionBlocked ? "blocked" : "completed") : "failed",
             task_id: task.task_id,
             run_id: input.run_id,
             produced_artifact_ids: producedArtifactIds,
             metadata: {
               human_approval_required: false,
-              dispatch_gate_type: missingExpectedArtifacts ? "artifact_evidence" : null,
+              dispatch_gate_type: dispatchGateType,
               evidence_gate_required: missingExpectedArtifacts,
+              reasoning_policy_review_required: reasoningPolicyNeedsReview,
+              reasoning_policy_audit: reasoningPolicyAudit,
               artifact_expectations: expectedArtifactCheck ?? {
                 expected_artifact_types: [],
                 produced_artifact_ids: producedArtifactIds,
@@ -2502,6 +2550,7 @@ export async function agentReportResult(
                 run_id: input.run_id ?? null,
                 produced_artifact_ids: producedArtifactIds,
                 result_keys: Object.keys(input.result ?? {}),
+                auto_reflection_memory_id: autoReflection?.memory_id ?? null,
                 metadata: input.metadata ?? {},
               },
             },
@@ -2512,6 +2561,8 @@ export async function agentReportResult(
           ? storage.appendRuntimeEvent({
               event_type: missingExpectedArtifacts
                 ? "plan.step_evidence_blocked"
+                : reasoningPolicyNeedsReview
+                  ? "plan.step_reasoning_review_blocked"
                 : input.outcome === "completed"
                   ? "plan.step_completed"
                   : "plan.step_failed",
@@ -2521,6 +2572,8 @@ export async function agentReportResult(
               summary:
                 missingExpectedArtifacts
                   ? `Plan step ${planContext.step.step_id} is blocked pending expected evidence artifacts.`
+                  : reasoningPolicyNeedsReview
+                    ? `Plan step ${planContext.step.step_id} is blocked pending reasoning-policy review.`
                   : input.summary?.trim() ||
                     `Plan step ${planContext.step.step_id} ${input.outcome === "completed" ? "completed" : "failed"} via agent report.`,
               details: {
@@ -2533,6 +2586,8 @@ export async function agentReportResult(
                 agent_id: session.agent_id,
                 produced_artifact_ids: producedArtifactIds,
                 expected_artifacts: expectedArtifactCheck,
+                reasoning_policy_audit: reasoningPolicyAudit,
+                reasoning_policy_review_required: reasoningPolicyNeedsReview,
               },
               source_client: input.source_client,
               source_model: input.source_model,
@@ -2611,7 +2666,7 @@ export async function agentReportResult(
       const goalAutorunTrigger = shouldTriggerGoalAutorun(storage, task, planContext);
       const goalAutorun =
         input.outcome === "completed" &&
-        !missingExpectedArtifacts &&
+        !completionBlocked &&
         goalAutorunTrigger.enabled &&
         goalAutorunTrigger.goal_id
           ? ((await invokeTool("goal.autorun", {
@@ -2630,6 +2685,8 @@ export async function agentReportResult(
                   ? "task_failed"
                   : missingExpectedArtifacts
                     ? "missing_expected_artifacts"
+                    : reasoningPolicyNeedsReview
+                      ? "reasoning_policy_review"
                     : goalAutorunTrigger.reason,
             };
       const agentTaskEvent = storage.appendRuntimeEvent({
@@ -2650,8 +2707,11 @@ export async function agentReportResult(
           artifact_links_created: artifactLinks.length,
           auto_report_artifact_id: autoReportArtifact.artifact_id,
           experiment_run_id: experimentRun?.experiment_run_id ?? null,
-          goal_autorun_triggered: goalAutorunTrigger.enabled && input.outcome === "completed",
+          goal_autorun_triggered: goalAutorunTrigger.enabled && input.outcome === "completed" && !completionBlocked,
           expected_artifacts: expectedArtifactCheck,
+          reasoning_policy_audit: reasoningPolicyAudit,
+          reasoning_policy_review_required: reasoningPolicyNeedsReview,
+          auto_reflection_memory_id: autoReflection?.memory_id ?? null,
           adaptive_worker_profile: summarizeAdaptiveWorkerProfile(adaptiveReport.profile, taskProfile.complexity),
         },
         source_client: input.source_client,
@@ -2671,7 +2731,17 @@ export async function agentReportResult(
         artifact_links: artifactLinks,
         experiment: experimentUpdate,
         evidence_gate: expectedArtifactCheck,
+        reasoning_policy_review: reasoningPolicyNeedsReview
+          ? {
+              required: true,
+              audit: reasoningPolicyAudit,
+            }
+          : {
+              required: false,
+              audit: reasoningPolicyAudit,
+            },
         adaptive_worker_profile: adaptiveReport.profile,
+        auto_reflection: autoReflection,
         goal_autorun: goalAutorun,
         events: {
           task: agentTaskEvent,

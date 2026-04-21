@@ -117,6 +117,77 @@ function buildCatalog(raw: Record<string, unknown>) {
   return catalog;
 }
 
+function buildRoster(raw: Record<string, unknown>) {
+  return {
+    source: String(raw.source ?? "").trim(),
+    default_agent_ids: dedupe(asList(raw.default_agent_ids)),
+    active_agent_ids: dedupe(asList(raw.active_agent_ids)),
+    agents: asList(raw.agents).map((entry) => {
+      const item = asDict(entry);
+      return {
+        agent_id: normalizeAgentId(item.agent_id),
+        display_name: String(item.display_name ?? item.agent_id ?? "").trim(),
+        provider: String(item.provider ?? "").trim(),
+        role_lane: String(item.role_lane ?? "").trim(),
+        coordination_tier: String(item.coordination_tier ?? "").trim(),
+        parent_agent_id: normalizeAgentId(item.parent_agent_id),
+        managed_agent_ids: dedupe(asList(item.managed_agent_ids)),
+        accent_color: String(item.accent_color ?? "").trim(),
+        enabled: item.enabled !== false,
+      };
+    }),
+  };
+}
+
+function buildBridgeTargets(rosterRaw: Record<string, unknown>, providerBridgeRaw: Record<string, unknown>) {
+  const rosterAgents = new Map<string, Record<string, unknown>>();
+  for (const entry of asList(rosterRaw.agents)) {
+    const item = asDict(entry);
+    const agentId = normalizeAgentId(item.agent_id);
+    if (!agentId) {
+      continue;
+    }
+    rosterAgents.set(agentId, item);
+  }
+  const providerBridgeSnapshot = asDict(providerBridgeRaw.snapshot);
+  const outboundCouncilAgents = asList(providerBridgeSnapshot.outbound_council_agents);
+  const preferredOrder = ["codex", "claude", "cursor", "gemini"];
+  const targets = new Map<
+    string,
+    {
+      agent_id: string;
+      display_name: string;
+      role_lane: string;
+      provider: string;
+      coordination_tier: string;
+      client_id: string;
+      bridge_ready: boolean;
+      runtime_ready: boolean;
+    }
+  >();
+  for (const entry of outboundCouncilAgents) {
+    const item = asDict(entry);
+    const agentId = normalizeAgentId(item.agent_id);
+    if (!agentId) {
+      continue;
+    }
+    const rosterAgent = asDict(rosterAgents.get(agentId));
+    targets.set(agentId, {
+      agent_id: agentId,
+      display_name: String(rosterAgent.display_name ?? agentId).trim() || agentId,
+      role_lane: String(rosterAgent.role_lane ?? rosterAgent.provider ?? agentId).trim() || agentId,
+      provider: String(rosterAgent.provider ?? "").trim(),
+      coordination_tier: String(rosterAgent.coordination_tier ?? "").trim(),
+      client_id: String(item.client_id ?? "").trim(),
+      bridge_ready: item.bridge_ready === true,
+      runtime_ready: item.runtime_ready === true,
+    });
+  }
+  return preferredOrder
+    .filter((agentId) => targets.has(agentId))
+    .map((agentId) => targets.get(agentId)!);
+}
+
 function isFallbackRoster(raw: Record<string, unknown>) {
   return String(raw.source ?? "").trim().toLowerCase() === "config-fallback";
 }
@@ -660,6 +731,19 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const runtimeSummary = asDict(runtimeWorkers.summary);
   const latestDecision = asDict(workboard.latest_decision);
   const taskCounts = asDict(taskSummary.counts);
+  const taskReasoningPolicy = asDict(taskSummary.reasoning_policy);
+  const taskReasoningCompletionReview = asDict(taskReasoningPolicy.completion_review);
+  const taskReasoningReviewTaskIds = asList(taskReasoningCompletionReview.needs_review_task_ids)
+    .map((entry) => String(entry ?? "").trim())
+    .filter(Boolean)
+    .slice(0, 10);
+  const taskReasoningMissingFieldCounts = asDict(taskReasoningCompletionReview.missing_field_counts);
+  const taskReasoningMissingFieldLabels = Object.entries(taskReasoningMissingFieldCounts)
+    .map(([field, count]) => ({ field, count: parseAnyInt(count) }))
+    .filter((entry) => entry.field && entry.count > 0)
+    .sort((left, right) => right.count - left.count || left.field.localeCompare(right.field))
+    .map((entry) => `${entry.field}:${entry.count}`);
+  const taskReasoningReviewNeedsCount = parseAnyInt(taskReasoningCompletionReview.needs_review_count);
   const tmuxDashboard = asDict(tmux.dashboard);
   const maintainState = asDict(maintain.state);
   const maintainRuntime = asDict(maintain.runtime);
@@ -797,6 +881,22 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const workbenchPlan = asDict(workbenchActiveExecution.plan);
   const workbenchStep = asDict(workbenchActiveExecution.step);
   const workbenchTask = asDict(workbenchActiveExecution.task);
+  const reasoningReviewBlockers =
+    taskReasoningReviewNeedsCount > 0
+      ? [
+          {
+            kind: "reasoning_policy_review",
+            title: `${taskReasoningReviewNeedsCount} completed reasoning task${taskReasoningReviewNeedsCount === 1 ? "" : "s"} need review`,
+            detail: `Missing evidence: ${
+              taskReasoningMissingFieldLabels.length > 0
+                ? taskReasoningMissingFieldLabels.join(", ")
+                : "reasoning-policy completion evidence"
+            }. Review before treating completed work as verified.`,
+            task_ids: taskReasoningReviewTaskIds,
+          },
+        ]
+      : [];
+  const workbenchBlockers = [...asList(workbench.blockers).map((entry) => asDict(entry)), ...reasoningReviewBlockers];
 
   const fetchedAt = parseAnyFloat(
     raw.generated_at ? new Date(String(raw.generated_at)).getTime() / 1000 : Date.now() / 1000,
@@ -812,6 +912,8 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
     theme: input.theme,
     errors: asList(raw.errors).map((entry) => String(entry)),
     counts,
+    roster: buildRoster(roster),
+    bridge_targets: buildBridgeTargets(roster, providerBridge),
     agents: presences.map((presence) => ({
       agent: presence.agent,
       token: presence.token,
@@ -831,6 +933,19 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         running: parseAnyInt(taskCounts.running),
         failed: parseAnyInt(taskCounts.failed),
         completed: parseAnyInt(taskCounts.completed),
+        reasoning_policy: {
+          active_count: parseAnyInt(taskReasoningPolicy.total_active_count),
+          pending_count: parseAnyInt(taskReasoningPolicy.pending_count),
+          running_count: parseAnyInt(taskReasoningPolicy.running_count),
+          candidate_total: parseAnyInt(taskReasoningPolicy.total_candidate_count),
+          max_candidate_count: parseAnyInt(taskReasoningPolicy.max_candidate_count),
+          evidence_rerank_count: parseAnyInt(taskReasoningPolicy.evidence_rerank_count),
+          completion_review_needs_count: taskReasoningReviewNeedsCount,
+          completion_review_audited_count: parseAnyInt(taskReasoningCompletionReview.audited_completed_count),
+          completion_review_satisfied_count: parseAnyInt(taskReasoningCompletionReview.satisfied_count),
+          completion_review_task_ids: taskReasoningReviewTaskIds,
+          completion_review_missing_field_counts: taskReasoningMissingFieldCounts,
+        },
       },
       tmux: {
         enabled: Boolean(asDict(tmux.state).enabled),
@@ -1043,7 +1158,8 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         focus_area: String(workbench.focus_area ?? "intake"),
         status: String(workbench.status ?? "ready"),
         headline: compactSingleLine(workbench.headline, 200),
-        blocker_count: asList(workbench.blockers).length,
+        blocker_count: workbenchBlockers.length,
+        reasoning_review_count: taskReasoningReviewNeedsCount,
         next_action_count: asList(workbench.next_actions).length,
         suggested_objective_count: asList(workbench.suggested_objectives).length,
       },
@@ -1101,8 +1217,24 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         running_tasks: asList(workbenchQueue.running_tasks).map((entry) => asDict(entry)),
         pending_tasks: asList(workbenchQueue.pending_tasks).map((entry) => asDict(entry)),
         failed_tasks: asList(workbenchQueue.failed_tasks).map((entry) => asDict(entry)),
+        reasoning_policy: {
+          active_count: parseAnyInt(taskReasoningPolicy.total_active_count),
+          pending_count: parseAnyInt(taskReasoningPolicy.pending_count),
+          running_count: parseAnyInt(taskReasoningPolicy.running_count),
+          candidate_total: parseAnyInt(taskReasoningPolicy.total_candidate_count),
+          max_candidate_count: parseAnyInt(taskReasoningPolicy.max_candidate_count),
+          completion_review: {
+            audited_completed_count: parseAnyInt(taskReasoningCompletionReview.audited_completed_count),
+            needs_review_count: taskReasoningReviewNeedsCount,
+            satisfied_count: parseAnyInt(taskReasoningCompletionReview.satisfied_count),
+            missing_field_counts: taskReasoningMissingFieldCounts,
+            needs_review_task_ids: taskReasoningReviewTaskIds,
+            last_needs_review_task_id: String(taskReasoningCompletionReview.last_needs_review_task_id ?? "").trim(),
+            last_needs_review_at: String(taskReasoningCompletionReview.last_needs_review_at ?? "").trim(),
+          },
+        },
       },
-      blockers: asList(workbench.blockers).map((entry) => asDict(entry)),
+      blockers: workbenchBlockers,
       next_actions: asList(workbench.next_actions).map((entry) => asDict(entry)),
       suggested_objectives: asList(workbench.suggested_objectives).map((entry) => asDict(entry)),
       quick_actions: {

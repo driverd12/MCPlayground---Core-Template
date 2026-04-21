@@ -129,6 +129,211 @@ test("office gui snapshot reflects provider heartbeat states and self-drive summ
   assert.equal(snapshot.workbench.suggested_objectives[0].title, "Own the next queued task");
 });
 
+test("office gui snapshot retains roster metadata and exports explicit bridge targets", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    {
+      roster: {
+        source: "office.snapshot",
+        default_agent_ids: ["ring-leader", "codex"],
+        active_agent_ids: ["codex", "claude", "github-copilot"],
+        agents: [
+          {
+            agent_id: "codex",
+            display_name: "Codex",
+            provider: "openai",
+            coordination_tier: "support",
+            role_lane: "planner",
+            enabled: true,
+          },
+          {
+            agent_id: "claude",
+            display_name: "Claude",
+            provider: "anthropic",
+            coordination_tier: "support",
+            role_lane: "critic",
+            enabled: true,
+          },
+          {
+            agent_id: "github-copilot",
+            display_name: "GitHub Copilot",
+            provider: "github-copilot",
+            coordination_tier: "support",
+            role_lane: "implementer",
+            enabled: true,
+          },
+        ],
+      },
+      workboard: {},
+      tmux: {},
+      task_summary: { counts: {} },
+      task_running: {},
+      task_pending: {},
+      agent_sessions: { sessions: [] },
+      adapter: {},
+      bus_tail: {},
+      trichat_summary: {},
+      learning: {},
+      autopilot: {},
+      runtime_workers: { summary: {}, sessions: [] },
+      kernel: {
+        overview: {},
+        worker_fabric: { hosts: [] },
+        model_router: { backends: [] },
+        runtime_workers: {},
+        autonomy_maintain: {},
+        reaction_engine: {},
+        observability: {},
+        swarm: {},
+        workflow_exports: {},
+      },
+      autonomy_maintain: {
+        state: {},
+        runtime: {},
+        due: {},
+        self_drive: {},
+      },
+      provider_bridge: {
+        snapshot: {
+          outbound_council_agents: [
+            { client_id: "claude-cli", agent_id: "claude", bridge_ready: true, runtime_ready: true },
+            { client_id: "codex", agent_id: "codex", bridge_ready: true, runtime_ready: true },
+          ],
+        },
+        diagnostics: {
+          generated_at: "2026-04-01T17:00:00.000Z",
+          cached: true,
+          diagnostics: [],
+        },
+      },
+      workbench: {
+        focus_area: "intake",
+        status: "ready",
+        headline: "Bridge targets should stay visible.",
+        queue: {
+          running: 0,
+          pending: 0,
+          failed: 0,
+          completed: 0,
+          running_tasks: [],
+          pending_tasks: [],
+          failed_tasks: [],
+        },
+        blockers: [],
+        next_actions: [],
+        suggested_objectives: [],
+        quick_actions: {},
+      },
+    },
+    { theme: "dark" }
+  );
+
+  assert.equal(snapshot.roster.source, "office.snapshot");
+  assert.deepEqual(snapshot.roster.default_agent_ids, ["ring-leader", "codex"]);
+  assert.deepEqual(snapshot.roster.active_agent_ids, ["codex", "claude", "github-copilot"]);
+  assert.equal(snapshot.roster.agents.length, 3);
+  assert.deepEqual(
+    snapshot.roster.agents.map((entry) => entry.agent_id),
+    ["codex", "claude", "github-copilot"]
+  );
+  assert.equal(snapshot.roster.agents.find((entry) => entry.agent_id === "claude")?.role_lane, "critic");
+  assert.deepEqual(
+    snapshot.bridge_targets.map((entry) => entry.agent_id),
+    ["codex", "claude"]
+  );
+  assert.equal(snapshot.bridge_targets.find((entry) => entry.agent_id === "claude")?.client_id, "claude-cli");
+  assert.equal(snapshot.bridge_targets.find((entry) => entry.agent_id === "claude")?.runtime_ready, true);
+});
+
+test("office gui snapshot surfaces reasoning-policy review pressure in workbench state", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    {
+      roster: {
+        active_agent_ids: ["codex"],
+        agents: [{ agent_id: "codex", display_name: "Codex", coordination_tier: "lead", role_lane: "planner" }],
+      },
+      workboard: {},
+      tmux: {},
+      task_summary: {
+        counts: { pending: 0, running: 0, failed: 0, completed: 3 },
+        reasoning_policy: {
+          pending_count: 0,
+          running_count: 0,
+          total_active_count: 0,
+          evidence_rerank_count: 0,
+          plan_pass_count: 0,
+          verification_pass_count: 0,
+          total_candidate_count: 0,
+          max_candidate_count: 0,
+          high_compute_task_ids: [],
+          completion_review: {
+            audited_completed_count: 2,
+            needs_review_count: 1,
+            satisfied_count: 1,
+            missing_field_counts: {
+              candidate_evidence: 1,
+              verification_pass: 1,
+            },
+            needs_review_task_ids: ["task-review-1"],
+            last_needs_review_task_id: "task-review-1",
+            last_needs_review_at: "2026-04-21T06:00:00.000Z",
+          },
+        },
+      },
+      task_running: {},
+      task_pending: {},
+      agent_sessions: { sessions: [] },
+      adapter: {},
+      bus_tail: {},
+      trichat_summary: {},
+      learning: {},
+      autopilot: {},
+      runtime_workers: { summary: {}, sessions: [] },
+      kernel: {
+        overview: {},
+        worker_fabric: { hosts: [] },
+        model_router: { backends: [] },
+        runtime_workers: {},
+        autonomy_maintain: {},
+        reaction_engine: {},
+        observability: {},
+        swarm: {},
+        workflow_exports: {},
+      },
+      autonomy_maintain: {},
+      provider_bridge: {},
+      workbench: {
+        focus_area: "review",
+        status: "attention",
+        headline: "Review completed reasoning work.",
+        queue: {
+          running: 0,
+          pending: 0,
+          failed: 0,
+          completed: 3,
+          running_tasks: [],
+          pending_tasks: [],
+          failed_tasks: [],
+        },
+        blockers: [],
+        next_actions: [],
+        suggested_objectives: [],
+        quick_actions: {},
+      },
+    },
+    { theme: "dark" }
+  );
+
+  assert.equal(snapshot.summary.tasks.reasoning_policy.completion_review_needs_count, 1);
+  assert.equal(snapshot.summary.tasks.reasoning_policy.completion_review_audited_count, 2);
+  assert.deepEqual(snapshot.summary.tasks.reasoning_policy.completion_review_task_ids, ["task-review-1"]);
+  assert.equal(snapshot.summary.workbench.blocker_count, 1);
+  assert.equal(snapshot.summary.workbench.reasoning_review_count, 1);
+  assert.equal(snapshot.workbench.queue.reasoning_policy.completion_review.needs_review_count, 1);
+  assert.equal(snapshot.workbench.queue.reasoning_policy.completion_review.missing_field_counts.verification_pass, 1);
+  assert.equal(snapshot.workbench.blockers[0].kind, "reasoning_policy_review");
+  assert.deepEqual(snapshot.workbench.blockers[0].task_ids, ["task-review-1"]);
+});
+
 test("office gui snapshot surfaces control-plane rollup signals", () => {
   const snapshot = buildOfficeGuiSnapshot(
     {

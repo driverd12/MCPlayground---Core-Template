@@ -272,6 +272,22 @@
   }
 
   function getBridgeIntakeAgents() {
+    var explicitTargets =
+      state.snapshot && Array.isArray(state.snapshot.bridge_targets) ? state.snapshot.bridge_targets : [];
+    if (explicitTargets.length) {
+      return explicitTargets
+        .map(function (entry) {
+          if (!entry || typeof entry !== "object") return null;
+          var agentId = String(entry.agent_id || "").trim();
+          if (!agentId) return null;
+          return {
+            agent_id: agentId,
+            display_name: String(entry.display_name || agentId).trim() || agentId,
+            role_lane: String(entry.role_lane || entry.provider || agentId).trim(),
+          };
+        })
+        .filter(Boolean);
+    }
     var roster = state.snapshot && state.snapshot.roster && Array.isArray(state.snapshot.roster.agents) ? state.snapshot.roster.agents : [];
     var preferredIds = ["codex", "claude", "cursor", "gemini"];
     var byId = {};
@@ -571,6 +587,7 @@
     var summary = state.snapshot.summary || {};
     var kernel = summary.kernel || {};
     var tasks = summary.tasks || {};
+    var taskReasoning = tasks.reasoning_policy || {};
     var host = summary.local_host || {};
     var router = summary.router || {};
     var liveBackend = router.live_backend || {};
@@ -632,6 +649,17 @@
       ],
       ["Kernel", String(kernel.state || "n/a") + " | healthy " + String(kernel.healthy || 0) + " | degraded " + String(kernel.degraded || 0)],
       ["Tasks", "run " + String(tasks.running || 0) + " | queue " + String(tasks.pending || 0) + " | fail " + String(tasks.failed || 0)],
+      [
+        "Reasoning",
+        "active " + String(taskReasoning.active_count || 0) +
+          " | review " + String(taskReasoning.completion_review_needs_count || 0) +
+          " | maxN " + String(taskReasoning.max_candidate_count || 0),
+        (taskReasoning.completion_review_needs_count || 0) > 0
+          ? "bad"
+          : (taskReasoning.active_count || 0) > 0
+            ? "warn"
+            : "good"
+      ],
       ["Host", "cpu " + Math.round((host.cpu_utilization || 0) * 100) + "% | ram " + fmt(host.ram_available_gb) + " / " + fmt(host.ram_total_gb) + " GB | swap " + fmt(host.swap_used_gb) + " GB"],
       ["Router", String(router.default_backend_id || "n/a") + " | " + (liveBackend.probe_model_loaded ? "warm" : "cold") + " | " + fmt(liveBackend.latency_ms_p50, 0) + " ms"],
       ["Autopilot", (autopilot.running ? "running" : "idle") + " | exec " + (autopilot.execute_enabled ? "armed" : "advisory") + " | " + String(autopilot.last_execution_mode || "none")],
@@ -874,6 +902,15 @@
     var step = activeExecution.step || {};
     var task = activeExecution.task || {};
     var queue = workbench.queue || {};
+    var queueReasoning = queue.reasoning_policy || {};
+    var reasoningReview = queueReasoning.completion_review || {};
+    var reasoningReviewCount = Number(reasoningReview.needs_review_count || 0);
+    var reasoningReviewFields = reasoningReview.missing_field_counts || {};
+    var reasoningReviewFieldLabels = Object.keys(reasoningReviewFields)
+      .map(function (key) {
+        return key + ":" + String(reasoningReviewFields[key] || 0);
+      })
+      .slice(0, 4);
     var blockers = Array.isArray(workbench.blockers) ? workbench.blockers : [];
     var nextActions = Array.isArray(workbench.next_actions) ? workbench.next_actions : [];
     var suggestions = Array.isArray(workbench.suggested_objectives) ? workbench.suggested_objectives : [];
@@ -972,6 +1009,14 @@
         value: String(runtimeWorkers.active_count || 0) + " active",
         tone: (runtimeWorkers.active_count || 0) > 0 ? "good" : "warn",
         detail: String(runtimeWorkers.session_count || 0) + " sessions",
+      },
+      {
+        label: "Reasoning",
+        value: reasoningReviewCount ? String(reasoningReviewCount) + " review" : String(queueReasoning.active_count || 0) + " active",
+        tone: reasoningReviewCount ? "bad" : (queueReasoning.active_count || 0) > 0 ? "warn" : "good",
+        detail: reasoningReviewCount
+          ? compactIntakeText(reasoningReviewFieldLabels.join(" · ") || "completion evidence missing", 84)
+          : "policy evidence clean",
       },
       {
         label: "Providers",
@@ -1105,6 +1150,14 @@
         detail: "Recovery work is already queued.",
       });
     }
+    if (reasoningReviewCount) {
+      queuePressure.push({
+        title: reasoningReviewCount + " reasoning review",
+        detail: reasoningReviewFieldLabels.length
+          ? "Completed work is missing " + reasoningReviewFieldLabels.join(", ") + "."
+          : "Completed work needs reasoning-policy evidence review.",
+      });
+    }
     if (pendingTasks.length) {
       queuePressure.push({
         title: pendingTasks.length + " pending",
@@ -1197,6 +1250,7 @@
       '<article><span>Pending</span><strong>' + String(queue.pending || 0) + '</strong></article>' +
       '<article><span>Failed</span><strong>' + String(queue.failed || 0) + '</strong></article>' +
       '<article><span>Completed</span><strong>' + String(queue.completed || 0) + "</strong></article>" +
+      '<article><span>Review</span><strong>' + String(reasoningReviewCount || 0) + "</strong></article>" +
       "</div>" +
       "</section>" +
       '<section class="workbench-card">' +

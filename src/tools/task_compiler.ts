@@ -62,6 +62,32 @@ type CompileBriefDocument = {
   metadata: Record<string, unknown>;
 };
 
+type CompileWorkingMemory = {
+  objective: string;
+  goal_id: string;
+  constraints: string[];
+  success_criteria: string[];
+  expected_evidence: string[];
+  rollback_notes: string[];
+  unresolved_questions: string[];
+  known_failures: Array<{
+    id: string;
+    text_preview: string;
+    keywords: string[];
+  }>;
+  current_plan: Array<{
+    stream_id: string;
+    title: string;
+    owner_role_id: string;
+    step_kind: CompiledStream["step_kind"];
+    depends_on: string[];
+    evidence_requirements: string[];
+  }>;
+  memory_citations: Array<Record<string, unknown>>;
+  compression_policy: string;
+  generated_at: string;
+};
+
 function deriveDefaultStreams(objective: string): CompiledStream[] {
   const normalized = objective.toLowerCase();
   const streams: CompiledStream[] = [];
@@ -81,6 +107,9 @@ function deriveDefaultStreams(objective: string): CompiledStream[] {
       rollback_notes: ["Do not treat weak evidence as settled truth."],
       task_metadata: {
         preferred_host_tags: ["local"],
+        task_kind: "research",
+        quality_preference: "quality",
+        focus: "implementation_research",
       },
     });
   }
@@ -97,6 +126,9 @@ function deriveDefaultStreams(objective: string): CompiledStream[] {
       rollback_notes: ["Keep the change bounded and reversible."],
       task_metadata: {
         preferred_host_tags: ["local"],
+        task_kind: "coding",
+        quality_preference: "balanced",
+        focus: "implementation",
       },
     });
   }
@@ -113,6 +145,9 @@ function deriveDefaultStreams(objective: string): CompiledStream[] {
       rollback_notes: ["Fail closed when evidence is weak or regressions are plausible."],
       task_metadata: {
         preferred_host_tags: ["local"],
+        task_kind: "verification",
+        quality_preference: "quality",
+        focus: "verification",
       },
     });
   }
@@ -185,6 +220,11 @@ function readMemoryPreflightSummary(value: unknown): SwarmMemoryPreflightSummary
   if (!query || !strategy || matchCount === null || !topMatches) {
     return null;
   }
+  const reflectionMatchCount =
+    typeof record.reflection_match_count === "number" && Number.isFinite(record.reflection_match_count)
+      ? record.reflection_match_count
+      : 0;
+  const topReflections = Array.isArray(record.top_reflections) ? record.top_reflections : [];
   return {
     query,
     strategy,
@@ -202,6 +242,29 @@ function readMemoryPreflightSummary(value: unknown): SwarmMemoryPreflightSummary
             score: typeof match.score === "number" && Number.isFinite(match.score) ? match.score : null,
             text_preview: typeof match.text_preview === "string" ? match.text_preview : "",
             citation: match.citation && typeof match.citation === "object" && !Array.isArray(match.citation) ? (match.citation as Record<string, unknown>) : {},
+          },
+        ];
+      })
+      .slice(0, 3),
+    reflection_match_count: reflectionMatchCount,
+    top_reflections: topReflections
+      .flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+          return [];
+        }
+        const reflection = entry as Record<string, unknown>;
+        return [
+          {
+            id: typeof reflection.id === "string" ? reflection.id : "unknown",
+            score: typeof reflection.score === "number" && Number.isFinite(reflection.score) ? reflection.score : null,
+            text_preview: typeof reflection.text_preview === "string" ? reflection.text_preview : "",
+            citation:
+              reflection.citation && typeof reflection.citation === "object" && !Array.isArray(reflection.citation)
+                ? (reflection.citation as Record<string, unknown>)
+                : {},
+            keywords: Array.isArray(reflection.keywords)
+              ? reflection.keywords.map((keyword) => String(keyword ?? "").trim()).filter(Boolean)
+              : [],
           },
         ];
       })
@@ -285,12 +348,61 @@ function applySignalsToTaskMetadata(
   return nextTaskMetadata;
 }
 
+function applyAdaptiveReasoningPolicy(
+  taskMetadata: Record<string, unknown>,
+  stream: CompiledStream,
+  memoryPreflight: SwarmMemoryPreflightSummary
+) {
+  const nextTaskMetadata = { ...taskMetadata };
+  const taskKind = typeof nextTaskMetadata.task_kind === "string" ? nextTaskMetadata.task_kind : null;
+  const focus = typeof nextTaskMetadata.focus === "string" ? nextTaskMetadata.focus : null;
+  const reflectionBoost = memoryPreflight.reflection_match_count > 0 ? 1 : 0;
+  const shouldMultiSample =
+    stream.step_kind === "analysis" ||
+    stream.step_kind === "verification" ||
+    taskKind === "research" ||
+    taskKind === "verification" ||
+    nextTaskMetadata.quality_preference === "quality";
+  if (shouldMultiSample) {
+    const baseCount = 2;
+    const resolvedCount = Math.min(4, baseCount + reflectionBoost);
+    const existingCount =
+      typeof nextTaskMetadata.reasoning_candidate_count === "number" && Number.isFinite(nextTaskMetadata.reasoning_candidate_count)
+        ? Math.max(1, Math.min(4, Math.round(nextTaskMetadata.reasoning_candidate_count)))
+        : 0;
+    nextTaskMetadata.reasoning_candidate_count = Math.max(existingCount, resolvedCount);
+    if (typeof nextTaskMetadata.reasoning_selection_strategy !== "string") {
+      nextTaskMetadata.reasoning_selection_strategy = "evidence_rerank";
+    }
+  }
+  if (
+    stream.step_kind === "analysis" ||
+    taskKind === "research" ||
+    focus === "implementation_research" ||
+    focus === "task_breakdown"
+  ) {
+    nextTaskMetadata.require_plan_pass = true;
+  }
+  if (stream.step_kind === "verification" || taskKind === "verification" || nextTaskMetadata.fail_closed === true) {
+    nextTaskMetadata.require_verification_pass = true;
+  }
+  return nextTaskMetadata;
+}
+
 function renderBulletedSection(title: string, items: string[]) {
   const normalized = uniqueStrings(items);
   if (normalized.length === 0) {
     return `${title}\n- none`;
   }
   return [title, ...normalized.map((item) => `- ${item}`)].join("\n");
+}
+
+function compactCompilerText(value: unknown, limit = 240) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, limit - 3))}...`;
 }
 
 function describeMemoryPreflight(memoryPreflight: ReturnType<typeof summarizeMemoryPreflight>) {
@@ -307,6 +419,114 @@ function describeMemoryPreflight(memoryPreflight: ReturnType<typeof summarizeMem
       if (match.text_preview) {
         lines.push(`    ${match.text_preview}`);
       }
+    }
+  }
+  lines.push(`- reflection_match_count: ${memoryPreflight.reflection_match_count}`);
+  if (memoryPreflight.top_reflections.length > 0) {
+    lines.push("- grounded_reflections:");
+    for (const reflection of memoryPreflight.top_reflections) {
+      lines.push(`  - memory:${reflection.id}${reflection.score === null ? "" : ` score=${reflection.score}`}`);
+      if (reflection.text_preview) {
+        lines.push(`    ${reflection.text_preview}`);
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
+function buildCompileWorkingMemory(input: {
+  goal_id: string;
+  objective: string;
+  streams: CompiledStream[];
+  success_criteria?: string[];
+  rollback?: string[];
+  constraints?: string[];
+  memory_preflight: SwarmMemoryPreflightSummary;
+  generated_at: string;
+}): CompileWorkingMemory {
+  const successCriteria = uniqueStrings(input.success_criteria ?? ["Objective is completed with evidence."]);
+  const rollbackNotes = uniqueStrings(input.rollback ?? ["Keep each workstream bounded and reversible."]);
+  const constraints = uniqueStrings(input.constraints ?? []);
+  const expectedEvidence = uniqueStrings([
+    ...successCriteria,
+    ...input.streams.flatMap((stream) => stream.evidence_requirements),
+  ]);
+  const knownFailures = input.memory_preflight.top_reflections.map((reflection) => ({
+    id: reflection.id,
+    text_preview: compactCompilerText(reflection.text_preview, 360),
+    keywords: reflection.keywords.slice(0, 12),
+  }));
+  const unresolvedQuestions = uniqueStrings([
+    ...input.streams
+      .filter((stream) => stream.step_kind === "analysis" || stream.task_metadata.task_kind === "research")
+      .flatMap((stream) =>
+        (stream.evidence_requirements.length > 0 ? stream.evidence_requirements : [stream.title]).map(
+          (entry) => `Resolve ${stream.stream_id}: ${compactCompilerText(entry, 180)}`
+        )
+      ),
+    ...(input.memory_preflight.match_count > 0
+      ? ["Confirm retrieved memory still applies before treating it as current truth."]
+      : []),
+  ]).slice(0, 8);
+  return {
+    objective: compactCompilerText(input.objective, 600),
+    goal_id: input.goal_id,
+    constraints,
+    success_criteria: successCriteria,
+    expected_evidence: expectedEvidence.slice(0, 12),
+    rollback_notes: rollbackNotes,
+    unresolved_questions: unresolvedQuestions,
+    known_failures: knownFailures,
+    current_plan: input.streams.map((stream) => ({
+      stream_id: stream.stream_id,
+      title: stream.title,
+      owner_role_id: stream.owner_role_id,
+      step_kind: stream.step_kind,
+      depends_on: stream.depends_on,
+      evidence_requirements: stream.evidence_requirements,
+    })),
+    memory_citations: [
+      ...input.memory_preflight.top_matches.map((match) => match.citation),
+      ...input.memory_preflight.top_reflections.map((reflection) => reflection.citation),
+    ].filter((entry) => Object.keys(entry).length > 0),
+    compression_policy:
+      "Use this compact state first; retrieve cited memory only when a decision needs more context, and avoid replaying raw transcripts by default.",
+    generated_at: input.generated_at,
+  };
+}
+
+function laneWorkingMemory(workingMemory: CompileWorkingMemory, stream: Pick<CompiledStream, "stream_id" | "owner_role_id" | "title">) {
+  return {
+    ...workingMemory,
+    current_stream_id: stream.stream_id,
+    current_owner_role_id: stream.owner_role_id,
+    current_stream_title: stream.title,
+  };
+}
+
+function describeWorkingMemory(workingMemory: CompileWorkingMemory) {
+  const lines = [
+    "Working memory",
+    `- compression_policy: ${workingMemory.compression_policy}`,
+    `- expected_evidence_count: ${workingMemory.expected_evidence.length}`,
+    `- known_failure_count: ${workingMemory.known_failures.length}`,
+  ];
+  if (workingMemory.constraints.length > 0) {
+    lines.push("- constraints:");
+    for (const constraint of workingMemory.constraints.slice(0, 6)) {
+      lines.push(`  - ${constraint}`);
+    }
+  }
+  if (workingMemory.unresolved_questions.length > 0) {
+    lines.push("- unresolved_questions:");
+    for (const question of workingMemory.unresolved_questions.slice(0, 6)) {
+      lines.push(`  - ${question}`);
+    }
+  }
+  if (workingMemory.known_failures.length > 0) {
+    lines.push("- known_failures:");
+    for (const failure of workingMemory.known_failures.slice(0, 3)) {
+      lines.push(`  - memory:${failure.id} ${failure.text_preview}`);
     }
   }
   return lines.join("\n");
@@ -368,6 +588,8 @@ function buildCompileBriefDocument(input: {
     "",
     describeMemoryPreflight(input.preview.memory_preflight),
     "",
+    describeWorkingMemory(input.preview.working_memory),
+    "",
     "Workstreams",
     ...workstreamSummaries.flatMap((stream, index) => [
       `${index + 1}. ${stream.title} [${stream.stream_id}]`,
@@ -403,6 +625,7 @@ function buildCompileBriefDocument(input: {
       summary: input.preview.summary,
       swarm_profile: input.preview.swarm_profile,
       memory_preflight: input.preview.memory_preflight,
+      working_memory: input.preview.working_memory,
       streams: workstreamSummaries,
       steps: stepSummaries,
       success_criteria: input.success_criteria,
@@ -416,6 +639,9 @@ function buildCompileBriefDocument(input: {
       stream_count: workstreamSummaries.length,
       step_count: stepSummaries.length,
       memory_match_count: input.preview.memory_preflight.match_count,
+      reflection_match_count: input.preview.memory_preflight.reflection_match_count,
+      working_memory_known_failure_count: input.preview.working_memory.known_failures.length,
+      working_memory_unresolved_question_count: input.preview.working_memory.unresolved_questions.length,
     },
   };
 }
@@ -428,6 +654,7 @@ export function compileObjectivePreview(
     workstreams?: z.infer<typeof compiledWorkstreamSchema>[];
     success_criteria?: string[];
     rollback?: string[];
+    constraints?: string[];
     metadata?: Record<string, unknown>;
     risk_tier?: GoalRiskTier | null;
     budget?: Record<string, unknown> | null;
@@ -477,6 +704,16 @@ export function compileObjectivePreview(
       }),
       swarmProfile.memory_preflight.query
     );
+  const workingMemory = buildCompileWorkingMemory({
+    goal_id: input.goal_id?.trim() || "preview-goal",
+    objective: input.objective,
+    streams,
+    success_criteria: input.success_criteria,
+    rollback: input.rollback,
+    constraints: input.constraints,
+    memory_preflight: memoryPreflight,
+    generated_at: now,
+  });
   const analysisStepId = `compile-analysis-${crypto.randomUUID()}`;
   const streamStepIds = new Map(streams.map((stream) => [stream.stream_id, `${stream.stream_id}-${crypto.randomUUID()}`]));
   const compiledSteps = [
@@ -501,6 +738,11 @@ export function compileObjectivePreview(
         swarm_profile: swarmProfile,
         checkpoint_policy: swarmProfile.checkpoint_policy,
         memory_preflight: memoryPreflight,
+        working_memory: laneWorkingMemory(workingMemory, {
+          stream_id: "compile-analysis",
+          owner_role_id: "ring-leader",
+          title: "Frame the objective and open execution lanes",
+        }),
       },
       depends_on: [],
     },
@@ -512,7 +754,11 @@ export function compileObjectivePreview(
       const evidenceRequirements = uniqueStrings(stream.evidence_requirements);
       const rollbackNotes = uniqueStrings([...stream.rollback_notes, ...deriveProgramRollbackNotes(orgProgram.signals)]);
       const acceptanceChecks = uniqueStrings([...evidenceRequirements, ...deriveProgramAcceptanceChecks(orgProgram.signals)]);
-      const taskExecution = applySignalsToTaskMetadata(stream.task_metadata, orgProgram.signals);
+      const taskExecution = applyAdaptiveReasoningPolicy(
+        applySignalsToTaskMetadata(stream.task_metadata, orgProgram.signals),
+        stream,
+        memoryPreflight
+      );
       if (
         (stream.step_kind === "mutation" || stream.step_kind === "verification") &&
         (typeof taskExecution.runtime_id !== "string" || !taskExecution.runtime_id.trim())
@@ -551,6 +797,7 @@ export function compileObjectivePreview(
           checkpoint_required: true,
           checkpoint_cadence: swarmProfile.checkpoint_policy.cadence,
           memory_preflight: memoryPreflight,
+          working_memory: laneWorkingMemory(workingMemory, stream),
           task_execution: taskExecution,
         },
         depends_on: [analysisStepId, ...resolvedDependsOn],
@@ -558,22 +805,49 @@ export function compileObjectivePreview(
     }),
   ];
 
+  const finalVerificationTitle = "Merge evidence and decide whether the objective is truly complete";
+  const finalEvidenceRequirements = input.success_criteria ?? ["Evidence bundle satisfies the objective."];
+  const finalRollbackNotes = input.rollback ?? ["Keep each workstream bounded and reversible."];
+  const finalVerificationStream: CompiledStream = {
+    stream_id: "verification-finalize",
+    title: finalVerificationTitle,
+    owner_role_id: "verification-director",
+    executor_ref: "verification-director",
+    step_kind: "decision",
+    depends_on: streams.map((stream) => stream.stream_id),
+    evidence_requirements: finalEvidenceRequirements,
+    rollback_notes: finalRollbackNotes,
+    task_metadata: {
+      preferred_host_tags: ["local"],
+      task_kind: "verification",
+      quality_preference: "quality",
+      focus: "verification",
+      require_plan_pass: true,
+      require_verification_pass: true,
+    },
+  };
+  const finalTaskExecution = applyAdaptiveReasoningPolicy(
+    finalVerificationStream.task_metadata,
+    finalVerificationStream,
+    memoryPreflight
+  );
+
   compiledSteps.push({
     step_id: `compile-verification-${crypto.randomUUID()}`,
     seq: compiledSteps.length + 1,
-    title: "Merge evidence and decide whether the objective is truly complete",
+    title: finalVerificationTitle,
     step_kind: "decision",
     status: "pending",
     executor_kind: "worker",
     executor_ref: "verification-director",
     input: {
       objective: input.objective,
-      stream_id: "verification-finalize",
-      evidence_requirements: input.success_criteria ?? ["Evidence bundle satisfies the objective."],
-      rollback_notes: input.rollback ?? ["Keep each workstream bounded and reversible."],
+      stream_id: finalVerificationStream.stream_id,
+      evidence_requirements: finalEvidenceRequirements,
+      rollback_notes: finalRollbackNotes,
     },
     expected_artifact_types: ["verification.report"],
-    acceptance_checks: input.success_criteria ?? ["Evidence bundle satisfies the objective."],
+    acceptance_checks: finalEvidenceRequirements,
     retry_policy: {},
     timeout_seconds: 1800,
     metadata: {
@@ -589,7 +863,8 @@ export function compileObjectivePreview(
       checkpoint_required: true,
       checkpoint_cadence: swarmProfile.checkpoint_policy.cadence,
       memory_preflight: memoryPreflight,
-      task_execution: {},
+      working_memory: laneWorkingMemory(workingMemory, finalVerificationStream),
+      task_execution: finalTaskExecution,
     },
     depends_on: compiledSteps.filter((step) => step.step_id !== analysisStepId).map((step) => step.step_id),
   });
@@ -600,6 +875,7 @@ export function compileObjectivePreview(
     steps: compiledSteps,
     swarm_profile: swarmProfile,
     memory_preflight: memoryPreflight,
+    working_memory: workingMemory,
   };
 }
 
@@ -620,6 +896,7 @@ export async function taskCompile(storage: Storage, input: z.infer<typeof taskCo
         workstreams: input.workstreams,
         success_criteria: input.success_criteria,
         rollback: input.rollback,
+        constraints: goal.constraints,
         metadata: input.metadata,
         risk_tier: goal.risk_tier,
         budget: goal.budget,
@@ -650,6 +927,7 @@ export async function taskCompile(storage: Storage, input: z.infer<typeof taskCo
               swarm_profile: preview.swarm_profile,
               checkpoint_policy: preview.swarm_profile.checkpoint_policy,
               memory_preflight: preview.memory_preflight,
+              working_memory: preview.working_memory,
               ...(input.metadata ?? {}),
             }, typeof goal.metadata.permission_profile === "string" ? goal.metadata.permission_profile : null),
             steps: preview.steps,
@@ -691,6 +969,7 @@ export async function taskCompile(storage: Storage, input: z.infer<typeof taskCo
             step_count: created.steps.length,
             profile: preview.swarm_profile,
             memory_preflight: preview.memory_preflight,
+            working_memory: preview.working_memory,
           },
           metadata: {
             phase: "plan-compiled",
@@ -734,6 +1013,7 @@ export async function taskCompile(storage: Storage, input: z.infer<typeof taskCo
         created_plan: created?.created ?? false,
         swarm_profile: preview.swarm_profile,
         memory_preflight: preview.memory_preflight,
+        working_memory: preview.working_memory,
         compile_brief: compileBrief,
         compile_brief_artifact: compile_brief_artifact?.artifact ?? null,
         checkpoint_artifact: checkpoint_artifact?.artifact ?? null,

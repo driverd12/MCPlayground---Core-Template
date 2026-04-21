@@ -458,6 +458,33 @@ export type TaskRecord = {
   lease: TaskLeaseRecord | null;
 };
 
+export type TaskCompletionReasoningAudit = {
+  required: boolean;
+  status: "not_required" | "satisfied" | "needs_review";
+  required_candidate_count: number | null;
+  observed_candidate_count: number | null;
+  selection: {
+    strategy: string | null;
+    selection_rationale_present: boolean;
+    selected_candidate_id: string | null;
+    candidate_count: number | null;
+    selected_candidate_in_candidates: boolean | null;
+    selected_candidate_has_evidence: boolean;
+    evidence_scored_candidate_count: number;
+  };
+  required_fields: string[];
+  satisfied_fields: string[];
+  missing_fields: string[];
+  warnings: string[];
+};
+
+export type TaskFailureReflectionCapture = {
+  memory_id: number;
+  created_at: string;
+  event_id: string;
+  keywords: string[];
+};
+
 export type BudgetLedgerEntryRecord = {
   entry_id: string;
   created_at: string;
@@ -694,6 +721,26 @@ export type TriChatAdapterTelemetrySummaryRecord = {
 export type TaskSummaryRecord = {
   counts: Record<TaskStatus, number>;
   expired_running_count: number;
+  reasoning_policy: {
+    pending_count: number;
+    running_count: number;
+    total_active_count: number;
+    evidence_rerank_count: number;
+    plan_pass_count: number;
+    verification_pass_count: number;
+    total_candidate_count: number;
+    max_candidate_count: number;
+    high_compute_task_ids: string[];
+    completion_review: {
+      audited_completed_count: number;
+      needs_review_count: number;
+      satisfied_count: number;
+      missing_field_counts: Record<string, number>;
+      needs_review_task_ids: string[];
+      last_needs_review_task_id: string | null;
+      last_needs_review_at: string | null;
+    };
+  };
   running: Array<{
     task_id: string;
     objective: string;
@@ -7754,6 +7801,8 @@ export class Storage {
           reason: "owner-mismatch",
         };
       }
+      const existingTask = this.getTaskById(taskId);
+      const result = withTaskCompletionReasoningAudit(existingTask, params.result ?? {});
       const updated = this.db
         .prepare(
           `UPDATE tasks
@@ -7766,7 +7815,7 @@ export class Storage {
            WHERE task_id = ?
              AND status = 'running'`
         )
-        .run(now, now, workerId, stableStringify(params.result ?? {}), taskId);
+        .run(now, now, workerId, stableStringify(result), taskId);
       if (Number(updated.changes ?? 0) <= 0) {
         return {
           completed: false,
@@ -7782,9 +7831,37 @@ export class Storage {
         worker_id: workerId,
         summary: params.summary?.trim() || "Task completed successfully.",
         details: {
-          result_keys: Object.keys(params.result ?? {}),
+          result_keys: Object.keys(result),
+          reasoning_policy_audit: result.reasoning_policy_audit ?? null,
         },
       });
+      const reasoningAudit = readPlainObject(result.reasoning_policy_audit);
+      if (reasoningAudit?.status === "needs_review") {
+        const missingFields = Array.isArray(reasoningAudit.missing_fields)
+          ? reasoningAudit.missing_fields.map((entry) => String(entry ?? "").trim()).filter(Boolean)
+          : [];
+        this.appendTaskEvent({
+          task_id: taskId,
+          event_type: "reasoning_review_needed",
+          from_status: "completed",
+          to_status: "completed",
+          worker_id: workerId,
+          summary:
+            missingFields.length > 0
+              ? `Task completed but reasoning-policy evidence needs review: missing ${missingFields.join(", ")}.`
+              : "Task completed but reasoning-policy evidence needs review.",
+          details: {
+            audit_status: reasoningAudit.status,
+            missing_fields: missingFields,
+            required_fields: Array.isArray(reasoningAudit.required_fields) ? reasoningAudit.required_fields : [],
+            satisfied_fields: Array.isArray(reasoningAudit.satisfied_fields) ? reasoningAudit.satisfied_fields : [],
+            required_candidate_count: reasoningAudit.required_candidate_count ?? null,
+            observed_candidate_count: reasoningAudit.observed_candidate_count ?? null,
+            selection: readPlainObject(reasoningAudit.selection) ?? null,
+            warnings: Array.isArray(reasoningAudit.warnings) ? reasoningAudit.warnings : [],
+          },
+        });
+      }
       const task = this.getTaskById(taskId);
       return {
         completed: true,
@@ -7801,7 +7878,7 @@ export class Storage {
     error: string;
     result?: Record<string, unknown>;
     summary?: string;
-  }): { failed: boolean; reason: string; task?: TaskRecord } {
+  }): { failed: boolean; reason: string; task?: TaskRecord; auto_reflection?: TaskFailureReflectionCapture | null } {
     const taskId = params.task_id.trim();
     const workerId = params.worker_id.trim();
     const errorText = params.error.trim();
@@ -7860,10 +7937,19 @@ export class Storage {
         },
       });
       const task = this.getTaskById(taskId);
+      const autoReflection = task
+        ? captureTaskFailureReflection(this, task, {
+            worker_id: workerId,
+            error: errorText,
+            summary: params.summary,
+            result: params.result,
+          })
+        : null;
       return {
         failed: true,
         reason: "failed",
         task: task ?? undefined,
+        auto_reflection: autoReflection,
       };
     });
     return fail();
@@ -7882,6 +7968,14 @@ export class Storage {
     const delaySeconds = parseBoundedInt(params.delay_seconds, 0, 0, 86400);
     const now = new Date().toISOString();
     const availableAt = new Date(Date.now() + delaySeconds * 1000).toISOString();
+    const existingTaskForRetry = this.getTaskById(taskId);
+    const retryMemoryPreflight = existingTaskForRetry
+      ? buildTaskRetryReflectionPreflight(this, existingTaskForRetry, now)
+      : null;
+    const retryMetadata =
+      existingTaskForRetry && retryMemoryPreflight
+        ? mergeTaskRetryReflectionPreflight(existingTaskForRetry.metadata, retryMemoryPreflight, now)
+        : existingTaskForRetry?.metadata ?? {};
 
     const retry = this.db.transaction(() => {
       const existing = this.db
@@ -7918,10 +8012,11 @@ export class Storage {
                started_at = NULL,
                finished_at = NULL,
                last_error = NULL,
-               result_json = NULL
+               result_json = NULL,
+               metadata_json = ?
            WHERE task_id = ?`
         )
-        .run(now, availableAt, taskId);
+        .run(now, availableAt, stableStringify(retryMetadata), taskId);
       this.db.prepare(`DELETE FROM task_leases WHERE task_id = ?`).run(taskId);
       this.appendTaskEvent({
         task_id: taskId,
@@ -7933,6 +8028,12 @@ export class Storage {
           delay_seconds: delaySeconds,
           available_at: availableAt,
           force: Boolean(params.force),
+          retry_reflection_memory_ids: retryMemoryPreflight
+            ? asStringArrayForStorage(retryMemoryPreflight.retry_reflection_memory_ids)
+            : [],
+          retry_reflection_match_count: retryMemoryPreflight
+            ? asFiniteNumberForStorage(retryMemoryPreflight.reflection_match_count)
+            : 0,
         },
       });
       const task = this.getTaskById(taskId);
@@ -8197,6 +8298,28 @@ export class Storage {
          LIMIT 1`
       )
       .get() as Record<string, unknown> | undefined;
+    const reasoningRows = this.db
+      .prepare(
+        `SELECT task_id, status, metadata_json
+         FROM tasks
+         WHERE status IN ('pending', 'running')
+         ORDER BY priority DESC, updated_at DESC
+         LIMIT 500`
+      )
+      .all() as Array<Record<string, unknown>>;
+    const completionReasoningRows = this.db
+      .prepare(
+        `SELECT task_id, updated_at, result_json
+         FROM tasks
+         WHERE status = 'completed'
+         ORDER BY updated_at DESC
+         LIMIT 500`
+      )
+      .all() as Array<Record<string, unknown>>;
+    const reasoningPolicy = summarizeTaskReasoningPolicy(
+      reasoningRows,
+      summarizeTaskCompletionReasoningReview(completionReasoningRows)
+    );
 
     return {
       counts,
@@ -8204,6 +8327,7 @@ export class Storage {
         const leaseExpiresAt = asNullableString(row.lease_expires_at);
         return leaseExpiresAt !== null && leaseExpiresAt <= now;
       }).length,
+      reasoning_policy: reasoningPolicy,
       running: runningRows.map((row) => ({
         task_id: String(row.task_id ?? ""),
         objective: String(row.objective ?? ""),
@@ -13521,6 +13645,699 @@ function mapTaskRow(row: Record<string, unknown>): TaskRecord {
           }
       : null,
   };
+}
+
+function withTaskCompletionReasoningAudit(task: TaskRecord | null | undefined, result: Record<string, unknown>): Record<string, unknown> {
+  const audit = buildTaskCompletionReasoningAudit(task, result);
+  if (!audit) {
+    return result;
+  }
+  return {
+    ...result,
+    reasoning_policy_audit: audit,
+  };
+}
+
+function buildTaskRetryReflectionPreflight(
+  storage: Storage,
+  task: TaskRecord,
+  injectedAt: string
+): (Record<string, unknown> & {
+  reflection_match_count: number;
+  retry_reflection_memory_ids: string[];
+}) | null {
+  const execution = readPlainObject(task.metadata.task_execution);
+  if (!isTaskExecutionHighCompute(execution)) {
+    return null;
+  }
+  const memories = storage
+    .searchMemories({
+      query: task.task_id,
+      limit: 5,
+    })
+    .filter((entry) => entry.keywords.includes("reflection") || /Reflection Case:/i.test(entry.content))
+    .slice(0, 3);
+  if (memories.length === 0) {
+    return null;
+  }
+  const topReflections = memories.map((entry) => ({
+    id: String(entry.id),
+    score: typeof entry.score === "number" && Number.isFinite(entry.score) ? entry.score : null,
+    text_preview: compactStorageSingleLine(entry.content, 320),
+    citation: {
+      source: "memory",
+      id: String(entry.id),
+    },
+    keywords: entry.keywords.slice(0, 12),
+  }));
+  return {
+    query: task.task_id,
+    strategy: "retry_reflection",
+    match_count: memories.length,
+    top_matches: [],
+    reflection_match_count: memories.length,
+    top_reflections: topReflections,
+    retry_reflection_memory_ids: topReflections.map((entry) => entry.id),
+    retry_reflection_injected_at: injectedAt,
+  };
+}
+
+function captureTaskFailureReflection(
+  storage: Storage,
+  task: TaskRecord,
+  input: {
+    worker_id: string;
+    error: string;
+    summary?: string;
+    result?: Record<string, unknown>;
+  }
+): TaskFailureReflectionCapture | null {
+  const execution = readPlainObject(task.metadata.task_execution);
+  if (!execution || !isTaskExecutionHighCompute(execution)) {
+    return null;
+  }
+
+  const taskKind = String(execution.task_kind ?? "").trim() || "task";
+  const candidateCount =
+    typeof execution.reasoning_candidate_count === "number" && Number.isFinite(execution.reasoning_candidate_count)
+      ? Math.max(1, Math.min(4, Math.round(execution.reasoning_candidate_count)))
+      : null;
+  const resultKeys = Object.keys(input.result ?? {}).slice(0, 12);
+  const groundedFeedback = [
+    `Task ${task.task_id} failed under ${taskKind} reasoning policy.`,
+    `Failure error: ${compactStorageSingleLine(input.error, 220)}`,
+    input.summary ? `Worker summary: ${compactStorageSingleLine(input.summary, 220)}` : null,
+    resultKeys.length > 0 ? `Failure result keys: ${resultKeys.join(", ")}` : null,
+  ].filter((entry): entry is string => Boolean(entry));
+  const policySignals = [
+    candidateCount && candidateCount > 1 ? `candidate_count=${candidateCount}` : null,
+    String(execution.reasoning_selection_strategy ?? "").trim()
+      ? `selection=${String(execution.reasoning_selection_strategy ?? "").trim()}`
+      : null,
+    execution.require_plan_pass === true ? "plan_pass_required" : null,
+    execution.require_verification_pass === true ? "verification_pass_required" : null,
+  ].filter((entry): entry is string => Boolean(entry));
+  const content = [
+    `Reflection Case: Failed high-compute task ${task.task_id}`,
+    `Objective: ${compactStorageSingleLine(task.objective, 360)}`,
+    `Attempted action: ${compactStorageSingleLine(input.summary || "Task execution reported failure.", 300)}`,
+    "Grounded feedback:",
+    ...groundedFeedback.map((entry) => `- ${entry}`),
+    "Reflection:",
+    "Retry should change the candidate, evidence, or verification path instead of repeating the failed execution. Re-enter with explicit evidence for the required reasoning-policy fields before completion.",
+    "Next actions:",
+    "- Inspect the failure evidence and identify the contradiction or missing check.",
+    "- Generate a revised bounded candidate path and verify it with concrete evidence.",
+    "- If evidence remains weak, fail closed with the blocker instead of marking success.",
+    "Evidence references:",
+    `- [run] storage.failTask (task:${task.task_id})`,
+  ].join("\n");
+
+  const keywords = normalizeKeywords([
+    "reflection",
+    "episodic",
+    "grounded",
+    "task-failure",
+    "high-compute",
+    "reasoning-policy",
+    task.task_id,
+    taskKind,
+    ...policySignals,
+    ...task.tags,
+  ]);
+  const memory = storage.insertMemory({
+    content,
+    keywords,
+  });
+  const event = storage.appendRuntimeEvent({
+    event_type: "memory.reflection_captured",
+    entity_type: "memory",
+    entity_id: String(memory.id),
+    status: "active",
+    summary: `auto reflection captured for failed task ${task.task_id}`,
+    details: {
+      task_id: task.task_id,
+      worker_id: input.worker_id,
+      grounded_feedback_count: groundedFeedback.length,
+      source: "storage.failTask",
+      policy_signals: policySignals,
+    },
+  });
+  return {
+    memory_id: memory.id,
+    created_at: memory.created_at,
+    event_id: event.event_id,
+    keywords: normalizeKeywords(["reflection", "task-failure", "high-compute", ...policySignals]),
+  };
+}
+
+function mergeTaskRetryReflectionPreflight(
+  metadata: Record<string, unknown>,
+  retryPreflight: Record<string, unknown>,
+  injectedAt: string
+): Record<string, unknown> {
+  const existingPreflight = readPlainObject(metadata.memory_preflight) ?? {};
+  const existingTopReflections = Array.isArray(existingPreflight.top_reflections)
+    ? existingPreflight.top_reflections.filter((entry) => readPlainObject(entry))
+    : [];
+  const retryTopReflections = Array.isArray(retryPreflight.top_reflections)
+    ? retryPreflight.top_reflections.filter((entry) => readPlainObject(entry))
+    : [];
+  const seen = new Set<string>();
+  const topReflections = [...retryTopReflections, ...existingTopReflections]
+    .filter((entry) => {
+      const record = readPlainObject(entry);
+      const id = String(record?.id ?? "").trim();
+      if (!id || seen.has(id)) {
+        return false;
+      }
+      seen.add(id);
+      return true;
+    })
+    .slice(0, 3);
+  return {
+    ...metadata,
+    memory_preflight: {
+      ...existingPreflight,
+      ...retryPreflight,
+      reflection_match_count: Math.max(
+        asFiniteNumberForStorage(existingPreflight.reflection_match_count),
+        asFiniteNumberForStorage(retryPreflight.reflection_match_count),
+        topReflections.length
+      ),
+      top_reflections: topReflections,
+      retry_reflection_injected_at: injectedAt,
+    },
+  };
+}
+
+function isTaskExecutionHighCompute(execution: Record<string, unknown> | null): boolean {
+  if (!execution) {
+    return false;
+  }
+  const candidateCount =
+    typeof execution.reasoning_candidate_count === "number" && Number.isFinite(execution.reasoning_candidate_count)
+      ? Math.max(1, Math.min(4, Math.round(execution.reasoning_candidate_count)))
+      : 0;
+  const taskKind = String(execution.task_kind ?? "").trim();
+  const qualityPreference = String(execution.quality_preference ?? "").trim();
+  return (
+    candidateCount > 1 ||
+    String(execution.reasoning_selection_strategy ?? "").trim() === "evidence_rerank" ||
+    execution.require_plan_pass === true ||
+    execution.require_verification_pass === true ||
+    (qualityPreference === "quality" && (taskKind === "research" || taskKind === "verification"))
+  );
+}
+
+function buildTaskCompletionReasoningAudit(
+  task: TaskRecord | null | undefined,
+  result: Record<string, unknown>
+): TaskCompletionReasoningAudit | null {
+  const execution = readPlainObject(task?.metadata.task_execution);
+  if (!execution) {
+    return null;
+  }
+  const candidateRequirement =
+    typeof execution.reasoning_candidate_count === "number" && Number.isFinite(execution.reasoning_candidate_count)
+      ? Math.max(1, Math.min(4, Math.round(execution.reasoning_candidate_count)))
+      : null;
+  const evidenceRerank = String(execution.reasoning_selection_strategy ?? "").trim() === "evidence_rerank";
+  const planRequired = execution.require_plan_pass === true;
+  const verificationRequired = execution.require_verification_pass === true;
+  const taskKind = String(execution.task_kind ?? "").trim();
+  const qualityPreference = String(execution.quality_preference ?? "").trim();
+  const qualityBiased =
+    qualityPreference === "quality" && (taskKind === "research" || taskKind === "verification");
+  const required =
+    planRequired ||
+    verificationRequired ||
+    evidenceRerank ||
+    (candidateRequirement !== null && candidateRequirement > 1) ||
+    qualityBiased;
+  if (!required) {
+    return null;
+  }
+
+  const requiredFields: string[] = [];
+  const satisfiedFields: string[] = [];
+  const missingFields: string[] = [];
+  const warnings: string[] = [];
+  const observedCandidateCount = readCompletionCandidateCount(result);
+  const selectionAudit = buildCompletionSelectionAudit(
+    result,
+    observedCandidateCount,
+    evidenceRerank ? "evidence_rerank" : null
+  );
+
+  const requireField = (field: string, satisfied: boolean) => {
+    requiredFields.push(field);
+    if (satisfied) {
+      satisfiedFields.push(field);
+    } else {
+      missingFields.push(field);
+    }
+  };
+
+  if (candidateRequirement !== null && candidateRequirement > 1) {
+    requireField(
+      "candidate_evidence",
+      observedCandidateCount !== null && observedCandidateCount >= candidateRequirement
+    );
+  }
+  if (evidenceRerank) {
+    requireField("selection_rationale", completionSelectionAuditIsSatisfied(selectionAudit));
+  }
+  if (planRequired) {
+    requireField("plan_pass", hasCompletionEvidence(result, [
+      "plan_pass",
+      "plan_passed",
+      "plan_summary",
+      "planning_summary",
+      "planned_steps",
+      "reasoning_plan",
+      "plan",
+    ]));
+  }
+  if (verificationRequired) {
+    requireField("verification_pass", hasCompletionEvidence(result, [
+      "verification_pass",
+      "verification_passed",
+      "verification_summary",
+      "verification_evidence",
+      "test_results",
+      "checks",
+      "evidence",
+      "evidence_refs",
+      "validated_by",
+    ]));
+  }
+  if (qualityBiased && requiredFields.length === 0) {
+    requireField("evidence_summary", hasCompletionEvidence(result, [
+      "evidence",
+      "evidence_refs",
+      "evidence_summary",
+      "verification_summary",
+      "checks",
+      "test_results",
+    ]));
+  }
+
+  if (missingFields.length > 0) {
+    warnings.push("Completion accepted, but reasoning-policy evidence is incomplete; review before treating as verified.");
+  }
+  if (
+    candidateRequirement !== null &&
+    candidateRequirement > 1 &&
+    observedCandidateCount !== null &&
+    observedCandidateCount < candidateRequirement
+  ) {
+    warnings.push(`Observed ${observedCandidateCount} candidate(s), below required ${candidateRequirement}.`);
+  }
+  if (evidenceRerank && selectionAudit.selection_rationale_present && !completionSelectionAuditIsSatisfied(selectionAudit)) {
+    warnings.push(
+      "Selection rationale is present, but the chosen candidate is not grounded in the candidate evidence."
+    );
+  }
+
+  return {
+    required: true,
+    status: missingFields.length === 0 ? "satisfied" : "needs_review",
+    required_candidate_count: candidateRequirement && candidateRequirement > 1 ? candidateRequirement : null,
+    observed_candidate_count: observedCandidateCount,
+    selection: selectionAudit,
+    required_fields: requiredFields,
+    satisfied_fields: satisfiedFields,
+    missing_fields: missingFields,
+    warnings,
+  };
+}
+
+type CompletionCandidateEvidence = {
+  id: string;
+  selected: boolean;
+  has_evidence: boolean;
+};
+
+function buildCompletionSelectionAudit(
+  result: Record<string, unknown>,
+  observedCandidateCount: number | null,
+  strategy: string | null
+): TaskCompletionReasoningAudit["selection"] {
+  const candidates = readCompletionCandidateEvidence(result);
+  const explicitSelectedId = readCompletionSelectedCandidateId(result);
+  const inferredSelected = candidates.find((entry) => entry.selected) ?? null;
+  const selectedCandidateId = explicitSelectedId ?? inferredSelected?.id ?? null;
+  const selectedKey = normalizeCompletionCandidateId(selectedCandidateId);
+  const selectedCandidate = selectedKey
+    ? candidates.find((entry) => normalizeCompletionCandidateId(entry.id) === selectedKey) ?? null
+    : inferredSelected;
+  const selectedCandidateInCandidates =
+    candidates.length === 0 ? null : selectedCandidate ? true : selectedCandidateId ? false : null;
+  const selectedCandidateObject = readCompletionSelectedCandidateObject(result);
+  const selectedCandidateHasEvidence =
+    selectedCandidate?.has_evidence === true ||
+    (selectedCandidateObject ? completionCandidateHasEvidence(selectedCandidateObject) : false);
+  return {
+    strategy,
+    selection_rationale_present: hasCompletionEvidence(result, [
+      "selection_rationale",
+      "rerank_rationale",
+      "selected_candidate_rationale",
+      "selected_candidate_reason",
+    ]),
+    selected_candidate_id: selectedCandidateId,
+    candidate_count: observedCandidateCount,
+    selected_candidate_in_candidates: selectedCandidateInCandidates,
+    selected_candidate_has_evidence: selectedCandidateHasEvidence,
+    evidence_scored_candidate_count: candidates.filter((entry) => entry.has_evidence).length,
+  };
+}
+
+function completionSelectionAuditIsSatisfied(selection: TaskCompletionReasoningAudit["selection"]): boolean {
+  if (!selection.selection_rationale_present) {
+    return false;
+  }
+  if (!selection.selected_candidate_id) {
+    return false;
+  }
+  if (selection.selected_candidate_in_candidates === false) {
+    return false;
+  }
+  if ((selection.candidate_count ?? 0) > 0 && !selection.selected_candidate_has_evidence) {
+    return false;
+  }
+  return true;
+}
+
+function readCompletionCandidateEvidence(result: Record<string, unknown>): CompletionCandidateEvidence[] {
+  const candidates: CompletionCandidateEvidence[] = [];
+  for (const source of completionEvidenceSources(result)) {
+    for (const key of ["candidates", "candidate_paths", "options", "alternatives"]) {
+      const value = source[key];
+      if (!Array.isArray(value)) {
+        continue;
+      }
+      value.forEach((entry, index) => {
+        const record = readPlainObject(entry);
+        if (!record) {
+          candidates.push({
+            id: `candidate-${index + 1}`,
+            selected: false,
+            has_evidence: typeof entry === "string" && entry.trim().length > 0,
+          });
+          return;
+        }
+        candidates.push({
+          id: readCompletionCandidateId(record) ?? `candidate-${index + 1}`,
+          selected: completionCandidateIsSelected(record),
+          has_evidence: completionCandidateHasEvidence(record),
+        });
+      });
+    }
+  }
+  return candidates;
+}
+
+function readCompletionSelectedCandidateId(result: Record<string, unknown>): string | null {
+  for (const source of completionEvidenceSources(result)) {
+    for (const key of ["selected_candidate_id", "selected_candidate", "chosen_candidate", "winner"]) {
+      const value = source[key];
+      const normalized = stringifyCompletionCandidateRef(value);
+      if (normalized) {
+        return normalized;
+      }
+    }
+  }
+  return null;
+}
+
+function readCompletionSelectedCandidateObject(result: Record<string, unknown>): Record<string, unknown> | null {
+  for (const source of completionEvidenceSources(result)) {
+    for (const key of ["selected_candidate", "chosen_candidate", "winner"]) {
+      const value = readPlainObject(source[key]);
+      if (value) {
+        return value;
+      }
+    }
+  }
+  return null;
+}
+
+function readCompletionCandidateId(candidate: Record<string, unknown>): string | null {
+  for (const key of ["id", "candidate_id", "label", "name", "key", "path_id", "title"]) {
+    const value = candidate[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+  return null;
+}
+
+function stringifyCompletionCandidateRef(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  const record = readPlainObject(value);
+  return record ? readCompletionCandidateId(record) : null;
+}
+
+function normalizeCompletionCandidateId(value: string | null): string | null {
+  const normalized = value?.trim().toLowerCase() ?? "";
+  return normalized.length > 0 ? normalized : null;
+}
+
+function completionCandidateIsSelected(candidate: Record<string, unknown>): boolean {
+  if (candidate.selected === true || candidate.chosen === true || candidate.winner === true) {
+    return true;
+  }
+  for (const key of ["verdict", "status", "outcome", "decision"]) {
+    const value = String(candidate[key] ?? "").trim().toLowerCase();
+    if (["selected", "chosen", "winner", "accepted", "promoted"].includes(value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function completionCandidateHasEvidence(candidate: Record<string, unknown>): boolean {
+  for (const key of [
+    "evidence",
+    "rationale",
+    "reason",
+    "verification_summary",
+    "verification_evidence",
+    "test_results",
+    "checks",
+    "score",
+    "verifier_score",
+    "contradiction_risk",
+  ]) {
+    if (isCompletionEvidenceValue(candidate[key])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function readCompletionCandidateCount(result: Record<string, unknown>): number | null {
+  let count: number | null = null;
+  for (const source of completionEvidenceSources(result)) {
+    for (const key of ["candidate_count", "reasoning_candidate_count", "reasoning_candidates"]) {
+      const value = source[key];
+      if (typeof value === "number" && Number.isFinite(value)) {
+        count = Math.max(count ?? 0, Math.max(0, Math.round(value)));
+      }
+    }
+    for (const key of ["candidates", "candidate_paths", "options", "alternatives"]) {
+      const value = source[key];
+      if (Array.isArray(value)) {
+        count = Math.max(count ?? 0, value.length);
+      }
+    }
+  }
+  return count;
+}
+
+function hasCompletionEvidence(result: Record<string, unknown>, keys: string[]): boolean {
+  for (const source of completionEvidenceSources(result)) {
+    for (const key of keys) {
+      if (isCompletionEvidenceValue(source[key])) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function completionEvidenceSources(result: Record<string, unknown>): Record<string, unknown>[] {
+  return [
+    result,
+    readPlainObject(result.reasoning_policy),
+    readPlainObject(result.reasoning_policy_evidence),
+    readPlainObject(result.completion_evidence),
+  ].filter((entry): entry is Record<string, unknown> => entry !== null);
+}
+
+function isCompletionEvidenceValue(value: unknown): boolean {
+  if (value === true) {
+    return true;
+  }
+  if (typeof value === "string") {
+    return value.trim().length > 0;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value);
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  if (value && typeof value === "object") {
+    return Object.keys(value).length > 0;
+  }
+  return false;
+}
+
+function readPlainObject(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return null;
+}
+
+function compactStorageSingleLine(value: unknown, limit = 240): string {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, limit - 3))}...`;
+}
+
+function asFiniteNumberForStorage(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function asStringArrayForStorage(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((entry) => String(entry ?? "").trim()).filter(Boolean) : [];
+}
+
+function summarizeTaskReasoningPolicy(
+  rows: Array<Record<string, unknown>>,
+  completionReview: TaskSummaryRecord["reasoning_policy"]["completion_review"]
+): TaskSummaryRecord["reasoning_policy"] {
+  const summary: TaskSummaryRecord["reasoning_policy"] = {
+    pending_count: 0,
+    running_count: 0,
+    total_active_count: 0,
+    evidence_rerank_count: 0,
+    plan_pass_count: 0,
+    verification_pass_count: 0,
+    total_candidate_count: 0,
+    max_candidate_count: 0,
+    high_compute_task_ids: [],
+    completion_review: completionReview,
+  };
+  for (const row of rows) {
+    const metadata = parseJsonObject(row.metadata_json);
+    const execution =
+      metadata.task_execution && typeof metadata.task_execution === "object" && !Array.isArray(metadata.task_execution)
+        ? (metadata.task_execution as Record<string, unknown>)
+        : {};
+    const candidateCount =
+      typeof execution.reasoning_candidate_count === "number" && Number.isFinite(execution.reasoning_candidate_count)
+        ? Math.max(1, Math.min(4, Math.round(execution.reasoning_candidate_count)))
+        : 0;
+    const evidenceRerank = String(execution.reasoning_selection_strategy ?? "").trim() === "evidence_rerank";
+    const planPass = execution.require_plan_pass === true;
+    const verificationPass = execution.require_verification_pass === true;
+    const taskKind = String(execution.task_kind ?? "").trim();
+    const qualityPreference = String(execution.quality_preference ?? "").trim();
+    const qualityBiased =
+      qualityPreference === "quality" && (taskKind === "research" || taskKind === "verification");
+    const highCompute = candidateCount > 1 || evidenceRerank || planPass || verificationPass || qualityBiased;
+    if (!highCompute) {
+      continue;
+    }
+    const status = normalizeTaskStatus(row.status);
+    if (status === "pending") {
+      summary.pending_count += 1;
+    } else if (status === "running") {
+      summary.running_count += 1;
+    }
+    summary.total_active_count += 1;
+    if (evidenceRerank) {
+      summary.evidence_rerank_count += 1;
+    }
+    if (planPass) {
+      summary.plan_pass_count += 1;
+    }
+    if (verificationPass) {
+      summary.verification_pass_count += 1;
+    }
+    summary.total_candidate_count += candidateCount;
+    summary.max_candidate_count = Math.max(summary.max_candidate_count, candidateCount);
+    if (summary.high_compute_task_ids.length < 10) {
+      summary.high_compute_task_ids.push(String(row.task_id ?? ""));
+    }
+  }
+  return summary;
+}
+
+function summarizeTaskCompletionReasoningReview(
+  rows: Array<Record<string, unknown>>
+): TaskSummaryRecord["reasoning_policy"]["completion_review"] {
+  const summary: TaskSummaryRecord["reasoning_policy"]["completion_review"] = {
+    audited_completed_count: 0,
+    needs_review_count: 0,
+    satisfied_count: 0,
+    missing_field_counts: {},
+    needs_review_task_ids: [],
+    last_needs_review_task_id: null,
+    last_needs_review_at: null,
+  };
+
+  for (const row of rows) {
+    const result = parseNullableJsonObject(row.result_json);
+    const audit = readPlainObject(result?.reasoning_policy_audit);
+    if (audit?.required !== true) {
+      continue;
+    }
+    summary.audited_completed_count += 1;
+    const status = String(audit.status ?? "").trim();
+    if (status === "satisfied") {
+      summary.satisfied_count += 1;
+      continue;
+    }
+    if (status !== "needs_review") {
+      continue;
+    }
+    summary.needs_review_count += 1;
+    const taskId = String(row.task_id ?? "").trim();
+    if (!summary.last_needs_review_task_id) {
+      summary.last_needs_review_task_id = taskId || null;
+      summary.last_needs_review_at = asNullableString(row.updated_at);
+    }
+    if (taskId && summary.needs_review_task_ids.length < 10) {
+      summary.needs_review_task_ids.push(taskId);
+    }
+    const missingFields = Array.isArray(audit.missing_fields) ? audit.missing_fields : [];
+    for (const field of missingFields) {
+      const key = String(field ?? "").trim();
+      if (!key) {
+        continue;
+      }
+      summary.missing_field_counts[key] = (summary.missing_field_counts[key] ?? 0) + 1;
+    }
+  }
+
+  return summary;
 }
 
 function mapTaskEventRow(row: Record<string, unknown>): TaskEventRecord {

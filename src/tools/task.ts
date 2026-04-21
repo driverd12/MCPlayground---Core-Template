@@ -53,6 +53,11 @@ export const taskExecutionSchema = z.object({
   selected_worker_host_id: z.string().min(1).optional(),
   routed_bridge_agent_ids: z.array(z.string().min(1)).optional(),
   planned_backend_candidates: z.array(taskExecutionCandidateSchema).optional(),
+  focus: z.string().min(1).optional(),
+  reasoning_candidate_count: z.number().int().min(1).max(4).optional(),
+  reasoning_selection_strategy: z.enum(["single_path", "evidence_rerank"]).optional(),
+  require_plan_pass: z.boolean().optional(),
+  require_verification_pass: z.boolean().optional(),
   runtime_id: z.enum(["codex", "shell"]).optional(),
   runtime_strategy: z.enum(["tmux_worktree"]).optional(),
   runtime_command: z.string().min(1).optional(),
@@ -397,6 +402,11 @@ function normalizeTaskExecutionMetadata(value: unknown) {
   const selected_backend_locality = readString(value.selected_backend_locality);
   const task_kind = readString(value.task_kind);
   const quality_preference = readString(value.quality_preference);
+  const reasoning_selection_strategy = readString(value.reasoning_selection_strategy);
+  const reasoning_candidate_count =
+    typeof value.reasoning_candidate_count === "number" && Number.isFinite(value.reasoning_candidate_count)
+      ? Math.max(1, Math.min(4, Math.round(value.reasoning_candidate_count)))
+      : null;
   const runtime_id = readString(value.runtime_id);
   const runtime_strategy = readString(value.runtime_strategy);
   const planned_backend_candidates = Array.isArray(value.planned_backend_candidates)
@@ -455,6 +465,14 @@ function normalizeTaskExecutionMetadata(value: unknown) {
     selected_worker_host_id: readString(value.selected_worker_host_id),
     routed_bridge_agent_ids: normalizeStringArray(value.routed_bridge_agent_ids),
     planned_backend_candidates,
+    focus: readString(value.focus),
+    reasoning_candidate_count,
+    reasoning_selection_strategy:
+      reasoning_selection_strategy === "single_path" || reasoning_selection_strategy === "evidence_rerank"
+        ? reasoning_selection_strategy
+        : null,
+    require_plan_pass: value.require_plan_pass === true,
+    require_verification_pass: value.require_verification_pass === true,
     runtime_id: runtime_id === "codex" || runtime_id === "shell" ? runtime_id : null,
     runtime_strategy: runtime_strategy === "tmux_worktree" ? runtime_strategy : null,
     runtime_command: readString(value.runtime_command),
@@ -525,7 +543,19 @@ export function resolveTaskExecutionProfile(task: Pick<TaskRecord, "objective" |
   const signals: string[] = [];
   let score = 0;
   const objective = task.objective.trim().toLowerCase();
-  const focus = isRecord(task.payload) ? readString(task.payload.focus)?.toLowerCase() ?? null : null;
+  const metadataExecution = isRecord(task.metadata) && isRecord(task.metadata.task_execution) ? task.metadata.task_execution : null;
+  const focus =
+    (isRecord(task.payload) ? readString(task.payload.focus)?.toLowerCase() ?? null : null) ??
+    (metadataExecution ? readString(metadataExecution.focus)?.toLowerCase() ?? null : null);
+  const taskKind = metadataExecution ? readString(metadataExecution.task_kind)?.toLowerCase() ?? null : null;
+  const qualityPreference = metadataExecution ? readString(metadataExecution.quality_preference)?.toLowerCase() ?? null : null;
+  const reasoningSelectionStrategy = metadataExecution
+    ? readString(metadataExecution.reasoning_selection_strategy)?.toLowerCase() ?? null
+    : null;
+  const reasoningCandidateCount =
+    metadataExecution && typeof metadataExecution.reasoning_candidate_count === "number" && Number.isFinite(metadataExecution.reasoning_candidate_count)
+      ? Math.max(1, Math.min(4, Math.round(metadataExecution.reasoning_candidate_count)))
+      : 0;
   const tags = new Set(task.tags.map((tag) => tag.trim().toLowerCase()).filter(Boolean));
 
   if (task.project_dir && task.project_dir !== ".") {
@@ -535,6 +565,33 @@ export function resolveTaskExecutionProfile(task: Pick<TaskRecord, "objective" |
   if (focus && ["implementation", "candidate_variant", "baseline_measurement", "codebase_map", "verification", "implementation_research", "task_breakdown", "fix"].includes(focus)) {
     score += 2;
     signals.push(`focus:${focus}`);
+  }
+  if (taskKind === "research" || taskKind === "verification") {
+    score += 1;
+    signals.push(`task_kind:${taskKind}`);
+  }
+  if (qualityPreference === "quality") {
+    score += 1;
+    signals.push("quality_preference:quality");
+  }
+  if (reasoningCandidateCount >= 3) {
+    score += 2;
+    signals.push(`reasoning_candidates:${reasoningCandidateCount}`);
+  } else if (reasoningCandidateCount >= 2) {
+    score += 1;
+    signals.push(`reasoning_candidates:${reasoningCandidateCount}`);
+  }
+  if (reasoningSelectionStrategy === "evidence_rerank") {
+    score += 1;
+    signals.push("reasoning_selection:evidence_rerank");
+  }
+  if (metadataExecution?.require_plan_pass === true) {
+    score += 1;
+    signals.push("requires_plan_pass");
+  }
+  if (metadataExecution?.require_verification_pass === true) {
+    score += 1;
+    signals.push("requires_verification_pass");
   }
   if (
     /implement|refactor|debug|fix|benchmark|latency|throughput|performance|verify|verification|codebase|architecture|integration|optimiz/.test(

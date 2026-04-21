@@ -617,6 +617,77 @@ function readQualityPreference(value: unknown): "speed" | "balanced" | "quality"
   return undefined;
 }
 
+function mergePlanDispatchMetadata(stepMetadata: unknown, inputMetadata: unknown) {
+  const mergedInput = isRecord(inputMetadata) ? { ...inputMetadata } : {};
+  const stepRecord = isRecord(stepMetadata) ? stepMetadata : null;
+  const inheritedKeys = [
+    "compiler",
+    "owner_role_id",
+    "org_program_version_id",
+    "org_program_summary",
+    "org_program_doctrine",
+    "org_program_delegation_contract",
+    "org_program_evaluation_standard",
+    "org_program_signals",
+    "swarm_profile",
+    "checkpoint_required",
+    "checkpoint_cadence",
+    "memory_preflight",
+    "working_memory",
+  ] as const;
+  for (const key of inheritedKeys) {
+    if (!(key in mergedInput) && stepRecord && key in stepRecord) {
+      mergedInput[key] = stepRecord[key];
+    }
+  }
+  const stepTaskExecution = stepRecord && isRecord(stepRecord.task_execution) ? stepRecord.task_execution : null;
+  const inputTaskExecution = isRecord(mergedInput.task_execution) ? mergedInput.task_execution : null;
+  if (!stepTaskExecution && !inputTaskExecution) {
+    return mergedInput;
+  }
+  return {
+    ...mergedInput,
+    task_execution: {
+      ...(stepTaskExecution ?? {}),
+      ...(inputTaskExecution ?? {}),
+    },
+  };
+}
+
+function synthesizePlanDispatchDelegationBrief(step: PlanStepRecord, rawInput: Record<string, unknown>, payload: Record<string, unknown>, metadata: Record<string, unknown>) {
+  const payloadBrief = isRecord(payload.delegation_brief) ? payload.delegation_brief : null;
+  const metadataBrief = isRecord(metadata.delegation_brief) ? metadata.delegation_brief : null;
+  const explicitBrief = payloadBrief ?? metadataBrief;
+  const stepInput = isRecord(step.input) ? step.input : {};
+  const taskObjective = readString(explicitBrief?.task_objective) ?? readString(rawInput.objective) ?? step.title;
+  const successCriteria = mergeUniqueStrings(
+    readStringArray(explicitBrief?.success_criteria),
+    readStringArray(rawInput.success_criteria),
+    step.acceptance_checks
+  );
+  const evidenceRequirements = mergeUniqueStrings(
+    readStringArray(explicitBrief?.evidence_requirements),
+    readStringArray(rawInput.evidence_requirements),
+    readStringArray(stepInput.evidence_requirements)
+  );
+  const rollbackNotes = mergeUniqueStrings(
+    readStringArray(explicitBrief?.rollback_notes),
+    readStringArray(rawInput.rollback_notes),
+    readStringArray(stepInput.rollback_notes)
+  );
+  const delegateAgentId = readString(explicitBrief?.delegate_agent_id) ?? readString(rawInput.delegate_agent_id) ?? null;
+  if (!taskObjective && successCriteria.length === 0 && evidenceRequirements.length === 0 && rollbackNotes.length === 0) {
+    return null;
+  }
+  return {
+    delegate_agent_id: delegateAgentId,
+    task_objective: taskObjective,
+    success_criteria: successCriteria,
+    evidence_requirements: evidenceRequirements,
+    rollback_notes: rollbackNotes,
+  };
+}
+
 function planDispatchTaskExecution(
   storage: Storage,
   params: {
@@ -636,6 +707,7 @@ function planDispatchTaskExecution(
   const basePreferredBackendIds = readStringArray(baseExecution.preferred_backend_ids);
   const baseRequiredBackendIds = readStringArray(baseExecution.required_backend_ids);
   const qualityPreference = readQualityPreference(baseExecution.quality_preference) ?? "balanced";
+  const reasoningSelectionStrategy = readString(baseExecution.reasoning_selection_strategy);
   const modelRouterSelection = routeObjectiveBackends(storage, {
     objective: params.objective,
     preferred_tags: mergeUniqueStrings(basePreferredModelTags, params.tags),
@@ -680,6 +752,17 @@ function planDispatchTaskExecution(
       title: entry.title,
       score: entry.score,
     })),
+    focus: readString(baseExecution.focus),
+    reasoning_candidate_count:
+      typeof baseExecution.reasoning_candidate_count === "number" && Number.isFinite(baseExecution.reasoning_candidate_count)
+        ? Math.max(1, Math.min(4, Math.round(baseExecution.reasoning_candidate_count)))
+        : undefined,
+    reasoning_selection_strategy:
+      reasoningSelectionStrategy === "single_path" || reasoningSelectionStrategy === "evidence_rerank"
+        ? reasoningSelectionStrategy
+        : undefined,
+    require_plan_pass: baseExecution.require_plan_pass === true,
+    require_verification_pass: baseExecution.require_verification_pass === true,
   };
   const parsedTaskExecution = taskExecutionSchema.parse(taskExecutionInput);
   const fabricState = resolveEffectiveWorkerFabric(storage, {
@@ -1223,7 +1306,8 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
           if (executorKind === "task" || executorKind === "worker") {
             const rawInput = isRecord(step.input) ? step.input : {};
             const payload = isRecord(rawInput.payload) ? rawInput.payload : {};
-            const rawMetadata = isRecord(rawInput.metadata) ? rawInput.metadata : {};
+            const rawMetadata = mergePlanDispatchMetadata(step.metadata, rawInput.metadata);
+            const delegationBrief = synthesizePlanDispatchDelegationBrief(step, rawInput, payload, rawMetadata);
             const inheritedPermissionProfile =
               readString(rawInput.permission_profile) ??
               readString(rawMetadata.permission_profile) ??
@@ -1271,6 +1355,11 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               project_dir: readString(rawInput.project_dir),
               payload: {
                 ...payload,
+                ...(delegationBrief
+                  ? {
+                      delegation_brief: delegationBrief,
+                    }
+                  : {}),
                 plan_id: plan.plan_id,
                 step_id: step.step_id,
                 goal_id: plan.goal_id,
@@ -1289,6 +1378,11 @@ async function planDispatch(input: z.infer<typeof planDispatchSchema>) {
               tags: readStringArray(rawInput.tags) ?? ["plan.dispatch", executorKind],
               metadata: mergeDeclaredPermissionProfile({
                 ...rawMetadata,
+                ...(delegationBrief
+                  ? {
+                      delegation_brief: delegationBrief,
+                    }
+                  : {}),
                 adaptive_assignment: adaptiveAssignment,
                 task_execution: taskExecutionPlan.task_execution,
                 model_router: taskExecutionPlan.model_router,

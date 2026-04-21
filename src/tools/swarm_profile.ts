@@ -83,6 +83,14 @@ export type SwarmMemoryPreflightSummary = {
     text_preview: string;
     citation: Record<string, unknown>;
   }>;
+  reflection_match_count: number;
+  top_reflections: Array<{
+    id: string;
+    score: number | null;
+    text_preview: string;
+    citation: Record<string, unknown>;
+    keywords: string[];
+  }>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -171,27 +179,44 @@ export function summarizeMemoryPreflight(result: unknown, fallbackQuery: string)
   const query = readString(record.query) ?? fallbackQuery;
   const strategy = readString(record.strategy) ?? "unknown";
   const matches = Array.isArray(record.matches) ? record.matches : [];
+  const normalizedMatches = matches.flatMap((entry) => {
+    if (!isRecord(entry)) {
+      return [];
+    }
+    const citation = isRecord(entry.citation) ? entry.citation : {};
+    const idValue = entry.id;
+    const id =
+      typeof idValue === "string" || typeof idValue === "number" ? String(idValue) : cryptoSafeId(citation);
+    return [
+      {
+        type: readString(entry.type) ?? "unknown",
+        id,
+        score: typeof entry.score === "number" && Number.isFinite(entry.score) ? Number(entry.score.toFixed(4)) : null,
+        text_preview: compactText(String(entry.text ?? ""), 140),
+        citation,
+      },
+    ];
+  });
+  const reflectionMatches = normalizedMatches.filter((entry) => {
+    if (entry.type !== "memory") {
+      return false;
+    }
+    const keywords = normalizeStringArray(entry.citation.keywords).map((keyword) => keyword.toLowerCase());
+    return keywords.includes("reflection") || keywords.includes("episodic");
+  });
   return {
     query,
     strategy,
-    match_count: matches.length,
-    top_matches: matches.slice(0, 3).flatMap((entry) => {
-      if (!isRecord(entry)) {
-        return [];
-      }
-      const idValue = entry.id;
-      const id =
-        typeof idValue === "string" || typeof idValue === "number" ? String(idValue) : cryptoSafeId(entry.citation);
-      return [
-        {
-          type: readString(entry.type) ?? "unknown",
-          id,
-          score: typeof entry.score === "number" && Number.isFinite(entry.score) ? Number(entry.score.toFixed(4)) : null,
-          text_preview: compactText(String(entry.text ?? ""), 140),
-          citation: isRecord(entry.citation) ? entry.citation : {},
-        },
-      ];
-    }),
+    match_count: normalizedMatches.length,
+    top_matches: normalizedMatches.slice(0, 3),
+    reflection_match_count: reflectionMatches.length,
+    top_reflections: reflectionMatches.slice(0, 3).map((entry) => ({
+      id: entry.id,
+      score: entry.score,
+      text_preview: entry.text_preview,
+      citation: entry.citation,
+      keywords: normalizeStringArray(entry.citation.keywords),
+    })),
   };
 }
 

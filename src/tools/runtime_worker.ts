@@ -139,6 +139,152 @@ function renderBulletSection(title: string, items: string[]) {
   return [title, ...items.map((item) => `- ${item}`)].join("\n");
 }
 
+function uniqueStrings(items: Array<string | null | undefined>) {
+  return [...new Set(items.map((item) => readString(item)).filter((item): item is string => Boolean(item)))];
+}
+
+function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExecution: Record<string, unknown>) {
+  const taskKind = readString(taskExecution.task_kind);
+  const qualityPreference = readString(taskExecution.quality_preference);
+  const focus = readString(taskExecution.focus);
+  const reasoningCandidateCount =
+    typeof taskExecution.reasoning_candidate_count === "number" && Number.isFinite(taskExecution.reasoning_candidate_count)
+      ? Math.max(1, Math.min(4, Math.round(taskExecution.reasoning_candidate_count)))
+      : null;
+  const reasoningSelectionStrategy = readString(taskExecution.reasoning_selection_strategy);
+  const requirePlanPass = taskExecution.require_plan_pass === true;
+  const requireVerificationPass = taskExecution.require_verification_pass === true;
+  const orgSignals = readNullableRecord(taskMetadata.org_program_signals);
+  const lines = uniqueStrings([
+    reasoningCandidateCount && reasoningCandidateCount > 1
+      ? `Generate ${reasoningCandidateCount} bounded candidate approaches or failure hypotheses before committing to one path.`
+      : taskKind === "research" || taskKind === "verification" || qualityPreference === "quality"
+        ? "Generate 2-3 bounded candidate approaches or failure hypotheses before committing to one path."
+        : null,
+    reasoningSelectionStrategy === "evidence_rerank"
+      ? "Rerank candidate paths by concrete evidence and contradiction risk, not style."
+      : null,
+    requirePlanPass || taskKind === "research" || focus === "implementation_research" || focus === "task_breakdown"
+      ? "Write a short plan first so unknowns, evidence needs, and rollback are explicit before mutation."
+      : null,
+    requireVerificationPass || taskKind === "verification" || focus === "verification"
+      ? "Try to falsify the current answer with concrete checks before declaring success."
+      : null,
+    orgSignals?.explicit_evidence === true
+      ? "Choose the path with the strongest evidence trail, not the most fluent explanation."
+      : null,
+    orgSignals?.fail_closed === true
+      ? "If evidence is weak or contradictory, stop and report the blocker instead of guessing."
+      : null,
+  ]);
+  return renderBulletSection("Reasoning policy", lines);
+}
+
+function describeMemoryGuidance(taskMetadata: Record<string, unknown>) {
+  const memoryPreflight = readNullableRecord(taskMetadata.memory_preflight);
+  const topReflections = Array.isArray(memoryPreflight?.top_reflections) ? memoryPreflight.top_reflections : [];
+  if (topReflections.length === 0) {
+    return renderBulletSection("Grounded reflections", []);
+  }
+  const lines = topReflections
+    .flatMap((entry) => {
+      const reflection = readNullableRecord(entry);
+      if (!reflection) {
+        return [];
+      }
+      const preview = readString(reflection.text_preview);
+      const keywords = readStringArray(reflection.keywords);
+      const suffix = keywords.length > 0 ? ` [keywords: ${keywords.join(", ")}]` : "";
+      return preview ? [`${preview}${suffix}`] : [];
+    })
+    .slice(0, 3);
+  return renderBulletSection("Grounded reflections", lines);
+}
+
+function compactBriefText(value: unknown, limit = 240) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, limit - 3))}...`;
+}
+
+function describeWorkingMemory(taskMetadata: Record<string, unknown>) {
+  const workingMemory = readNullableRecord(taskMetadata.working_memory);
+  if (!workingMemory) {
+    return renderBulletSection("Working memory", []);
+  }
+  const lines = uniqueStrings([
+    readString(workingMemory.compression_policy)
+      ? `Use compact state first: ${readString(workingMemory.compression_policy)}`
+      : "Use compact state first; retrieve more context only when necessary.",
+    readString(workingMemory.current_stream_id)
+      ? `Current lane: ${readString(workingMemory.current_stream_id)}${readString(workingMemory.current_owner_role_id) ? ` owned by ${readString(workingMemory.current_owner_role_id)}` : ""}.`
+      : null,
+  ]);
+  const expectedEvidence = readStringArray(workingMemory.expected_evidence).slice(0, 5);
+  if (expectedEvidence.length > 0) {
+    lines.push(`Expected evidence: ${expectedEvidence.map((entry) => compactBriefText(entry, 140)).join(" | ")}`);
+  }
+  const unresolvedQuestions = readStringArray(workingMemory.unresolved_questions).slice(0, 5);
+  if (unresolvedQuestions.length > 0) {
+    lines.push(`Unresolved questions: ${unresolvedQuestions.map((entry) => compactBriefText(entry, 140)).join(" | ")}`);
+  }
+  const rollbackNotes = readStringArray(workingMemory.rollback_notes).slice(0, 4);
+  if (rollbackNotes.length > 0) {
+    lines.push(`Rollback posture: ${rollbackNotes.map((entry) => compactBriefText(entry, 140)).join(" | ")}`);
+  }
+  const knownFailures = Array.isArray(workingMemory.known_failures) ? workingMemory.known_failures : [];
+  for (const entry of knownFailures.slice(0, 3)) {
+    const failure = readNullableRecord(entry);
+    if (!failure) {
+      continue;
+    }
+    const preview = readString(failure.text_preview);
+    const id = readString(failure.id) ?? "unknown";
+    if (preview) {
+      lines.push(`Known failure memory:${id}: ${compactBriefText(preview, 220)}`);
+    }
+  }
+  return renderBulletSection("Working memory", lines);
+}
+
+function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: Record<string, unknown>) {
+  const reasoningCandidateCount =
+    typeof taskExecution.reasoning_candidate_count === "number" && Number.isFinite(taskExecution.reasoning_candidate_count)
+      ? Math.max(1, Math.min(4, Math.round(taskExecution.reasoning_candidate_count)))
+      : null;
+  const needsCandidateEvidence = reasoningCandidateCount !== null && reasoningCandidateCount > 1;
+  const needsRerank = readString(taskExecution.reasoning_selection_strategy) === "evidence_rerank";
+  const needsPlan = taskExecution.require_plan_pass === true;
+  const needsVerification = taskExecution.require_verification_pass === true;
+  const taskKind = readString(taskExecution.task_kind);
+  const qualityPreference = readString(taskExecution.quality_preference);
+  const qualityBiased = qualityPreference === "quality" && (taskKind === "research" || taskKind === "verification");
+  if (!needsCandidateEvidence && !needsRerank && !needsPlan && !needsVerification && !qualityBiased) {
+    return renderBulletSection("Completion evidence handoff", []);
+  }
+
+  const evidencePath = path.join(worktreePath, ".mcp-runtime", "reasoning-evidence.json");
+  const lines = [
+    `Before exiting successfully, write ${evidencePath} so task.complete can carry audit evidence.`,
+    "Use compact JSON; avoid transcripts or hidden reasoning dumps.",
+  ];
+  if (needsCandidateEvidence) {
+    lines.push(`Include candidates or candidate_count showing at least ${reasoningCandidateCount} bounded candidates.`);
+  }
+  if (needsRerank) {
+    lines.push("Include selection_rationale explaining why the chosen path beat alternatives by evidence and contradiction risk.");
+  }
+  if (needsPlan) {
+    lines.push("Include plan_summary or planned_steps proving a plan pass happened before mutation.");
+  }
+  if (needsVerification || qualityBiased) {
+    lines.push("Include verification_summary, checks, test_results, or evidence_refs from concrete validation.");
+  }
+  return renderBulletSection("Completion evidence handoff", lines);
+}
+
 function shellQuote(value: string) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
@@ -490,6 +636,14 @@ function buildSessionBrief(input: {
       ...(input.step_rollback_notes ?? []),
     ]),
     "",
+    describeReasoningPolicy(input.task_metadata, taskExecution),
+    "",
+    describeMemoryGuidance(input.task_metadata),
+    "",
+    describeWorkingMemory(input.task_metadata),
+    "",
+    describeCompletionEvidenceHandoff(input.worktree_path, taskExecution),
+    "",
     "Execution routing:",
     ...(routingLines.length > 0 ? routingLines : ["- none"]),
     "",
@@ -533,6 +687,10 @@ function writeRuntimeWrapper(input: {
   const runtimeDir = path.join(input.worktree_path, ".mcp-runtime");
   fs.mkdirSync(runtimeDir, { recursive: true });
   const wrapperPath = path.join(runtimeDir, "run-task.sh");
+  const evidencePath = path.join(runtimeDir, "reasoning-evidence.json");
+  const evidenceMergePath = path.join(runtimeDir, "merge-completion-evidence.mjs");
+  const completeArgsBasePath = path.join(runtimeDir, "task-complete-base.json");
+  const completeEnvelopeBasePath = path.join(runtimeDir, "completion-base.json");
   const httpUrl = readString(process.env.TRICHAT_MCP_URL);
   const httpOrigin = readString(process.env.TRICHAT_MCP_ORIGIN) ?? "http://127.0.0.1";
   if (!fs.existsSync(controlPlaneHelperPath)) {
@@ -579,6 +737,37 @@ function writeRuntimeWrapper(input: {
       status: "completed",
     },
   });
+  fs.writeFileSync(completeArgsBasePath, completeArgs, "utf8");
+  fs.writeFileSync(completeEnvelopeBasePath, completeEnvelope, "utf8");
+  fs.writeFileSync(
+    evidenceMergePath,
+    `import fs from "node:fs";
+
+const [basePath, evidencePath] = process.argv.slice(2);
+const base = JSON.parse(fs.readFileSync(basePath, "utf8"));
+const result = base.result && typeof base.result === "object" && !Array.isArray(base.result) ? base.result : {};
+if (evidencePath && fs.existsSync(evidencePath)) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(evidencePath, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      base.result = {
+        ...result,
+        reasoning_policy_evidence: parsed,
+        reasoning_policy_evidence_path: evidencePath,
+      };
+    }
+  } catch (error) {
+    base.result = {
+      ...result,
+      reasoning_policy_evidence_error: error instanceof Error ? error.message : String(error),
+      reasoning_policy_evidence_path: evidencePath,
+    };
+  }
+}
+process.stdout.write(JSON.stringify(base));
+`,
+    "utf8"
+  );
   const failEnvelope = JSON.stringify({
     task_id: input.task_id,
     worker_id: input.session_id,
@@ -622,10 +811,10 @@ ${input.runtime_command}
 status=$?
 set -e
 if [ "$status" -eq 0 ]; then
-  printf '%s\n' ${shellQuote(completeEnvelope)} > ${shellQuote(input.completion_path)}
-  call_control_plane task.complete ${shellQuote(
-    completeArgs
-  )} || true
+  complete_envelope_json="$(node ${shellQuote(evidenceMergePath)} ${shellQuote(completeEnvelopeBasePath)} ${shellQuote(evidencePath)})"
+  complete_args_json="$(node ${shellQuote(evidenceMergePath)} ${shellQuote(completeArgsBasePath)} ${shellQuote(evidencePath)})"
+  printf '%s\n' "$complete_envelope_json" > ${shellQuote(input.completion_path)}
+  call_control_plane task.complete "$complete_args_json" || true
 else
   printf '%s\n' ${shellQuote(failEnvelope)} > ${shellQuote(input.completion_path)}
   call_control_plane task.fail ${shellQuote(
@@ -762,6 +951,7 @@ function spawnForTask(storage: Storage, input: {
       isolation_mode: layout.isolation_mode,
       lease_expires_at: claimResult.lease_expires_at ?? null,
       completion_path: completionPath,
+      reasoning_policy_evidence_path: path.join(runtimeDir, "reasoning-evidence.json"),
     },
     source_client: input.source_client,
     source_model: input.source_model,

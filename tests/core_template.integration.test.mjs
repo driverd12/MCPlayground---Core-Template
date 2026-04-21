@@ -4189,6 +4189,13 @@ test("agent.claim_next and agent.report_result close the worker loop back into p
           title: "Execute the worker through an agent session",
           step_kind: "mutation",
           executor_kind: "worker",
+          metadata: {
+            task_execution: {
+              task_kind: "verification",
+              quality_preference: "quality",
+              require_verification_pass: true,
+            },
+          },
           input: {
             objective: "Complete the worker loop integration task",
             project_dir: REPO_ROOT,
@@ -4265,6 +4272,8 @@ test("agent.claim_next and agent.report_result close the worker loop back into p
     });
     assert.equal(reported.reported, true);
     assert.equal(reported.task.status, "completed");
+    assert.equal(reported.task.result.reasoning_policy_audit.status, "satisfied");
+    assert.ok(reported.task.result.completion_evidence.evidence_refs.includes(`artifact:${producedArtifact.artifact.artifact_id}`));
     assert.equal(reported.session.status, "idle");
     assert.equal(reported.plan_step_update.step.status, "completed");
     assert.equal(reported.plan_step_update.step.run_id, "agent-worker-run-1");
@@ -4321,6 +4330,57 @@ test("agent.claim_next and agent.report_result close the worker loop back into p
     assert.equal(sessionAfterReport.found, true);
     assert.equal(sessionAfterReport.session.status, "idle");
     assert.equal(sessionAfterReport.session.metadata.last_reported_task_id, claimedTask.task.task_id);
+
+    const failureTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.agent-report-failure-reflection", () => mutationCounter++),
+      objective: "Retry a high-compute verification lane after a failed agent report.",
+      project_dir: REPO_ROOT,
+      priority: 6,
+      routing: {
+        allowed_agent_ids: ["codex"],
+      },
+      task_execution: {
+        task_kind: "verification",
+        quality_preference: "quality",
+        reasoning_candidate_count: 2,
+        reasoning_selection_strategy: "evidence_rerank",
+        require_verification_pass: true,
+      },
+      tags: ["agent-report", "failure-reflection"],
+    });
+
+    const failureClaim = await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.agent-report-failure-reflection", () => mutationCounter++),
+      session_id: "agent-worker-loop-session",
+      task_id: failureTask.task.task_id,
+      lease_seconds: 120,
+    });
+    assert.equal(failureClaim.claimed, true);
+    assert.equal(failureClaim.task.task_id, failureTask.task.task_id);
+
+    const failedReport = await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.agent-report-failure-reflection", () => mutationCounter++),
+      session_id: "agent-worker-loop-session",
+      task_id: failureClaim.task.task_id,
+      outcome: "failed",
+      summary: "Agent selected a candidate but verification contradicted the selected path.",
+      error: "selected candidate failed the verification gate",
+      result: {
+        selected_candidate: "candidate-a",
+        verification_summary: "candidate-a violated the invariant",
+      },
+    });
+    assert.equal(failedReport.reported, true);
+    assert.equal(failedReport.task.status, "failed");
+    assert.equal(typeof failedReport.auto_reflection.memory_id, "number");
+    assert.ok(failedReport.auto_reflection.keywords.includes("task-failure"));
+
+    const failedReportReflection = await callTool(client, "memory.get", {
+      id: failedReport.auto_reflection.memory_id,
+    });
+    assert.equal(failedReportReflection.found, true);
+    assert.match(failedReportReflection.memory.content, /Failed high-compute task/);
+    assert.match(failedReportReflection.memory.content, /selected candidate failed the verification gate/);
 
     const allEvents = await callTool(client, "event.tail", {
       limit: 200,
@@ -4448,6 +4508,128 @@ test("agent.report_result blocks plan advancement when expected evidence artifac
     assert.equal(blockedStep.metadata.dispatch_gate_type, "artifact_evidence");
     assert.deepEqual(blockedStep.metadata.artifact_expectations.missing_artifact_types, ["verification_report"]);
     assert.equal(dispatched.dispatched_count, 1);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("agent.report_result blocks plan advancement when reasoning-policy audit needs review", async () => {
+  const testId = `${Date.now()}-agent-reasoning-review`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-agent-reasoning-review-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    await callTool(client, "agent.session_open", {
+      mutation: nextMutation(testId, "agent.session_open", () => mutationCounter++),
+      session_id: "agent-reasoning-review-session",
+      agent_id: "codex",
+      display_name: "Reasoning review worker",
+      client_kind: "codex",
+      transport_kind: "stdio",
+      workspace_root: REPO_ROOT,
+      lease_seconds: 120,
+      status: "active",
+      capabilities: {
+        worker: true,
+        coding: true,
+        planning: true,
+        verification: true,
+      },
+    });
+
+    const createdGoal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Reasoning-review-enforced goal",
+      objective: "Block downstream advancement when high-compute reasoning evidence is incomplete",
+      status: "active",
+      autonomy_mode: "execute_bounded",
+      acceptance_criteria: ["High-compute completions require grounded candidate and verification evidence"],
+    });
+
+    const createdPlan = await callTool(client, "plan.create", {
+      mutation: nextMutation(testId, "plan.create", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      title: "Reasoning-review-enforced plan",
+      summary: "Require reasoning-policy audit satisfaction before allowing the step to complete",
+      selected: true,
+      steps: [
+        {
+          step_id: "reasoning-step",
+          seq: 1,
+          title: "Produce a grounded verification decision",
+          step_kind: "verification",
+          executor_kind: "worker",
+          input: {
+            objective: "Verify candidate options and report the evidence-backed selected path",
+            project_dir: REPO_ROOT,
+          },
+          metadata: {
+            task_execution: {
+              task_kind: "verification",
+              quality_preference: "quality",
+              focus: "verification",
+              reasoning_candidate_count: 2,
+              reasoning_selection_strategy: "evidence_rerank",
+              require_plan_pass: true,
+              require_verification_pass: true,
+            },
+          },
+        },
+      ],
+    });
+
+    const dispatched = await callTool(client, "plan.dispatch", {
+      mutation: nextMutation(testId, "plan.dispatch", () => mutationCounter++),
+      plan_id: createdPlan.plan.plan_id,
+    });
+    const claimed = await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next", () => mutationCounter++),
+      session_id: "agent-reasoning-review-session",
+      lease_seconds: 120,
+    });
+    assert.equal(claimed.claimed, true);
+
+    const reported = await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result", () => mutationCounter++),
+      session_id: "agent-reasoning-review-session",
+      task_id: claimed.task.task_id,
+      outcome: "completed",
+      summary: "Completed the verification decision but omitted candidate and verification evidence",
+      result: {
+        completed: true,
+      },
+    });
+
+    assert.equal(reported.reported, true);
+    assert.equal(reported.task.result.reasoning_policy_audit.status, "needs_review");
+    assert.equal(reported.plan_step_update.step.status, "blocked");
+    assert.equal(reported.plan_step_update.step.metadata.dispatch_gate_type, "reasoning_policy_review");
+    assert.equal(reported.plan_step_update.step.metadata.reasoning_policy_review_required, true);
+    assert.equal(reported.reasoning_policy_review.required, true);
+    assert.equal(reported.goal_autorun.triggered, false);
+    assert.equal(reported.goal_autorun.reason, "reasoning_policy_review");
+    assert.equal(dispatched.dispatched_count, 1);
+
+    const fetchedPlan = await callTool(client, "plan.get", {
+      plan_id: createdPlan.plan.plan_id,
+    });
+    const blockedStep = fetchedPlan.steps.find((step) => step.step_id === "reasoning-step");
+    assert.equal(blockedStep.status, "blocked");
+    assert.equal(blockedStep.metadata.dispatch_gate_type, "reasoning_policy_review");
+    assert.deepEqual(
+      new Set(blockedStep.metadata.reasoning_policy_audit.missing_fields),
+      new Set(["candidate_evidence", "selection_rationale", "plan_pass", "verification_pass"])
+    );
+
+    const stepEvents = await callTool(client, "event.tail", {
+      entity_type: "step",
+      entity_id: "reasoning-step",
+      limit: 20,
+    });
+    assert.ok(stepEvents.events.some((event) => event.event_type === "plan.step_reasoning_review_blocked"));
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
