@@ -722,6 +722,7 @@ function updateAdaptiveWorkerProfileOnReport(
   reportedAt: string,
   options: {
     missing_expected_artifacts: boolean;
+    reasoning_policy_review_required?: boolean;
   }
 ): { profile: AdaptiveWorkerProfile; completion_seconds: number | null } {
   const profile = getAdaptiveWorkerProfile(session);
@@ -752,7 +753,7 @@ function updateAdaptiveWorkerProfileOnReport(
       );
       profile.last_completion_seconds = completionSeconds;
     }
-    if (options.missing_expected_artifacts) {
+    if (options.missing_expected_artifacts || options.reasoning_policy_review_required === true) {
       stats.evidence_blocks += 1;
       profile.total_evidence_blocks += 1;
     }
@@ -774,6 +775,8 @@ function updateAdaptiveWorkerProfileOnReport(
       reported_at: reportedAt,
       complexity: taskProfile.complexity,
       missing_expected_artifacts: options.missing_expected_artifacts,
+      reasoning_policy_review_required: options.reasoning_policy_review_required === true,
+      evidence_blocked: options.missing_expected_artifacts || options.reasoning_policy_review_required === true,
       completion_seconds: completionSeconds,
       stagnation_signaled: currentTask.stagnation_signaled,
     },
@@ -2750,14 +2753,27 @@ export async function agentReportResult(
       const reasoningPolicyAudit = isRecord(task.result?.reasoning_policy_audit)
         ? task.result.reasoning_policy_audit
         : null;
+      const reasoningPolicyRecoveryMetadata = isRecord(task.metadata.reasoning_policy_recovery)
+        ? task.metadata.reasoning_policy_recovery
+        : null;
+      const reasoningPolicyRecoverySourceTaskId =
+        readString(reasoningPolicyRecoveryMetadata?.source_task_id) ??
+        (isRecord(task.metadata.plan_dispatch) ? readString(task.metadata.plan_dispatch.recovery_of_task_id) : null);
+      const reasoningPolicyRecoveryTask =
+        reasoningPolicyRecoveryMetadata?.kind === "reasoning_policy_review_recovery";
       const reasoningPolicyNeedsReview =
         input.outcome === "completed" && reasoningPolicyAudit?.status === "needs_review";
+      const reasoningPolicyRecovered =
+        input.outcome === "completed" &&
+        reasoningPolicyRecoveryTask &&
+        reasoningPolicyAudit?.status === "satisfied";
       const completionBlocked = missingExpectedArtifacts || reasoningPolicyNeedsReview;
       const dispatchGateType = missingExpectedArtifacts
         ? "artifact_evidence"
         : reasoningPolicyNeedsReview
           ? "reasoning_policy_review"
           : null;
+      const reportedAt = new Date().toISOString();
       const reasoningPolicyRecovery = reasoningPolicyNeedsReview
         ? await queueReasoningPolicyRecoveryTask({
             storage,
@@ -2778,14 +2794,17 @@ export async function agentReportResult(
             event: null,
             skipped_reason: null,
           };
+      const reasoningPolicyRecoveryTaskId =
+        reasoningPolicyRecovery.task_id ?? (reasoningPolicyRecoveryTask ? task.task_id : null);
       const adaptiveReport = updateAdaptiveWorkerProfileOnReport(
         session,
         task,
         taskProfile,
         input.outcome,
-        new Date().toISOString(),
+        reportedAt,
         {
           missing_expected_artifacts: missingExpectedArtifacts,
+          reasoning_policy_review_required: reasoningPolicyNeedsReview,
         }
       );
 
@@ -2806,8 +2825,20 @@ export async function agentReportResult(
               reasoning_policy_audit: reasoningPolicyAudit,
               reasoning_policy_recovery_queued: reasoningPolicyRecovery.queued,
               reasoning_policy_recovery_task_created: reasoningPolicyRecovery.created,
-              reasoning_policy_recovery_task_id: reasoningPolicyRecovery.task_id,
+              reasoning_policy_recovery_task_id: reasoningPolicyRecoveryTaskId,
               reasoning_policy_recovery_skipped_reason: reasoningPolicyRecovery.skipped_reason,
+              reasoning_policy_recovered: reasoningPolicyRecovered,
+              reasoning_policy_recovered_at: reasoningPolicyRecovered ? reportedAt : null,
+              reasoning_policy_recovery_source_task_id: reasoningPolicyRecoverySourceTaskId,
+              reasoning_policy_recovery_resolution: reasoningPolicyRecoveryTask
+                ? {
+                    recovered: reasoningPolicyRecovered,
+                    recovery_task_id: task.task_id,
+                    source_task_id: reasoningPolicyRecoverySourceTaskId,
+                    audit_status: reasoningPolicyAudit?.status ?? null,
+                    resolved_at: reasoningPolicyRecovered ? reportedAt : null,
+                  }
+                : null,
               artifact_expectations: expectedArtifactCheck ?? {
                 expected_artifact_types: [],
                 produced_artifact_ids: producedArtifactIds,
@@ -2818,7 +2849,7 @@ export async function agentReportResult(
               last_agent_report: {
                 session_id: session.session_id,
                 agent_id: session.agent_id,
-                reported_at: new Date().toISOString(),
+                reported_at: reportedAt,
                 outcome: input.outcome,
                 summary: input.summary?.trim() ?? null,
                 error: input.error?.trim() ?? null,
@@ -2863,8 +2894,33 @@ export async function agentReportResult(
                 expected_artifacts: expectedArtifactCheck,
                 reasoning_policy_audit: reasoningPolicyAudit,
                 reasoning_policy_review_required: reasoningPolicyNeedsReview,
-                reasoning_policy_recovery_task_id: reasoningPolicyRecovery.task_id,
+                reasoning_policy_recovery_task_id: reasoningPolicyRecoveryTaskId,
                 reasoning_policy_recovery_queued: reasoningPolicyRecovery.queued,
+                reasoning_policy_recovered: reasoningPolicyRecovered,
+                reasoning_policy_recovery_source_task_id: reasoningPolicyRecoverySourceTaskId,
+              },
+              source_client: input.source_client,
+              source_model: input.source_model,
+              source_agent: session.agent_id,
+            })
+          : null;
+      const reasoningPolicyRecoveredEvent =
+        reasoningPolicyRecovered && planContext && planStepUpdate
+          ? storage.appendRuntimeEvent({
+              event_type: "plan.step_reasoning_recovered",
+              entity_type: "step",
+              entity_id: planContext.step.step_id,
+              status: planStepUpdate.step.status,
+              summary: `Plan step ${planContext.step.step_id} recovered from reasoning-policy review via task ${task.task_id}.`,
+              details: {
+                plan_id: planContext.plan.plan_id,
+                goal_id: planContext.plan.goal_id,
+                step_id: planContext.step.step_id,
+                source_task_id: reasoningPolicyRecoverySourceTaskId,
+                recovery_task_id: task.task_id,
+                run_id: input.run_id ?? null,
+                produced_artifact_ids: producedArtifactIds,
+                reasoning_policy_audit: reasoningPolicyAudit,
               },
               source_client: input.source_client,
               source_model: input.source_model,
@@ -2931,7 +2987,7 @@ export async function agentReportResult(
           ...(input.metadata ?? {}),
           current_task_id: null,
           last_reported_task_id: task.task_id,
-          last_reported_at: new Date().toISOString(),
+          last_reported_at: reportedAt,
           last_report_outcome: input.outcome,
           last_run_id: input.run_id ?? null,
           last_produced_artifact_ids: producedArtifactIds,
@@ -2988,8 +3044,10 @@ export async function agentReportResult(
           expected_artifacts: expectedArtifactCheck,
           reasoning_policy_audit: reasoningPolicyAudit,
           reasoning_policy_review_required: reasoningPolicyNeedsReview,
-          reasoning_policy_recovery_task_id: reasoningPolicyRecovery.task_id,
+          reasoning_policy_recovery_task_id: reasoningPolicyRecoveryTaskId,
           reasoning_policy_recovery_queued: reasoningPolicyRecovery.queued,
+          reasoning_policy_recovered: reasoningPolicyRecovered,
+          reasoning_policy_recovery_source_task_id: reasoningPolicyRecoverySourceTaskId,
           auto_reflection_memory_id: autoReflection?.memory_id ?? null,
           adaptive_worker_profile: summarizeAdaptiveWorkerProfile(adaptiveReport.profile, taskProfile.complexity),
         },
@@ -3021,12 +3079,26 @@ export async function agentReportResult(
             },
         adaptive_worker_profile: adaptiveReport.profile,
         reasoning_policy_recovery: reasoningPolicyRecovery,
+        reasoning_policy_recovery_resolution: reasoningPolicyRecoveryTask
+          ? {
+              recovered: reasoningPolicyRecovered,
+              recovery_task_id: task.task_id,
+              source_task_id: reasoningPolicyRecoverySourceTaskId,
+              audit: reasoningPolicyAudit,
+            }
+          : {
+              recovered: false,
+              recovery_task_id: null,
+              source_task_id: null,
+              audit: null,
+            },
         auto_reflection: autoReflection,
         goal_autorun: goalAutorun,
         events: {
           task: agentTaskEvent,
           step: planStepEvent,
           reasoning_policy_recovery: reasoningPolicyRecovery.event,
+          reasoning_policy_recovered: reasoningPolicyRecoveredEvent,
         },
       };
     },

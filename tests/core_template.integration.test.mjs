@@ -4611,6 +4611,7 @@ test("agent.report_result blocks plan advancement when reasoning-policy audit ne
     assert.equal(reported.reasoning_policy_review.required, true);
     assert.equal(reported.reasoning_policy_recovery.queued, true);
     assert.equal(reported.reasoning_policy_recovery.created, true);
+    assert.equal(reported.adaptive_worker_profile.total_evidence_blocks, 1);
     assert.equal(typeof reported.reasoning_policy_recovery.task_id, "string");
     assert.equal(
       reported.plan_step_update.step.metadata.reasoning_policy_recovery_task_id,
@@ -4661,13 +4662,76 @@ test("agent.report_result blocks plan advancement when reasoning-policy audit ne
       new Set(["candidate_evidence", "selection_rationale", "plan_pass", "verification_pass"])
     );
 
+    const recoveryClaim = await callTool(client, "agent.claim_next", {
+      mutation: nextMutation(testId, "agent.claim_next.recovery", () => mutationCounter++),
+      session_id: "agent-reasoning-review-session",
+      task_id: recoveryTask.task_id,
+      lease_seconds: 120,
+    });
+    assert.equal(recoveryClaim.claimed, true);
+    assert.equal(recoveryClaim.task.task_id, recoveryTask.task_id);
+
+    const recoveryReported = await callTool(client, "agent.report_result", {
+      mutation: nextMutation(testId, "agent.report_result.recovery", () => mutationCounter++),
+      session_id: "agent-reasoning-review-session",
+      task_id: recoveryTask.task_id,
+      outcome: "completed",
+      summary: "Recovered the reasoning-policy evidence with grounded candidates and verification checks",
+      result: {
+        completion_evidence: {
+          candidates: [
+            {
+              id: "candidate-a",
+              selected: true,
+              evidence: "Matches the step objective and has explicit verification coverage.",
+              contradiction_risk: "low",
+            },
+            {
+              id: "candidate-b",
+              evidence: "Alternative leaves the original missing-evidence gap unresolved.",
+              contradiction_risk: "medium",
+            },
+          ],
+          selected_candidate_id: "candidate-a",
+          selection_rationale:
+            "candidate-a is selected because it is the only candidate with explicit plan, candidate, and verification evidence.",
+          plan_summary: "Compare candidate paths, select the evidence-grounded path, then verify the selected path.",
+          verification_summary: "Recovered evidence satisfies candidate, selection, plan, and verification gates.",
+          checks: ["candidate-evidence-present", "selection-grounded", "plan-pass-present", "verification-pass-present"],
+          evidence_refs: [`artifact:${reported.auto_report_artifact_id}`],
+        },
+      },
+    });
+    assert.equal(recoveryReported.reported, true);
+    assert.equal(recoveryReported.task.result.reasoning_policy_audit.status, "satisfied");
+    assert.equal(recoveryReported.reasoning_policy_review.required, false);
+    assert.equal(recoveryReported.reasoning_policy_recovery_resolution.recovered, true);
+    assert.equal(recoveryReported.reasoning_policy_recovery_resolution.source_task_id, claimed.task.task_id);
+    assert.equal(recoveryReported.plan_step_update.step.status, "completed");
+    assert.equal(recoveryReported.plan_step_update.step.metadata.dispatch_gate_type, null);
+    assert.equal(recoveryReported.plan_step_update.step.metadata.reasoning_policy_recovered, true);
+    assert.equal(
+      recoveryReported.plan_step_update.step.metadata.reasoning_policy_recovery_source_task_id,
+      claimed.task.task_id
+    );
+    assert.equal(recoveryReported.adaptive_worker_profile.total_evidence_blocks, 1);
+
+    const recoveredPlan = await callTool(client, "plan.get", {
+      plan_id: createdPlan.plan.plan_id,
+    });
+    const recoveredStep = recoveredPlan.steps.find((step) => step.step_id === "reasoning-step");
+    assert.equal(recoveredStep.status, "completed");
+    assert.equal(recoveredStep.metadata.reasoning_policy_recovered, true);
+    assert.equal(recoveredStep.metadata.reasoning_policy_recovery_source_task_id, claimed.task.task_id);
+
     const stepEvents = await callTool(client, "event.tail", {
       entity_type: "step",
       entity_id: "reasoning-step",
-      limit: 20,
+      limit: 50,
     });
     assert.ok(stepEvents.events.some((event) => event.event_type === "plan.step_reasoning_review_blocked"));
     assert.ok(stepEvents.events.some((event) => event.event_type === "plan.step_reasoning_recovery_queued"));
+    assert.ok(stepEvents.events.some((event) => event.event_type === "plan.step_reasoning_recovered"));
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
