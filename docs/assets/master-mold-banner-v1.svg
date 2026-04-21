@@ -90,7 +90,7 @@
     <text x="0" y="0" fill="#efeaf7" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">CODEX • VISIBLE CLAUDE • CURSOR • OLLAMA • SQLITE • EVENTS</text>
     <text x="0" y="28" fill="#efeaf7" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">AUTONOMY.INGRESS • MODEL.ROUTER • AGENT OFFICE • LAUNCHD</text>
     <rect x="0" y="46" width="704" height="2" fill="#404861"/>
-    <text x="0" y="72" fill="#72e6dd" font-family="Menlo, Monaco, Consolas, monospace" font-size="15">MASTER-MOLD MODE is optional. MASTER-MOLD is the durable base system.</text>
+    <text x="0" y="72" fill="#72e6dd" font-family="Menlo, Monaco, Consolas, monospace" font-size="15">MASTER-MOLD MODE is optional.</text>
   </g>
 
   <g transform="translate(400 198)">
