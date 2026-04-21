@@ -23,7 +23,9 @@ function shell(command, args) {
 
 async function main() {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    console.log(`Usage: node scripts/request_remote_access.mjs --server http://MAIN-MAC:8787 --host-id my-mac --workspace-root /path/to/MASTER-MOLD [--agent-runtime claude] [--model-label "Claude Opus"] [--desktop-context true]`);
+    console.log(`Usage: node scripts/request_remote_access.mjs --server http://MAIN-MAC:8787 --host-id my-mac --workspace-root /path/to/MASTER-MOLD [--agent-runtime claude] [--model-label "Claude Opus"] [--desktop-context true]
+
+Run this independently on each host that should request MASTER-MOLD access. The main Mac stages every request as a separate pending host identity; approval remains operator-controlled in Agent Office.`);
     return;
   }
   const server = argValue("server", process.env.MASTER_MOLD_MAIN_URL || "http://10.1.2.54:8787");

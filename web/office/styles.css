@@ -1243,6 +1243,17 @@ textarea {
   gap: 10px;
 }
 
+.host-pair-form__hint {
+  margin: 6px 0 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.host-pair-form__hint code {
+  color: var(--text);
+  font-family: var(--mono);
+}
+
 .host-pair-form label {
   display: grid;
   gap: 6px;

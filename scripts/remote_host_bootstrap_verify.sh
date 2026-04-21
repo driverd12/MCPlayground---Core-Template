@@ -6,6 +6,20 @@ REMOTE_REPO_ROOT="${2:-${MASTER_MOLD_REMOTE_REPO_ROOT:-/Users/dan.driver/Documen
 GIT_URL="${MASTER_MOLD_BOOTSTRAP_GIT_URL:-git@github.com:driverd12/MASTER-MOLD.git}"
 BRANCH="${MASTER_MOLD_BOOTSTRAP_BRANCH:-main}"
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  cat <<'EOF'
+Usage: scripts/remote_host_bootstrap_verify.sh [ssh-target] [remote-repo-root]
+
+Bootstraps and verifies one remote MASTER-MOLD host. Repeat this command for
+each approved host in the N-host fabric. Defaults can be overridden with:
+  MASTER_MOLD_REMOTE_SSH
+  MASTER_MOLD_REMOTE_REPO_ROOT
+  MASTER_MOLD_BOOTSTRAP_GIT_URL
+  MASTER_MOLD_BOOTSTRAP_BRANCH
+EOF
+  exit 0
+fi
+
 json_escape() {
   python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'
 }

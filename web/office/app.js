@@ -1615,7 +1615,7 @@
     els.hostsView.innerHTML =
       '<div class="hosts-grid">' +
       '<section class="hosts-hero">' +
-      '<div><div class="section-title">Host Pairing</div><h2>Approve remote Macs without opening the whole LAN.</h2><p>Pairing adds a device identity, allowed address, runtime label, and task-worker scope before any remote host can use the local MCP surface.</p></div>' +
+      '<div><div class="section-title">Host Pairing</div><h2>Approve many remote Macs without opening the whole LAN.</h2><p>Pairing adds a durable device identity, allowed address, runtime label, and task-worker scope for each approved host before it can use the local MCP surface.</p></div>' +
       '<div class="hosts-hero__stats">' +
       '<article><span>Total hosts</span><strong>' + String(fabric.host_count || hosts.length || 0) + '</strong></article>' +
       '<article><span>Approved remote</span><strong>' + String(approvedCount) + '</strong></article>' +
@@ -1625,12 +1625,13 @@
       '</section>' +
       '<section class="hosts-panel hosts-panel--pair">' +
       '<div class="section-title">Add Remote Host</div>' +
+      '<p class="host-pair-form__hint">Repeat this form, or run <code>node scripts/request_remote_access.mjs --server http://MAIN-MAC:8787</code> on any host that should request access.</p>' +
       '<form class="host-pair-form" id="host-pair-form">' +
-      '<div class="host-pair-form__row"><label>Host ID<input name="host_id" value="dans-mbp" /></label><label>Display name<input name="display_name" value="Dan&apos;s MacBook Pro" /></label></div>' +
-      '<div class="host-pair-form__row"><label>Hostname<input name="hostname" value="Dans-MBP.local" /></label><label>IP address<input name="ip_address" value="10.1.2.76" /></label></div>' +
-      '<div class="host-pair-form__row"><label>SSH user<input name="ssh_user" value="dan.driver" /></label><label>Workers<input name="worker_count" value="1" inputmode="numeric" /></label></div>' +
-      '<label>Workspace root<input name="workspace_root" value="/Users/dan.driver/Documents/Playground/Agentic Playground/MASTER-MOLD" /></label>' +
-      '<div class="host-pair-form__row"><label>Agent runtime<input name="agent_runtime" value="claude" /></label><label>Model label<input name="model_label" value="Claude Opus" /></label></div>' +
+      '<div class="host-pair-form__row"><label>Host ID<input name="host_id" placeholder="e.g. dans-mbp, studio-m2, rack-mini-01" /></label><label>Display name<input name="display_name" placeholder="Operator-facing device name" /></label></div>' +
+      '<div class="host-pair-form__row"><label>Hostname<input name="hostname" placeholder="e.g. Dans-MBP.local" /></label><label>IP address<input name="ip_address" placeholder="e.g. 10.1.2.76" /></label></div>' +
+      '<div class="host-pair-form__row"><label>SSH user<input name="ssh_user" placeholder="e.g. dan.driver" /></label><label>Workers<input name="worker_count" value="1" inputmode="numeric" /></label></div>' +
+      '<label>Workspace root<input name="workspace_root" placeholder="/Users/you/Documents/Playground/MASTER-MOLD" /></label>' +
+      '<div class="host-pair-form__row"><label>Agent runtime<input name="agent_runtime" placeholder="e.g. claude, codex, cursor" /></label><label>Model label<input name="model_label" placeholder="e.g. Claude Opus, GPT-5.4" /></label></div>' +
       '<div class="host-pair-form__row"><label>Permission<select name="permission_profile"><option value="task_worker" selected>task worker</option><option value="read_only">read only</option><option value="artifact_writer">artifact writer</option><option value="operator">operator</option></select></label><label class="host-pair-form__check"><input name="desktop_context" type="checkbox" checked /> Context capture</label></div>' +
       '<label class="host-pair-form__check"><input name="approve" type="checkbox" /> Approve immediately</label>' +
       '<button type="submit" class="button button--primary">Stage Host</button>' +
