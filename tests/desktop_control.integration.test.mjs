@@ -276,6 +276,68 @@ JSON
   }
 });
 
+test("desktop.context reports failed remote probes with a concrete unavailable reason", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-desktop-context-remote-failed-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const binDir = path.join(tempDir, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const sshPath = path.join(binDir, "ssh");
+  fs.writeFileSync(
+    sshPath,
+    `#!/bin/sh
+printf '%s\\n' 'ssh: connect to host many-host.local port 22: Operation timed out' >&2
+exit 255
+`
+  );
+  fs.chmodSync(sshPath, 0o755);
+  let mutationCounter = 0;
+  const { client } = await openClient(tempDir, dbPath, {
+    PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+  });
+  try {
+    await callTool(client, "desktop.control", {
+      action: "set",
+      mutation: nextMutation("desktop-context-remote-failed", "desktop.control.set", () => mutationCounter++),
+      enabled: true,
+      allow_observe: true,
+      screenshot_dir: tempDir,
+    });
+    await callTool(client, "worker.fabric", {
+      action: "stage_remote_host",
+      mutation: nextMutation("desktop-context-remote-failed", "worker.fabric.stage", () => mutationCounter++),
+      remote_host: {
+        host_id: "many-host",
+        hostname: "ManyHost.local",
+        ssh_destination: "dan.driver@ManyHost.local",
+        workspace_root: "/remote/master-mold",
+        agent_runtime: "claude",
+        model_label: "Claude Opus",
+        capabilities: { desktop_context: true },
+        approve: true,
+      },
+    });
+
+    const context = await callTool(client, "desktop.context", {
+      action: "latest",
+      host_id: "many-host",
+      fallback_screenshot: false,
+    });
+    assert.equal(context.ok, false);
+    assert.equal(context.status, "unavailable");
+    assert.equal(context.unavailable_reason, "remote_context_probe_failed");
+    assert.equal(context.captured_from_host_id, "many-host");
+    assert.equal(context.captured_hostname, "ManyHost.local");
+    assert.equal(context.captured_agent_runtime, "claude");
+
+    const kernel = await callTool(client, "kernel.summary", {});
+    const remoteHost = kernel.worker_fabric.hosts.find((host) => host.host_id === "many-host");
+    assert.equal(remoteHost.desktop_context.unavailable_reason, "remote_context_probe_failed");
+  } finally {
+    await closeClient(client);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("desktop.context ingests approved remote screenshot fallback without local proof pollution", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-desktop-context-remote-shot-"));
   const dbPath = path.join(tempDir, "hub.sqlite");

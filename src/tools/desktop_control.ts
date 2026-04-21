@@ -819,6 +819,12 @@ function desktopContextRemote(
     (chronicleStatus === "available" || input.prefer_source === "chronicle" || input.action === "status" || !shouldTryScreenshot);
   if (shouldReturnChronicle) {
     const identity = remoteHostContextIdentity(input, host, chroniclePayload);
+    const chronicleStaleReason = readString(chroniclePayload?.stale_reason);
+    const chronicleUnavailableReason =
+      readString(chroniclePayload?.unavailable_reason) ??
+      (chronicleStatus === "unavailable"
+        ? chronicleStaleReason ?? (chronicle.result.status === 0 ? "remote_context_source_unavailable" : "remote_context_probe_failed")
+        : null);
     const event =
       input.action === "status"
         ? null
@@ -835,8 +841,8 @@ function desktopContextRemote(
               action: input.action,
               latest_frame_path: readString(chroniclePayload?.latest_frame_path),
               freshness_seconds: typeof chroniclePayload?.freshness_seconds === "number" ? chroniclePayload.freshness_seconds : null,
-              stale_reason: readString(chroniclePayload?.stale_reason),
-              unavailable_reason: readString(chroniclePayload?.unavailable_reason),
+              stale_reason: chronicleStaleReason,
+              unavailable_reason: chronicleUnavailableReason,
               ocr_hit_count: remoteProbeOcrHits(chroniclePayload)?.length ?? 0,
               ssh_destination: host.ssh_destination,
             },
@@ -852,8 +858,8 @@ function desktopContextRemote(
       display_count: remoteProbeDisplays(chroniclePayload).length,
       latest_frame_path: readString(chroniclePayload?.latest_frame_path),
       screenshot_path: null,
-      stale_reason: readString(chroniclePayload?.stale_reason),
-      unavailable_reason: readString(chroniclePayload?.unavailable_reason),
+      stale_reason: chronicleStaleReason,
+      unavailable_reason: chronicleUnavailableReason,
       event_id: event?.event_id ?? null,
     });
     return {
@@ -868,8 +874,8 @@ function desktopContextRemote(
       screenshot_path: null,
       ocr_hits: remoteProbeOcrHits(chroniclePayload),
       ocr_note: readString(chroniclePayload?.ocr_note),
-      stale_reason: readString(chroniclePayload?.stale_reason),
-      unavailable_reason: readString(chroniclePayload?.unavailable_reason),
+      stale_reason: chronicleStaleReason,
+      unavailable_reason: chronicleUnavailableReason,
       authority_summary: params.authoritySummary,
       recommended_next_action:
         chronicleStatus === "available"
