@@ -13831,21 +13831,68 @@ function mergeTaskRetryReflectionPreflight(
   };
 }
 
+function boundedReasoningPolicyCandidateCount(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.max(1, Math.min(4, Math.round(value)));
+}
+
+function readTaskReasoningComputePolicy(execution: Record<string, unknown>): Record<string, unknown> | null {
+  return readPlainObject(execution.reasoning_compute_policy);
+}
+
+function resolveTaskReasoningCandidateRequirement(execution: Record<string, unknown>): number | null {
+  const legacyCount = boundedReasoningPolicyCandidateCount(execution.reasoning_candidate_count);
+  if (legacyCount !== null) {
+    return legacyCount;
+  }
+  const computePolicy = readTaskReasoningComputePolicy(execution);
+  if (!computePolicy) {
+    return null;
+  }
+  const policyCount =
+    boundedReasoningPolicyCandidateCount(computePolicy.candidate_count) ??
+    boundedReasoningPolicyCandidateCount(computePolicy.max_candidate_count);
+  const policyMode = String(computePolicy.mode ?? "").trim();
+  if (policyMode === "adaptive_best_of_n") {
+    return Math.max(2, policyCount ?? 2);
+  }
+  return policyCount;
+}
+
+function resolveTaskReasoningSelectionStrategy(execution: Record<string, unknown>): string | null {
+  const legacyStrategy = String(execution.reasoning_selection_strategy ?? "").trim();
+  if (legacyStrategy) {
+    return legacyStrategy;
+  }
+  const computePolicy = readTaskReasoningComputePolicy(execution);
+  const policyStrategy = String(computePolicy?.selection_strategy ?? "").trim();
+  return policyStrategy || null;
+}
+
+function taskReasoningComputePolicyRequiresEvidence(execution: Record<string, unknown>): boolean {
+  const computePolicy = readTaskReasoningComputePolicy(execution);
+  if (!computePolicy) {
+    return false;
+  }
+  return computePolicy.evidence_required === true || String(computePolicy.mode ?? "").trim() === "adaptive_best_of_n";
+}
+
 function isTaskExecutionHighCompute(execution: Record<string, unknown> | null): boolean {
   if (!execution) {
     return false;
   }
-  const candidateCount =
-    typeof execution.reasoning_candidate_count === "number" && Number.isFinite(execution.reasoning_candidate_count)
-      ? Math.max(1, Math.min(4, Math.round(execution.reasoning_candidate_count)))
-      : 0;
+  const candidateCount = resolveTaskReasoningCandidateRequirement(execution) ?? 0;
+  const selectionStrategy = resolveTaskReasoningSelectionStrategy(execution);
   const taskKind = String(execution.task_kind ?? "").trim();
   const qualityPreference = String(execution.quality_preference ?? "").trim();
   return (
     candidateCount > 1 ||
-    String(execution.reasoning_selection_strategy ?? "").trim() === "evidence_rerank" ||
+    selectionStrategy === "evidence_rerank" ||
     execution.require_plan_pass === true ||
     execution.require_verification_pass === true ||
+    taskReasoningComputePolicyRequiresEvidence(execution) ||
     (qualityPreference === "quality" && (taskKind === "research" || taskKind === "verification"))
   );
 }
@@ -13858,13 +13905,11 @@ function buildTaskCompletionReasoningAudit(
   if (!execution) {
     return null;
   }
-  const candidateRequirement =
-    typeof execution.reasoning_candidate_count === "number" && Number.isFinite(execution.reasoning_candidate_count)
-      ? Math.max(1, Math.min(4, Math.round(execution.reasoning_candidate_count)))
-      : null;
-  const evidenceRerank = String(execution.reasoning_selection_strategy ?? "").trim() === "evidence_rerank";
+  const candidateRequirement = resolveTaskReasoningCandidateRequirement(execution);
+  const evidenceRerank = resolveTaskReasoningSelectionStrategy(execution) === "evidence_rerank";
   const planRequired = execution.require_plan_pass === true;
   const verificationRequired = execution.require_verification_pass === true;
+  const policyEvidenceRequired = taskReasoningComputePolicyRequiresEvidence(execution);
   const taskKind = String(execution.task_kind ?? "").trim();
   const qualityPreference = String(execution.quality_preference ?? "").trim();
   const qualityBiased =
@@ -13873,6 +13918,7 @@ function buildTaskCompletionReasoningAudit(
     planRequired ||
     verificationRequired ||
     evidenceRerank ||
+    policyEvidenceRequired ||
     (candidateRequirement !== null && candidateRequirement > 1) ||
     qualityBiased;
   if (!required) {
@@ -13932,7 +13978,7 @@ function buildTaskCompletionReasoningAudit(
       "validated_by",
     ]));
   }
-  if (qualityBiased && requiredFields.length === 0) {
+  if ((policyEvidenceRequired || qualityBiased) && requiredFields.length === 0) {
     requireField("evidence_summary", hasCompletionEvidence(result, [
       "evidence",
       "evidence_refs",

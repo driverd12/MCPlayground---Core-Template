@@ -109,6 +109,36 @@ function readNullableRecord(value: unknown) {
   return isRecord(value) ? value : null;
 }
 
+function boundedReasoningCandidateCount(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.max(1, Math.min(4, Math.round(value)));
+}
+
+function resolveReasoningComputePolicy(taskExecution: Record<string, unknown>) {
+  return readNullableRecord(taskExecution.reasoning_compute_policy);
+}
+
+function resolveReasoningCandidateCount(taskExecution: Record<string, unknown>): number | null {
+  const legacyCount = boundedReasoningCandidateCount(taskExecution.reasoning_candidate_count);
+  if (legacyCount !== null) {
+    return legacyCount;
+  }
+  const computePolicy = resolveReasoningComputePolicy(taskExecution);
+  const policyCount =
+    boundedReasoningCandidateCount(computePolicy?.candidate_count) ??
+    boundedReasoningCandidateCount(computePolicy?.max_candidate_count);
+  if (readString(computePolicy?.mode) === "adaptive_best_of_n") {
+    return Math.max(2, policyCount ?? 2);
+  }
+  return policyCount;
+}
+
+function resolveReasoningSelectionStrategy(taskExecution: Record<string, unknown>): string | null {
+  return readString(taskExecution.reasoning_selection_strategy) ?? readString(resolveReasoningComputePolicy(taskExecution)?.selection_strategy);
+}
+
 function extractDelegationBrief(task: { payload: Record<string, unknown>; metadata: Record<string, unknown> }) {
   const nested =
     readNullableRecord(task.payload.delegation_brief) ??
@@ -147,15 +177,12 @@ function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExec
   const taskKind = readString(taskExecution.task_kind);
   const qualityPreference = readString(taskExecution.quality_preference);
   const focus = readString(taskExecution.focus);
-  const reasoningCandidateCount =
-    typeof taskExecution.reasoning_candidate_count === "number" && Number.isFinite(taskExecution.reasoning_candidate_count)
-      ? Math.max(1, Math.min(4, Math.round(taskExecution.reasoning_candidate_count)))
-      : null;
-  const reasoningSelectionStrategy = readString(taskExecution.reasoning_selection_strategy);
+  const reasoningCandidateCount = resolveReasoningCandidateCount(taskExecution);
+  const reasoningSelectionStrategy = resolveReasoningSelectionStrategy(taskExecution);
   const requirePlanPass = taskExecution.require_plan_pass === true;
   const requireVerificationPass = taskExecution.require_verification_pass === true;
   const orgSignals = readNullableRecord(taskMetadata.org_program_signals);
-  const computePolicy = readNullableRecord(taskExecution.reasoning_compute_policy);
+  const computePolicy = resolveReasoningComputePolicy(taskExecution);
   const policyMode = readString(computePolicy?.mode);
   const activationReasons = readStringArray(computePolicy?.activation_reasons);
   const transcriptPolicy = readString(computePolicy?.transcript_policy);
@@ -261,18 +288,17 @@ function describeWorkingMemory(taskMetadata: Record<string, unknown>) {
 }
 
 function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: Record<string, unknown>) {
-  const reasoningCandidateCount =
-    typeof taskExecution.reasoning_candidate_count === "number" && Number.isFinite(taskExecution.reasoning_candidate_count)
-      ? Math.max(1, Math.min(4, Math.round(taskExecution.reasoning_candidate_count)))
-      : null;
+  const reasoningCandidateCount = resolveReasoningCandidateCount(taskExecution);
   const needsCandidateEvidence = reasoningCandidateCount !== null && reasoningCandidateCount > 1;
-  const needsRerank = readString(taskExecution.reasoning_selection_strategy) === "evidence_rerank";
+  const needsRerank = resolveReasoningSelectionStrategy(taskExecution) === "evidence_rerank";
   const needsPlan = taskExecution.require_plan_pass === true;
   const needsVerification = taskExecution.require_verification_pass === true;
   const taskKind = readString(taskExecution.task_kind);
   const qualityPreference = readString(taskExecution.quality_preference);
+  const computePolicy = resolveReasoningComputePolicy(taskExecution);
+  const policyEvidenceRequired = computePolicy?.evidence_required === true || readString(computePolicy?.mode) === "adaptive_best_of_n";
   const qualityBiased = qualityPreference === "quality" && (taskKind === "research" || taskKind === "verification");
-  if (!needsCandidateEvidence && !needsRerank && !needsPlan && !needsVerification && !qualityBiased) {
+  if (!needsCandidateEvidence && !needsRerank && !needsPlan && !needsVerification && !qualityBiased && !policyEvidenceRequired) {
     return renderBulletSection("Completion evidence handoff", []);
   }
 
@@ -285,7 +311,9 @@ function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: 
     lines.push(`Include candidates or candidate_count showing at least ${reasoningCandidateCount} bounded candidates.`);
   }
   if (needsRerank) {
-    lines.push("Include selection_rationale explaining why the chosen path beat alternatives by evidence and contradiction risk.");
+    lines.push(
+      "Include selected_candidate_id plus selection_rationale explaining why the chosen path beat alternatives by evidence and contradiction risk."
+    );
   }
   if (needsPlan) {
     lines.push("Include plan_summary or planned_steps proving a plan pass happened before mutation.");

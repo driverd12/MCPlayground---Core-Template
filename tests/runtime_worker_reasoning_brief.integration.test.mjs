@@ -52,6 +52,7 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
               { id: "candidate-c", verdict: "rejected", evidence: "missed completion handoff evidence" },
               { id: "candidate-d", verdict: "selected", evidence: "checked brief and completion handoff" },
             ],
+            selected_candidate_id: "candidate-d",
             selection_rationale: "Selected the path that verifies both runtime brief instructions and completion evidence handoff.",
             plan_summary: "Inspect the brief, write compact completion evidence, then let the wrapper report task completion.",
             verification_summary: "Created runtime-brief-proof.txt and reasoning-evidence.json in the runtime worktree.",
@@ -62,8 +63,6 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
         task_kind: "verification",
         quality_preference: "quality",
         focus: "verification",
-        reasoning_candidate_count: 4,
-        reasoning_selection_strategy: "evidence_rerank",
         reasoning_compute_policy: {
           mode: "adaptive_best_of_n",
           candidate_count: 4,
@@ -172,6 +171,7 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.match(sessionBrief, /Completion evidence handoff/);
     assert.match(sessionBrief, /reasoning-evidence\.json/);
     assert.match(sessionBrief, /Include candidates or candidate_count showing at least 4 bounded candidates/i);
+    assert.match(sessionBrief, /Include selected_candidate_id plus selection_rationale/i);
 
     const completedTask = await waitFor(async () => {
       const completed = await callTool(client, "task.list", { status: "completed", limit: 20 });
