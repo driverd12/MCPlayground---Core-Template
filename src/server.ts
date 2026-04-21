@@ -17,6 +17,8 @@ import {
   desktopActSchema,
   desktopControl,
   desktopControlSchema,
+  desktopContext,
+  desktopContextSchema,
   desktopListen,
   desktopListenSchema,
   desktopObserve,
@@ -3192,6 +3194,13 @@ registerTool(
   "Inspect the local desktop through frontmost-app, clipboard, and screenshot observation tools.",
   desktopObserveSchema,
   (input) => desktopObserve(storage, input)
+);
+
+registerTool(
+  "desktop.context",
+  "Read shared screen context from Chronicle when live, or fall back to a logged desktop.observe screenshot capture.",
+  desktopContextSchema,
+  (input) => desktopContext(storage, input)
 );
 
 registerTool(

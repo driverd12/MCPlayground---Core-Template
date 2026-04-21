@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { type DesktopControlCapabilityProbeRecord, summarizeDesktopControlState } from "../desktop_control_plane.js";
-import { Storage } from "../storage.js";
+import { type RuntimeEventRecord, Storage } from "../storage.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -103,6 +103,30 @@ export const desktopListenSchema = z
         code: z.ZodIssueCode.custom,
         message: "mutation is required for action=record",
         path: ["mutation"],
+      });
+    }
+  });
+
+export const desktopContextSchema = z
+  .object({
+    action: z.enum(["status", "latest", "search"]).default("latest"),
+    prefer_source: z.enum(["auto", "chronicle", "desktop_observe"]).default("auto"),
+    fallback_screenshot: z.boolean().default(true),
+    mutation: mutationSchema.optional(),
+    query: z.string().min(1).max(500).optional(),
+    max_freshness_seconds: z.number().min(1).max(3600).default(120),
+    ocr_max_hits: z.number().int().min(1).max(50).default(10),
+    display_id: z.string().min(1).max(120).optional(),
+    filename: z.string().min(1).max(200).optional(),
+    delay_ms: z.number().int().min(0).max(10000).default(0),
+    ...sourceSchema.shape,
+  })
+  .superRefine((value, ctx) => {
+    if (value.action === "search" && !value.query?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "query is required for action=search",
+        path: ["query"],
       });
     }
   });
@@ -268,8 +292,8 @@ function recordRuntimeEvent(
     source_model?: string;
     source_agent?: string;
   }
-) {
-  storage.appendRuntimeEvent({
+): RuntimeEventRecord {
+  return storage.appendRuntimeEvent({
     event_type: params.event_type,
     entity_type: "daemon",
     entity_id: "desktop.control",
@@ -280,6 +304,231 @@ function recordRuntimeEvent(
     source_model: params.source_model,
     source_agent: params.source_agent ?? "ring-leader",
   });
+}
+
+function currentTmpDir() {
+  return readString(process.env.TMPDIR) ?? os.tmpdir();
+}
+
+function chronicleRecordingRoot() {
+  return path.join(currentTmpDir(), "chronicle", "screen_recording");
+}
+
+function chronicleRecorderStatus() {
+  const pidPath = path.join(currentTmpDir(), "codex_tape_recorder", "chronicle-started.pid");
+  try {
+    const rawPid = fs.readFileSync(pidPath, "utf8").trim();
+    const pid = Number(rawPid);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      return { live: false, unavailable_reason: "chronicle_recorder_not_running" };
+    }
+    try {
+      process.kill(pid, 0);
+      return { live: true, unavailable_reason: null };
+    } catch (error) {
+      const code = typeof error === "object" && error !== null ? String((error as { code?: unknown }).code ?? "") : "";
+      if (code === "EPERM") {
+        return { live: true, unavailable_reason: null };
+      }
+      return { live: false, unavailable_reason: "chronicle_recorder_not_running" };
+    }
+  } catch {
+    return { live: false, unavailable_reason: "chronicle_recorder_not_running" };
+  }
+}
+
+function safeStat(filePath: string) {
+  try {
+    return fs.statSync(filePath);
+  } catch {
+    return null;
+  }
+}
+
+function safeReadJsonRecord(filePath: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function roundSeconds(value: number) {
+  return Number(value.toFixed(3));
+}
+
+function latestFrameDisplayId(filename: string) {
+  const match = filename.match(/-display-(.+)-latest\.jpg$/);
+  return match ? match[1] : "unknown";
+}
+
+type ChronicleDisplayContext = {
+  display_id: string;
+  segment_id: string;
+  latest_frame_path: string;
+  latest_frame_mtime: string;
+  freshness_seconds: number;
+  stale: boolean;
+  capture_metadata_path: string | null;
+  capture_metadata: Record<string, unknown> | null;
+  ocr_path: string | null;
+  sparse_history_dir: string | null;
+};
+
+function listChronicleDisplays(input: { max_freshness_seconds: number; display_id?: string }) {
+  const recorder = chronicleRecorderStatus();
+  const root = chronicleRecordingRoot();
+  if (!recorder.live) {
+    return {
+      ok: false,
+      root,
+      displays: [] as ChronicleDisplayContext[],
+      unavailable_reason: recorder.unavailable_reason ?? "chronicle_recorder_not_running",
+      stale_reason: null as string | null,
+    };
+  }
+  if (!fs.existsSync(root)) {
+    return {
+      ok: false,
+      root,
+      displays: [] as ChronicleDisplayContext[],
+      unavailable_reason: "chronicle_recording_root_missing",
+      stale_reason: null as string | null,
+    };
+  }
+
+  const nowMs = Date.now();
+  const displayFilter = readString(input.display_id);
+  const displays = fs
+    .readdirSync(root)
+    .filter((filename) => filename.endsWith("-latest.jpg"))
+    .map((filename) => {
+      const displayId = latestFrameDisplayId(filename);
+      if (displayFilter && displayFilter !== displayId) {
+        return null;
+      }
+      const segmentId = filename.replace(/-latest\.jpg$/, "");
+      const latestFramePath = path.join(root, filename);
+      const stat = safeStat(latestFramePath);
+      if (!stat) {
+        return null;
+      }
+      const captureMetadataPath = path.join(root, `${segmentId}.capture.json`);
+      const ocrPath = path.join(root, `${segmentId}.ocr.jsonl`);
+      const sparseHistoryDir = path.join(root, "1min", segmentId);
+      const freshnessSeconds = Math.max(0, (nowMs - stat.mtimeMs) / 1000);
+      return {
+        display_id: displayId,
+        segment_id: segmentId,
+        latest_frame_path: latestFramePath,
+        latest_frame_mtime: stat.mtime.toISOString(),
+        freshness_seconds: roundSeconds(freshnessSeconds),
+        stale: freshnessSeconds > input.max_freshness_seconds,
+        capture_metadata_path: fs.existsSync(captureMetadataPath) ? captureMetadataPath : null,
+        capture_metadata: fs.existsSync(captureMetadataPath) ? safeReadJsonRecord(captureMetadataPath) : null,
+        ocr_path: fs.existsSync(ocrPath) ? ocrPath : null,
+        sparse_history_dir: fs.existsSync(sparseHistoryDir) ? sparseHistoryDir : null,
+      };
+    })
+    .filter((entry): entry is ChronicleDisplayContext => entry !== null)
+    .sort((left, right) => left.display_id.localeCompare(right.display_id));
+
+  const unavailableReason = displays.length <= 0 ? "chronicle_latest_frame_missing" : null;
+  const staleReason =
+    displays.length > 0 && displays.every((display) => display.stale) ? "chronicle_latest_frames_stale" : null;
+  return {
+    ok: displays.length > 0 && !staleReason,
+    root,
+    displays,
+    unavailable_reason: unavailableReason,
+    stale_reason: staleReason,
+  };
+}
+
+function readFileTail(filePath: string, maxBytes: number) {
+  const stat = safeStat(filePath);
+  if (!stat) {
+    return "";
+  }
+  const start = Math.max(0, stat.size - maxBytes);
+  const length = stat.size - start;
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(length);
+    fs.readSync(fd, buffer, 0, length, start);
+    return buffer.toString("utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function collectStringFragments(value: unknown, fragments: string[] = [], depth = 0) {
+  if (fragments.length >= 20 || depth > 4) {
+    return fragments;
+  }
+  if (typeof value === "string") {
+    const compact = value.replace(/\s+/g, " ").trim();
+    if (compact) {
+      fragments.push(compact);
+    }
+    return fragments;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectStringFragments(entry, fragments, depth + 1);
+      if (fragments.length >= 20) break;
+    }
+    return fragments;
+  }
+  if (value && typeof value === "object") {
+    for (const entry of Object.values(value as Record<string, unknown>)) {
+      collectStringFragments(entry, fragments, depth + 1);
+      if (fragments.length >= 20) break;
+    }
+  }
+  return fragments;
+}
+
+function chronicleOcrHits(displays: ChronicleDisplayContext[], query: string | undefined, maxHits: number) {
+  const needle = readString(query)?.toLowerCase();
+  if (!needle) {
+    return undefined;
+  }
+  const hits: Array<Record<string, unknown>> = [];
+  for (const display of displays) {
+    if (!display.ocr_path || hits.length >= maxHits) {
+      continue;
+    }
+    const text = readFileTail(display.ocr_path, 2_000_000);
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    for (let index = 0; index < lines.length && hits.length < maxHits; index += 1) {
+      const line = lines[index];
+      if (!line.toLowerCase().includes(needle)) {
+        continue;
+      }
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        parsed = null;
+      }
+      const fragments = collectStringFragments(parsed).join(" ");
+      const parsedRecord = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+      hits.push({
+        display_id: display.display_id,
+        ocr_path: display.ocr_path,
+        line_offset_from_tail: index,
+        timestamp:
+          readString(parsedRecord.timestamp) ??
+          readString(parsedRecord.created_at) ??
+          readString(parsedRecord.ts) ??
+          readString(parsedRecord.time),
+        text_excerpt: compactText(fragments || line, 360),
+      });
+    }
+  }
+  return hits;
 }
 
 function runFrontmostAppQuery(timeoutMs: number) {
@@ -693,6 +942,252 @@ export function desktopObserve(storage: Storage, input: z.infer<typeof desktopOb
           frontmost_window: nextState.last_frontmost_window,
         },
         source: "desktop.observe",
+      };
+    },
+  });
+}
+
+export function desktopContext(storage: Storage, input: z.infer<typeof desktopContextSchema>) {
+  const generatedAt = new Date().toISOString();
+  const state = storage.getDesktopControlState();
+  const authoritySummary = summarizeDesktopControlState(state);
+  const observationAllowed = state.enabled && state.allow_observe;
+
+  if (!observationAllowed) {
+    const event =
+      input.action === "status"
+        ? null
+        : recordRuntimeEvent(storage, {
+            event_type: "desktop.context",
+            status: "unavailable",
+            summary: "desktop.context unavailable: desktop observation is disabled by policy",
+            details: {
+              source: "none",
+              unavailable_reason: "desktop_observation_disabled_by_policy",
+              action: input.action,
+            },
+            source_client: input.source_client,
+            source_model: input.source_model,
+            source_agent: input.source_agent,
+          });
+    return {
+      ok: false,
+      status: "unavailable",
+      source: "none",
+      generated_at: generatedAt,
+      current_utc: generatedAt,
+      freshness_seconds: null,
+      displays: [],
+      latest_frame_path: null,
+      screenshot_path: null,
+      ocr_hits: input.query ? [] : undefined,
+      unavailable_reason: "desktop_observation_disabled_by_policy",
+      stale_reason: null,
+      authority_summary: authoritySummary,
+      recommended_next_action: "Enable desktop.control with allow_observe before exposing screen context to MCP clients.",
+      event_id: event?.event_id ?? null,
+    };
+  }
+
+  const shouldTryChronicle = input.prefer_source !== "desktop_observe";
+  const shouldTryScreenshot = input.prefer_source === "desktop_observe" || input.fallback_screenshot;
+  const chronicle = shouldTryChronicle
+    ? listChronicleDisplays({
+        max_freshness_seconds: input.max_freshness_seconds,
+        display_id: input.display_id,
+      })
+    : null;
+
+  if (chronicle && (chronicle.displays.length > 0 || input.prefer_source === "chronicle" || input.action === "status")) {
+    const freshDisplays = chronicle.displays.filter((display) => !display.stale);
+    const selectedDisplay = freshDisplays[0] ?? chronicle.displays[0] ?? null;
+    const status = freshDisplays.length > 0 ? "available" : chronicle.displays.length > 0 ? "degraded" : "unavailable";
+    const ocrHits = input.action === "search" || input.query ? chronicleOcrHits(chronicle.displays, input.query, input.ocr_max_hits) ?? [] : undefined;
+    if (status === "available" || input.prefer_source === "chronicle" || input.action === "status") {
+      const event =
+        input.action === "status"
+          ? null
+          : recordRuntimeEvent(storage, {
+              event_type: "desktop.context",
+              status,
+              summary:
+                status === "available"
+                  ? `desktop.context read ${freshDisplays.length} fresh Chronicle display frame(s)`
+                  : `desktop.context Chronicle degraded: ${chronicle.stale_reason ?? chronicle.unavailable_reason ?? "unknown"}`,
+              details: {
+                source: "chronicle",
+                action: input.action,
+                display_count: chronicle.displays.length,
+                fresh_display_count: freshDisplays.length,
+                latest_frame_path: selectedDisplay?.latest_frame_path ?? null,
+                freshness_seconds: selectedDisplay?.freshness_seconds ?? null,
+                stale_reason: chronicle.stale_reason,
+                unavailable_reason: chronicle.unavailable_reason,
+                ocr_hit_count: ocrHits?.length ?? 0,
+                ocr_is_noisy: Boolean(ocrHits),
+              },
+              source_client: input.source_client,
+              source_model: input.source_model,
+              source_agent: input.source_agent,
+            });
+      return {
+        ok: status !== "unavailable",
+        status,
+        source: status === "unavailable" ? "none" : "chronicle",
+        generated_at: generatedAt,
+        current_utc: generatedAt,
+        freshness_seconds: selectedDisplay?.freshness_seconds ?? null,
+        displays: chronicle.displays,
+        latest_frame_path: selectedDisplay?.latest_frame_path ?? null,
+        screenshot_path: null,
+        ocr_hits: ocrHits,
+        ocr_note: ocrHits ? "OCR hits are noisy triage hints only; use app/file/connectors for authoritative extraction." : undefined,
+        stale_reason: chronicle.stale_reason,
+        unavailable_reason: chronicle.unavailable_reason,
+        authority_summary: authoritySummary,
+        recommended_next_action:
+          status === "available"
+            ? "Use the frame path for visual context, then switch to app, file, or connector data once the target is identified."
+            : "Refresh Chronicle or call desktop.context with fallback_screenshot=true and a mutation to capture a fresh screenshot.",
+        event_id: event?.event_id ?? null,
+      };
+    }
+  }
+
+  if (!shouldTryScreenshot) {
+    const reason = chronicle?.stale_reason ?? chronicle?.unavailable_reason ?? "desktop_context_source_unavailable";
+    const event =
+      input.action === "status"
+        ? null
+        : recordRuntimeEvent(storage, {
+            event_type: "desktop.context",
+            status: "unavailable",
+            summary: `desktop.context unavailable: ${reason}`,
+            details: {
+              source: "none",
+              action: input.action,
+              unavailable_reason: reason,
+            },
+            source_client: input.source_client,
+            source_model: input.source_model,
+            source_agent: input.source_agent,
+          });
+    return {
+      ok: false,
+      status: "unavailable",
+      source: "none",
+      generated_at: generatedAt,
+      current_utc: generatedAt,
+      freshness_seconds: null,
+      displays: chronicle?.displays ?? [],
+      latest_frame_path: null,
+      screenshot_path: null,
+      ocr_hits: input.query ? [] : undefined,
+      stale_reason: chronicle?.stale_reason ?? null,
+      unavailable_reason: reason,
+      authority_summary: authoritySummary,
+      recommended_next_action: "Enable fallback_screenshot or restore Chronicle before requesting screen context.",
+      event_id: event?.event_id ?? null,
+    };
+  }
+
+  if (!input.mutation) {
+    const reason = chronicle?.stale_reason ?? chronicle?.unavailable_reason ?? "desktop_context_screenshot_requires_mutation";
+    const event =
+      input.action === "status"
+        ? null
+        : recordRuntimeEvent(storage, {
+            event_type: "desktop.context",
+            status: "unavailable",
+            summary: "desktop.context screenshot fallback requires an idempotent mutation",
+            details: {
+              source: "none",
+              action: input.action,
+              unavailable_reason: reason,
+              fallback_screenshot: true,
+            },
+            source_client: input.source_client,
+            source_model: input.source_model,
+            source_agent: input.source_agent,
+          });
+    return {
+      ok: false,
+      status: "unavailable",
+      source: "none",
+      generated_at: generatedAt,
+      current_utc: generatedAt,
+      freshness_seconds: null,
+      displays: chronicle?.displays ?? [],
+      latest_frame_path: null,
+      screenshot_path: null,
+      ocr_hits: input.query ? [] : undefined,
+      stale_reason: chronicle?.stale_reason ?? null,
+      unavailable_reason: "desktop_context_screenshot_requires_mutation",
+      authority_summary: authoritySummary,
+      recommended_next_action: "Retry with a mutation so MASTER-MOLD can capture and log a fresh screenshot fallback.",
+      event_id: event?.event_id ?? null,
+    };
+  }
+
+  return runIdempotentMutation({
+    storage,
+    tool_name: "desktop.context",
+    mutation: input.mutation,
+    payload: input,
+    execute: () => {
+      const capturedAt = new Date().toISOString();
+      const outputPath = buildOutputPath(state.screenshot_dir, "desktop-context", "png", input.filename);
+      const screenshot = captureScreenshot(outputPath, input.delay_ms, state.action_timeout_ms);
+      const frontmost = readFrontmostOverride() ?? { app_name: state.last_frontmost_app ?? "", window_title: state.last_frontmost_window ?? "" };
+      const nextState = storage.setDesktopControlState({
+        last_observation_at: capturedAt,
+        last_screenshot_at: screenshot.dry_run ? state.last_screenshot_at : capturedAt,
+        last_frontmost_app: frontmost.app_name || state.last_frontmost_app,
+        last_frontmost_window: frontmost.window_title || state.last_frontmost_window,
+        last_error: null,
+      });
+      const nextAuthoritySummary = summarizeDesktopControlState(nextState);
+      const status = input.prefer_source === "desktop_observe" && !screenshot.dry_run ? "available" : "degraded";
+      const event = recordRuntimeEvent(storage, {
+        event_type: "desktop.context",
+        status,
+        summary: `desktop.context ${screenshot.dry_run ? "planned" : "captured"} screenshot fallback -> ${outputPath}`,
+        details: {
+          source: "desktop_observe",
+          action: input.action,
+          screenshot_path: outputPath,
+          dry_run: screenshot.dry_run,
+          size_bytes: screenshot.size_bytes,
+          fallback_from: chronicle?.stale_reason ?? chronicle?.unavailable_reason ?? null,
+          screen_recording_proven: !screenshot.dry_run,
+        },
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      });
+      return {
+        ok: true,
+        status,
+        source: "desktop_observe",
+        generated_at: capturedAt,
+        current_utc: capturedAt,
+        freshness_seconds: 0,
+        displays: chronicle?.displays ?? [],
+        latest_frame_path: null,
+        screenshot_path: outputPath,
+        screenshot: {
+          ...screenshot,
+          format: "png",
+          captured: !screenshot.dry_run,
+          frontmost_app: nextState.last_frontmost_app,
+          frontmost_window: nextState.last_frontmost_window,
+        },
+        ocr_hits: input.query ? [] : undefined,
+        stale_reason: chronicle?.stale_reason ?? null,
+        unavailable_reason: chronicle?.unavailable_reason ?? null,
+        authority_summary: nextAuthoritySummary,
+        recommended_next_action: "Use the screenshot as current visual context, then switch to app, file, or connector data for authoritative work.",
+        event_id: event.event_id,
       };
     },
   });

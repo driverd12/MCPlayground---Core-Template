@@ -102,6 +102,108 @@ test("desktop control tools persist host-control state and surface dry-run machi
   }
 });
 
+test("desktop.context surfaces fresh Chronicle screen frames with noisy OCR triage and event logging", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-desktop-context-chronicle-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const tmpDir = path.join(tempDir, "tmp");
+  const chronicleRoot = path.join(tmpDir, "chronicle", "screen_recording");
+  const recorderRoot = path.join(tmpDir, "codex_tape_recorder");
+  fs.mkdirSync(chronicleRoot, { recursive: true });
+  fs.mkdirSync(recorderRoot, { recursive: true });
+  fs.writeFileSync(path.join(recorderRoot, "chronicle-started.pid"), String(process.pid));
+  const segmentId = "2026-04-21T14-00-00Z-display-main";
+  const latestFrame = path.join(chronicleRoot, `${segmentId}-latest.jpg`);
+  fs.writeFileSync(latestFrame, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+  fs.writeFileSync(
+    path.join(chronicleRoot, `${segmentId}.capture.json`),
+    JSON.stringify({ segment_id: segmentId, display_id: "main" })
+  );
+  fs.writeFileSync(
+    path.join(chronicleRoot, `${segmentId}.ocr.jsonl`),
+    `${JSON.stringify({ timestamp: new Date().toISOString(), text: "Agent Office Hosts panel is visible" })}\n`
+  );
+
+  let mutationCounter = 0;
+  const { client } = await openClient(tempDir, dbPath, {
+    TMPDIR: tmpDir,
+  });
+  try {
+    await callTool(client, "desktop.control", {
+      action: "set",
+      mutation: nextMutation("desktop-context-chronicle", "desktop.control.set", () => mutationCounter++),
+      enabled: true,
+      allow_observe: true,
+      screenshot_dir: tempDir,
+    });
+
+    const context = await callTool(client, "desktop.context", {
+      action: "latest",
+      query: "Hosts panel",
+      source_client: "test",
+      source_agent: "codex-test",
+    });
+    assert.equal(context.status, "available");
+    assert.equal(context.source, "chronicle");
+    assert.equal(context.latest_frame_path, latestFrame);
+    assert.equal(context.displays.length, 1);
+    assert.equal(context.displays[0].display_id, "main");
+    assert.equal(context.displays[0].stale, false);
+    assert.equal(context.ocr_hits.length, 1);
+    assert.match(context.ocr_note, /noisy triage/i);
+    assert.equal(typeof context.event_id, "string");
+
+    const events = await callTool(client, "event.tail", {
+      event_type: "desktop.context",
+      limit: 5,
+    });
+    assert.ok(events.events.some((event) => event.event_id === context.event_id));
+  } finally {
+    await closeClient(client);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("desktop.context falls back to logged desktop.observe screenshot when Chronicle is unavailable", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-desktop-context-fallback-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const tmpDir = path.join(tempDir, "tmp");
+  fs.mkdirSync(tmpDir, { recursive: true });
+  let mutationCounter = 0;
+
+  const { client } = await openClient(tempDir, dbPath, {
+    TMPDIR: tmpDir,
+    MCP_DESKTOP_CONTROL_DRY_RUN: "1",
+    MCP_DESKTOP_CONTROL_TEST_FRONTMOST: "Cursor|Agent Office",
+  });
+  try {
+    await callTool(client, "desktop.control", {
+      action: "set",
+      mutation: nextMutation("desktop-context-fallback", "desktop.control.set", () => mutationCounter++),
+      enabled: true,
+      allow_observe: true,
+      screenshot_dir: tempDir,
+    });
+
+    const context = await callTool(client, "desktop.context", {
+      action: "latest",
+      mutation: nextMutation("desktop-context-fallback", "desktop.context", () => mutationCounter++),
+      filename: "fallback-context",
+      source_client: "test",
+      source_agent: "codex-test",
+    });
+    assert.equal(context.status, "degraded");
+    assert.equal(context.source, "desktop_observe");
+    assert.match(context.screenshot_path, /fallback-context\.png$/);
+    assert.equal(context.screenshot.dry_run, true);
+    assert.equal(context.screenshot.captured, false);
+    assert.equal(context.unavailable_reason, "chronicle_recorder_not_running");
+    assert.equal(typeof context.event_id, "string");
+  } finally {
+    await closeClient(client);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function openClient(tempDir, dbPath, extraEnv = {}) {
   const transport = new StdioClientTransport({
     command: "node",
