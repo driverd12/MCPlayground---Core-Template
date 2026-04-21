@@ -13,6 +13,7 @@ This is the centralized human-facing docs hub for MASTER MOLD.
 ## Architecture and Diagrams
 
 - [System Interconnects](./SYSTEM_INTERCONNECTS.md)
+- [Federation Mesh](./FEDERATION_MESH.md)
 - [Architecture Pitch](./ARCHITECTURE_PITCH.md)
 - [Provider Bridge Matrix](./PROVIDER_BRIDGE_MATRIX.md)
 - [Ring Leader MCP Ops](./RING_LEADER_MCP_OPS.md)

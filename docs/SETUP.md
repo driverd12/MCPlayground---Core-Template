@@ -123,14 +123,19 @@ This script is cross-platform. It sets `MCP_HTTP=1` inside a Node wrapper so it 
 Peer federation sidecar:
 
 ```bash
+node scripts/federation_secret_bootstrap.mjs \
+  --vault Employee \
+  --host-id this-host \
+  --peers http://Dans-MBP.local:8787 \
+  --write-env
+
 MASTER_MOLD_FEDERATION_PEERS=http://Dans-MBP.local:8787 \
 MASTER_MOLD_HOST_ID=this-host \
 MASTER_MOLD_IDENTITY_KEY_PATH=~/.master-mold/identity/this-host-ed25519.pem \
-MCP_HTTP_BEARER_TOKEN=change-me \
 npm run federation:sidecar -- --once
 ```
 
-Run the same sidecar on any approved peer and change `MASTER_MOLD_FEDERATION_PEERS` to the other approved MASTER-MOLD HTTP endpoints. This is a mesh/tendril stream: each host captures locally, signs `POST /federation/ingest`, and each receiving peer stores the compact context/event payload in its own runtime events.
+Run the same bootstrap and sidecar on any approved peer and change `MASTER_MOLD_FEDERATION_PEERS` to the other approved MASTER-MOLD HTTP endpoints. This is a mesh/tendril stream: each host captures locally, signs `POST /federation/ingest`, and each receiving peer stores the compact context/event payload in its own runtime events. See [Federation Mesh](./FEDERATION_MESH.md) for the wire diagram and team bootstrap sequence.
 
 On macOS, install the same sidecar as a launchd agent after `MASTER_MOLD_FEDERATION_PEERS`, `MASTER_MOLD_HOST_ID`, and `MASTER_MOLD_IDENTITY_KEY_PATH` are set:
 

@@ -181,6 +181,14 @@ function readJsonFile(filePath, fallback) {
   }
 }
 
+function readLocalBearerTokenFile() {
+  try {
+    return fs.readFileSync(path.join(REPO_ROOT, "data", "imprint", "http_bearer_token"), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
 function writeJsonFile(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
@@ -238,6 +246,7 @@ function runMcpTool(tool, args, options) {
     MASTER_MOLD_AGENT_RUNTIME: options.agentRuntime,
     MASTER_MOLD_MODEL_LABEL: options.modelLabel,
     MASTER_MOLD_IDENTITY_KEY_PATH: options.identityKeyPath,
+    MCP_HTTP_BEARER_TOKEN: options.bearerToken,
   };
   const commandArgs = [
     path.join(REPO_ROOT, "scripts", "mcp_tool_call.mjs"),
@@ -449,7 +458,7 @@ function parseOptions() {
     agentId: String(argValue("agent-id", process.env.MASTER_MOLD_AGENT_ID || "")).trim(),
     agentRuntime: String(argValue("agent-runtime", process.env.MASTER_MOLD_AGENT_RUNTIME || "federation-sidecar")).trim(),
     modelLabel: String(argValue("model-label", process.env.MASTER_MOLD_MODEL_LABEL || "federation-sidecar")).trim(),
-    bearerToken: String(argValue("bearer-token", process.env.MCP_HTTP_BEARER_TOKEN || "")).trim(),
+    bearerToken: String(argValue("bearer-token", process.env.MCP_HTTP_BEARER_TOKEN || readLocalBearerTokenFile())).trim(),
     origin: String(argValue("origin", process.env.MASTER_MOLD_FEDERATION_ORIGIN || "")).trim(),
     peers: parsePeers(),
     once: boolArg("once", false),
