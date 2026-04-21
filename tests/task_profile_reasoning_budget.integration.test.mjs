@@ -218,6 +218,16 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       tags: ["reasoning-budget", "failure-reflection"],
     });
 
+    const policyOnlySummary = await callTool(client, "task.summary", {
+      running_limit: 10,
+    });
+    assert.equal(policyOnlySummary.reasoning_policy.pending_count, 1);
+    assert.equal(policyOnlySummary.reasoning_policy.total_active_count, 1);
+    assert.equal(policyOnlySummary.reasoning_policy.evidence_rerank_count, 1);
+    assert.equal(policyOnlySummary.reasoning_policy.total_candidate_count, 3);
+    assert.equal(policyOnlySummary.reasoning_policy.max_candidate_count, 3);
+    assert.ok(policyOnlySummary.reasoning_policy.high_compute_task_ids.includes(failedTask.task.task_id));
+
     const failureClaim = await callTool(client, "task.claim", {
       mutation: nextMutation(testId, "task.claim.failure-reflection", () => mutationCounter++),
       worker_id: "failure-reflection-worker",

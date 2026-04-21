@@ -14302,18 +14302,21 @@ function summarizeTaskReasoningPolicy(
       metadata.task_execution && typeof metadata.task_execution === "object" && !Array.isArray(metadata.task_execution)
         ? (metadata.task_execution as Record<string, unknown>)
         : {};
-    const candidateCount =
-      typeof execution.reasoning_candidate_count === "number" && Number.isFinite(execution.reasoning_candidate_count)
-        ? Math.max(1, Math.min(4, Math.round(execution.reasoning_candidate_count)))
-        : 0;
-    const evidenceRerank = String(execution.reasoning_selection_strategy ?? "").trim() === "evidence_rerank";
+    const candidateCount = resolveTaskReasoningCandidateRequirement(execution) ?? 0;
+    const evidenceRerank = resolveTaskReasoningSelectionStrategy(execution) === "evidence_rerank";
     const planPass = execution.require_plan_pass === true;
     const verificationPass = execution.require_verification_pass === true;
     const taskKind = String(execution.task_kind ?? "").trim();
     const qualityPreference = String(execution.quality_preference ?? "").trim();
     const qualityBiased =
       qualityPreference === "quality" && (taskKind === "research" || taskKind === "verification");
-    const highCompute = candidateCount > 1 || evidenceRerank || planPass || verificationPass || qualityBiased;
+    const highCompute =
+      candidateCount > 1 ||
+      evidenceRerank ||
+      planPass ||
+      verificationPass ||
+      taskReasoningComputePolicyRequiresEvidence(execution) ||
+      qualityBiased;
     if (!highCompute) {
       continue;
     }
