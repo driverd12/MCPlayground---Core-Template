@@ -1,9 +1,10 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import dns from "node:dns/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -39,6 +40,8 @@ type NetworkGateResult = {
   remote_address: string | null;
   reason: string;
   host_id: string | null;
+  host_hostname?: string | null;
+  host_mac_address?: string | null;
   display_name?: string | null;
   agent_runtime?: string | null;
   model_label?: string | null;
@@ -1014,6 +1017,91 @@ function readStringList(value: unknown): string[] {
   return Array.isArray(value) ? value.map((entry) => String(entry ?? "").trim()).filter(Boolean) : [];
 }
 
+function readStringValue(value: unknown): string | null {
+  const text = String(value ?? "").trim();
+  return text ? text : null;
+}
+
+function normalizeMacAddress(value: unknown): string | null {
+  const text = String(value ?? "").trim().toLowerCase().replace(/-/g, ":");
+  return /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(text) ? text : null;
+}
+
+function readMacList(...values: unknown[]) {
+  return [
+    ...new Set(
+      values
+        .flatMap((value) => (Array.isArray(value) ? value : [value]))
+        .map(normalizeMacAddress)
+        .filter((entry): entry is string => Boolean(entry))
+    ),
+  ];
+}
+
+async function resolveHostnameAddresses(hostname: string | null, timeoutMs = 750) {
+  if (!hostname) {
+    return [];
+  }
+  try {
+    const lookup = dns.lookup(hostname, { all: true, verbatim: true });
+    const timeout = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error("hostname_lookup_timeout")), timeoutMs).unref();
+    });
+    const addresses = await Promise.race([lookup, timeout]);
+    return addresses.map((entry) => normalizeClientIp(entry.address)).filter((entry): entry is string => Boolean(entry));
+  } catch {
+    return [];
+  }
+}
+
+function lookupLanMacAddress(remoteAddress: string | null) {
+  if (!remoteAddress || remoteAddress.includes(":")) {
+    return null;
+  }
+  const result = spawnSync("arp", ["-n", remoteAddress], {
+    encoding: "utf8",
+    timeout: 750,
+    maxBuffer: 64 * 1024,
+  });
+  const text = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  const match = text.match(/\bat\s+([0-9a-fA-F:-]{17})\b/) ?? text.match(/\b([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})\b/);
+  return normalizeMacAddress(match?.[1]);
+}
+
+export async function approvedHostNetworkMatch(
+  remoteAddress: string | null,
+  host: Record<string, unknown>,
+  deps: {
+    resolveHostnameAddresses?: (hostname: string | null) => Promise<string[]>;
+    lookupLanMacAddress?: (remoteAddress: string | null) => string | null;
+  } = {}
+) {
+  const metadata = readRecord(host.metadata) ?? {};
+  const remoteAccess = readRecord(metadata.remote_access) ?? {};
+  if (String(remoteAccess.status ?? "").trim() !== "approved") {
+    return null;
+  }
+  const allowedAddresses = readStringList(remoteAccess.allowed_addresses);
+  const ipAddress = normalizeClientIp(remoteAccess.ip_address);
+  const allowed = [...allowedAddresses.map(normalizeClientIp).filter(Boolean), ipAddress].filter(
+    (entry): entry is string => Boolean(entry)
+  );
+  const hostname = readStringValue(remoteAccess.hostname);
+  const expectedMacs = readMacList(remoteAccess.mac_address, remoteAccess.hardware_address, remoteAccess.mac_addresses);
+  const observedMac = (deps.lookupLanMacAddress ?? lookupLanMacAddress)(remoteAddress);
+  if (remoteAddress && allowed.includes(remoteAddress)) {
+    return { reason: "approved_host_address", remoteAccess, hostname, observedMac };
+  }
+  if (remoteAddress && expectedMacs.length > 0 && observedMac && expectedMacs.includes(observedMac)) {
+    return { reason: "approved_host_mac", remoteAccess, hostname, observedMac };
+  }
+  const hostnameAddresses = await (deps.resolveHostnameAddresses ?? resolveHostnameAddresses)(hostname);
+  if (remoteAddress && hostnameAddresses.includes(remoteAddress)) {
+    return { reason: "approved_host_hostname", remoteAccess, hostname, observedMac };
+  }
+  return null;
+}
+
 function truncateOfficeOutput(value: unknown, maxLength = 2000) {
   const text = String(value ?? "").trim();
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
@@ -1080,6 +1168,7 @@ function sanitizeRemoteAccessRequest(body: Record<string, unknown>, remoteAddres
     shell: boundedString(body.shell, 120) ?? undefined,
     agent_runtime: boundedString(body.agent_runtime, 120) ?? undefined,
     model_label: boundedString(body.model_label, 160) ?? undefined,
+    mac_address: normalizeMacAddress(body.mac_address) ?? normalizeMacAddress(body.hardware_address) ?? undefined,
     device_fingerprint: boundedString(body.device_fingerprint, 240) ?? undefined,
     public_key_fingerprint: boundedString(body.public_key_fingerprint, 240) ?? undefined,
     permission_profile: normalizePermissionProfile(body.permission_profile),
@@ -1182,25 +1271,18 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
     if (!host || host.enabled === false) {
       continue;
     }
-    const metadata = readRecord(host.metadata) ?? {};
-    const remoteAccess = readRecord(metadata.remote_access) ?? {};
-    if (String(remoteAccess.status ?? "").trim() !== "approved") {
-      continue;
-    }
-    const allowedAddresses = readStringList(remoteAccess.allowed_addresses);
-    const ipAddress = normalizeClientIp(remoteAccess.ip_address);
-    const allowed = [...allowedAddresses.map(normalizeClientIp).filter(Boolean), ipAddress].filter(
-      (entry): entry is string => Boolean(entry)
-    );
-    if (remoteAddress && allowed.includes(remoteAddress)) {
+    const match = await approvedHostNetworkMatch(remoteAddress, host);
+    if (match) {
       return {
         allowed: true,
         remote_address: remoteAddress,
-        reason: "approved_host",
+        reason: match.reason,
         host_id: String(host.host_id ?? "").trim() || null,
-        display_name: String(remoteAccess.display_name ?? "").trim() || null,
-        agent_runtime: String(remoteAccess.agent_runtime ?? "").trim() || null,
-        model_label: String(remoteAccess.model_label ?? "").trim() || null,
+        host_hostname: match.hostname,
+        host_mac_address: match.observedMac ?? normalizeMacAddress(match.remoteAccess.mac_address),
+        display_name: String(match.remoteAccess.display_name ?? "").trim() || null,
+        agent_runtime: String(match.remoteAccess.agent_runtime ?? "").trim() || null,
+        model_label: String(match.remoteAccess.model_label ?? "").trim() || null,
       };
     }
   }
@@ -2628,6 +2710,8 @@ function networkIdentityPayload(networkGate: NetworkGateResult) {
     requesting_host_id: networkGate.host_id ?? undefined,
     requesting_remote_address: networkGate.remote_address ?? undefined,
     requesting_network_gate_reason: networkGate.reason,
+    requesting_hostname: networkGate.host_hostname ?? undefined,
+    requesting_mac_address: networkGate.host_mac_address ?? undefined,
     requesting_display_name: networkGate.display_name ?? undefined,
     requesting_agent_runtime: networkGate.agent_runtime ?? undefined,
     requesting_model_label: networkGate.model_label ?? undefined,
@@ -2680,6 +2764,8 @@ function attachNetworkIdentity(req: http.IncomingMessage, networkGate: NetworkGa
         host_id: networkGate.host_id,
         remote_address: networkGate.remote_address,
         reason: networkGate.reason,
+        hostname: networkGate.host_hostname ?? null,
+        mac_address: networkGate.host_mac_address ?? null,
         display_name: networkGate.display_name ?? null,
         agent_runtime: networkGate.agent_runtime ?? null,
         model_label: networkGate.model_label ?? null,

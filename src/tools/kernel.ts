@@ -169,6 +169,7 @@ type HostFabricSummary = {
     remote_display_name: string | null;
     remote_hostname: string | null;
     remote_ip_address: string | null;
+    remote_mac_address: string | null;
     remote_agent_runtime: string | null;
     remote_model_label: string | null;
     remote_allowed_addresses: string[];
@@ -1283,6 +1284,7 @@ function summarizeWorkerFabric(storage: Storage, state?: WorkerFabricStateRecord
         remote_display_name: readString(remoteAccess.display_name),
         remote_hostname: readString(remoteAccess.hostname),
         remote_ip_address: readString(remoteAccess.ip_address),
+        remote_mac_address: readString(remoteAccess.mac_address),
         remote_agent_runtime: readString(remoteAccess.agent_runtime),
         remote_model_label: readString(remoteAccess.model_label),
         remote_allowed_addresses: Array.isArray(remoteAccess.allowed_addresses)

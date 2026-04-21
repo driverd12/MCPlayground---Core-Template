@@ -66,6 +66,7 @@ const remoteHostPairingSchema = z.object({
   shell: z.string().min(1).optional(),
   agent_runtime: z.string().min(1).optional(),
   model_label: z.string().min(1).optional(),
+  mac_address: z.string().min(1).optional(),
   device_fingerprint: z.string().min(1).optional(),
   public_key_fingerprint: z.string().min(1).optional(),
   permission_profile: z.enum(["read_only", "task_worker", "artifact_writer", "operator"]).optional(),
@@ -355,6 +356,7 @@ function mergeRemoteAccessMetadata(params: {
       ssh_user: readString(params.remoteHost.ssh_user) ?? readString(existingRemoteAccess.ssh_user),
       agent_runtime: readString(params.remoteHost.agent_runtime) ?? readString(existingRemoteAccess.agent_runtime),
       model_label: readString(params.remoteHost.model_label) ?? readString(existingRemoteAccess.model_label),
+      mac_address: readString(params.remoteHost.mac_address) ?? readString(existingRemoteAccess.mac_address),
       device_fingerprint:
         readString(params.remoteHost.device_fingerprint) ?? readString(existingRemoteAccess.device_fingerprint),
       public_key_fingerprint:
@@ -1256,6 +1258,7 @@ export function workerFabric(storage: Storage, input: z.infer<typeof workerFabri
           ssh_user: readString(existingRemoteAccess.ssh_user) ?? undefined,
           agent_runtime: readString(existingRemoteAccess.agent_runtime) ?? undefined,
           model_label: readString(existingRemoteAccess.model_label) ?? undefined,
+          mac_address: readString(existingRemoteAccess.mac_address) ?? undefined,
           allowed_addresses: normalizeStringArray(existingRemoteAccess.allowed_addresses),
           permission_profile: normalizeRemotePermissionProfile(existingRemoteAccess.permission_profile) ?? undefined,
           operator_note: input.remote_host?.operator_note,

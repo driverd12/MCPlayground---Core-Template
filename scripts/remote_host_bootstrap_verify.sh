@@ -29,6 +29,16 @@ set -euo pipefail
 repo_root="$1"
 git_url="$2"
 branch="$3"
+if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1 || true
+fi
+for candidate in "$HOME"/.nvm/versions/node/*/bin /opt/homebrew/bin /usr/local/bin "$HOME"/.local/node-*/bin; do
+  if [[ -d "$candidate" ]]; then
+    PATH="$candidate:$PATH"
+  fi
+done
+export PATH
 parent="$(dirname "$repo_root")"
 mkdir -p "$parent"
 if [[ ! -d "$repo_root/.git" ]]; then
@@ -45,12 +55,14 @@ else
 fi
 npm run build
 context_json="$(node scripts/remote_context_probe.mjs --action=status 2>/dev/null || true)"
+mac_address="$(networksetup -listallhardwareports 2>/dev/null | awk '/Device:/{dev=$2} /Ethernet Address:/{print $3; exit}' || ifconfig en0 2>/dev/null | awk '/ether/{print $2; exit}' || true)"
 device_fingerprint="$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4; exit}' || true)"
 public_key_fingerprint="$(for f in ~/.ssh/*.pub; do [[ -f "$f" ]] && ssh-keygen -lf "$f" 2>/dev/null && break; done || true)"
-printf '{"ok":true,"hostname":%s,"repo_root":%s,"git_head":%s,"device_fingerprint":%s,"public_key_fingerprint":%s,"context_probe":%s}\n' \
+printf '{"ok":true,"hostname":%s,"repo_root":%s,"git_head":%s,"mac_address":%s,"device_fingerprint":%s,"public_key_fingerprint":%s,"context_probe":%s}\n' \
   "$(hostname | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
   "$(pwd | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
   "$(git rev-parse HEAD | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
+  "$(printf '%s' "$mac_address" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
   "$(printf '%s' "$device_fingerprint" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
   "$(printf '%s' "$public_key_fingerprint" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
   "${context_json:-null}"

@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { parseJsonText, startHttpTransport } from "../dist/transports/http.js";
+import { approvedHostNetworkMatch, parseJsonText, startHttpTransport } from "../dist/transports/http.js";
 
 function officeHttpCachePath(cacheDir, cacheFile) {
   return path.join(cacheDir, "web", cacheFile);
@@ -27,6 +27,37 @@ test("parseJsonText recovers a trailing JSON object from noisy child stdout", ()
     ok: true,
     agents: [{ agent_id: "ring-leader" }],
   });
+});
+
+test("approved host network matching treats IP as a locator and hostname/MAC as identity evidence", async () => {
+  const host = {
+    host_id: "dans-mbp",
+    enabled: true,
+    metadata: {
+      remote_access: {
+        status: "approved",
+        hostname: "Dans-MBP.local",
+        ip_address: "10.1.2.76",
+        allowed_addresses: ["10.1.2.76"],
+        mac_address: "aa:bb:cc:dd:ee:ff",
+      },
+    },
+  };
+
+  const hostnameMatch = await approvedHostNetworkMatch("10.1.3.224", host, {
+    resolveHostnameAddresses: async (hostname) => {
+      assert.equal(hostname, "Dans-MBP.local");
+      return ["10.1.3.224"];
+    },
+    lookupLanMacAddress: () => null,
+  });
+  assert.equal(hostnameMatch.reason, "approved_host_hostname");
+
+  const macMatch = await approvedHostNetworkMatch("10.1.4.88", host, {
+    resolveHostnameAddresses: async () => [],
+    lookupLanMacAddress: () => "aa:bb:cc:dd:ee:ff",
+  });
+  assert.equal(macMatch.reason, "approved_host_mac");
 });
 
 test("HTTP transport refuses LAN binds unless explicitly enabled", { concurrency: false }, async () => {

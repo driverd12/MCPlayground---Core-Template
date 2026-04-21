@@ -46,6 +46,13 @@ Run this independently on each host that should request MASTER-MOLD access. The 
     model_label: argValue("model-label", process.env.MASTER_MOLD_MODEL_LABEL || "unknown"),
     permission_profile: argValue("permission-profile", "task_worker"),
     request_desktop_context: boolArg("desktop-context", true),
+    mac_address: argValue(
+      "mac-address",
+      shell("sh", [
+        "-lc",
+        "networksetup -listallhardwareports 2>/dev/null | awk '/Device:/{dev=$2} /Ethernet Address:/{print $3; exit}' || ifconfig en0 2>/dev/null | awk '/ether/{print $2; exit}'",
+      ])
+    ),
     device_fingerprint: shell("sh", ["-lc", "ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'\"' '/IOPlatformUUID/{print $4; exit}'"]),
     public_key_fingerprint: shell("sh", ["-lc", "for f in ~/.ssh/*.pub; do [ -f \"$f\" ] && ssh-keygen -lf \"$f\" 2>/dev/null && break; done"]),
     operator_note: argValue("note", "Remote host is requesting MASTER-MOLD MCP fabric access."),

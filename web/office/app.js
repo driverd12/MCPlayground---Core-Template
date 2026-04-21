@@ -1530,6 +1530,7 @@
       workspace_root: get("workspace_root"),
       agent_runtime: get("agent_runtime"),
       model_label: get("model_label"),
+      mac_address: get("mac_address"),
       worker_count: Number(get("worker_count") || "1"),
       permission_profile: get("permission_profile") || "task_worker",
       allowed_addresses: [get("ip_address")].filter(Boolean),
@@ -1574,6 +1575,7 @@
             var detail = [
               host.remote_hostname || host.ssh_destination || host.transport,
               host.remote_ip_address,
+              host.remote_mac_address,
               host.remote_agent_runtime,
               host.remote_model_label,
             ].filter(Boolean).join(" · ");
@@ -1628,7 +1630,8 @@
       '<p class="host-pair-form__hint">Repeat this form, or run <code>node scripts/request_remote_access.mjs --server http://MAIN-MAC:8787</code> on any host that should request access.</p>' +
       '<form class="host-pair-form" id="host-pair-form">' +
       '<div class="host-pair-form__row"><label>Host ID<input name="host_id" placeholder="e.g. dans-mbp, studio-m2, rack-mini-01" /></label><label>Display name<input name="display_name" placeholder="Operator-facing device name" /></label></div>' +
-      '<div class="host-pair-form__row"><label>Hostname<input name="hostname" placeholder="e.g. Dans-MBP.local" /></label><label>IP address<input name="ip_address" placeholder="e.g. 10.1.2.76" /></label></div>' +
+      '<div class="host-pair-form__row"><label>Hostname<input name="hostname" placeholder="e.g. Dans-MBP.local" /></label><label>Current IP<input name="ip_address" placeholder="changes are OK; e.g. 10.1.3.224" /></label></div>' +
+      '<label>MAC address<input name="mac_address" placeholder="optional stable LAN hardware address" /></label>' +
       '<div class="host-pair-form__row"><label>SSH user<input name="ssh_user" placeholder="e.g. dan.driver" /></label><label>Workers<input name="worker_count" value="1" inputmode="numeric" /></label></div>' +
       '<label>Workspace root<input name="workspace_root" placeholder="/Users/you/Documents/Playground/MASTER-MOLD" /></label>' +
       '<div class="host-pair-form__row"><label>Agent runtime<input name="agent_runtime" placeholder="e.g. claude, codex, cursor" /></label><label>Model label<input name="model_label" placeholder="e.g. Claude Opus, GPT-5.4" /></label></div>' +

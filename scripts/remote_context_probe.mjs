@@ -14,7 +14,9 @@ function argValue(name, fallback = null) {
 }
 
 function numberArg(name, fallback) {
-  const parsed = Number(argValue(name, ""));
+  const raw = String(argValue(name, "") ?? "").trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 

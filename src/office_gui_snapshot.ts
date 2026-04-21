@@ -1000,6 +1000,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
             remote_access_status: String(host.remote_access_status ?? ""),
             remote_hostname: String(host.remote_hostname ?? ""),
             remote_ip_address: String(host.remote_ip_address ?? ""),
+            remote_mac_address: String(host.remote_mac_address ?? ""),
             remote_agent_runtime: String(host.remote_agent_runtime ?? ""),
             remote_model_label: String(host.remote_model_label ?? ""),
             remote_allowed_addresses: asList(host.remote_allowed_addresses)

@@ -603,7 +603,15 @@ function runRemoteContextProbe(params: {
   if (params.input.query) {
     probeArgs.push(`--query=${params.input.query}`);
   }
+  const remoteRuntimePrelude = [
+    "[ -s \"$HOME/.nvm/nvm.sh\" ] && . \"$HOME/.nvm/nvm.sh\" >/dev/null 2>&1 || true;",
+    "for candidate in \"$HOME\"/.nvm/versions/node/*/bin /opt/homebrew/bin /usr/local/bin \"$HOME\"/.local/node-*/bin; do",
+    "[ -d \"$candidate\" ] && PATH=\"$candidate:$PATH\";",
+    "done;",
+    "export PATH;",
+  ].join(" ");
   const command = [
+    remoteRuntimePrelude,
     `cd ${shellQuote(params.host.workspace_root)}`,
     "&&",
     "node",
