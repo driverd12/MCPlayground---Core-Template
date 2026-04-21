@@ -368,15 +368,15 @@ function createHttpTransport(options) {
   if (!token) {
     throw new Error("MCP_HTTP_BEARER_TOKEN is required for --transport http");
   }
-  const identityHeaders = buildHostIdentityHeaders(options);
+  const signedFetch = createSignedFetch(options);
   return new StreamableHTTPClientTransport(new URL(options.url), {
     requestInit: {
       headers: {
         Authorization: `Bearer ${token}`,
         Origin: options.origin,
-        ...identityHeaders,
       },
     },
+    ...(signedFetch ? { fetch: signedFetch } : {}),
   });
 }
 
@@ -432,21 +432,34 @@ function buildHostIdentitySignaturePayload(input) {
   ].join("\n");
 }
 
-function buildHostIdentityHeaders(options) {
+function requestPathForSignature(input, fallbackUrl) {
+  const rawUrl =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : typeof input?.url === "string"
+          ? input.url
+          : String(fallbackUrl || "");
+  const parsed = new URL(rawUrl, fallbackUrl);
+  return `${parsed.pathname || "/"}${parsed.search || ""}` || "/";
+}
+
+function requestMethodForSignature(input, init) {
+  return String(init?.method || (typeof input === "object" && input && "method" in input ? input.method : "GET") || "GET").toUpperCase();
+}
+
+function buildHostIdentityHeaders(options, request) {
   const hostId = String(options.hostId || "").trim();
   if (!hostId) {
     return {};
-  }
-  const privateKey = readIdentityPrivateKey(options);
-  if (!privateKey) {
-    throw new Error("MASTER_MOLD_HOST_ID is set but no host identity private key was provided");
   }
   const timestamp = new Date().toISOString();
   const nonce = randomUUID();
   const agentId = String(options.agentId || options.agentRuntime || "").trim();
   const payload = buildHostIdentitySignaturePayload({
-    method: "*",
-    path: "*",
+    method: request.method,
+    path: request.path,
     host_id: hostId,
     agent_id: agentId,
     timestamp,
@@ -457,9 +470,41 @@ function buildHostIdentityHeaders(options) {
     "x-master-mold-agent-id": agentId,
     "x-master-mold-timestamp": timestamp,
     "x-master-mold-nonce": nonce,
-    "x-master-mold-signature": `ed25519:${signData(null, Buffer.from(payload), privateKey).toString("base64url")}`,
+    "x-master-mold-signature": `ed25519:${signData(null, Buffer.from(payload), request.privateKey).toString("base64url")}`,
     ...(options.agentRuntime ? { "x-master-mold-agent-runtime": options.agentRuntime } : {}),
     ...(options.modelLabel ? { "x-master-mold-model-label": options.modelLabel } : {}),
+  };
+}
+
+function createSignedFetch(options) {
+  const hostId = String(options.hostId || "").trim();
+  if (!hostId) {
+    return null;
+  }
+  const privateKey = readIdentityPrivateKey(options);
+  if (!privateKey) {
+    throw new Error("MASTER_MOLD_HOST_ID is set but no host identity private key was provided");
+  }
+  const fallbackUrl = options.url;
+  return async (input, init = {}) => {
+    const headers = new Headers(typeof input === "object" && input && "headers" in input ? input.headers : undefined);
+    for (const [name, value] of new Headers(init?.headers || {}).entries()) {
+      headers.set(name, value);
+    }
+    const method = requestMethodForSignature(input, init);
+    const pathForSignature = requestPathForSignature(input, fallbackUrl);
+    const signedHeaders = buildHostIdentityHeaders(options, {
+      method,
+      path: pathForSignature,
+      privateKey,
+    });
+    for (const [name, value] of Object.entries(signedHeaders)) {
+      headers.set(name, value);
+    }
+    return fetch(input, {
+      ...init,
+      headers,
+    });
   };
 }
 

@@ -12,6 +12,7 @@ import {
   buildHostIdentitySignaturePayload,
   parseJsonText,
   remoteToolAllowedForPermission,
+  resetHostIdentityReplayCache,
   startHttpTransport,
   verifyHostIdentitySignature,
 } from "../dist/transports/http.js";
@@ -137,6 +138,72 @@ test("signed host identity verifies Ed25519 proof and permission scopes deny hig
   assert.equal(remoteToolAllowedForPermission("desktop.context", "task_worker", { host_id: "dans-mbp" }, { host_id: "dans-mbp" }), true);
   assert.equal(remoteToolAllowedForPermission("desktop.context", "task_worker", { host_id: "main-mac" }, { host_id: "dans-mbp" }), false);
   assert.equal(remoteToolAllowedForPermission("desktop.control", "task_worker"), false);
+});
+
+test("signed host identity replay protection rejects reused nonces inside the freshness window", () => {
+  resetHostIdentityReplayCache();
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
+  const timestamp = "2026-04-21T18:05:00.000Z";
+  const nonce = "nonce-replay-1";
+  const agentId = "codex";
+  const payload = buildHostIdentitySignaturePayload({
+    method: "POST",
+    path: "/?transport=streamable",
+    host_id: "many-host",
+    agent_id: agentId,
+    timestamp,
+    nonce,
+  });
+  const headers = {
+    "x-master-mold-host-id": "many-host",
+    "x-master-mold-agent-id": agentId,
+    "x-master-mold-timestamp": timestamp,
+    "x-master-mold-nonce": nonce,
+    "x-master-mold-signature": `ed25519:${sign(null, Buffer.from(payload), privateKey).toString("base64url")}`,
+  };
+  const host = {
+    host_id: "many-host",
+    metadata: {
+      remote_access: {
+        status: "approved",
+        identity_public_key: publicKeyPem,
+      },
+    },
+  };
+
+  const first = verifyHostIdentitySignature({
+    method: "POST",
+    path: "/?transport=streamable",
+    host,
+    headers,
+    nowMs: Date.parse(timestamp),
+    enforceReplayProtection: true,
+  });
+  assert.equal(first.ok, true);
+  assert.equal(first.status, "verified");
+
+  const replayed = verifyHostIdentitySignature({
+    method: "POST",
+    path: "/?transport=streamable",
+    host,
+    headers,
+    nowMs: Date.parse(timestamp) + 1000,
+    enforceReplayProtection: true,
+  });
+  assert.equal(replayed.ok, false);
+  assert.equal(replayed.status, "replayed");
+
+  const wrongPath = verifyHostIdentitySignature({
+    method: "POST",
+    path: "/",
+    host,
+    headers,
+    nowMs: Date.parse(timestamp),
+    enforceReplayProtection: true,
+  });
+  assert.equal(wrongPath.ok, false);
+  assert.equal(wrongPath.status, "invalid");
 });
 
 test("HTTP transport refuses LAN binds unless explicitly enabled", { concurrency: false }, async () => {

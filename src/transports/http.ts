@@ -46,7 +46,7 @@ type NetworkGateResult = {
   agent_runtime?: string | null;
   model_label?: string | null;
   permission_profile?: "read_only" | "task_worker" | "artifact_writer" | "operator" | null;
-  signature_status?: "not_required" | "not_configured" | "verified" | "missing" | "invalid" | "expired" | "host_mismatch";
+  signature_status?: "not_required" | "not_configured" | "verified" | "missing" | "invalid" | "expired" | "host_mismatch" | "replayed";
   signed_agent_id?: string | null;
   identity_public_key_fingerprint?: string | null;
 };
@@ -1103,6 +1103,37 @@ function hostIdentityPublicKey(remoteAccess: Record<string, unknown>) {
   return readStringValue(remoteAccess.identity_public_key) ?? readStringValue(remoteAccess.public_key_pem);
 }
 
+const hostIdentityNonceCache = new Map<string, number>();
+
+function purgeExpiredHostIdentityNonces(nowMs: number) {
+  for (const [key, expiresAt] of hostIdentityNonceCache.entries()) {
+    if (expiresAt <= nowMs) {
+      hostIdentityNonceCache.delete(key);
+    }
+  }
+}
+
+function rememberHostIdentityNonce(input: {
+  fingerprint: string | null;
+  host_id: string;
+  nonce: string;
+  nowMs: number;
+  parsedTimestamp: number;
+  maxSkewMs: number;
+}) {
+  purgeExpiredHostIdentityNonces(input.nowMs);
+  const key = [input.fingerprint ?? "unknown-key", input.host_id, input.nonce].join("\0");
+  if (hostIdentityNonceCache.has(key)) {
+    return false;
+  }
+  hostIdentityNonceCache.set(key, Math.max(input.nowMs, input.parsedTimestamp) + input.maxSkewMs);
+  return true;
+}
+
+export function resetHostIdentityReplayCache() {
+  hostIdentityNonceCache.clear();
+}
+
 export function verifyHostIdentitySignature(input: {
   method: string;
   path: string;
@@ -1110,6 +1141,7 @@ export function verifyHostIdentitySignature(input: {
   host: Record<string, unknown>;
   nowMs?: number;
   maxSkewSeconds?: number;
+  enforceReplayProtection?: boolean;
 }) {
   const metadata = readRecord(input.host.metadata) ?? {};
   const remoteAccess = readRecord(metadata.remote_access) ?? {};
@@ -1175,6 +1207,24 @@ export function verifyHostIdentitySignature(input: {
           nonce,
         });
         if (verifySignature(null, Buffer.from(payload), publicKey, signature)) {
+          if (
+            input.enforceReplayProtection &&
+            !rememberHostIdentityNonce({
+              fingerprint,
+              host_id: hostId,
+              nonce,
+              nowMs,
+              parsedTimestamp,
+              maxSkewMs,
+            })
+          ) {
+            return {
+              ok: false,
+              status: "replayed" as const,
+              agent_id: agentId,
+              fingerprint,
+            };
+          }
           return {
             ok: true,
             status: "verified" as const,
@@ -1445,6 +1495,7 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
         path: req.url ?? "/",
         headers: req.headers as Record<string, unknown>,
         host,
+        enforceReplayProtection: true,
       });
       if (!signature.ok || (requireSignedRemote && signature.status === "not_configured")) {
         return {
