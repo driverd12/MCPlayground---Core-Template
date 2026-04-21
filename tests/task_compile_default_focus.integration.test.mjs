@@ -98,6 +98,63 @@ test("task.compile default streams carry explicit focus, routing hints, and adap
   }
 });
 
+test("task.compile enables shallow branch search for hard reasoning branches", async () => {
+  const testId = `task-compile-hard-branch-${Date.now()}`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-task-compile-hard-branch-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, { MCP_NOTIFIER_DRY_RUN: "1" });
+  try {
+    const goal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Hard branch compile goal",
+      objective: "Research, implement, and verify a high-risk multi-host MCP federation rollout",
+      status: "active",
+      priority: 9,
+      risk_tier: "high",
+      autonomy_mode: "recommend",
+      acceptance_criteria: ["High-risk compile policies expose bounded branch search"],
+      constraints: ["Preserve existing access gates", "Keep rollback explicit", "Fail closed on weak evidence"],
+      tags: ["compiler", "reasoning"],
+    });
+
+    const compiled = await callTool(client, "task.compile", {
+      mutation: nextMutation(testId, "task.compile", () => mutationCounter++),
+      goal_id: goal.goal.goal_id,
+      objective: "Research, implement, and verify high-risk signed federation behavior without broad refactors",
+      title: "Hard branch compile",
+      create_plan: true,
+      selected: true,
+      success_criteria: ["Hard reasoning branches use bounded branch search"],
+    });
+
+    const researchStep = compiled.steps.find((step) => step.metadata.owner_role_id === "research-director");
+    const implementationStep = compiled.steps.find((step) => step.metadata.owner_role_id === "implementation-director");
+    const verificationStep = compiled.steps.find(
+      (step) => step.metadata.owner_role_id === "verification-director" && step.step_kind === "verification"
+    );
+    const branchSearch = verificationStep?.metadata.task_execution.reasoning_compute_policy.shallow_branch_search;
+
+    assert.equal(researchStep?.metadata.task_execution.reasoning_candidate_count, 3);
+    assert.ok(researchStep?.metadata.task_execution.reasoning_compute_policy.activation_reasons.includes("high_risk_goal"));
+    assert.equal(implementationStep?.metadata.task_execution.reasoning_compute_policy, undefined);
+    assert.equal(verificationStep?.metadata.task_execution.reasoning_candidate_count, 3);
+    assert.equal(branchSearch?.enabled, true);
+    assert.equal(branchSearch?.max_depth, 2);
+    assert.equal(branchSearch?.branch_count, 3);
+    assert.deepEqual(branchSearch?.prune_with, [
+      "artifact_fit",
+      "contradiction_risk",
+      "rollback_safety",
+      "environment_feedback",
+    ]);
+  } finally {
+    await client.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function openClient(dbPath, extraEnv) {
   const transport = new StdioClientTransport({
     command: "node",

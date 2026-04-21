@@ -351,12 +351,21 @@ function applySignalsToTaskMetadata(
 function applyAdaptiveReasoningPolicy(
   taskMetadata: Record<string, unknown>,
   stream: CompiledStream,
-  memoryPreflight: SwarmMemoryPreflightSummary
+  memoryPreflight: SwarmMemoryPreflightSummary,
+  context?: {
+    risk_tier?: GoalRiskTier | null;
+    stream_count?: number;
+    constraint_count?: number;
+  }
 ) {
   const nextTaskMetadata = { ...taskMetadata };
   const taskKind = typeof nextTaskMetadata.task_kind === "string" ? nextTaskMetadata.task_kind : null;
   const focus = typeof nextTaskMetadata.focus === "string" ? nextTaskMetadata.focus : null;
   const reflectionBoost = memoryPreflight.reflection_match_count > 0 ? 1 : 0;
+  const highRiskGoal = context?.risk_tier === "high" || context?.risk_tier === "critical";
+  const multiStreamPlan = (context?.stream_count ?? 0) >= 4;
+  const constraintPressure = (context?.constraint_count ?? 0) >= 3;
+  const hardBranch = highRiskGoal || multiStreamPlan || constraintPressure;
   const activationReasons = uniqueStrings([
     stream.step_kind === "analysis" ? "analysis_step" : null,
     stream.step_kind === "verification" ? "verification_step" : null,
@@ -364,6 +373,9 @@ function applyAdaptiveReasoningPolicy(
     taskKind === "verification" ? "verification_task" : null,
     nextTaskMetadata.quality_preference === "quality" ? "quality_preference" : null,
     reflectionBoost > 0 ? "grounded_reflection_match" : null,
+    highRiskGoal ? "high_risk_goal" : null,
+    multiStreamPlan ? "multi_stream_plan" : null,
+    constraintPressure ? "constraint_pressure" : null,
   ]);
   const shouldMultiSample =
     stream.step_kind === "analysis" ||
@@ -373,7 +385,8 @@ function applyAdaptiveReasoningPolicy(
     nextTaskMetadata.quality_preference === "quality";
   if (shouldMultiSample) {
     const baseCount = 2;
-    const resolvedCount = Math.min(4, baseCount + reflectionBoost);
+    const hardBranchBoost = hardBranch ? 1 : 0;
+    const resolvedCount = Math.min(4, baseCount + reflectionBoost + hardBranchBoost);
     const existingCount =
       typeof nextTaskMetadata.reasoning_candidate_count === "number" && Number.isFinite(nextTaskMetadata.reasoning_candidate_count)
         ? Math.max(1, Math.min(4, Math.round(nextTaskMetadata.reasoning_candidate_count)))
@@ -382,7 +395,7 @@ function applyAdaptiveReasoningPolicy(
     if (typeof nextTaskMetadata.reasoning_selection_strategy !== "string") {
       nextTaskMetadata.reasoning_selection_strategy = "evidence_rerank";
     }
-    nextTaskMetadata.reasoning_compute_policy = {
+    const reasoningComputePolicy: Record<string, unknown> = {
       mode: "adaptive_best_of_n",
       candidate_count: nextTaskMetadata.reasoning_candidate_count,
       max_candidate_count: 4,
@@ -397,6 +410,17 @@ function applyAdaptiveReasoningPolicy(
         contradiction_risk_fail_closed: true,
       },
     };
+    if (hardBranch) {
+      reasoningComputePolicy.shallow_branch_search = {
+        enabled: true,
+        max_depth: 2,
+        branch_count: Math.min(3, Number(nextTaskMetadata.reasoning_candidate_count) || resolvedCount),
+        expand_policy: "top_scoring_candidates_only",
+        prune_with: ["artifact_fit", "contradiction_risk", "rollback_safety", "environment_feedback"],
+        fallback: "single_path_when_branch_confidence_high",
+      };
+    }
+    nextTaskMetadata.reasoning_compute_policy = reasoningComputePolicy;
   }
   if (
     stream.step_kind === "analysis" ||
@@ -780,7 +804,12 @@ export function compileObjectivePreview(
       const taskExecution = applyAdaptiveReasoningPolicy(
         applySignalsToTaskMetadata(stream.task_metadata, orgProgram.signals),
         stream,
-        memoryPreflight
+        memoryPreflight,
+        {
+          risk_tier: input.risk_tier,
+          stream_count: streams.length,
+          constraint_count: input.constraints?.length ?? 0,
+        }
       );
       if (
         (stream.step_kind === "mutation" || stream.step_kind === "verification") &&
@@ -852,7 +881,12 @@ export function compileObjectivePreview(
   const finalTaskExecution = applyAdaptiveReasoningPolicy(
     finalVerificationStream.task_metadata,
     finalVerificationStream,
-    memoryPreflight
+    memoryPreflight,
+    {
+      risk_tier: input.risk_tier,
+      stream_count: streams.length,
+      constraint_count: input.constraints?.length ?? 0,
+    }
   );
 
   compiledSteps.push({

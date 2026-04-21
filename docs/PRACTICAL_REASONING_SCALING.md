@@ -165,6 +165,12 @@ This should be reserved for:
 - repo-wide debugging
 - multi-option repair tasks
 
+Current MASTER-MOLD contract:
+
+- `task.compile` now tags hard planning and verification branches with a bounded `reasoning_compute_policy.shallow_branch_search` contract.
+- Activation is limited to high or critical risk goals, multi-stream plans, or constraint-heavy objectives; ordinary mutation lanes stay single-path.
+- The policy caps search at depth 2, expands only top-scoring candidates, and prunes with artifact fit, contradiction risk, rollback safety, and environment feedback.
+
 ## 7. Newer lane worth testing, but not making default
 
 ### Budget forcing and simple test-time scaling
