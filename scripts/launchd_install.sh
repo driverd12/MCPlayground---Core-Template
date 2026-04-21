@@ -46,6 +46,12 @@ BUS_SOCKET_PATH="${TRICHAT_BUS_SOCKET_PATH:-${BUS_SOCKET_DEFAULT}}"
 
 MCP_PORT="${MCP_HTTP_PORT:-${ANAMNESIS_MCP_HTTP_PORT:-8787}}"
 MCP_HOST="${MCP_HTTP_HOST:-127.0.0.1}"
+MCP_CONNECT_HOST="${MCP_HOST}"
+if [[ "${MCP_CONNECT_HOST}" == "0.0.0.0" || "${MCP_CONNECT_HOST}" == "::" ]]; then
+  MCP_CONNECT_HOST="127.0.0.1"
+fi
+MCP_ALLOW_LAN="${MCP_HTTP_ALLOW_LAN:-0}"
+MCP_ALLOWED_CLIENTS="${MCP_HTTP_ALLOWED_CLIENTS:-${MCP_HTTP_ALLOWED_CLIENT_IPS:-}}"
 ALLOWED_ORIGINS="${MCP_HTTP_ALLOWED_ORIGINS:-http://localhost,http://127.0.0.1}"
 INBOX_POLL_INTERVAL="${ANAMNESIS_INBOX_POLL_INTERVAL:-5}"
 INBOX_BATCH_SIZE="${ANAMNESIS_INBOX_BATCH_SIZE:-3}"
@@ -118,7 +124,7 @@ reset_launch_agent() {
 }
 
 wait_for_mcp_http() {
-  local url="http://${MCP_HOST}:${MCP_PORT}/health"
+  local url="http://${MCP_CONNECT_HOST}:${MCP_PORT}/health"
   local deadline=$((SECONDS + MCP_HTTP_READY_TIMEOUT_SECONDS))
   local health_json=""
 
@@ -209,6 +215,10 @@ cat >"${MCP_PLIST}" <<PLIST
       <string>${MCP_HOST}</string>
       <key>MCP_HTTP_PORT</key>
       <string>${MCP_PORT}</string>
+      <key>MCP_HTTP_ALLOW_LAN</key>
+      <string>${MCP_ALLOW_LAN}</string>
+      <key>MCP_HTTP_ALLOWED_CLIENTS</key>
+      <string>${MCP_ALLOWED_CLIENTS}</string>
       <key>MCP_HTTP_ALLOWED_ORIGINS</key>
       <string>${ALLOWED_ORIGINS}</string>
       <key>MCP_HTTP_BEARER_TOKEN</key>
@@ -499,7 +509,7 @@ cat >"${OFFICE_GUI_PLIST}" <<PLIST
       <key>MCP_HTTP_PORT</key>
       <string>${MCP_PORT}</string>
       <key>TRICHAT_MCP_URL</key>
-      <string>http://${MCP_HOST}:${MCP_PORT}/</string>
+      <string>http://${MCP_CONNECT_HOST}:${MCP_PORT}/</string>
       <key>TRICHAT_MCP_ORIGIN</key>
       <string>http://127.0.0.1</string>
       <key>AGENT_OFFICE_GUI_WATCH_INTERVAL_MS</key>
@@ -551,7 +561,7 @@ cat >"${AUTO_OPEN_PLIST}" <<PLIST
       <key>MCP_HTTP_PORT</key>
       <string>${MCP_PORT}</string>
       <key>TRICHAT_MCP_URL</key>
-      <string>http://${MCP_HOST}:${MCP_PORT}/</string>
+      <string>http://${MCP_CONNECT_HOST}:${MCP_PORT}/</string>
       <key>TRICHAT_MCP_ORIGIN</key>
       <string>http://127.0.0.1</string>
       <key>MASTER_MOLD_REPO_ROOT</key>
