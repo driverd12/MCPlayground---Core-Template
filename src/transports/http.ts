@@ -26,6 +26,7 @@ export type HttpOptions = {
     | { generated_at?: string | null; diagnostics?: unknown[]; stale?: boolean }
     | Promise<{ generated_at?: string | null; diagnostics?: unknown[]; stale?: boolean }>;
   officeHostFabric?: (input: Record<string, unknown>) => unknown | Promise<unknown>;
+  federationIngest?: (input: { payload: Record<string, unknown>; networkGate: NetworkGateResult }) => unknown | Promise<unknown>;
   trustedRemoteHosts?: () => unknown[] | Promise<unknown[]>;
 };
 
@@ -1612,6 +1613,39 @@ export async function startHttpTransport(createServer: () => Server, options: Ht
           return;
         }
 
+        if (requestUrl.pathname === "/federation/ingest") {
+          if (!validateOptionalOrigin(req.headers.origin, options.allowedOrigins)) {
+            sendApiError(res, pathname, 403, {
+              error: "forbidden_origin",
+              detail: "Origin is not allowed for this endpoint.",
+            });
+            return;
+          }
+
+          if (!validateBearer(req.headers.authorization, options.bearerToken)) {
+            sendApiError(res, pathname, 403, {
+              error: "forbidden_bearer",
+              detail: "Bearer token is missing or invalid.",
+            });
+            return;
+          }
+
+          void Promise.resolve(maybeHandleFederationRequest(req, res, requestUrl, options, requestNetworkGate!)).catch((error) => {
+            logEvent("http.error", {
+              error: String(error),
+              method: req.method ?? "unknown",
+              url: req.url ?? "",
+            });
+            if (!res.headersSent) {
+              sendApiError(res, pathname, 500, {
+                error: "internal_server_error",
+                detail: error instanceof Error ? error.message : String(error),
+              });
+            }
+          });
+          return;
+        }
+
         if (!validateOrigin(req.headers.origin, options.allowedOrigins)) {
           sendApiError(res, pathname, 403, {
             error: "forbidden_origin",
@@ -1664,6 +1698,51 @@ export async function startHttpTransport(createServer: () => Server, options: Ht
 
   logEvent("http.listen", { host: options.host, port: options.port });
   return httpServer;
+}
+
+async function maybeHandleFederationRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  requestUrl: URL,
+  options: HttpOptions,
+  networkGate: NetworkGateResult
+) {
+  if (requestUrl.pathname !== "/federation/ingest") {
+    return false;
+  }
+  if (String(req.method ?? "GET").toUpperCase() !== "POST") {
+    sendJson(res, 405, {
+      ok: false,
+      error: "method_not_allowed",
+      detail: "Federation ingest requires POST.",
+    });
+    return true;
+  }
+  if (!options.federationIngest) {
+    sendJson(res, 503, {
+      ok: false,
+      error: "federation_unavailable",
+      detail: "Federation ingest is not wired for this HTTP transport.",
+    });
+    return true;
+  }
+  if (networkGate.host_id !== "local" && networkGate.signature_status !== "verified") {
+    sendJson(res, 403, {
+      ok: false,
+      error: "federation_requires_signed_host",
+      detail: `Federation ingest requires a verified signed host identity; got ${networkGate.signature_status ?? "unknown"}.`,
+    });
+    return true;
+  }
+  const payload = await readLimitedJsonBody(req, 512 * 1024);
+  const result = await Promise.resolve(options.federationIngest({ payload, networkGate }));
+  sendJson(res, 202, {
+    ok: true,
+    accepted: true,
+    host_id: networkGate.host_id ?? null,
+    result,
+  });
+  return true;
 }
 
 async function handleFastPathRequest(

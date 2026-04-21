@@ -69,6 +69,8 @@
     "ring-leader:start": "node ./scripts/run_sh.mjs ./scripts/ring_leader_ctl.sh start",
     "ring-leader:stop": "node ./scripts/run_sh.mjs ./scripts/ring_leader_ctl.sh stop",
     "ring-leader:run": "node ./scripts/run_sh.mjs ./scripts/ring_leader_ctl.sh run_once",
+    "federation:sidecar": "node ./scripts/federation_sidecar.mjs",
+    "federation:launchd:install": "node ./scripts/run_sh.mjs ./scripts/federation_sidecar_launchd.sh",
     "autonomy:status": "node ./scripts/run_sh.mjs ./scripts/autonomy_ctl.sh status",
     "autonomy:ensure": "node ./scripts/run_sh.mjs ./scripts/autonomy_ctl.sh ensure",
     "autonomy:maintain": "node ./scripts/run_sh.mjs ./scripts/autonomy_ctl.sh maintain",

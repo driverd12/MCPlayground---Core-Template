@@ -206,6 +206,72 @@ test("signed host identity replay protection rejects reused nonces inside the fr
   assert.equal(wrongPath.status, "invalid");
 });
 
+test("signed host identity proofs bind federation ingest to the request path", () => {
+  resetHostIdentityReplayCache();
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
+  const timestamp = "2026-04-21T20:15:00.000Z";
+  const nonce = "federation-nonce-1";
+  const agentId = "federation-sidecar";
+  const payload = buildHostIdentitySignaturePayload({
+    method: "POST",
+    path: "/federation/ingest",
+    host_id: "mesh-peer",
+    agent_id: agentId,
+    timestamp,
+    nonce,
+  });
+  const headers = {
+    "x-master-mold-host-id": "mesh-peer",
+    "x-master-mold-agent-id": agentId,
+    "x-master-mold-timestamp": timestamp,
+    "x-master-mold-nonce": nonce,
+    "x-master-mold-signature": `ed25519:${sign(null, Buffer.from(payload), privateKey).toString("base64url")}`,
+  };
+  const host = {
+    host_id: "mesh-peer",
+    metadata: {
+      remote_access: {
+        status: "approved",
+        identity_public_key: publicKeyPem,
+      },
+    },
+  };
+
+  const verified = verifyHostIdentitySignature({
+    method: "POST",
+    path: "/federation/ingest",
+    host,
+    headers,
+    nowMs: Date.parse(timestamp),
+    enforceReplayProtection: true,
+  });
+  assert.equal(verified.ok, true);
+  assert.equal(verified.status, "verified");
+
+  const wrongPath = verifyHostIdentitySignature({
+    method: "POST",
+    path: "/?transport=streamable",
+    host,
+    headers,
+    nowMs: Date.parse(timestamp),
+    enforceReplayProtection: true,
+  });
+  assert.equal(wrongPath.ok, false);
+  assert.equal(wrongPath.status, "invalid");
+
+  const replayed = verifyHostIdentitySignature({
+    method: "POST",
+    path: "/federation/ingest",
+    host,
+    headers,
+    nowMs: Date.parse(timestamp) + 1000,
+    enforceReplayProtection: true,
+  });
+  assert.equal(replayed.ok, false);
+  assert.equal(replayed.status, "replayed");
+});
+
 test("HTTP transport refuses LAN binds unless explicitly enabled", { concurrency: false }, async () => {
   const previousLan = process.env.MCP_HTTP_ALLOW_LAN;
   delete process.env.MCP_HTTP_ALLOW_LAN;
@@ -405,6 +471,121 @@ test("/remote-access/request stages a pending sanitized host request without bea
     assert.match(calls[0].remote_host.identity_public_key, /^-----BEGIN PUBLIC KEY-----\n/);
     assert.deepEqual(calls[0].remote_host.capabilities, { desktop_context: true, desktop_observe: true });
     assert.equal(calls[0].remote_host.capabilities.operator, undefined);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+});
+
+test("/federation/ingest accepts a sidecar payload into the ingest callback", { concurrency: false }, async () => {
+  const ingests = [];
+  const port = await reservePort();
+  const server = await startHttpTransport(
+    () =>
+      new Server(
+        {
+          name: "http-federation-ingest-test",
+          version: "1.0.0",
+        },
+        {
+          capabilities: {
+            tools: {},
+          },
+        }
+      ),
+    {
+      host: "127.0.0.1",
+      port,
+      allowedOrigins: ["http://127.0.0.1"],
+      bearerToken: "federation-ingest-token",
+      federationIngest: async (input) => {
+        ingests.push(input);
+        return {
+          ok: true,
+          event_id: "evt-fed-1",
+          host_id: input.payload.host?.host_id ?? null,
+          stream_id: input.payload.stream_id ?? null,
+        };
+      },
+    }
+  );
+
+  try {
+    const response = await fetchHttpJsonResponse(port, "/federation/ingest", {
+      method: "POST",
+      headers: {
+        Origin: "http://127.0.0.1",
+        Authorization: "Bearer federation-ingest-token",
+        "Content-Type": "application/json",
+      },
+      body: {
+        schema_version: "master-mold-federation-v1",
+        stream_id: "mesh-peer:master-mold",
+        sequence: 7,
+        generated_at: "2026-04-21T20:20:00.000Z",
+        host: {
+          host_id: "mesh-peer",
+          hostname: "Mesh-Peer.local",
+          agent_runtime: "claude",
+          model_label: "Claude Opus",
+        },
+        local_mcp: {
+          status: "available",
+        },
+        recent_events: [
+          {
+            event_type: "task.complete",
+            summary: "compact context only",
+          },
+        ],
+      },
+    });
+
+    assert.equal(response.statusCode, 202);
+    assert.equal(response.body.ok, true);
+    assert.equal(response.body.accepted, true);
+    assert.equal(response.body.host_id, "local");
+    assert.equal(response.body.result.ok, true);
+    assert.equal(response.body.result.host_id, "mesh-peer");
+    assert.equal(ingests.length, 1);
+    assert.equal(ingests[0].payload.schema_version, "master-mold-federation-v1");
+    assert.equal(ingests[0].payload.stream_id, "mesh-peer:master-mold");
+    assert.equal(ingests[0].networkGate.host_id, "local");
+
+    const noOrigin = await fetchHttpJsonResponse(port, "/federation/ingest", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer federation-ingest-token",
+        "Content-Type": "application/json",
+      },
+      body: {
+        schema_version: "master-mold-federation-v1",
+        stream_id: "mesh-peer:master-mold",
+        sequence: 8,
+        host: {
+          host_id: "mesh-peer",
+        },
+      },
+    });
+    assert.equal(noOrigin.statusCode, 202);
+    assert.equal(noOrigin.body.accepted, true);
+    assert.equal(ingests.length, 2);
+
+    const wrongMethod = await fetchHttpJsonResponse(port, "/federation/ingest", {
+      headers: {
+        Origin: "http://127.0.0.1",
+        Authorization: "Bearer federation-ingest-token",
+      },
+    });
+    assert.equal(wrongMethod.statusCode, 405);
+    assert.equal(wrongMethod.body.error, "method_not_allowed");
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => {

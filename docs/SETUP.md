@@ -120,6 +120,24 @@ npm run start:http
 
 This script is cross-platform. It sets `MCP_HTTP=1` inside a Node wrapper so it works in PowerShell, `cmd.exe`, Git Bash, macOS, and Linux.
 
+Peer federation sidecar:
+
+```bash
+MASTER_MOLD_FEDERATION_PEERS=http://Dans-MBP.local:8787 \
+MASTER_MOLD_HOST_ID=this-host \
+MASTER_MOLD_IDENTITY_KEY_PATH=~/.master-mold/identity/this-host-ed25519.pem \
+MCP_HTTP_BEARER_TOKEN=change-me \
+npm run federation:sidecar -- --once
+```
+
+Run the same sidecar on any approved peer and change `MASTER_MOLD_FEDERATION_PEERS` to the other approved MASTER-MOLD HTTP endpoints. This is a mesh/tendril stream: each host captures locally, signs `POST /federation/ingest`, and each receiving peer stores the compact context/event payload in its own runtime events.
+
+On macOS, install the same sidecar as a launchd agent after `MASTER_MOLD_FEDERATION_PEERS`, `MASTER_MOLD_HOST_ID`, and `MASTER_MOLD_IDENTITY_KEY_PATH` are set:
+
+```bash
+npm run federation:launchd:install
+```
+
 ## 8. Smoke Check
 
 ```bash

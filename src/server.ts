@@ -560,6 +560,156 @@ function readStringArray(value: unknown): string[] | undefined {
   return normalized.length > 0 ? Array.from(new Set(normalized)) : undefined;
 }
 
+function readFiniteNumber(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value.trim()) : NaN;
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function truncateFederationText(value: string, maxLength = 2_000) {
+  return value.length > maxLength ? `${value.slice(0, maxLength)}...<truncated:${value.length - maxLength}>` : value;
+}
+
+function sanitizeFederationValue(value: unknown, depth = 0): unknown {
+  if (value === null || typeof value === "boolean" || typeof value === "number") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return truncateFederationText(value);
+  }
+  if (depth >= 5) {
+    return "[max_depth]";
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 50).map((entry) => sanitizeFederationValue(entry, depth + 1));
+  }
+  if (!isRecord(value)) {
+    return String(value);
+  }
+  const entries = Object.entries(value).slice(0, 80);
+  return Object.fromEntries(entries.map(([key, entry]) => [truncateFederationText(key, 160), sanitizeFederationValue(entry, depth + 1)]));
+}
+
+function federationPayloadSummary(payload: Record<string, unknown>) {
+  const host = isRecord(payload.host) ? payload.host : {};
+  const desktopContext = isRecord(payload.desktop_context) ? payload.desktop_context : {};
+  const localMcp = isRecord(payload.local_mcp) ? payload.local_mcp : {};
+  const recentEvents = Array.isArray(payload.recent_events) ? payload.recent_events : [];
+  return {
+    schema_version: readString(payload.schema_version) ?? "unknown",
+    stream_id: readString(payload.stream_id) ?? null,
+    sequence: readFiniteNumber(payload.sequence) ?? null,
+    generated_at: readString(payload.generated_at) ?? null,
+    host: sanitizeFederationValue(host),
+    capabilities: sanitizeFederationValue(payload.capabilities ?? {}),
+    desktop_context: sanitizeFederationValue(desktopContext),
+    local_mcp: sanitizeFederationValue(localMcp),
+    recent_event_count: recentEvents.length,
+    recent_events: sanitizeFederationValue(recentEvents.slice(0, 25)),
+  };
+}
+
+function stableFederationMutation(hostId: string, streamId: string, sequence: number | null, createdAt: string) {
+  const digest = crypto.createHash("sha256").update(`${hostId}|${streamId}|${sequence ?? createdAt}`).digest("hex");
+  return {
+    idempotency_key: `federation-ingest-${digest.slice(0, 40)}`,
+    side_effect_fingerprint: `federation-ingest:${digest.slice(0, 64)}`,
+  };
+}
+
+function ingestFederationPayload(storage: Storage, payload: Record<string, unknown>, networkGate: Record<string, unknown>) {
+  const createdAt = new Date().toISOString();
+  const hostPayload = isRecord(payload.host) ? payload.host : {};
+  const hostId = readString(networkGate.host_id) ?? readString(hostPayload.host_id) ?? "unknown-peer";
+  const streamId = readString(payload.stream_id) ?? `${hostId}:default`;
+  const sequence = readFiniteNumber(payload.sequence);
+  const roundedSequence = sequence === undefined ? null : Math.round(sequence);
+  const summaryPayload = federationPayloadSummary(payload);
+  const sourceAgent =
+    readString(networkGate.signed_agent_id) ??
+    readString(networkGate.agent_runtime) ??
+    readString(hostPayload.agent_runtime) ??
+    readString(hostPayload.agent_id) ??
+    hostId;
+  const modelLabel = readString(hostPayload.model_label) ?? readString(networkGate.model_label);
+  const event = storage.appendRuntimeEvent({
+    created_at: createdAt,
+    event_type: "federation.ingest",
+    entity_type: "worker_fabric_host",
+    entity_id: hostId,
+    status: "received",
+    summary: `federation ingest from ${hostId}${roundedSequence === null ? "" : ` seq=${roundedSequence}`}`,
+    details: {
+      network_gate: sanitizeFederationValue(networkGate),
+      ...summaryPayload,
+    },
+    source_client: "federation.sidecar",
+    source_model: modelLabel,
+    source_agent: sourceAgent,
+  });
+
+  let workerFabricHeartbeatOk = false;
+  let workerFabricHeartbeatError: string | null = null;
+  try {
+    workerFabric(storage, {
+      action: "heartbeat",
+      mutation: stableFederationMutation(hostId, streamId, roundedSequence, createdAt),
+      host_id: hostId,
+      capabilities: {
+        federation_stream: true,
+        federation_sidecar: true,
+      },
+      metadata: {
+        federation: {
+          ...summaryPayload,
+          last_ingest_at: createdAt,
+          last_ingest_event_id: event.event_id,
+          last_stream_id: streamId,
+          last_sequence: roundedSequence,
+          peer_signature_status: readString(networkGate.signature_status) ?? null,
+        },
+      },
+      tags: ["federation-peer"],
+      telemetry: {
+        heartbeat_at: createdAt,
+        health_state: "healthy",
+      },
+      source_client: "federation.ingest",
+      source_model: modelLabel,
+      source_agent: sourceAgent,
+    } as z.infer<typeof workerFabricSchema>);
+    workerFabricHeartbeatOk = true;
+  } catch (error) {
+    workerFabricHeartbeatError = error instanceof Error ? error.message : String(error);
+    storage.appendRuntimeEvent({
+      created_at: createdAt,
+      event_type: "federation.ingest.warning",
+      entity_type: "worker_fabric_host",
+      entity_id: hostId,
+      status: "degraded",
+      summary: `federation ingest could not update worker fabric host ${hostId}`,
+      details: {
+        error: workerFabricHeartbeatError,
+        stream_id: streamId,
+        sequence: roundedSequence,
+      },
+      source_client: "federation.sidecar",
+      source_model: modelLabel,
+      source_agent: sourceAgent,
+    });
+  }
+
+  return {
+    ok: true,
+    event_id: event.event_id,
+    event_seq: event.event_seq,
+    host_id: hostId,
+    stream_id: streamId,
+    sequence: roundedSequence,
+    worker_fabric_heartbeat_ok: workerFabricHeartbeatOk,
+    worker_fabric_heartbeat_error: workerFabricHeartbeatError,
+  };
+}
+
 function resolveEffectiveTriChatAgentIds(
   storage: Storage,
   objective: string | undefined,
@@ -3733,6 +3883,8 @@ async function main() {
         };
       },
       officeHostFabric: (input) => workerFabric(storage, input as z.infer<typeof workerFabricSchema>),
+      federationIngest: ({ payload, networkGate }) =>
+        ingestFederationPayload(storage, payload, networkGate as unknown as Record<string, unknown>),
       trustedRemoteHosts: () => storage.getWorkerFabricState()?.hosts ?? [],
     });
     if (startupConvergenceDelayMs > 0) {
