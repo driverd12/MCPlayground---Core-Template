@@ -1386,6 +1386,11 @@ async function queueReasoningPolicyRecoveryTask(params: {
   const satisfiedFields = normalizeStringArray(params.reasoningPolicyAudit.satisfied_fields);
   const warnings = normalizeStringArray(params.reasoningPolicyAudit.warnings);
   const evidenceRequirements = buildReasoningPolicyRecoveryEvidenceRequirements(missingFields, candidateCount);
+  const recoveryActivationReasons = dedupeStrings([
+    "reasoning_policy_review",
+    "blocked_step_recovery",
+    ...missingFields.map((field) => `missing_${field}`),
+  ]);
   const queuedAt = new Date().toISOString();
   const recoveryTaskId = buildReasoningPolicyRecoveryTaskId(params.task.task_id);
   const recoveryExecution = {
@@ -1394,6 +1399,15 @@ async function queueReasoningPolicyRecoveryTask(params: {
     focus: "reasoning_policy_review",
     reasoning_candidate_count: candidateCount,
     reasoning_selection_strategy: "evidence_rerank",
+    reasoning_compute_policy: {
+      mode: "adaptive_best_of_n",
+      candidate_count: candidateCount,
+      max_candidate_count: 4,
+      selection_strategy: "evidence_rerank",
+      activation_reasons: recoveryActivationReasons,
+      evidence_required: true,
+      transcript_policy: "compact_evidence_only",
+    },
     require_plan_pass: true,
     require_verification_pass: true,
   };

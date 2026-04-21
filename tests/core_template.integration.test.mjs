@@ -4705,6 +4705,24 @@ test("agent.report_result blocks plan advancement when reasoning-policy audit ne
     assert.equal(recoveryTask.metadata.task_execution.require_plan_pass, true);
     assert.equal(recoveryTask.metadata.task_execution.require_verification_pass, true);
     assert.equal(recoveryTask.metadata.task_execution.reasoning_selection_strategy, "evidence_rerank");
+    const recoveryComputePolicy = recoveryTask.metadata.task_execution.reasoning_compute_policy;
+    assert.equal(recoveryComputePolicy.mode, "adaptive_best_of_n");
+    assert.equal(recoveryComputePolicy.candidate_count, 2);
+    assert.equal(recoveryComputePolicy.max_candidate_count, 4);
+    assert.equal(recoveryComputePolicy.selection_strategy, "evidence_rerank");
+    assert.equal(recoveryComputePolicy.evidence_required, true);
+    assert.equal(recoveryComputePolicy.transcript_policy, "compact_evidence_only");
+    assert.deepEqual(
+      new Set(recoveryComputePolicy.activation_reasons),
+      new Set([
+        "reasoning_policy_review",
+        "blocked_step_recovery",
+        "missing_candidate_evidence",
+        "missing_selection_rationale",
+        "missing_plan_pass",
+        "missing_verification_pass",
+      ])
+    );
     assert.ok(
       recoveryTask.payload.delegation_brief.evidence_requirements.some((requirement) =>
         /candidate/i.test(requirement)
