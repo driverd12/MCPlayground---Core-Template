@@ -55,6 +55,18 @@ test("task.compile default streams carry explicit focus, routing hints, and adap
     assert.equal(researchStep?.metadata.task_execution.reasoning_selection_strategy, "evidence_rerank");
     assert.equal(researchStep?.metadata.task_execution.reasoning_compute_policy.mode, "adaptive_best_of_n");
     assert.equal(researchStep?.metadata.task_execution.reasoning_compute_policy.candidate_count, 2);
+    assert.deepEqual(researchStep?.metadata.task_execution.reasoning_compute_policy.verifier_rerank.score_fields, [
+      "evidence_strength",
+      "artifact_fit",
+      "contradiction_risk",
+      "rollback_safety",
+    ]);
+    assert.deepEqual(researchStep?.metadata.task_execution.reasoning_compute_policy.verifier_rerank.required_selected_fields, [
+      "selected_candidate_id",
+      "selection_rationale",
+      "verifier_score",
+      "contradiction_risk",
+    ]);
     assert.ok(researchStep?.metadata.task_execution.reasoning_compute_policy.activation_reasons.includes("research_task"));
     assert.equal(researchStep?.metadata.task_execution.require_plan_pass, true);
     assert.equal(implementationStep?.metadata.task_execution.focus, "implementation");

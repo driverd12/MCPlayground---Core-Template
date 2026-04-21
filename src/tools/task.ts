@@ -42,6 +42,7 @@ const reasoningComputePolicySchema = z.object({
   activation_reasons: z.array(z.string().min(1)).optional(),
   evidence_required: z.boolean().optional(),
   transcript_policy: z.string().min(1).optional(),
+  verifier_rerank: z.record(z.unknown()).optional(),
 });
 
 export const taskExecutionSchema = z.object({
@@ -464,6 +465,18 @@ function normalizeTaskExecutionMetadata(value: unknown) {
         activation_reasons: normalizeStringArray(reasoningComputePolicy.activation_reasons),
         evidence_required: reasoningComputePolicy.evidence_required === true,
         transcript_policy: readString(reasoningComputePolicy.transcript_policy),
+        verifier_rerank: isRecord(reasoningComputePolicy.verifier_rerank)
+          ? {
+              score_fields: normalizeStringArray(reasoningComputePolicy.verifier_rerank.score_fields),
+              required_selected_fields: normalizeStringArray(reasoningComputePolicy.verifier_rerank.required_selected_fields),
+              minimum_selected_score:
+                typeof reasoningComputePolicy.verifier_rerank.minimum_selected_score === "number" &&
+                Number.isFinite(reasoningComputePolicy.verifier_rerank.minimum_selected_score)
+                  ? Math.max(0, Math.min(1, Number(reasoningComputePolicy.verifier_rerank.minimum_selected_score.toFixed(4))))
+                  : null,
+              contradiction_risk_fail_closed: reasoningComputePolicy.verifier_rerank.contradiction_risk_fail_closed === true,
+            }
+          : null,
       }
     : null;
 

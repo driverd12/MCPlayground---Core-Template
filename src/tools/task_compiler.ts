@@ -390,6 +390,12 @@ function applyAdaptiveReasoningPolicy(
       activation_reasons: activationReasons,
       evidence_required: true,
       transcript_policy: "compact_evidence_only",
+      verifier_rerank: {
+        score_fields: ["evidence_strength", "artifact_fit", "contradiction_risk", "rollback_safety"],
+        required_selected_fields: ["selected_candidate_id", "selection_rationale", "verifier_score", "contradiction_risk"],
+        minimum_selected_score: 0.6,
+        contradiction_risk_fail_closed: true,
+      },
     };
   }
   if (

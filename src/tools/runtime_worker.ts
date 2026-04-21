@@ -186,6 +186,9 @@ function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExec
   const policyMode = readString(computePolicy?.mode);
   const activationReasons = readStringArray(computePolicy?.activation_reasons);
   const transcriptPolicy = readString(computePolicy?.transcript_policy);
+  const verifierRerank = readNullableRecord(computePolicy?.verifier_rerank);
+  const verifierScoreFields = readStringArray(verifierRerank?.score_fields);
+  const verifierRequiredFields = readStringArray(verifierRerank?.required_selected_fields);
   const lines = uniqueStrings([
     policyMode === "adaptive_best_of_n"
       ? `Adaptive compute policy: best-of-N with ${reasoningCandidateCount ?? computePolicy?.candidate_count ?? "bounded"} candidate(s).`
@@ -198,6 +201,9 @@ function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExec
         : null,
     reasoningSelectionStrategy === "evidence_rerank"
       ? "Rerank candidate paths by concrete evidence and contradiction risk, not style."
+      : null,
+    verifierScoreFields.length > 0
+      ? `Score candidates on ${verifierScoreFields.join(", ")} before selecting the winner.`
       : null,
     requirePlanPass || taskKind === "research" || focus === "implementation_research" || focus === "task_breakdown"
       ? "Write a short plan first so unknowns, evidence needs, and rollback are explicit before mutation."
@@ -213,6 +219,9 @@ function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExec
       : null,
     transcriptPolicy === "compact_evidence_only"
       ? "Keep reasoning evidence compact; do not dump raw transcripts or hidden chains of thought."
+      : null,
+    verifierRequiredFields.length > 0
+      ? `The selected candidate evidence must include ${verifierRequiredFields.join(", ")}.`
       : null,
   ]);
   return renderBulletSection("Reasoning policy", lines);
@@ -297,6 +306,8 @@ function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: 
   const qualityPreference = readString(taskExecution.quality_preference);
   const computePolicy = resolveReasoningComputePolicy(taskExecution);
   const policyEvidenceRequired = computePolicy?.evidence_required === true || readString(computePolicy?.mode) === "adaptive_best_of_n";
+  const verifierRerank = readNullableRecord(computePolicy?.verifier_rerank);
+  const verifierRequiredFields = readStringArray(verifierRerank?.required_selected_fields);
   const qualityBiased = qualityPreference === "quality" && (taskKind === "research" || taskKind === "verification");
   if (!needsCandidateEvidence && !needsRerank && !needsPlan && !needsVerification && !qualityBiased && !policyEvidenceRequired) {
     return renderBulletSection("Completion evidence handoff", []);
@@ -314,6 +325,9 @@ function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: 
     lines.push(
       "Include selected_candidate_id plus selection_rationale explaining why the chosen path beat alternatives by evidence and contradiction risk."
     );
+  }
+  if (verifierRequiredFields.length > 0) {
+    lines.push(`Include verifier rerank fields for the selected path: ${verifierRequiredFields.join(", ")}.`);
   }
   if (needsPlan) {
     lines.push("Include plan_summary or planned_steps proving a plan pass happened before mutation.");
