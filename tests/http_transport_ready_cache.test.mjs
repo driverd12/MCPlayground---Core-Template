@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -6,7 +7,14 @@ import path from "node:path";
 import test from "node:test";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { approvedHostNetworkMatch, parseJsonText, startHttpTransport } from "../dist/transports/http.js";
+import {
+  approvedHostNetworkMatch,
+  buildHostIdentitySignaturePayload,
+  parseJsonText,
+  remoteToolAllowedForPermission,
+  startHttpTransport,
+  verifyHostIdentitySignature,
+} from "../dist/transports/http.js";
 
 function officeHttpCachePath(cacheDir, cacheFile) {
   return path.join(cacheDir, "web", cacheFile);
@@ -58,6 +66,77 @@ test("approved host network matching treats IP as a locator and hostname/MAC as 
     lookupLanMacAddress: () => "aa:bb:cc:dd:ee:ff",
   });
   assert.equal(macMatch.reason, "approved_host_mac");
+});
+
+test("signed host identity verifies Ed25519 proof and permission scopes deny high-risk tools", () => {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
+  const timestamp = "2026-04-21T18:00:00.000Z";
+  const nonce = "nonce-1";
+  const agentId = "claude-opus";
+  const payload = buildHostIdentitySignaturePayload({
+    method: "*",
+    path: "*",
+    host_id: "dans-mbp",
+    agent_id: agentId,
+    timestamp,
+    nonce,
+  });
+  const signature = sign(null, Buffer.from(payload), privateKey).toString("base64url");
+  const host = {
+    host_id: "dans-mbp",
+    metadata: {
+      remote_access: {
+        status: "approved",
+        identity_public_key: publicKeyPem,
+      },
+    },
+  };
+
+  const verified = verifyHostIdentitySignature({
+    method: "POST",
+    path: "/",
+    host,
+    nowMs: Date.parse(timestamp),
+    headers: {
+      "x-master-mold-host-id": "dans-mbp",
+      "x-master-mold-agent-id": agentId,
+      "x-master-mold-timestamp": timestamp,
+      "x-master-mold-nonce": nonce,
+      "x-master-mold-signature": `ed25519:${signature}`,
+    },
+  });
+  assert.equal(verified.ok, true);
+  assert.equal(verified.status, "verified");
+  assert.equal(verified.agent_id, agentId);
+  assert.match(verified.fingerprint, /^sha256:/);
+
+  const missing = verifyHostIdentitySignature({
+    method: "POST",
+    path: "/",
+    host,
+    nowMs: Date.parse(timestamp),
+    headers: {
+      "x-master-mold-host-id": "dans-mbp",
+    },
+  });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.status, "missing");
+
+  assert.equal(remoteToolAllowedForPermission("agent.report_result", "task_worker"), true);
+  assert.equal(
+    remoteToolAllowedForPermission("worker.fabric", "task_worker", { action: "heartbeat", host_id: "dans-mbp" }, { host_id: "dans-mbp" }),
+    true
+  );
+  assert.equal(
+    remoteToolAllowedForPermission("worker.fabric", "task_worker", { action: "approve_remote_host", host_id: "dans-mbp" }, { host_id: "dans-mbp" }),
+    false
+  );
+  assert.equal(remoteToolAllowedForPermission("artifact.record", "artifact_writer"), true);
+  assert.equal(remoteToolAllowedForPermission("task.complete", "read_only"), false);
+  assert.equal(remoteToolAllowedForPermission("desktop.context", "task_worker", { host_id: "dans-mbp" }, { host_id: "dans-mbp" }), true);
+  assert.equal(remoteToolAllowedForPermission("desktop.context", "task_worker", { host_id: "main-mac" }, { host_id: "dans-mbp" }), false);
+  assert.equal(remoteToolAllowedForPermission("desktop.control", "task_worker"), false);
 });
 
 test("HTTP transport refuses LAN binds unless explicitly enabled", { concurrency: false }, async () => {
@@ -242,6 +321,7 @@ test("/remote-access/request stages a pending sanitized host request without bea
         workspace_root: "/Users/dan.driver/Documents/Playground/Agentic Playground/MASTER-MOLD",
         approve: true,
         request_desktop_context: true,
+        identity_public_key: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAremotehosttestidentitypublickey=\n-----END PUBLIC KEY-----",
         capabilities: { operator: true },
       },
     });
@@ -255,6 +335,7 @@ test("/remote-access/request stages a pending sanitized host request without bea
     assert.equal(calls[0].remote_host.approve, false);
     assert.deepEqual(calls[0].remote_host.allowed_addresses, ["127.0.0.1"]);
     assert.equal(calls[0].remote_host.ip_address, "127.0.0.1");
+    assert.match(calls[0].remote_host.identity_public_key, /^-----BEGIN PUBLIC KEY-----\n/);
     assert.deepEqual(calls[0].remote_host.capabilities, { desktop_context: true, desktop_observe: true });
     assert.equal(calls[0].remote_host.capabilities.operator, undefined);
   } finally {

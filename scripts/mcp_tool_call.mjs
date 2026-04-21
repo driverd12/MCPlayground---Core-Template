@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { randomUUID, sign as signData } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -104,6 +106,12 @@ function parseArgs(argv) {
     cwd: process.cwd(),
     timeoutMs: Number.parseInt(String(process.env.MCP_TOOL_CALL_TIMEOUT_MS ?? "").trim(), 10),
     maxAttempts: Number.parseInt(String(process.env.MCP_TOOL_CALL_HTTP_MAX_ATTEMPTS ?? "").trim(), 10),
+    hostId: process.env.MASTER_MOLD_HOST_ID ?? "",
+    agentId: process.env.MASTER_MOLD_AGENT_ID ?? process.env.MASTER_MOLD_AGENT_RUNTIME ?? "",
+    identityKey: process.env.MASTER_MOLD_HOST_IDENTITY_KEY ?? "",
+    identityKeyPath: process.env.MASTER_MOLD_IDENTITY_KEY_PATH ?? "",
+    agentRuntime: process.env.MASTER_MOLD_AGENT_RUNTIME ?? "",
+    modelLabel: process.env.MASTER_MOLD_MODEL_LABEL ?? "",
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -128,6 +136,18 @@ function parseArgs(argv) {
       out.timeoutMs = Number.parseInt(String(argv[++i] ?? "").trim(), 10);
     } else if (token === "--max-attempts") {
       out.maxAttempts = Number.parseInt(String(argv[++i] ?? "").trim(), 10);
+    } else if (token === "--host-id") {
+      out.hostId = argv[++i] ?? out.hostId;
+    } else if (token === "--agent-id") {
+      out.agentId = argv[++i] ?? out.agentId;
+    } else if (token === "--identity-key") {
+      out.identityKey = argv[++i] ?? out.identityKey;
+    } else if (token === "--identity-key-path") {
+      out.identityKeyPath = argv[++i] ?? out.identityKeyPath;
+    } else if (token === "--agent-runtime") {
+      out.agentRuntime = argv[++i] ?? out.agentRuntime;
+    } else if (token === "--model-label") {
+      out.modelLabel = argv[++i] ?? out.modelLabel;
     } else if (token === "--help" || token === "-h") {
       printHelp();
       process.exit(0);
@@ -160,6 +180,7 @@ function printHelp() {
       "Examples:",
       "  node scripts/mcp_tool_call.mjs --tool health.storage",
       "  node scripts/mcp_tool_call.mjs --tool imprint.bootstrap --args '{\"profile_id\":\"default\"}'",
+      "  MASTER_MOLD_HOST_ID=my-mac MASTER_MOLD_IDENTITY_KEY_PATH=~/.master-mold/identity/my-mac-ed25519.pem node scripts/mcp_tool_call.mjs --transport http --tool kernel.summary",
     ].join("\n") + "\n"
   );
 }
@@ -347,14 +368,99 @@ function createHttpTransport(options) {
   if (!token) {
     throw new Error("MCP_HTTP_BEARER_TOKEN is required for --transport http");
   }
+  const identityHeaders = buildHostIdentityHeaders(options);
   return new StreamableHTTPClientTransport(new URL(options.url), {
     requestInit: {
       headers: {
         Authorization: `Bearer ${token}`,
         Origin: options.origin,
+        ...identityHeaders,
       },
     },
   });
+}
+
+function expandHome(filePath) {
+  const text = String(filePath || "").trim();
+  if (!text) {
+    return "";
+  }
+  if (text === "~") {
+    return os.homedir();
+  }
+  if (text.startsWith("~/")) {
+    return path.join(os.homedir(), text.slice(2));
+  }
+  return text;
+}
+
+function defaultIdentityKeyPath(hostId) {
+  const safeHostId =
+    String(hostId || "remote-host")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^[-.]+|[-.]+$/g, "") || "remote-host";
+  return path.join(os.homedir(), ".master-mold", "identity", `${safeHostId}-ed25519.pem`);
+}
+
+function readIdentityPrivateKey(options) {
+  const inlineKey = String(options.identityKey || "").trim();
+  if (inlineKey.startsWith("-----BEGIN")) {
+    return inlineKey;
+  }
+  const explicitPath = expandHome(inlineKey || options.identityKeyPath);
+  const candidatePath = explicitPath || (options.hostId ? defaultIdentityKeyPath(options.hostId) : "");
+  if (!candidatePath) {
+    return "";
+  }
+  if (!fs.existsSync(candidatePath)) {
+    throw new Error(`MASTER-MOLD host identity key not found: ${candidatePath}`);
+  }
+  return fs.readFileSync(candidatePath, "utf8");
+}
+
+function buildHostIdentitySignaturePayload(input) {
+  return [
+    "master-mold-host-identity-v1",
+    String(input.method || "*").toUpperCase(),
+    input.path || "*",
+    input.host_id,
+    input.agent_id ?? "",
+    input.timestamp,
+    input.nonce,
+  ].join("\n");
+}
+
+function buildHostIdentityHeaders(options) {
+  const hostId = String(options.hostId || "").trim();
+  if (!hostId) {
+    return {};
+  }
+  const privateKey = readIdentityPrivateKey(options);
+  if (!privateKey) {
+    throw new Error("MASTER_MOLD_HOST_ID is set but no host identity private key was provided");
+  }
+  const timestamp = new Date().toISOString();
+  const nonce = randomUUID();
+  const agentId = String(options.agentId || options.agentRuntime || "").trim();
+  const payload = buildHostIdentitySignaturePayload({
+    method: "*",
+    path: "*",
+    host_id: hostId,
+    agent_id: agentId,
+    timestamp,
+    nonce,
+  });
+  return {
+    "x-master-mold-host-id": hostId,
+    "x-master-mold-agent-id": agentId,
+    "x-master-mold-timestamp": timestamp,
+    "x-master-mold-nonce": nonce,
+    "x-master-mold-signature": `ed25519:${signData(null, Buffer.from(payload), privateKey).toString("base64url")}`,
+    ...(options.agentRuntime ? { "x-master-mold-agent-runtime": options.agentRuntime } : {}),
+    ...(options.modelLabel ? { "x-master-mold-model-label": options.modelLabel } : {}),
+  };
 }
 
 main().catch((error) => {

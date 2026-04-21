@@ -1,5 +1,5 @@
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, createPublicKey, randomUUID, verify as verifySignature } from "node:crypto";
 import dns from "node:dns/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -45,6 +45,10 @@ type NetworkGateResult = {
   display_name?: string | null;
   agent_runtime?: string | null;
   model_label?: string | null;
+  permission_profile?: "read_only" | "task_worker" | "artifact_writer" | "operator" | null;
+  signature_status?: "not_required" | "not_configured" | "verified" | "missing" | "invalid" | "expired" | "host_mismatch";
+  signed_agent_id?: string | null;
+  identity_public_key_fingerprint?: string | null;
 };
 
 type OfficeSnapshotCommandResult = {
@@ -1038,6 +1042,160 @@ function readMacList(...values: unknown[]) {
   ];
 }
 
+function readRemotePermissionProfile(value: unknown): "read_only" | "task_worker" | "artifact_writer" | "operator" | null {
+  const profile = String(value ?? "").trim();
+  return profile === "read_only" || profile === "task_worker" || profile === "artifact_writer" || profile === "operator"
+    ? profile
+    : null;
+}
+
+function headerValue(headers: Record<string, unknown>, name: string) {
+  const direct = headers[name] ?? headers[name.toLowerCase()];
+  const value = Array.isArray(direct) ? direct[0] : direct;
+  return typeof value === "string" ? value.trim() : null;
+}
+
+export function buildHostIdentitySignaturePayload(input: {
+  method: string;
+  path: string;
+  host_id: string;
+  agent_id?: string | null;
+  timestamp: string;
+  nonce: string;
+}) {
+  return [
+    "master-mold-host-identity-v1",
+    String(input.method || "*").toUpperCase(),
+    input.path || "*",
+    input.host_id,
+    input.agent_id ?? "",
+    input.timestamp,
+    input.nonce,
+  ].join("\n");
+}
+
+function parseSignatureBytes(value: string | null) {
+  const text = String(value ?? "").trim().replace(/^ed25519:/i, "");
+  if (!text) {
+    return null;
+  }
+  try {
+    return Buffer.from(text, text.includes("+") || text.includes("/") ? "base64" : "base64url");
+  } catch {
+    return null;
+  }
+}
+
+function publicKeyFingerprint(publicKeyPem: string | null) {
+  if (!publicKeyPem) {
+    return null;
+  }
+  try {
+    const key = createPublicKey(publicKeyPem);
+    const der = key.export({ type: "spki", format: "der" });
+    return `sha256:${createHash("sha256").update(der).digest("base64url")}`;
+  } catch {
+    return null;
+  }
+}
+
+function hostIdentityPublicKey(remoteAccess: Record<string, unknown>) {
+  return readStringValue(remoteAccess.identity_public_key) ?? readStringValue(remoteAccess.public_key_pem);
+}
+
+export function verifyHostIdentitySignature(input: {
+  method: string;
+  path: string;
+  headers: Record<string, unknown>;
+  host: Record<string, unknown>;
+  nowMs?: number;
+  maxSkewSeconds?: number;
+}) {
+  const metadata = readRecord(input.host.metadata) ?? {};
+  const remoteAccess = readRecord(metadata.remote_access) ?? {};
+  const publicKeyPem = hostIdentityPublicKey(remoteAccess);
+  const fingerprint = publicKeyFingerprint(publicKeyPem);
+  if (!publicKeyPem) {
+    return {
+      ok: true,
+      status: "not_configured" as const,
+      agent_id: null,
+      fingerprint: null,
+    };
+  }
+
+  const expectedHostId = String(input.host.host_id ?? "").trim();
+  const hostId = headerValue(input.headers, "x-master-mold-host-id");
+  if (!hostId || hostId !== expectedHostId) {
+    return {
+      ok: false,
+      status: "host_mismatch" as const,
+      agent_id: null,
+      fingerprint,
+    };
+  }
+
+  const timestamp = headerValue(input.headers, "x-master-mold-timestamp");
+  const nonce = headerValue(input.headers, "x-master-mold-nonce");
+  const signature = parseSignatureBytes(headerValue(input.headers, "x-master-mold-signature"));
+  const agentId = headerValue(input.headers, "x-master-mold-agent-id");
+  if (!timestamp || !nonce || !signature) {
+    return {
+      ok: false,
+      status: "missing" as const,
+      agent_id: agentId,
+      fingerprint,
+    };
+  }
+
+  const parsedTimestamp = /^\d+$/.test(timestamp) ? Number(timestamp) * 1000 : Date.parse(timestamp);
+  const nowMs = input.nowMs ?? Date.now();
+  const maxSkewMs = Math.max(1, input.maxSkewSeconds ?? 300) * 1000;
+  if (!Number.isFinite(parsedTimestamp) || Math.abs(nowMs - parsedTimestamp) > maxSkewMs) {
+    return {
+      ok: false,
+      status: "expired" as const,
+      agent_id: agentId,
+      fingerprint,
+    };
+  }
+
+  try {
+    const publicKey = createPublicKey(publicKeyPem);
+    const methods = [...new Set([String(input.method || "").toUpperCase(), "*"].filter(Boolean))];
+    const paths = [...new Set([input.path || "/", "*"])];
+    for (const method of methods) {
+      for (const pathCandidate of paths) {
+        const payload = buildHostIdentitySignaturePayload({
+          method,
+          path: pathCandidate,
+          host_id: hostId,
+          agent_id: agentId,
+          timestamp,
+          nonce,
+        });
+        if (verifySignature(null, Buffer.from(payload), publicKey, signature)) {
+          return {
+            ok: true,
+            status: "verified" as const,
+            agent_id: agentId,
+            fingerprint,
+          };
+        }
+      }
+    }
+  } catch {
+    // Fall through to invalid; malformed configured keys fail closed.
+  }
+
+  return {
+    ok: false,
+    status: "invalid" as const,
+    agent_id: agentId,
+    fingerprint,
+  };
+}
+
 async function resolveHostnameAddresses(hostname: string | null, timeoutMs = 750) {
   if (!hostname) {
     return [];
@@ -1138,6 +1296,11 @@ function boundedString(value: unknown, maxLength: number) {
   return text ? text.slice(0, maxLength) : null;
 }
 
+function boundedRawString(value: unknown, maxLength: number) {
+  const text = String(value ?? "").trim();
+  return text ? text.slice(0, maxLength) : null;
+}
+
 function shellQuote(value: string) {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
@@ -1171,6 +1334,7 @@ function sanitizeRemoteAccessRequest(body: Record<string, unknown>, remoteAddres
     mac_address: normalizeMacAddress(body.mac_address) ?? normalizeMacAddress(body.hardware_address) ?? undefined,
     device_fingerprint: boundedString(body.device_fingerprint, 240) ?? undefined,
     public_key_fingerprint: boundedString(body.public_key_fingerprint, 240) ?? undefined,
+    identity_public_key: boundedRawString(body.identity_public_key, 4096) ?? undefined,
     permission_profile: normalizePermissionProfile(body.permission_profile),
     allowed_addresses: addressList,
     capabilities: requestDesktopContext ? { desktop_context: true, desktop_observe: true } : {},
@@ -1254,6 +1418,8 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
       remote_address: remoteAddress,
       reason: "loopback",
       host_id: "local",
+      permission_profile: "operator" as const,
+      signature_status: "not_required" as const,
     };
   }
   if (!lanHttpEnabled()) {
@@ -1273,6 +1439,30 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
     }
     const match = await approvedHostNetworkMatch(remoteAddress, host);
     if (match) {
+      const requireSignedRemote = process.env.MCP_HTTP_REQUIRE_SIGNED_REMOTE === "1";
+      const signature = verifyHostIdentitySignature({
+        method: String(req.method ?? "GET").toUpperCase(),
+        path: req.url ?? "/",
+        headers: req.headers as Record<string, unknown>,
+        host,
+      });
+      if (!signature.ok || (requireSignedRemote && signature.status === "not_configured")) {
+        return {
+          allowed: false,
+          remote_address: remoteAddress,
+          reason: `signed_identity_${signature.status}`,
+          host_id: String(host.host_id ?? "").trim() || null,
+          host_hostname: match.hostname,
+          host_mac_address: match.observedMac ?? normalizeMacAddress(match.remoteAccess.mac_address),
+          display_name: String(match.remoteAccess.display_name ?? "").trim() || null,
+          agent_runtime: String(match.remoteAccess.agent_runtime ?? "").trim() || null,
+          model_label: String(match.remoteAccess.model_label ?? "").trim() || null,
+          permission_profile: readRemotePermissionProfile(match.remoteAccess.permission_profile) ?? "task_worker",
+          signature_status: signature.status,
+          signed_agent_id: signature.agent_id,
+          identity_public_key_fingerprint: signature.fingerprint,
+        };
+      }
       return {
         allowed: true,
         remote_address: remoteAddress,
@@ -1283,6 +1473,10 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
         display_name: String(match.remoteAccess.display_name ?? "").trim() || null,
         agent_runtime: String(match.remoteAccess.agent_runtime ?? "").trim() || null,
         model_label: String(match.remoteAccess.model_label ?? "").trim() || null,
+        permission_profile: readRemotePermissionProfile(match.remoteAccess.permission_profile) ?? "task_worker",
+        signature_status: signature.status,
+        signed_agent_id: signature.agent_id,
+        identity_public_key_fingerprint: signature.fingerprint,
       };
     }
   }
@@ -1294,6 +1488,8 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
       remote_address: remoteAddress,
       reason: "env_allowlist",
       host_id: null,
+      permission_profile: readRemotePermissionProfile(process.env.MCP_HTTP_ENV_ALLOWLIST_PERMISSION) ?? "read_only",
+      signature_status: "not_configured" as const,
     };
   }
 
@@ -2710,6 +2906,10 @@ function networkIdentityPayload(networkGate: NetworkGateResult) {
     requesting_host_id: networkGate.host_id ?? undefined,
     requesting_remote_address: networkGate.remote_address ?? undefined,
     requesting_network_gate_reason: networkGate.reason,
+    requesting_permission_profile: networkGate.permission_profile ?? undefined,
+    requesting_signature_status: networkGate.signature_status ?? undefined,
+    requesting_signed_agent_id: networkGate.signed_agent_id ?? undefined,
+    requesting_identity_public_key_fingerprint: networkGate.identity_public_key_fingerprint ?? undefined,
     requesting_hostname: networkGate.host_hostname ?? undefined,
     requesting_mac_address: networkGate.host_mac_address ?? undefined,
     requesting_display_name: networkGate.display_name ?? undefined,
@@ -2728,6 +2928,167 @@ function sourceAgentForNetworkIdentity(networkGate: NetworkGateResult) {
   return networkGate.remote_address ? `remote-${networkGate.remote_address}` : "remote-host";
 }
 
+type RemotePermissionProfile = NonNullable<NetworkGateResult["permission_profile"]>;
+
+const READ_ONLY_REMOTE_TOOLS = new Set([
+  "agent.current_task",
+  "agent.learning_list",
+  "agent.learning_summary",
+  "agent.session_get",
+  "agent.session_list",
+  "agent.worklist",
+  "artifact.bundle",
+  "artifact.get",
+  "artifact.list",
+  "event.summary",
+  "event.tail",
+  "goal.get",
+  "goal.list",
+  "health.policy",
+  "health.storage",
+  "health.tools",
+  "kernel.summary",
+  "memory.get",
+  "memory.search",
+  "migration.status",
+  "observability.dashboard",
+  "observability.search",
+  "office.snapshot",
+  "operator.brief",
+  "pack.hooks.list",
+  "plan.get",
+  "plan.list",
+  "plan.step_ready",
+  "playbook.get",
+  "playbook.list",
+  "run.timeline",
+  "task.list",
+  "task.summary",
+  "task.timeline",
+]);
+
+const ARTIFACT_WRITER_REMOTE_TOOLS = new Set([
+  ...READ_ONLY_REMOTE_TOOLS,
+  "artifact.link",
+  "artifact.record",
+  "event.publish",
+  "memory.append",
+  "transcript.append",
+]);
+
+const TASK_WORKER_REMOTE_TOOLS = new Set([
+  ...ARTIFACT_WRITER_REMOTE_TOOLS,
+  "agent.claim_next",
+  "agent.heartbeat_task",
+  "agent.report_result",
+  "agent.session_close",
+  "agent.session_heartbeat",
+  "agent.session_open",
+  "run.begin",
+  "run.end",
+  "run.step",
+  "task.claim",
+  "task.complete",
+  "task.fail",
+  "task.heartbeat",
+]);
+
+function remoteWorkerFabricActionAllowed(
+  profile: RemotePermissionProfile,
+  args: Record<string, unknown> | null | undefined,
+  networkGate?: { host_id?: string | null }
+) {
+  const action = readStringValue(args?.action) ?? "status";
+  if (action === "status") {
+    return true;
+  }
+  if (profile !== "task_worker") {
+    return false;
+  }
+  const targetHostId = readStringValue(args?.host_id);
+  return action === "heartbeat" && Boolean(networkGate?.host_id) && targetHostId === networkGate?.host_id;
+}
+
+function remoteDesktopContextAllowed(
+  profile: RemotePermissionProfile,
+  args: Record<string, unknown> | null | undefined,
+  networkGate?: { host_id?: string | null }
+) {
+  if (profile !== "task_worker") {
+    return false;
+  }
+  const requestedHostId = readStringValue(args?.host_id);
+  return Boolean(requestedHostId && networkGate?.host_id && requestedHostId === networkGate.host_id);
+}
+
+export function remoteToolAllowedForPermission(
+  toolName: string,
+  permissionProfile?: string | null,
+  args?: Record<string, unknown> | null,
+  networkGate?: { host_id?: string | null }
+) {
+  const profile = readRemotePermissionProfile(permissionProfile) ?? "read_only";
+  if (profile === "operator") {
+    return true;
+  }
+  if (toolName === "worker.fabric") {
+    return remoteWorkerFabricActionAllowed(profile, args, networkGate);
+  }
+  if (toolName === "desktop.context") {
+    return remoteDesktopContextAllowed(profile, args, networkGate);
+  }
+  if (profile === "task_worker") {
+    return TASK_WORKER_REMOTE_TOOLS.has(toolName);
+  }
+  if (profile === "artifact_writer") {
+    return ARTIFACT_WRITER_REMOTE_TOOLS.has(toolName);
+  }
+  return READ_ONLY_REMOTE_TOOLS.has(toolName);
+}
+
+function collectJsonRpcToolCalls(body: unknown) {
+  const calls: Array<{ toolName: string | null; args: Record<string, unknown> | null }> = [];
+  const values = Array.isArray(body) ? body : [body];
+  for (const value of values) {
+    const request = readRecord(value);
+    if (request?.method !== "tools/call") {
+      continue;
+    }
+    const params = readRecord(request.params);
+    calls.push({
+      toolName: readStringValue(params?.name),
+      args: readRecord(params?.arguments),
+    });
+  }
+  return calls;
+}
+
+function authorizeRemoteToolCalls(body: unknown, networkGate: NetworkGateResult) {
+  if (networkGate.permission_profile === "operator" || networkGate.host_id === "local" || networkGate.reason === "loopback") {
+    return { allowed: true as const };
+  }
+  const permissionProfile = networkGate.permission_profile ?? "read_only";
+  for (const call of collectJsonRpcToolCalls(body)) {
+    if (!call.toolName) {
+      return {
+        allowed: false as const,
+        tool_name: "unknown",
+        permission_profile: permissionProfile,
+        reason: "missing_tool_name",
+      };
+    }
+    if (!remoteToolAllowedForPermission(call.toolName, permissionProfile, call.args, networkGate)) {
+      return {
+        allowed: false as const,
+        tool_name: call.toolName,
+        permission_profile: permissionProfile,
+        reason: "tool_not_allowed_for_permission_profile",
+      };
+    }
+  }
+  return { allowed: true as const };
+}
+
 function stampOneJsonRpcRequest(value: unknown, networkGate: NetworkGateResult) {
   const request = readRecord(value);
   if (request?.method !== "tools/call") {
@@ -2742,6 +3103,7 @@ function stampOneJsonRpcRequest(value: unknown, networkGate: NetworkGateResult) 
     ...args,
     source_client: "http.mcp",
     source_agent: sourceAgentForNetworkIdentity(networkGate),
+    source_model: networkGate.model_label ?? undefined,
     ...networkIdentityPayload(networkGate),
   };
   request.params = params;
@@ -2764,6 +3126,10 @@ function attachNetworkIdentity(req: http.IncomingMessage, networkGate: NetworkGa
         host_id: networkGate.host_id,
         remote_address: networkGate.remote_address,
         reason: networkGate.reason,
+        permission_profile: networkGate.permission_profile ?? null,
+        signature_status: networkGate.signature_status ?? null,
+        signed_agent_id: networkGate.signed_agent_id ?? null,
+        identity_public_key_fingerprint: networkGate.identity_public_key_fingerprint ?? null,
         hostname: networkGate.host_hostname ?? null,
         mac_address: networkGate.host_mac_address ?? null,
         display_name: networkGate.display_name ?? null,
@@ -2787,6 +3153,14 @@ async function routeRequest(
 
   if (method === "POST") {
     const body = await parseJsonBody(req);
+    const authorization = authorizeRemoteToolCalls(body, networkGate);
+    if (!authorization.allowed) {
+      res.statusCode = 403;
+      res.end(
+        `Tool ${authorization.tool_name} is not allowed for remote permission profile ${authorization.permission_profile}: ${authorization.reason}`
+      );
+      return;
+    }
     let transport: StreamableHTTPServerTransport | undefined;
     let server: Server | undefined;
 
