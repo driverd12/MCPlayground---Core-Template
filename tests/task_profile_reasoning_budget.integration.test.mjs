@@ -205,9 +205,15 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       task_execution: {
         task_kind: "verification",
         quality_preference: "quality",
-        reasoning_candidate_count: 2,
-        reasoning_selection_strategy: "evidence_rerank",
-        require_verification_pass: true,
+        reasoning_compute_policy: {
+          mode: "adaptive_best_of_n",
+          candidate_count: 3,
+          max_candidate_count: 4,
+          selection_strategy: "evidence_rerank",
+          activation_reasons: ["verification_task", "failed_variant_retry"],
+          evidence_required: true,
+          transcript_policy: "compact_evidence_only",
+        },
       },
       tags: ["reasoning-budget", "failure-reflection"],
     });
@@ -233,6 +239,8 @@ test("task profiles treat high test-time-compute policy as high complexity for r
     assert.equal(failed.failed, true);
     assert.equal(typeof failed.auto_reflection.memory_id, "number");
     assert.ok(failed.auto_reflection.keywords.includes("task-failure"));
+    assert.ok(failed.auto_reflection.keywords.includes("candidate_count=3"));
+    assert.ok(failed.auto_reflection.keywords.includes("selection=evidence_rerank"));
 
     const reflection = await callTool(client, "memory.get", {
       id: failed.auto_reflection.memory_id,
@@ -240,6 +248,11 @@ test("task profiles treat high test-time-compute policy as high complexity for r
     assert.equal(reflection.found, true);
     assert.match(reflection.memory.content, /Failed high-compute task/);
     assert.match(reflection.memory.content, /verification contradicted the selected candidate/);
+    assert.match(reflection.memory.content, /mode=adaptive_best_of_n/);
+    assert.match(reflection.memory.content, /candidate_count=3/);
+    assert.match(reflection.memory.content, /selection=evidence_rerank/);
+    assert.match(reflection.memory.content, /transcript_policy=compact_evidence_only/);
+    assert.match(reflection.memory.content, /activation=failed_variant_retry/);
     assert.match(reflection.memory.content, /Retry should change the candidate, evidence, or verification path/);
 
     const reflectedSearch = await callTool(client, "memory.search", {

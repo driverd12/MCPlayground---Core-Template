@@ -13718,10 +13718,12 @@ function captureTaskFailureReflection(
   }
 
   const taskKind = String(execution.task_kind ?? "").trim() || "task";
-  const candidateCount =
-    typeof execution.reasoning_candidate_count === "number" && Number.isFinite(execution.reasoning_candidate_count)
-      ? Math.max(1, Math.min(4, Math.round(execution.reasoning_candidate_count)))
-      : null;
+  const computePolicy = readTaskReasoningComputePolicy(execution);
+  const candidateCount = resolveTaskReasoningCandidateRequirement(execution);
+  const selectionStrategy = resolveTaskReasoningSelectionStrategy(execution);
+  const policyMode = String(computePolicy?.mode ?? "").trim();
+  const activationReasons = asStringArrayForStorage(computePolicy?.activation_reasons).slice(0, 6);
+  const transcriptPolicy = String(computePolicy?.transcript_policy ?? "").trim();
   const resultKeys = Object.keys(input.result ?? {}).slice(0, 12);
   const groundedFeedback = [
     `Task ${task.task_id} failed under ${taskKind} reasoning policy.`,
@@ -13730,10 +13732,12 @@ function captureTaskFailureReflection(
     resultKeys.length > 0 ? `Failure result keys: ${resultKeys.join(", ")}` : null,
   ].filter((entry): entry is string => Boolean(entry));
   const policySignals = [
+    policyMode ? `mode=${policyMode}` : null,
     candidateCount && candidateCount > 1 ? `candidate_count=${candidateCount}` : null,
-    String(execution.reasoning_selection_strategy ?? "").trim()
-      ? `selection=${String(execution.reasoning_selection_strategy ?? "").trim()}`
-      : null,
+    selectionStrategy ? `selection=${selectionStrategy}` : null,
+    computePolicy?.evidence_required === true ? "evidence_required" : null,
+    transcriptPolicy ? `transcript_policy=${transcriptPolicy}` : null,
+    ...activationReasons.map((reason) => `activation=${reason}`),
     execution.require_plan_pass === true ? "plan_pass_required" : null,
     execution.require_verification_pass === true ? "verification_pass_required" : null,
   ].filter((entry): entry is string => Boolean(entry));
@@ -13743,6 +13747,8 @@ function captureTaskFailureReflection(
     `Attempted action: ${compactStorageSingleLine(input.summary || "Task execution reported failure.", 300)}`,
     "Grounded feedback:",
     ...groundedFeedback.map((entry) => `- ${entry}`),
+    "Reasoning policy signals:",
+    ...(policySignals.length > 0 ? policySignals.map((entry) => `- ${entry}`) : ["- none"]),
     "Reflection:",
     "Retry should change the candidate, evidence, or verification path instead of repeating the failed execution. Re-enter with explicit evidence for the required reasoning-policy fields before completion.",
     "Next actions:",
