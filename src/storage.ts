@@ -13885,6 +13885,12 @@ function taskReasoningComputePolicyRequiresEvidence(execution: Record<string, un
   return computePolicy.evidence_required === true || String(computePolicy.mode ?? "").trim() === "adaptive_best_of_n";
 }
 
+function taskReasoningComputePolicyRequiresBranchSearch(execution: Record<string, unknown>): boolean {
+  const computePolicy = readTaskReasoningComputePolicy(execution);
+  const branchSearch = readPlainObject(computePolicy?.shallow_branch_search);
+  return branchSearch?.enabled === true;
+}
+
 function isTaskExecutionHighCompute(execution: Record<string, unknown> | null): boolean {
   if (!execution) {
     return false;
@@ -13899,6 +13905,7 @@ function isTaskExecutionHighCompute(execution: Record<string, unknown> | null): 
     execution.require_plan_pass === true ||
     execution.require_verification_pass === true ||
     taskReasoningComputePolicyRequiresEvidence(execution) ||
+    taskReasoningComputePolicyRequiresBranchSearch(execution) ||
     (qualityPreference === "quality" && (taskKind === "research" || taskKind === "verification"))
   );
 }
@@ -13916,6 +13923,7 @@ function buildTaskCompletionReasoningAudit(
   const planRequired = execution.require_plan_pass === true;
   const verificationRequired = execution.require_verification_pass === true;
   const policyEvidenceRequired = taskReasoningComputePolicyRequiresEvidence(execution);
+  const branchSearchRequired = taskReasoningComputePolicyRequiresBranchSearch(execution);
   const taskKind = String(execution.task_kind ?? "").trim();
   const qualityPreference = String(execution.quality_preference ?? "").trim();
   const qualityBiased =
@@ -13923,6 +13931,7 @@ function buildTaskCompletionReasoningAudit(
   const required =
     planRequired ||
     verificationRequired ||
+    branchSearchRequired ||
     evidenceRerank ||
     policyEvidenceRequired ||
     (candidateRequirement !== null && candidateRequirement > 1) ||
@@ -13982,6 +13991,16 @@ function buildTaskCompletionReasoningAudit(
       "evidence",
       "evidence_refs",
       "validated_by",
+    ]));
+  }
+  if (branchSearchRequired) {
+    requireField("branch_search", hasCompletionEvidence(result, [
+      "branch_search",
+      "branch_search_summary",
+      "branch_evaluation",
+      "branch_evaluations",
+      "pruned_branches",
+      "environment_feedback",
     ]));
   }
   if ((policyEvidenceRequired || qualityBiased) && requiredFields.length === 0) {

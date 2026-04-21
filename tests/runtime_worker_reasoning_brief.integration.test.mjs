@@ -54,6 +54,13 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
             ],
             selected_candidate_id: "candidate-d",
             selection_rationale: "Selected the path that verifies both runtime brief instructions and completion evidence handoff.",
+            branch_search_summary: "Expanded four candidate checks to depth 2, pruned the weak metadata-only branches, and executed candidate-d.",
+            branch_evaluations: [
+              { id: "candidate-a", pruned: true, reason: "no generated brief evidence" },
+              { id: "candidate-b", pruned: true, reason: "metadata-only evidence" },
+              { id: "candidate-c", pruned: true, reason: "missed completion handoff" },
+              { id: "candidate-d", selected: true, reason: "validated brief and handoff artifacts" },
+            ],
             plan_summary: "Inspect the brief, write compact completion evidence, then let the wrapper report task completion.",
             verification_summary: "Created runtime-brief-proof.txt and reasoning-evidence.json in the runtime worktree.",
             checks: ["runtime-brief-proof.txt written", "reasoning-evidence.json written"],
@@ -71,6 +78,13 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
           activation_reasons: ["verification_task", "quality_preference", "grounded_reflection_match"],
           evidence_required: true,
           transcript_policy: "compact_evidence_only",
+          shallow_branch_search: {
+            enabled: true,
+            max_depth: 2,
+            branch_count: 4,
+            prune_with: ["artifact_fit", "contradiction_risk", "rollback_safety", "environment_feedback"],
+            fallback: "single_path_when_branch_confidence_high",
+          },
         },
         require_plan_pass: true,
         require_verification_pass: true,
@@ -155,6 +169,8 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.match(sessionBrief, /Activation reasons: verification_task, quality_preference, grounded_reflection_match/i);
     assert.match(sessionBrief, /Generate 4 bounded candidate approaches or failure hypotheses/i);
     assert.match(sessionBrief, /Rerank candidate paths by concrete evidence and contradiction risk/i);
+    assert.match(sessionBrief, /Bounded branch search: expand up to 4 branch/i);
+    assert.match(sessionBrief, /Prune branches with artifact_fit, contradiction_risk, rollback_safety, environment_feedback/i);
     assert.match(sessionBrief, /Try to falsify the current answer with concrete checks before declaring success/i);
     assert.match(sessionBrief, /Write a short plan first so unknowns, evidence needs, and rollback are explicit before mutation/i);
     assert.match(sessionBrief, /Choose the path with the strongest evidence trail/i);
@@ -172,6 +188,7 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.match(sessionBrief, /reasoning-evidence\.json/);
     assert.match(sessionBrief, /Include candidates or candidate_count showing at least 4 bounded candidates/i);
     assert.match(sessionBrief, /Include selected_candidate_id plus selection_rationale/i);
+    assert.match(sessionBrief, /Include branch_search_summary or branch_evaluations/i);
 
     const completedTask = await waitFor(async () => {
       const completed = await callTool(client, "task.list", { status: "completed", limit: 20 });
@@ -183,8 +200,10 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.deepEqual(completedTask.result.reasoning_policy_audit.missing_fields, []);
     assert.equal(completedTask.result.reasoning_policy_audit.selection.selected_candidate_id, "candidate-d");
     assert.equal(completedTask.result.reasoning_policy_audit.selection.selected_candidate_has_evidence, true);
+    assert.ok(completedTask.result.reasoning_policy_audit.satisfied_fields.includes("branch_search"));
     assert.equal(completedTask.result.reasoning_policy_evidence.candidates.length, 4);
     assert.match(completedTask.result.reasoning_policy_evidence.selection_rationale, /brief instructions and completion evidence/i);
+    assert.match(completedTask.result.reasoning_policy_evidence.branch_search_summary, /Expanded four candidate checks/i);
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

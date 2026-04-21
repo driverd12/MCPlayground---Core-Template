@@ -43,6 +43,16 @@ const reasoningComputePolicySchema = z.object({
   evidence_required: z.boolean().optional(),
   transcript_policy: z.string().min(1).optional(),
   verifier_rerank: z.record(z.unknown()).optional(),
+  shallow_branch_search: z
+    .object({
+      enabled: z.boolean().optional(),
+      max_depth: z.number().int().min(1).max(3).optional(),
+      branch_count: z.number().int().min(1).max(4).optional(),
+      expand_policy: z.string().min(1).optional(),
+      prune_with: z.array(z.string().min(1)).optional(),
+      fallback: z.string().min(1).optional(),
+    })
+    .optional(),
 });
 
 export const taskExecutionSchema = z.object({
@@ -453,6 +463,9 @@ function normalizeTaskExecutionMetadata(value: unknown) {
       ? Math.max(1, Math.min(4, Math.round(reasoningComputePolicy.max_candidate_count)))
       : null;
   const policySelectionStrategy = readString(reasoningComputePolicy?.selection_strategy);
+  const policyShallowBranchSearch = isRecord(reasoningComputePolicy?.shallow_branch_search)
+    ? reasoningComputePolicy.shallow_branch_search
+    : null;
   const normalizedReasoningComputePolicy = reasoningComputePolicy
     ? {
         mode: policyMode === "adaptive_best_of_n" || policyMode === "single_path" ? policyMode : null,
@@ -475,6 +488,22 @@ function normalizeTaskExecutionMetadata(value: unknown) {
                   ? Math.max(0, Math.min(1, Number(reasoningComputePolicy.verifier_rerank.minimum_selected_score.toFixed(4))))
                   : null,
               contradiction_risk_fail_closed: reasoningComputePolicy.verifier_rerank.contradiction_risk_fail_closed === true,
+            }
+          : null,
+        shallow_branch_search: policyShallowBranchSearch
+          ? {
+              enabled: policyShallowBranchSearch.enabled === true,
+              max_depth:
+                typeof policyShallowBranchSearch.max_depth === "number" && Number.isFinite(policyShallowBranchSearch.max_depth)
+                  ? Math.max(1, Math.min(3, Math.round(policyShallowBranchSearch.max_depth)))
+                  : null,
+              branch_count:
+                typeof policyShallowBranchSearch.branch_count === "number" && Number.isFinite(policyShallowBranchSearch.branch_count)
+                  ? Math.max(1, Math.min(4, Math.round(policyShallowBranchSearch.branch_count)))
+                  : null,
+              expand_policy: readString(policyShallowBranchSearch.expand_policy),
+              prune_with: normalizeStringArray(policyShallowBranchSearch.prune_with),
+              fallback: readString(policyShallowBranchSearch.fallback),
             }
           : null,
       }

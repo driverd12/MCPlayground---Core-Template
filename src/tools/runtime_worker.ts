@@ -139,6 +139,12 @@ function resolveReasoningSelectionStrategy(taskExecution: Record<string, unknown
   return readString(taskExecution.reasoning_selection_strategy) ?? readString(resolveReasoningComputePolicy(taskExecution)?.selection_strategy);
 }
 
+function resolveShallowBranchSearch(taskExecution: Record<string, unknown>) {
+  const computePolicy = resolveReasoningComputePolicy(taskExecution);
+  const branchSearch = readNullableRecord(computePolicy?.shallow_branch_search);
+  return branchSearch?.enabled === true ? branchSearch : null;
+}
+
 function extractDelegationBrief(task: { payload: Record<string, unknown>; metadata: Record<string, unknown> }) {
   const nested =
     readNullableRecord(task.payload.delegation_brief) ??
@@ -189,6 +195,16 @@ function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExec
   const verifierRerank = readNullableRecord(computePolicy?.verifier_rerank);
   const verifierScoreFields = readStringArray(verifierRerank?.score_fields);
   const verifierRequiredFields = readStringArray(verifierRerank?.required_selected_fields);
+  const shallowBranchSearch = resolveShallowBranchSearch(taskExecution);
+  const branchPruneSignals = readStringArray(shallowBranchSearch?.prune_with);
+  const branchCount =
+    typeof shallowBranchSearch?.branch_count === "number" && Number.isFinite(shallowBranchSearch.branch_count)
+      ? Math.max(1, Math.round(shallowBranchSearch.branch_count))
+      : reasoningCandidateCount;
+  const branchDepth =
+    typeof shallowBranchSearch?.max_depth === "number" && Number.isFinite(shallowBranchSearch.max_depth)
+      ? Math.max(1, Math.round(shallowBranchSearch.max_depth))
+      : null;
   const lines = uniqueStrings([
     policyMode === "adaptive_best_of_n"
       ? `Adaptive compute policy: best-of-N with ${reasoningCandidateCount ?? computePolicy?.candidate_count ?? "bounded"} candidate(s).`
@@ -204,6 +220,12 @@ function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExec
       : null,
     verifierScoreFields.length > 0
       ? `Score candidates on ${verifierScoreFields.join(", ")} before selecting the winner.`
+      : null,
+    shallowBranchSearch
+      ? `Bounded branch search: expand up to ${branchCount ?? "the top"} branch(es)${branchDepth ? ` to depth ${branchDepth}` : ""}, then prune before execution.`
+      : null,
+    branchPruneSignals.length > 0
+      ? `Prune branches with ${branchPruneSignals.join(", ")}; fall back to a single path when confidence is high.`
       : null,
     requirePlanPass || taskKind === "research" || focus === "implementation_research" || focus === "task_breakdown"
       ? "Write a short plan first so unknowns, evidence needs, and rollback are explicit before mutation."
@@ -308,8 +330,9 @@ function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: 
   const policyEvidenceRequired = computePolicy?.evidence_required === true || readString(computePolicy?.mode) === "adaptive_best_of_n";
   const verifierRerank = readNullableRecord(computePolicy?.verifier_rerank);
   const verifierRequiredFields = readStringArray(verifierRerank?.required_selected_fields);
+  const needsBranchSearch = resolveShallowBranchSearch(taskExecution) !== null;
   const qualityBiased = qualityPreference === "quality" && (taskKind === "research" || taskKind === "verification");
-  if (!needsCandidateEvidence && !needsRerank && !needsPlan && !needsVerification && !qualityBiased && !policyEvidenceRequired) {
+  if (!needsCandidateEvidence && !needsRerank && !needsPlan && !needsVerification && !needsBranchSearch && !qualityBiased && !policyEvidenceRequired) {
     return renderBulletSection("Completion evidence handoff", []);
   }
 
@@ -328,6 +351,9 @@ function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: 
   }
   if (verifierRequiredFields.length > 0) {
     lines.push(`Include verifier rerank fields for the selected path: ${verifierRequiredFields.join(", ")}.`);
+  }
+  if (needsBranchSearch) {
+    lines.push("Include branch_search_summary or branch_evaluations showing which branches were expanded, pruned, and why.");
   }
   if (needsPlan) {
     lines.push("Include plan_summary or planned_steps proving a plan pass happened before mutation.");
