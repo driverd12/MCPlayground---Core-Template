@@ -194,6 +194,74 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       /not grounded in the candidate evidence/
     );
 
+    const missingVerifierFieldsTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.missing-verifier-fields", () => mutationCounter++),
+      objective: "Select a candidate only after verifier rerank fields are present.",
+      project_dir: REPO_ROOT,
+      priority: 6,
+      routing: {
+        allowed_agent_ids: ["verifier-field-worker"],
+      },
+      task_execution: {
+        task_kind: "verification",
+        quality_preference: "quality",
+        reasoning_compute_policy: {
+          mode: "adaptive_best_of_n",
+          candidate_count: 2,
+          max_candidate_count: 4,
+          selection_strategy: "evidence_rerank",
+          activation_reasons: ["verification_task"],
+          evidence_required: true,
+          transcript_policy: "compact_evidence_only",
+          verifier_rerank: {
+            score_fields: ["evidence_strength", "artifact_fit", "contradiction_risk", "rollback_safety"],
+            required_selected_fields: [
+              "selected_candidate_id",
+              "selection_rationale",
+              "verifier_score",
+              "contradiction_risk",
+            ],
+            minimum_selected_score: 0.6,
+            contradiction_risk_fail_closed: true,
+          },
+        },
+      },
+      tags: ["reasoning-budget", "verifier-rerank"],
+    });
+
+    const missingVerifierFieldsClaim = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim.missing-verifier-fields", () => mutationCounter++),
+      worker_id: "verifier-field-worker",
+      task_id: missingVerifierFieldsTask.task.task_id,
+    });
+    assert.equal(missingVerifierFieldsClaim.claimed, true);
+
+    const missingVerifierFieldsCompletion = await callTool(client, "task.complete", {
+      mutation: nextMutation(testId, "task.complete.missing-verifier-fields", () => mutationCounter++),
+      task_id: missingVerifierFieldsTask.task.task_id,
+      worker_id: "verifier-field-worker",
+      summary: "Selected a candidate without verifier rerank fields.",
+      result: {
+        candidates: [
+          { id: "candidate-a", evidence: "passed smoke check" },
+          { id: "candidate-b", selected: true, evidence: "passed regression check" },
+        ],
+        selected_candidate_id: "candidate-b",
+        selection_rationale: "candidate-b has better regression evidence",
+      },
+    });
+    assert.equal(missingVerifierFieldsCompletion.completed, true);
+    assert.equal(missingVerifierFieldsCompletion.task.result.reasoning_policy_audit.status, "needs_review");
+    assert.ok(missingVerifierFieldsCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("selection_rationale"));
+    assert.deepEqual(
+      new Set(missingVerifierFieldsCompletion.task.result.reasoning_policy_audit.missing_fields),
+      new Set(["verifier_score", "contradiction_risk"])
+    );
+    assert.match(
+      missingVerifierFieldsCompletion.task.result.reasoning_policy_audit.warnings.join(" "),
+      /missing required verifier rerank fields/
+    );
+
     const failedTask = await callTool(client, "task.create", {
       mutation: nextMutation(testId, "task.create.failure-reflection", () => mutationCounter++),
       objective: "Investigate a brittle verification path and learn from the failed attempt.",

@@ -50,7 +50,13 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
               { id: "candidate-a", verdict: "rejected", evidence: "did not check the generated brief" },
               { id: "candidate-b", verdict: "rejected", evidence: "checked only task metadata" },
               { id: "candidate-c", verdict: "rejected", evidence: "missed completion handoff evidence" },
-              { id: "candidate-d", verdict: "selected", evidence: "checked brief and completion handoff" },
+              {
+                id: "candidate-d",
+                verdict: "selected",
+                evidence: "checked brief and completion handoff",
+                verifier_score: 0.94,
+                contradiction_risk: "low",
+              },
             ],
             selected_candidate_id: "candidate-d",
             selection_rationale: "Selected the path that verifies both runtime brief instructions and completion evidence handoff.",
@@ -78,6 +84,12 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
           activation_reasons: ["verification_task", "quality_preference", "grounded_reflection_match"],
           evidence_required: true,
           transcript_policy: "compact_evidence_only",
+          verifier_rerank: {
+            score_fields: ["evidence_strength", "artifact_fit", "contradiction_risk", "rollback_safety"],
+            required_selected_fields: ["selected_candidate_id", "selection_rationale", "verifier_score", "contradiction_risk"],
+            minimum_selected_score: 0.6,
+            contradiction_risk_fail_closed: true,
+          },
           shallow_branch_search: {
             enabled: true,
             max_depth: 2,
@@ -169,6 +181,7 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.match(sessionBrief, /Activation reasons: verification_task, quality_preference, grounded_reflection_match/i);
     assert.match(sessionBrief, /Generate 4 bounded candidate approaches or failure hypotheses/i);
     assert.match(sessionBrief, /Rerank candidate paths by concrete evidence and contradiction risk/i);
+    assert.match(sessionBrief, /Include verifier rerank fields for the selected path: selected_candidate_id, selection_rationale, verifier_score, contradiction_risk/i);
     assert.match(sessionBrief, /Bounded branch search: expand up to 4 branch/i);
     assert.match(sessionBrief, /Prune branches with artifact_fit, contradiction_risk, rollback_safety, environment_feedback/i);
     assert.match(sessionBrief, /Try to falsify the current answer with concrete checks before declaring success/i);

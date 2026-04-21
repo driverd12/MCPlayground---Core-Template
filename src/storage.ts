@@ -13924,6 +13924,7 @@ function buildTaskCompletionReasoningAudit(
   const verificationRequired = execution.require_verification_pass === true;
   const policyEvidenceRequired = taskReasoningComputePolicyRequiresEvidence(execution);
   const branchSearchRequired = taskReasoningComputePolicyRequiresBranchSearch(execution);
+  const verifierRequiredSelectedFields = readVerifierRerankRequiredSelectedFields(execution);
   const taskKind = String(execution.task_kind ?? "").trim();
   const qualityPreference = String(execution.quality_preference ?? "").trim();
   const qualityBiased =
@@ -13968,6 +13969,12 @@ function buildTaskCompletionReasoningAudit(
   }
   if (evidenceRerank) {
     requireField("selection_rationale", completionSelectionAuditIsSatisfied(selectionAudit));
+    for (const field of verifierRequiredSelectedFields) {
+      if (field === "selected_candidate_id" || field === "selection_rationale") {
+        continue;
+      }
+      requireField(field, completionSelectedCandidateHasRequiredField(result, selectionAudit.selected_candidate_id, field));
+    }
   }
   if (planRequired) {
     requireField("plan_pass", hasCompletionEvidence(result, [
@@ -14030,6 +14037,9 @@ function buildTaskCompletionReasoningAudit(
       "Selection rationale is present, but the chosen candidate is not grounded in the candidate evidence."
     );
   }
+  if (verifierRequiredSelectedFields.some((field) => missingFields.includes(field))) {
+    warnings.push("Selected candidate is missing required verifier rerank fields.");
+  }
 
   return {
     required: true,
@@ -14049,6 +14059,12 @@ type CompletionCandidateEvidence = {
   selected: boolean;
   has_evidence: boolean;
 };
+
+function readVerifierRerankRequiredSelectedFields(execution: Record<string, unknown>): string[] {
+  const computePolicy = readTaskReasoningComputePolicy(execution);
+  const verifierRerank = readPlainObject(computePolicy?.verifier_rerank);
+  return [...new Set(asStringArrayForStorage(verifierRerank?.required_selected_fields))];
+}
 
 function buildCompletionSelectionAudit(
   result: Record<string, unknown>,
@@ -14153,6 +14169,72 @@ function readCompletionSelectedCandidateObject(result: Record<string, unknown>):
     }
   }
   return null;
+}
+
+function readCompletionSelectedCandidateRecords(
+  result: Record<string, unknown>,
+  selectedCandidateId: string | null
+): Record<string, unknown>[] {
+  const selectedKey = normalizeCompletionCandidateId(selectedCandidateId);
+  const records: Record<string, unknown>[] = [];
+  for (const source of completionEvidenceSources(result)) {
+    for (const key of ["selected_candidate", "chosen_candidate", "winner"]) {
+      const value = readPlainObject(source[key]);
+      if (value) {
+        records.push(value);
+      }
+    }
+    for (const key of ["candidates", "candidate_paths", "options", "alternatives"]) {
+      const value = source[key];
+      if (!Array.isArray(value)) {
+        continue;
+      }
+      for (const entry of value) {
+        const record = readPlainObject(entry);
+        if (!record) {
+          continue;
+        }
+        const candidateKey = normalizeCompletionCandidateId(readCompletionCandidateId(record));
+        if ((selectedKey && candidateKey === selectedKey) || (!selectedKey && completionCandidateIsSelected(record))) {
+          records.push(record);
+        }
+      }
+    }
+  }
+  return records;
+}
+
+function completionVerifierRequiredFieldKeys(field: string): string[] {
+  const normalized = field.trim();
+  if (normalized === "verifier_score") {
+    return ["verifier_score", "score"];
+  }
+  return normalized ? [normalized] : [];
+}
+
+function completionSelectedCandidateHasRequiredField(
+  result: Record<string, unknown>,
+  selectedCandidateId: string | null,
+  field: string
+): boolean {
+  if (field === "selected_candidate_id") {
+    return Boolean(selectedCandidateId);
+  }
+  if (field === "selection_rationale") {
+    return hasCompletionEvidence(result, [
+      "selection_rationale",
+      "rerank_rationale",
+      "selected_candidate_rationale",
+      "selected_candidate_reason",
+    ]);
+  }
+  const keys = completionVerifierRequiredFieldKeys(field);
+  if (keys.length === 0) {
+    return false;
+  }
+  return readCompletionSelectedCandidateRecords(result, selectedCandidateId).some((record) =>
+    keys.some((key) => isCompletionEvidenceValue(record[key]))
+  );
 }
 
 function readCompletionCandidateId(candidate: Record<string, unknown>): string | null {
