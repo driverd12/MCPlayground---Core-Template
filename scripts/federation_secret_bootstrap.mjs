@@ -16,7 +16,7 @@ function argValues(name) {
   const prefix = `${longName}=`;
   for (let index = 2; index < process.argv.length; index += 1) {
     const token = process.argv[index];
-    if (token === longName && process.argv[index + 1]) {
+    if (token === longName && process.argv[index + 1] && !process.argv[index + 1].startsWith("--")) {
       values.push(process.argv[index + 1]);
       index += 1;
     } else if (token.startsWith(prefix)) {
@@ -26,14 +26,30 @@ function argValues(name) {
   return values;
 }
 
+function hasArg(name) {
+  const longName = `--${name}`;
+  const prefix = `${longName}=`;
+  return process.argv.some((token) => token === longName || token.startsWith(prefix));
+}
+
 function argValue(name, fallback = "") {
   const values = argValues(name);
   return values.length > 0 ? values[values.length - 1] : fallback;
 }
 
 function boolArg(name, fallback = false) {
-  const value = String(argValue(name, fallback ? "true" : "false")).trim().toLowerCase();
-  return ["1", "true", "yes", "on"].includes(value);
+  const values = argValues(name);
+  if (values.length <= 0) {
+    return hasArg(name) ? true : fallback;
+  }
+  const value = String(values[values.length - 1]).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(value)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(value)) {
+    return false;
+  }
+  return fallback;
 }
 
 function safeId(value, fallback = "host") {
