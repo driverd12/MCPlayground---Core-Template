@@ -4609,9 +4609,46 @@ test("agent.report_result blocks plan advancement when reasoning-policy audit ne
     assert.equal(reported.plan_step_update.step.metadata.dispatch_gate_type, "reasoning_policy_review");
     assert.equal(reported.plan_step_update.step.metadata.reasoning_policy_review_required, true);
     assert.equal(reported.reasoning_policy_review.required, true);
+    assert.equal(reported.reasoning_policy_recovery.queued, true);
+    assert.equal(reported.reasoning_policy_recovery.created, true);
+    assert.equal(typeof reported.reasoning_policy_recovery.task_id, "string");
+    assert.equal(
+      reported.plan_step_update.step.metadata.reasoning_policy_recovery_task_id,
+      reported.reasoning_policy_recovery.task_id
+    );
     assert.equal(reported.goal_autorun.triggered, false);
     assert.equal(reported.goal_autorun.reason, "reasoning_policy_review");
     assert.equal(dispatched.dispatched_count, 1);
+
+    const pendingTasks = await callTool(client, "task.list", {
+      status: "pending",
+      limit: 20,
+    });
+    const recoveryTask = pendingTasks.tasks.find(
+      (task) => task.task_id === reported.reasoning_policy_recovery.task_id
+    );
+    assert.ok(recoveryTask);
+    assert.equal(recoveryTask.metadata.reasoning_policy_recovery.source_task_id, claimed.task.task_id);
+    assert.equal(recoveryTask.metadata.reasoning_policy_recovery.step_id, "reasoning-step");
+    assert.deepEqual(
+      new Set(recoveryTask.metadata.reasoning_policy_recovery.missing_fields),
+      new Set(["candidate_evidence", "selection_rationale", "plan_pass", "verification_pass"])
+    );
+    assert.equal(recoveryTask.metadata.plan_dispatch.step_id, "reasoning-step");
+    assert.equal(recoveryTask.metadata.plan_dispatch.recovery_kind, "reasoning_policy_review");
+    assert.equal(recoveryTask.metadata.task_execution.require_plan_pass, true);
+    assert.equal(recoveryTask.metadata.task_execution.require_verification_pass, true);
+    assert.equal(recoveryTask.metadata.task_execution.reasoning_selection_strategy, "evidence_rerank");
+    assert.ok(
+      recoveryTask.payload.delegation_brief.evidence_requirements.some((requirement) =>
+        /candidate/i.test(requirement)
+      )
+    );
+    assert.ok(
+      recoveryTask.payload.delegation_brief.evidence_requirements.some((requirement) =>
+        /verification/i.test(requirement)
+      )
+    );
 
     const fetchedPlan = await callTool(client, "plan.get", {
       plan_id: createdPlan.plan.plan_id,
@@ -4630,6 +4667,7 @@ test("agent.report_result blocks plan advancement when reasoning-policy audit ne
       limit: 20,
     });
     assert.ok(stepEvents.events.some((event) => event.event_type === "plan.step_reasoning_review_blocked"));
+    assert.ok(stepEvents.events.some((event) => event.event_type === "plan.step_reasoning_recovery_queued"));
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

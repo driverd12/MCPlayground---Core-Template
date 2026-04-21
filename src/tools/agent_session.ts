@@ -1278,6 +1278,257 @@ function shouldTriggerGoalAutorun(
   };
 }
 
+type ReasoningPolicyRecoveryQueueResult = {
+  queued: boolean;
+  created: boolean;
+  task_id: string | null;
+  task: unknown;
+  event: unknown;
+  skipped_reason: string | null;
+  error?: string;
+};
+
+function buildReasoningPolicyRecoveryTaskId(sourceTaskId: string): string {
+  const safeTaskId = sourceTaskId.replace(/[^a-zA-Z0-9_.:-]/g, "-").slice(0, 160);
+  return `reasoning-review-${safeTaskId}`;
+}
+
+function boundedReasoningCandidateCount(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.max(1, Math.min(4, Math.round(value)));
+}
+
+function buildReasoningPolicyRecoveryEvidenceRequirements(missingFields: string[], candidateCount: number): string[] {
+  const missing = new Set(missingFields);
+  const requirements: string[] = [];
+  if (missing.has("candidate_evidence")) {
+    requirements.push(
+      `Provide at least ${candidateCount} bounded candidate paths or failure hypotheses, each with concrete evidence and contradiction risk.`
+    );
+  }
+  if (missing.has("selection_rationale")) {
+    requirements.push(
+      "Provide selected_candidate_id plus selection_rationale grounded in the candidate evidence and explain why rejected candidates lost."
+    );
+  }
+  if (missing.has("plan_pass")) {
+    requirements.push(
+      "Provide plan_summary or planned_steps before changing state so the verification path is decomposed and auditable."
+    );
+  }
+  if (missing.has("verification_pass")) {
+    requirements.push(
+      "Provide verification_summary plus checks, test_results, or evidence_refs that prove the selected path was validated."
+    );
+  }
+  if (requirements.length === 0) {
+    requirements.push("Re-run the reasoning-policy audit and provide any missing grounded evidence before unblocking the step.");
+  }
+  return requirements;
+}
+
+function readTaskPermissionProfile(value: unknown): "read_only" | "bounded_execute" | "network_enabled" | "high_risk" | undefined {
+  const text = readString(value);
+  return text === "read_only" || text === "bounded_execute" || text === "network_enabled" || text === "high_risk"
+    ? text
+    : undefined;
+}
+
+async function queueReasoningPolicyRecoveryTask(params: {
+  storage: Storage;
+  invokeTool: (toolName: string, input: Record<string, unknown>) => Promise<unknown>;
+  input: z.infer<typeof agentReportResultSchema>;
+  session: AgentSessionRecord;
+  task: TaskRecord;
+  planContext: { plan: PlanRecord; step: PlanStepRecord } | null;
+  reasoningPolicyAudit: Record<string, unknown> | null;
+  producedArtifactIds: string[];
+  autoReportArtifactId: string;
+}): Promise<ReasoningPolicyRecoveryQueueResult> {
+  const skipped = (skippedReason: string, error?: string): ReasoningPolicyRecoveryQueueResult => ({
+    queued: false,
+    created: false,
+    task_id: null,
+    task: null,
+    event: null,
+    skipped_reason: skippedReason,
+    ...(error ? { error } : {}),
+  });
+
+  if (!params.planContext) {
+    return skipped("no-plan-context");
+  }
+  if (!params.reasoningPolicyAudit) {
+    return skipped("no-reasoning-policy-audit");
+  }
+
+  const existingRecovery = isRecord(params.task.metadata.reasoning_policy_recovery)
+    ? params.task.metadata.reasoning_policy_recovery
+    : null;
+  const existingRecoveryDepth = readPositiveInt(existingRecovery?.depth) ?? 0;
+  if (existingRecovery?.kind === "reasoning_policy_review_recovery" || existingRecoveryDepth >= 1) {
+    return skipped("recovery-depth-exhausted");
+  }
+
+  const sourceExecution = isRecord(params.task.metadata.task_execution) ? params.task.metadata.task_execution : {};
+  const requiredCandidateCount =
+    boundedReasoningCandidateCount(params.reasoningPolicyAudit.required_candidate_count) ??
+    boundedReasoningCandidateCount(sourceExecution.reasoning_candidate_count) ??
+    2;
+  const candidateCount = Math.max(2, Math.min(4, requiredCandidateCount));
+  const missingFields = normalizeStringArray(params.reasoningPolicyAudit.missing_fields);
+  const requiredFields = normalizeStringArray(params.reasoningPolicyAudit.required_fields);
+  const satisfiedFields = normalizeStringArray(params.reasoningPolicyAudit.satisfied_fields);
+  const warnings = normalizeStringArray(params.reasoningPolicyAudit.warnings);
+  const evidenceRequirements = buildReasoningPolicyRecoveryEvidenceRequirements(missingFields, candidateCount);
+  const queuedAt = new Date().toISOString();
+  const recoveryTaskId = buildReasoningPolicyRecoveryTaskId(params.task.task_id);
+  const recoveryExecution = {
+    task_kind: "verification",
+    quality_preference: "quality",
+    focus: "reasoning_policy_review",
+    reasoning_candidate_count: candidateCount,
+    reasoning_selection_strategy: "evidence_rerank",
+    require_plan_pass: true,
+    require_verification_pass: true,
+  };
+  const recoveryBrief = {
+    kind: "reasoning_policy_review_recovery",
+    depth: existingRecoveryDepth + 1,
+    queued_at: queuedAt,
+    source_task_id: params.task.task_id,
+    source_task_status: params.task.status,
+    plan_id: params.planContext.plan.plan_id,
+    step_id: params.planContext.step.step_id,
+    goal_id: params.planContext.plan.goal_id,
+    missing_fields: missingFields,
+    required_fields: requiredFields,
+    satisfied_fields: satisfiedFields,
+    required_candidate_count: candidateCount,
+    observed_candidate_count: params.reasoningPolicyAudit.observed_candidate_count ?? null,
+    selection: isRecord(params.reasoningPolicyAudit.selection) ? params.reasoningPolicyAudit.selection : null,
+    warnings,
+    produced_artifact_ids: params.producedArtifactIds,
+    auto_report_artifact_id: params.autoReportArtifactId,
+    source_task_execution: sourceExecution,
+  };
+  const metadata: Record<string, unknown> = {
+    reasoning_policy_recovery: recoveryBrief,
+    source_task_execution: sourceExecution,
+    task_execution: recoveryExecution,
+    plan_dispatch: {
+      plan_id: params.planContext.plan.plan_id,
+      step_id: params.planContext.step.step_id,
+      goal_id: params.planContext.plan.goal_id,
+      executor_kind: "worker",
+      recovery_of_task_id: params.task.task_id,
+      recovery_kind: "reasoning_policy_review",
+    },
+  };
+  if (params.task.metadata.working_memory !== undefined) {
+    metadata.working_memory = params.task.metadata.working_memory;
+  }
+  if (params.task.metadata.memory_preflight !== undefined) {
+    metadata.memory_preflight = params.task.metadata.memory_preflight;
+  }
+
+  let taskCreateResult: unknown;
+  try {
+    taskCreateResult = await params.invokeTool("task.create", {
+      mutation: buildAgentDerivedMutation(params.input.mutation, `reasoning-review-recovery:${params.task.task_id}`),
+      task_id: recoveryTaskId,
+      objective: `Recover reasoning-policy evidence for blocked step ${params.planContext.step.step_id}: ${params.planContext.step.title}`,
+      project_dir: params.task.project_dir,
+      payload: {
+        source_task_id: params.task.task_id,
+        source_task_objective: params.task.objective,
+        plan_id: params.planContext.plan.plan_id,
+        step_id: params.planContext.step.step_id,
+        goal_id: params.planContext.plan.goal_id,
+        reasoning_policy_audit: params.reasoningPolicyAudit,
+        delegation_brief: {
+          kind: "reasoning_policy_review_recovery",
+          objective:
+            "Recover the missing reasoning-policy evidence for the blocked plan step and report a grounded result.",
+          source_task_id: params.task.task_id,
+          blocked_step: {
+            plan_id: params.planContext.plan.plan_id,
+            step_id: params.planContext.step.step_id,
+            title: params.planContext.step.title,
+          },
+          missing_fields: missingFields,
+          required_fields: requiredFields,
+          satisfied_fields: satisfiedFields,
+          evidence_requirements: evidenceRequirements,
+          completion_contract: {
+            candidate_evidence: `At least ${candidateCount} evidence-backed candidates when candidate evidence is required.`,
+            selection_rationale:
+              "selected_candidate_id and selection_rationale must be grounded in the candidate evidence.",
+            plan_pass: "Include plan_summary or planned_steps.",
+            verification_pass: "Include verification_summary plus checks, test_results, or evidence_refs.",
+          },
+          rollback: "If evidence remains weak or contradictory, fail closed and report the blocker instead of unblocking the step.",
+        },
+        produced_artifact_ids: params.producedArtifactIds,
+        auto_report_artifact_id: params.autoReportArtifactId,
+      },
+      routing: {
+        preferred_agent_ids: [params.session.agent_id],
+        preferred_client_kinds: params.session.client_kind ? [params.session.client_kind] : [],
+        preferred_capabilities: ["verification", "planning", "worker"],
+      },
+      task_execution: recoveryExecution,
+      permission_profile: readTaskPermissionProfile(params.task.metadata.permission_profile),
+      priority: Math.max(params.task.priority, 7),
+      max_attempts: 2,
+      source: "agent.report_result.reasoning_policy_review",
+      source_client: params.input.source_client,
+      source_model: params.input.source_model,
+      source_agent: params.session.agent_id,
+      tags: dedupeStrings([...params.task.tags, "reasoning-policy-review", "recovery", "verification"]),
+      metadata,
+    });
+  } catch (error) {
+    return skipped("task-create-failed", error instanceof Error ? error.message : String(error));
+  }
+
+  const taskCreateRecord = isRecord(taskCreateResult) ? taskCreateResult : {};
+  const recoveryTask = isRecord(taskCreateRecord.task) ? taskCreateRecord.task : null;
+  const taskId = readString(recoveryTask?.task_id) ?? recoveryTaskId;
+  const created = taskCreateRecord.created === true;
+  const event = params.storage.appendRuntimeEvent({
+    event_type: "plan.step_reasoning_recovery_queued",
+    entity_type: "step",
+    entity_id: params.planContext.step.step_id,
+    status: "pending",
+    summary: `Queued reasoning-policy recovery task ${taskId} for blocked step ${params.planContext.step.step_id}.`,
+    details: {
+      plan_id: params.planContext.plan.plan_id,
+      goal_id: params.planContext.plan.goal_id,
+      step_id: params.planContext.step.step_id,
+      source_task_id: params.task.task_id,
+      recovery_task_id: taskId,
+      recovery_task_created: created,
+      missing_fields: missingFields,
+      required_fields: requiredFields,
+      evidence_requirements: evidenceRequirements,
+    },
+    source_client: params.input.source_client,
+    source_model: params.input.source_model,
+    source_agent: params.session.agent_id,
+  });
+  return {
+    queued: true,
+    created,
+    task_id: taskId,
+    task: recoveryTask,
+    event,
+    skipped_reason: null,
+  };
+}
+
 function attachArtifactsToTaskContext(
   storage: Storage,
   task: TaskRecord,
@@ -2507,6 +2758,26 @@ export async function agentReportResult(
         : reasoningPolicyNeedsReview
           ? "reasoning_policy_review"
           : null;
+      const reasoningPolicyRecovery = reasoningPolicyNeedsReview
+        ? await queueReasoningPolicyRecoveryTask({
+            storage,
+            invokeTool,
+            input,
+            session,
+            task,
+            planContext,
+            reasoningPolicyAudit,
+            producedArtifactIds,
+            autoReportArtifactId: autoReportArtifact.artifact_id,
+          })
+        : {
+            queued: false,
+            created: false,
+            task_id: null,
+            task: null,
+            event: null,
+            skipped_reason: null,
+          };
       const adaptiveReport = updateAdaptiveWorkerProfileOnReport(
         session,
         task,
@@ -2533,6 +2804,10 @@ export async function agentReportResult(
               evidence_gate_required: missingExpectedArtifacts,
               reasoning_policy_review_required: reasoningPolicyNeedsReview,
               reasoning_policy_audit: reasoningPolicyAudit,
+              reasoning_policy_recovery_queued: reasoningPolicyRecovery.queued,
+              reasoning_policy_recovery_task_created: reasoningPolicyRecovery.created,
+              reasoning_policy_recovery_task_id: reasoningPolicyRecovery.task_id,
+              reasoning_policy_recovery_skipped_reason: reasoningPolicyRecovery.skipped_reason,
               artifact_expectations: expectedArtifactCheck ?? {
                 expected_artifact_types: [],
                 produced_artifact_ids: producedArtifactIds,
@@ -2588,6 +2863,8 @@ export async function agentReportResult(
                 expected_artifacts: expectedArtifactCheck,
                 reasoning_policy_audit: reasoningPolicyAudit,
                 reasoning_policy_review_required: reasoningPolicyNeedsReview,
+                reasoning_policy_recovery_task_id: reasoningPolicyRecovery.task_id,
+                reasoning_policy_recovery_queued: reasoningPolicyRecovery.queued,
               },
               source_client: input.source_client,
               source_model: input.source_model,
@@ -2711,6 +2988,8 @@ export async function agentReportResult(
           expected_artifacts: expectedArtifactCheck,
           reasoning_policy_audit: reasoningPolicyAudit,
           reasoning_policy_review_required: reasoningPolicyNeedsReview,
+          reasoning_policy_recovery_task_id: reasoningPolicyRecovery.task_id,
+          reasoning_policy_recovery_queued: reasoningPolicyRecovery.queued,
           auto_reflection_memory_id: autoReflection?.memory_id ?? null,
           adaptive_worker_profile: summarizeAdaptiveWorkerProfile(adaptiveReport.profile, taskProfile.complexity),
         },
@@ -2741,11 +3020,13 @@ export async function agentReportResult(
               audit: reasoningPolicyAudit,
             },
         adaptive_worker_profile: adaptiveReport.profile,
+        reasoning_policy_recovery: reasoningPolicyRecovery,
         auto_reflection: autoReflection,
         goal_autorun: goalAutorun,
         events: {
           task: agentTaskEvent,
           step: planStepEvent,
+          reasoning_policy_recovery: reasoningPolicyRecovery.event,
         },
       };
     },
