@@ -1472,6 +1472,24 @@
     return "neutral";
   }
 
+  function hostContextSummary(host) {
+    var context = host && host.desktop_context && typeof host.desktop_context === "object" ? host.desktop_context : {};
+    var status = String(context.status || "").toLowerCase();
+    var source = String(context.source || "none");
+    var age = ageSeconds(context.generated_at || context.updated_at);
+    var tone = "neutral";
+    if (status === "available" && age != null && age <= 300) tone = "good";
+    else if (status === "available" || status === "degraded") tone = "warn";
+    else if (status === "unavailable") tone = "bad";
+    var label = status ? status.toUpperCase() : "NONE";
+    var detail = context.generated_at || context.updated_at ? relativeTime(context.generated_at || context.updated_at) + " ago" : "not captured";
+    return {
+      tone: tone,
+      label: label,
+      title: source + " · " + detail,
+    };
+  }
+
   function remoteHostsFromSnapshot() {
     var fabric = state.snapshot && state.snapshot.summary ? state.snapshot.summary.worker_fabric || {} : {};
     var hosts = Array.isArray(fabric.hosts) ? fabric.hosts : [];
@@ -1501,6 +1519,8 @@
       return node ? String(node.value || "").trim() : "";
     };
     var approveNode = form.querySelector('[name="approve"]');
+    var desktopContextNode = form.querySelector('[name="desktop_context"]');
+    var requestDesktopContext = desktopContextNode ? !!desktopContextNode.checked : true;
     var remoteHost = {
       host_id: get("host_id"),
       display_name: get("display_name"),
@@ -1513,6 +1533,7 @@
       worker_count: Number(get("worker_count") || "1"),
       permission_profile: get("permission_profile") || "task_worker",
       allowed_addresses: [get("ip_address")].filter(Boolean),
+      capabilities: requestDesktopContext ? { desktop_context: true, desktop_observe: true } : {},
       tags: ["mac", "remote", "agent-host"],
       approve: approveNode ? !!approveNode.checked : false,
     };
@@ -1559,6 +1580,7 @@
             var allowed = Array.isArray(host.remote_allowed_addresses) && host.remote_allowed_addresses.length
               ? host.remote_allowed_addresses.join(", ")
               : "loopback/local only";
+            var context = hostContextSummary(host);
             return (
               '<article class="host-row host-row--' + escapeHtml(tone) + '">' +
               '<div class="host-row__main">' +
@@ -1571,6 +1593,7 @@
               '<div><span>Health</span><strong>' + escapeHtml(String(host.health_state || "n/a")) + '</strong></div>' +
               '<div><span>Workers</span><strong>' + String(host.worker_count || 0) + '</strong></div>' +
               '<div><span>Queue</span><strong>' + String(host.queue_depth || 0) + '</strong></div>' +
+              '<div><span>Context</span><strong class="chip chip--' + escapeHtml(context.tone) + '" title="' + escapeHtml(context.title) + '">' + escapeHtml(context.label) + '</strong></div>' +
               '</div>' +
               '<div class="host-row__actions">' +
               (host.transport === "ssh"
@@ -1608,7 +1631,8 @@
       '<div class="host-pair-form__row"><label>SSH user<input name="ssh_user" value="dan.driver" /></label><label>Workers<input name="worker_count" value="1" inputmode="numeric" /></label></div>' +
       '<label>Workspace root<input name="workspace_root" value="/Users/dan.driver/Documents/Playground/Agentic Playground/MASTER-MOLD" /></label>' +
       '<div class="host-pair-form__row"><label>Agent runtime<input name="agent_runtime" value="claude" /></label><label>Model label<input name="model_label" value="Claude Opus" /></label></div>' +
-      '<div class="host-pair-form__row"><label>Permission<select name="permission_profile"><option value="task_worker" selected>task worker</option><option value="read_only">read only</option><option value="artifact_writer">artifact writer</option><option value="operator">operator</option></select></label><label class="host-pair-form__check"><input name="approve" type="checkbox" /> Approve immediately</label></div>' +
+      '<div class="host-pair-form__row"><label>Permission<select name="permission_profile"><option value="task_worker" selected>task worker</option><option value="read_only">read only</option><option value="artifact_writer">artifact writer</option><option value="operator">operator</option></select></label><label class="host-pair-form__check"><input name="desktop_context" type="checkbox" checked /> Context capture</label></div>' +
+      '<label class="host-pair-form__check"><input name="approve" type="checkbox" /> Approve immediately</label>' +
       '<button type="submit" class="button button--primary">Stage Host</button>' +
       '</form>' +
       '</section>' +

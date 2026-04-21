@@ -174,6 +174,7 @@ type HostFabricSummary = {
     remote_allowed_addresses: string[];
     remote_pairing_code: string | null;
     remote_approved_at: string | null;
+    desktop_context: Record<string, unknown> | null;
     tags: string[];
   }>;
 };
@@ -1259,6 +1260,7 @@ function summarizeWorkerFabric(storage: Storage, state?: WorkerFabricStateRecord
     transport_counts: transportCounts,
     hosts: hosts.map((host) => {
       const remoteAccess = isRecord(host.metadata.remote_access) ? host.metadata.remote_access : {};
+      const desktopContext = isRecord(host.metadata.desktop_context) ? host.metadata.desktop_context : null;
       return {
         ...resolveHostCapacityProfile(host),
         host_id: host.host_id,
@@ -1288,6 +1290,7 @@ function summarizeWorkerFabric(storage: Storage, state?: WorkerFabricStateRecord
           : [],
         remote_pairing_code: readString(remoteAccess.pairing_code),
         remote_approved_at: readString(remoteAccess.approved_at),
+        desktop_context: desktopContext,
         tags: host.tags,
       };
     }),

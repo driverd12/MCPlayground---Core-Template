@@ -160,6 +160,85 @@ test("/office/api/hosts bridges GUI host pairing actions into worker.fabric muta
   }
 });
 
+test("/remote-access/request stages a pending sanitized host request without bearer auth", { concurrency: false }, async () => {
+  const calls = [];
+  const port = await reservePort();
+  const server = await startHttpTransport(
+    () =>
+      new Server(
+        {
+          name: "http-remote-access-request-test",
+          version: "1.0.0",
+        },
+        {
+          capabilities: {
+            tools: {},
+          },
+        }
+      ),
+    {
+      host: "127.0.0.1",
+      port,
+      allowedOrigins: ["http://127.0.0.1"],
+      bearerToken: "remote-access-request-token",
+      officeHostFabric: async (input) => {
+        calls.push(input);
+        return {
+          host: {
+            host_id: input.remote_host.host_id,
+            metadata: {
+              remote_access: {
+                pairing_code: "REQ12345",
+              },
+            },
+          },
+        };
+      },
+    }
+  );
+
+  try {
+    const response = await fetchHttpJsonResponse(port, "/remote-access/request", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: {
+        action: "approve_remote_host",
+        host_id: "many-host",
+        hostname: "ManyHost.local",
+        ip_address: "203.0.113.25",
+        workspace_root: "/Users/dan.driver/Documents/Playground/Agentic Playground/MASTER-MOLD",
+        approve: true,
+        request_desktop_context: true,
+        capabilities: { operator: true },
+      },
+    });
+    assert.equal(response.statusCode, 202);
+    assert.equal(response.body.ok, true);
+    assert.equal(response.body.status, "pending");
+    assert.equal(response.body.host_id, "many-host");
+    assert.equal(response.body.pairing_code, "REQ12345");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].action, "stage_remote_host");
+    assert.equal(calls[0].remote_host.approve, false);
+    assert.deepEqual(calls[0].remote_host.allowed_addresses, ["127.0.0.1"]);
+    assert.equal(calls[0].remote_host.ip_address, "127.0.0.1");
+    assert.deepEqual(calls[0].remote_host.capabilities, { desktop_context: true, desktop_observe: true });
+    assert.equal(calls[0].remote_host.capabilities.operator, undefined);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+});
+
 test("/office/api/hosts verifies an SSH host with a bounded liveness probe", { concurrency: false }, async () => {
   const previousPath = process.env.PATH;
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "mcp-office-host-verify-"));

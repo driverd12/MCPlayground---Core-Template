@@ -1007,6 +1007,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
               .filter(Boolean),
             remote_pairing_code: String(host.remote_pairing_code ?? ""),
             remote_approved_at: String(host.remote_approved_at ?? ""),
+            desktop_context: asDict(host.desktop_context),
             tags: asList(host.tags).map((item) => String(item ?? "").trim()).filter(Boolean),
           };
         }),

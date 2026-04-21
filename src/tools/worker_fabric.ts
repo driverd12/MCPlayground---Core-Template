@@ -99,6 +99,7 @@ export const workerFabricSchema = z
     telemetry: workerFabricTelemetrySchema.optional(),
     remote_host: remoteHostPairingSchema.optional(),
     capabilities: recordSchema.optional(),
+    metadata: recordSchema.optional(),
     tags: z.array(z.string().min(1)).optional(),
     include_disabled: z.boolean().optional(),
     fallback_workspace_root: z.string().min(1).optional(),
@@ -1323,6 +1324,7 @@ export function workerFabric(storage: Storage, input: z.infer<typeof workerFabri
                 capabilities: input.capabilities && isRecord(input.capabilities)
                   ? { ...entry.capabilities, ...input.capabilities }
                   : entry.capabilities,
+                metadata: input.metadata && isRecord(input.metadata) ? { ...entry.metadata, ...input.metadata } : entry.metadata,
                 tags: input.tags ? [...new Set([...entry.tags, ...input.tags.map((tag) => tag.trim()).filter(Boolean)])] : entry.tags,
                 telemetry: normalizeTelemetry({
                   ...entry.telemetry,

@@ -31,6 +31,17 @@ export type HttpOptions = {
 type SessionBinding = {
   server: Server;
   transport: StreamableHTTPServerTransport;
+  networkGate: NetworkGateResult;
+};
+
+type NetworkGateResult = {
+  allowed: boolean;
+  remote_address: string | null;
+  reason: string;
+  host_id: string | null;
+  display_name?: string | null;
+  agent_runtime?: string | null;
+  model_label?: string | null;
 };
 
 type OfficeSnapshotCommandResult = {
@@ -1015,6 +1026,137 @@ function readWorkerFabricHosts(result: unknown): Record<string, unknown>[] {
   return hosts.map(readRecord).filter((entry): entry is Record<string, unknown> => entry !== null);
 }
 
+async function readLimitedJsonBody(req: http.IncomingMessage, maxBytes: number) {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.length;
+    if (total > maxBytes) {
+      throw new Error("request_body_too_large");
+    }
+    chunks.push(buffer);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) {
+    return {};
+  }
+  const parsed = JSON.parse(raw);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+}
+
+function boundedString(value: unknown, maxLength: number) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text ? text.slice(0, maxLength) : null;
+}
+
+function shellQuote(value: string) {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function normalizePermissionProfile(value: unknown) {
+  const profile = boundedString(value, 80);
+  return profile === "read_only" || profile === "task_worker" || profile === "artifact_writer" || profile === "operator"
+    ? profile
+    : "task_worker";
+}
+
+function sanitizeRemoteAccessRequest(body: Record<string, unknown>, remoteAddress: string | null) {
+  const workspaceRoot = boundedString(body.workspace_root, 500);
+  if (!workspaceRoot) {
+    throw new Error("workspace_root_required");
+  }
+  const requestDesktopContext = body.request_desktop_context === true || body.desktop_context === true;
+  const addressList = remoteAddress ? [remoteAddress] : [];
+  return {
+    host_id: boundedString(body.host_id, 120) ?? undefined,
+    display_name: boundedString(body.display_name, 160) ?? boundedString(body.hostname, 160) ?? undefined,
+    hostname: boundedString(body.hostname, 255) ?? undefined,
+    ip_address: remoteAddress ?? undefined,
+    ssh_user: boundedString(body.ssh_user, 120) ?? undefined,
+    ssh_destination: boundedString(body.ssh_destination, 255) ?? undefined,
+    workspace_root: workspaceRoot,
+    worker_count: Math.min(Math.max(Number.parseInt(String(body.worker_count ?? "1"), 10) || 1, 1), 64),
+    shell: boundedString(body.shell, 120) ?? undefined,
+    agent_runtime: boundedString(body.agent_runtime, 120) ?? undefined,
+    model_label: boundedString(body.model_label, 160) ?? undefined,
+    device_fingerprint: boundedString(body.device_fingerprint, 240) ?? undefined,
+    public_key_fingerprint: boundedString(body.public_key_fingerprint, 240) ?? undefined,
+    permission_profile: normalizePermissionProfile(body.permission_profile),
+    allowed_addresses: addressList,
+    capabilities: requestDesktopContext ? { desktop_context: true, desktop_observe: true } : {},
+    tags: requestDesktopContext ? ["remote", "access-request", "desktop-context"] : ["remote", "access-request"],
+    approve: false,
+    operator_note: boundedString(body.operator_note, 500) ?? undefined,
+  };
+}
+
+async function maybeHandleRemoteAccessRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  requestUrl: URL,
+  options: HttpOptions
+) {
+  const pathname = requestUrl.pathname;
+  if (pathname !== "/office/api/hosts/request_access" && pathname !== "/remote-access/request") {
+    return false;
+  }
+  if (String(req.method ?? "GET").toUpperCase() !== "POST") {
+    sendJson(res, 405, {
+      ok: false,
+      error: "method_not_allowed",
+      detail: "Remote access requests must use POST.",
+    });
+    return true;
+  }
+  if (!options.officeHostFabric) {
+    sendJson(res, 503, {
+      ok: false,
+      error: "hosts_unavailable",
+      detail: "Remote access requests are not wired for this HTTP transport.",
+    });
+    return true;
+  }
+  const remoteAddress = normalizeClientIp(req.socket.remoteAddress);
+  let remoteHost: Record<string, unknown>;
+  try {
+    remoteHost = sanitizeRemoteAccessRequest(await readLimitedJsonBody(req, 32_768), remoteAddress);
+  } catch (error) {
+    sendJson(res, error instanceof Error && error.message === "request_body_too_large" ? 413 : 400, {
+      ok: false,
+      error: error instanceof Error ? error.message : "invalid_request",
+      detail:
+        error instanceof Error && error.message === "workspace_root_required"
+          ? "workspace_root is required so the approved host has a concrete MASTER-MOLD checkout target."
+          : "Remote access request payload must be a small JSON object.",
+    });
+    return true;
+  }
+  const result = await Promise.resolve(
+    options.officeHostFabric({
+      action: "stage_remote_host",
+      mutation: buildOfficeMutation(`remote-access-request-${remoteHost.host_id ?? remoteAddress ?? "host"}`),
+      source_client: "remote-access.request",
+      source_agent: boundedString(remoteHost.agent_runtime, 120) ?? "remote-host",
+      remote_host: remoteHost,
+    })
+  );
+  invalidateOfficeSnapshotCaches();
+  const root = readRecord(result) ?? {};
+  const host = readRecord(root.host) ?? {};
+  const hostMetadata = readRecord(host.metadata) ?? {};
+  const remoteAccess = readRecord(hostMetadata.remote_access) ?? {};
+  sendJson(res, 202, {
+    ok: true,
+    status: "pending",
+    host_id: boundedString(host.host_id, 120),
+    remote_address: remoteAddress,
+    pairing_code: boundedString(remoteAccess.pairing_code, 80),
+    next_action: "Open Agent Office on the main Mac, review the pending host, verify SSH/repo readiness, then approve.",
+  });
+  return true;
+}
+
 async function validateNetworkClient(req: http.IncomingMessage, options: HttpOptions) {
   const remoteAddress = normalizeClientIp(req.socket.remoteAddress);
   if (isLoopbackClientIp(remoteAddress)) {
@@ -1030,16 +1172,6 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
       allowed: false,
       remote_address: remoteAddress,
       reason: "lan_disabled",
-      host_id: null,
-    };
-  }
-
-  const envAllowed = parseTrustedClientEnv();
-  if (remoteAddress && envAllowed.includes(remoteAddress)) {
-    return {
-      allowed: true,
-      remote_address: remoteAddress,
-      reason: "env_allowlist",
       host_id: null,
     };
   }
@@ -1066,8 +1198,21 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
         remote_address: remoteAddress,
         reason: "approved_host",
         host_id: String(host.host_id ?? "").trim() || null,
+        display_name: String(remoteAccess.display_name ?? "").trim() || null,
+        agent_runtime: String(remoteAccess.agent_runtime ?? "").trim() || null,
+        model_label: String(remoteAccess.model_label ?? "").trim() || null,
       };
     }
+  }
+
+  const envAllowed = parseTrustedClientEnv();
+  if (remoteAddress && envAllowed.includes(remoteAddress)) {
+    return {
+      allowed: true,
+      remote_address: remoteAddress,
+      reason: "env_allowlist",
+      host_id: null,
+    };
   }
 
   return {
@@ -1099,8 +1244,19 @@ export async function startHttpTransport(createServer: () => Server, options: Ht
     res.setHeader("connection", "close");
     const requestUrl = new URL(req.url ?? "/", `http://${options.host}:${options.port}`);
     const pathname = requestUrl.pathname;
-    Promise.resolve(validateNetworkClient(req, options))
+    let requestNetworkGate: NetworkGateResult | null = null;
+    Promise.resolve(maybeHandleRemoteAccessRequest(req, res, requestUrl, options))
+      .then((publicRequestHandled) => {
+        if (publicRequestHandled) {
+          return null;
+        }
+        return validateNetworkClient(req, options);
+      })
       .then((networkGate) => {
+        if (!networkGate) {
+          return true;
+        }
+        requestNetworkGate = networkGate;
         if (!networkGate.allowed) {
           sendApiError(res, pathname, 403, {
             error: "forbidden_remote_host",
@@ -1143,7 +1299,7 @@ export async function startHttpTransport(createServer: () => Server, options: Ht
           return;
         }
 
-        void routeRequest(createServer, sessions, req, res).catch((error) => {
+        void routeRequest(createServer, sessions, req, res, requestNetworkGate!).catch((error) => {
           logEvent("http.error", {
             error: String(error),
             method: req.method ?? "unknown",
@@ -1706,6 +1862,7 @@ async function maybeHandleOfficeRequest(
 
       const verifiedAt = new Date().toISOString();
       let verification: Record<string, unknown>;
+      let contextProbeSummary: Record<string, unknown> | null = null;
       try {
         const probe = await runLocalCommand(
           "ssh",
@@ -1722,6 +1879,45 @@ async function maybeHandleOfficeRequest(
           stdout: truncateOfficeOutput(probe.stdout),
           stderr: truncateOfficeOutput(probe.stderr),
         };
+        if (connected) {
+          const workspaceRoot = String(host.workspace_root ?? "").trim();
+          if (workspaceRoot) {
+            const contextProbe = await runLocalCommand(
+              "ssh",
+              [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=4",
+                sshDestination,
+                `cd ${shellQuote(workspaceRoot)} && node ./scripts/remote_context_probe.mjs --action=status`,
+              ],
+              { timeoutMs: 9000 }
+            );
+            const parsedProbe = parseJsonText(contextProbe.stdout.trim());
+            const probeRecord = readRecord(parsedProbe);
+            contextProbeSummary = probeRecord
+              ? {
+                  status: String(probeRecord.status ?? "unavailable"),
+                  source: String(probeRecord.source ?? "none"),
+                  generated_at: String(probeRecord.generated_at ?? verifiedAt),
+                  freshness_seconds:
+                    typeof probeRecord.freshness_seconds === "number" ? probeRecord.freshness_seconds : null,
+                  display_count: Array.isArray(probeRecord.displays) ? probeRecord.displays.length : 0,
+                  latest_frame_path: String(probeRecord.latest_frame_path ?? "") || null,
+                  stale_reason: String(probeRecord.stale_reason ?? "") || null,
+                  unavailable_reason: String(probeRecord.unavailable_reason ?? "") || null,
+                  verified_at: verifiedAt,
+                }
+              : {
+                  status: "unavailable",
+                  source: "none",
+                  generated_at: verifiedAt,
+                  unavailable_reason: "remote_context_probe_unparseable",
+                  verified_at: verifiedAt,
+                };
+          }
+        }
       } catch (error) {
         verification = {
           connected: false,
@@ -1743,6 +1939,7 @@ async function maybeHandleOfficeRequest(
             remote_last_verified_at: verifiedAt,
             remote_verify_ok: verification.connected === true,
           },
+          metadata: contextProbeSummary ? { desktop_context: contextProbeSummary } : undefined,
           telemetry: {
             heartbeat_at: verifiedAt,
             health_state: verification.connected === true ? "healthy" : "degraded",
@@ -1754,7 +1951,10 @@ async function maybeHandleOfficeRequest(
         ok: true,
         action,
         result: heartbeatResult,
-        verification,
+        verification: {
+          ...verification,
+          context_probe: contextProbeSummary,
+        },
       });
       return true;
     }
@@ -2415,11 +2615,85 @@ async function maybeHandleOfficeRequest(
   return serveOfficeStatic(res, pathname);
 }
 
+function sameNetworkIdentity(left: NetworkGateResult, right: NetworkGateResult) {
+  return (
+    (left.host_id ?? null) === (right.host_id ?? null) &&
+    (left.remote_address ?? null) === (right.remote_address ?? null) &&
+    left.reason === right.reason
+  );
+}
+
+function networkIdentityPayload(networkGate: NetworkGateResult) {
+  return {
+    requesting_host_id: networkGate.host_id ?? undefined,
+    requesting_remote_address: networkGate.remote_address ?? undefined,
+    requesting_network_gate_reason: networkGate.reason,
+    requesting_display_name: networkGate.display_name ?? undefined,
+    requesting_agent_runtime: networkGate.agent_runtime ?? undefined,
+    requesting_model_label: networkGate.model_label ?? undefined,
+  };
+}
+
+function sourceAgentForNetworkIdentity(networkGate: NetworkGateResult) {
+  if (networkGate.host_id) {
+    return networkGate.host_id;
+  }
+  if (isLoopbackClientIp(networkGate.remote_address)) {
+    return "local";
+  }
+  return networkGate.remote_address ? `remote-${networkGate.remote_address}` : "remote-host";
+}
+
+function stampOneJsonRpcRequest(value: unknown, networkGate: NetworkGateResult) {
+  const request = readRecord(value);
+  if (request?.method !== "tools/call") {
+    return value;
+  }
+  const params = readRecord(request.params);
+  const args = readRecord(params?.arguments);
+  if (!params || !args) {
+    return value;
+  }
+  params.arguments = {
+    ...args,
+    source_client: "http.mcp",
+    source_agent: sourceAgentForNetworkIdentity(networkGate),
+    ...networkIdentityPayload(networkGate),
+  };
+  request.params = params;
+  return request;
+}
+
+function stampNetworkIdentityOnToolCall(body: unknown, networkGate: NetworkGateResult) {
+  return Array.isArray(body) ? body.map((entry) => stampOneJsonRpcRequest(entry, networkGate)) : stampOneJsonRpcRequest(body, networkGate);
+}
+
+function attachNetworkIdentity(req: http.IncomingMessage, networkGate: NetworkGateResult) {
+  const requestWithAuth = req as http.IncomingMessage & {
+    auth?: { extra?: Record<string, unknown>; [key: string]: unknown };
+  };
+  requestWithAuth.auth = {
+    ...(requestWithAuth.auth ?? {}),
+    extra: {
+      ...(requestWithAuth.auth?.extra ?? {}),
+      network_host_identity: {
+        host_id: networkGate.host_id,
+        remote_address: networkGate.remote_address,
+        reason: networkGate.reason,
+        display_name: networkGate.display_name ?? null,
+        agent_runtime: networkGate.agent_runtime ?? null,
+        model_label: networkGate.model_label ?? null,
+      },
+    },
+  };
+}
+
 async function routeRequest(
   createServer: () => Server,
   sessions: Map<string, SessionBinding>,
   req: http.IncomingMessage,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  networkGate: NetworkGateResult
 ) {
   const method = String(req.method ?? "GET").toUpperCase();
   const sessionHeader = req.headers["mcp-session-id"];
@@ -2437,6 +2711,11 @@ async function routeRequest(
         res.end("Unknown MCP session");
         return;
       }
+      if (!sameNetworkIdentity(session.networkGate, networkGate)) {
+        res.statusCode = 403;
+        res.end("MCP session is bound to a different network host identity");
+        return;
+      }
       transport = session.transport;
       server = session.server;
     } else if (isInitializeRequest(body)) {
@@ -2446,6 +2725,7 @@ async function routeRequest(
           sessions.set(newSessionId, {
             server: server!,
             transport: transport!,
+            networkGate,
           });
         },
       });
@@ -2463,7 +2743,8 @@ async function routeRequest(
       return;
     }
 
-    await transport.handleRequest(req, res, body);
+    attachNetworkIdentity(req, networkGate);
+    await transport.handleRequest(req, res, stampNetworkIdentityOnToolCall(body, networkGate));
     return;
   }
 
@@ -2479,6 +2760,12 @@ async function routeRequest(
       res.end("Unknown MCP session");
       return;
     }
+    if (!sameNetworkIdentity(session.networkGate, networkGate)) {
+      res.statusCode = 403;
+      res.end("MCP session is bound to a different network host identity");
+      return;
+    }
+    attachNetworkIdentity(req, networkGate);
     await session.transport.handleRequest(req, res);
     return;
   }

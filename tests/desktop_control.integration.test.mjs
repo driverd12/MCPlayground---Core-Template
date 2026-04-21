@@ -204,6 +204,146 @@ test("desktop.context falls back to logged desktop.observe screenshot when Chron
   }
 });
 
+test("desktop.context captures approved remote host Chronicle context with host attribution", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-desktop-context-remote-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const binDir = path.join(tempDir, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const sshPath = path.join(binDir, "ssh");
+  fs.writeFileSync(
+    sshPath,
+    `#!/bin/sh
+cat <<'JSON'
+{"ok":true,"status":"available","source":"chronicle","generated_at":"2026-04-21T15:00:00.000Z","current_utc":"2026-04-21T15:00:00.000Z","freshness_seconds":1.25,"latest_frame_path":"/tmp/chronicle/screen_recording/remote-display-main-latest.jpg","displays":[{"display_id":"main","latest_frame_path":"/tmp/chronicle/screen_recording/remote-display-main-latest.jpg","freshness_seconds":1.25,"stale":false}],"ocr_hits":[{"display_id":"main","text_excerpt":"Remote Agent Office Hosts panel"}],"ocr_note":"OCR hits are noisy triage hints only; use app/file/connectors for authoritative extraction.","host":{"hostname":"Dans-MBP.local","repo_root":"/remote/master-mold"}}
+JSON
+`
+  );
+  fs.chmodSync(sshPath, 0o755);
+  let mutationCounter = 0;
+  const { client } = await openClient(tempDir, dbPath, {
+    PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+  });
+  try {
+    await callTool(client, "desktop.control", {
+      action: "set",
+      mutation: nextMutation("desktop-context-remote", "desktop.control.set", () => mutationCounter++),
+      enabled: true,
+      allow_observe: true,
+      screenshot_dir: tempDir,
+    });
+    await callTool(client, "worker.fabric", {
+      action: "stage_remote_host",
+      mutation: nextMutation("desktop-context-remote", "worker.fabric.stage", () => mutationCounter++),
+      remote_host: {
+        host_id: "dans-mbp",
+        display_name: "Dan's MacBook Pro",
+        hostname: "Dans-MBP.local",
+        ip_address: "10.1.2.76",
+        ssh_user: "dan.driver",
+        workspace_root: "/remote/master-mold",
+        agent_runtime: "claude",
+        model_label: "Claude Opus",
+        allowed_addresses: ["10.1.2.76"],
+        capabilities: { desktop_context: true },
+        approve: true,
+      },
+    });
+
+    const context = await callTool(client, "desktop.context", {
+      action: "latest",
+      host_id: "dans-mbp",
+      query: "Hosts panel",
+      requesting_host_id: "local",
+      requesting_remote_address: "127.0.0.1",
+    });
+    assert.equal(context.status, "available");
+    assert.equal(context.source, "chronicle");
+    assert.equal(context.captured_from_host_id, "dans-mbp");
+    assert.equal(context.captured_hostname, "Dans-MBP.local");
+    assert.equal(context.captured_agent_runtime, "claude");
+    assert.equal(context.captured_model_label, "Claude Opus");
+    assert.equal(context.requesting_host_id, "local");
+    assert.equal(context.latest_frame_path, "/tmp/chronicle/screen_recording/remote-display-main-latest.jpg");
+    assert.equal(context.ocr_hits.length, 1);
+
+    const kernel = await callTool(client, "kernel.summary", {});
+    const remoteHost = kernel.worker_fabric.hosts.find((host) => host.host_id === "dans-mbp");
+    assert.equal(remoteHost.desktop_context.status, "available");
+    assert.equal(remoteHost.desktop_context.source, "chronicle");
+  } finally {
+    await closeClient(client);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("desktop.context ingests approved remote screenshot fallback without local proof pollution", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-desktop-context-remote-shot-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const binDir = path.join(tempDir, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const sshPath = path.join(binDir, "ssh");
+  fs.writeFileSync(
+    sshPath,
+    `#!/bin/sh
+case "$*" in
+  *"--action=screenshot"*)
+    printf '%s\\n' '{"ok":true,"status":"available","source":"desktop_observe","generated_at":"2026-04-21T15:10:00.000Z","current_utc":"2026-04-21T15:10:00.000Z","screenshot_path":"/tmp/remote-context.png","screenshot_base64":"UE5H","screenshot":{"dry_run":false,"captured":true,"path":"/tmp/remote-context.png","size_bytes":3},"host":{"hostname":"ManyHost.local"}}'
+    ;;
+  *)
+    printf '%s\\n' '{"ok":false,"status":"unavailable","source":"none","generated_at":"2026-04-21T15:09:59.000Z","current_utc":"2026-04-21T15:09:59.000Z","displays":[],"unavailable_reason":"chronicle_recorder_not_running","host":{"hostname":"ManyHost.local"}}'
+    ;;
+esac
+`
+  );
+  fs.chmodSync(sshPath, 0o755);
+  let mutationCounter = 0;
+  const { client } = await openClient(tempDir, dbPath, {
+    PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+  });
+  try {
+    await callTool(client, "desktop.control", {
+      action: "set",
+      mutation: nextMutation("desktop-context-remote-shot", "desktop.control.set", () => mutationCounter++),
+      enabled: true,
+      allow_observe: true,
+      screenshot_dir: tempDir,
+    });
+    await callTool(client, "worker.fabric", {
+      action: "stage_remote_host",
+      mutation: nextMutation("desktop-context-remote-shot", "worker.fabric.stage", () => mutationCounter++),
+      remote_host: {
+        host_id: "many-host",
+        hostname: "ManyHost.local",
+        ssh_destination: "dan.driver@ManyHost.local",
+        workspace_root: "/remote/master-mold",
+        capabilities: { desktop_context: true },
+        approve: true,
+      },
+    });
+    const before = await callTool(client, "desktop.control", {});
+    assert.equal(before.state.last_screenshot_at, null);
+
+    const context = await callTool(client, "desktop.context", {
+      action: "latest",
+      host_id: "many-host",
+      mutation: nextMutation("desktop-context-remote-shot", "desktop.context", () => mutationCounter++),
+      filename: "many-host-context",
+    });
+    assert.equal(context.status, "available");
+    assert.equal(context.source, "desktop_observe");
+    assert.equal(context.captured_from_host_id, "many-host");
+    assert.equal(context.screenshot.captured, true);
+    assert.match(context.screenshot_path, /many-host-context\.png$/);
+    assert.equal(fs.readFileSync(context.screenshot_path, "utf8"), "PNG");
+
+    const after = await callTool(client, "desktop.control", {});
+    assert.equal(after.state.last_screenshot_at, null);
+  } finally {
+    await closeClient(client);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function openClient(tempDir, dbPath, extraEnv = {}) {
   const transport = new StdioClientTransport({
     command: "node",

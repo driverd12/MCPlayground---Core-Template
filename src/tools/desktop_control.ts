@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { type DesktopControlCapabilityProbeRecord, summarizeDesktopControlState } from "../desktop_control_plane.js";
-import { type RuntimeEventRecord, Storage } from "../storage.js";
+import { type RuntimeEventRecord, Storage, type WorkerFabricHostRecord } from "../storage.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -116,9 +116,12 @@ export const desktopContextSchema = z
     query: z.string().min(1).max(500).optional(),
     max_freshness_seconds: z.number().min(1).max(3600).default(120),
     ocr_max_hits: z.number().int().min(1).max(50).default(10),
+    host_id: z.string().min(1).max(120).optional(),
     display_id: z.string().min(1).max(120).optional(),
     filename: z.string().min(1).max(200).optional(),
     delay_ms: z.number().int().min(0).max(10000).default(0),
+    requesting_host_id: z.string().min(1).max(120).optional(),
+    requesting_remote_address: z.string().min(1).max(120).optional(),
     ...sourceSchema.shape,
   })
   .superRefine((value, ctx) => {
@@ -529,6 +532,546 @@ function chronicleOcrHits(displays: ChronicleDisplayContext[], query: string | u
     }
   }
   return hits;
+}
+
+function readRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function shellQuote(value: string) {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function remoteAccessForHost(host: WorkerFabricHostRecord) {
+  return readRecord(readRecord(host.metadata).remote_access);
+}
+
+function desktopContextIdentity(input: z.infer<typeof desktopContextSchema>, params?: {
+  captured_from_host_id?: string | null;
+  captured_hostname?: string | null;
+  captured_agent_runtime?: string | null;
+  captured_model_label?: string | null;
+}) {
+  const capturedFromHostId = params?.captured_from_host_id ?? input.host_id ?? "local";
+  return {
+    requesting_host_id: readString(input.requesting_host_id) ?? null,
+    requesting_remote_address: readString(input.requesting_remote_address) ?? null,
+    captured_from_host_id: capturedFromHostId,
+    captured_hostname: params?.captured_hostname ?? (capturedFromHostId === "local" ? os.hostname() : null),
+    captured_agent_runtime: params?.captured_agent_runtime ?? (capturedFromHostId === "local" ? "local" : null),
+    captured_model_label: params?.captured_model_label ?? null,
+  };
+}
+
+function parseRemoteProbeJson(stdout: string) {
+  const trimmed = stdout.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    const start = trimmed.indexOf("{");
+    const end = trimmed.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        const parsed = JSON.parse(trimmed.slice(start, end + 1));
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+function runRemoteContextProbe(params: {
+  host: WorkerFabricHostRecord;
+  action: "latest" | "search" | "screenshot";
+  input: z.infer<typeof desktopContextSchema>;
+  timeoutMs: number;
+}) {
+  const probeArgs = [
+    `--action=${params.action}`,
+    `--max-freshness-seconds=${params.input.max_freshness_seconds}`,
+    `--ocr-max-hits=${params.input.ocr_max_hits}`,
+  ];
+  if (params.input.display_id) {
+    probeArgs.push(`--display-id=${params.input.display_id}`);
+  }
+  if (params.input.query) {
+    probeArgs.push(`--query=${params.input.query}`);
+  }
+  const command = [
+    `cd ${shellQuote(params.host.workspace_root)}`,
+    "&&",
+    "node",
+    "./scripts/remote_context_probe.mjs",
+    ...probeArgs.map(shellQuote),
+  ].join(" ");
+  const result = spawnSync(
+    "ssh",
+    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6", params.host.ssh_destination ?? "", command],
+    {
+      encoding: "utf8",
+      timeout: Math.max(10_000, params.timeoutMs + 5_000),
+      maxBuffer: 20 * 1024 * 1024,
+    }
+  );
+  return {
+    result,
+    parsed: result.status === 0 ? parseRemoteProbeJson(result.stdout) : null,
+  };
+}
+
+function remoteProbeStatus(parsed: Record<string, unknown> | null) {
+  const status = readString(parsed?.status);
+  return status === "available" || status === "degraded" || status === "unavailable" ? status : "unavailable";
+}
+
+function remoteProbeDisplays(parsed: Record<string, unknown> | null) {
+  return Array.isArray(parsed?.displays) ? parsed.displays : [];
+}
+
+function remoteProbeOcrHits(parsed: Record<string, unknown> | null) {
+  return Array.isArray(parsed?.ocr_hits) ? parsed.ocr_hits : undefined;
+}
+
+function remoteHostContextIdentity(input: z.infer<typeof desktopContextSchema>, host: WorkerFabricHostRecord, parsed?: Record<string, unknown> | null) {
+  const remoteAccess = remoteAccessForHost(host);
+  const hostInfo = readRecord(parsed?.host);
+  return desktopContextIdentity(input, {
+    captured_from_host_id: host.host_id,
+    captured_hostname: readString(hostInfo.hostname) ?? readString(remoteAccess.hostname) ?? host.host_id,
+    captured_agent_runtime: readString(remoteAccess.agent_runtime),
+    captured_model_label: readString(remoteAccess.model_label),
+  });
+}
+
+function recordHostDesktopContext(
+  storage: Storage,
+  hostId: string,
+  context: {
+    status: string;
+    source: string;
+    generated_at: string;
+    freshness_seconds?: number | null;
+    display_count?: number;
+    latest_frame_path?: string | null;
+    screenshot_path?: string | null;
+    stale_reason?: string | null;
+    unavailable_reason?: string | null;
+    event_id?: string | null;
+  }
+) {
+  const state = storage.getWorkerFabricState();
+  if (!state?.hosts.some((host) => host.host_id === hostId)) {
+    return;
+  }
+  const updatedAt = new Date().toISOString();
+  storage.setWorkerFabricState({
+    enabled: state.enabled,
+    strategy: state.strategy,
+    default_host_id: state.default_host_id,
+    hosts: state.hosts.map((host) =>
+      host.host_id === hostId
+        ? {
+            ...host,
+            metadata: {
+              ...host.metadata,
+              desktop_context: {
+                ...context,
+                stale: context.status !== "available",
+                updated_at: updatedAt,
+              },
+            },
+            updated_at: updatedAt,
+          }
+        : host
+    ),
+  });
+}
+
+function desktopContextRemote(
+  storage: Storage,
+  input: z.infer<typeof desktopContextSchema>,
+  params: {
+    generatedAt: string;
+    authoritySummary: ReturnType<typeof summarizeDesktopControlState>;
+    timeoutMs: number;
+    screenshotDir: string;
+  }
+) {
+  const hostId = input.host_id?.trim();
+  const fabric = storage.getWorkerFabricState();
+  const host = fabric?.hosts.find((entry) => entry.host_id === hostId) ?? null;
+  if (!host) {
+    const identity = desktopContextIdentity(input, { captured_from_host_id: hostId ?? null });
+    const event =
+      input.action === "status"
+        ? null
+        : recordRuntimeEvent(storage, {
+            event_type: "desktop.context",
+            status: "unavailable",
+            summary: `desktop.context unavailable: unknown remote host ${hostId ?? "unknown"}`,
+            details: {
+              ...identity,
+              source: "none",
+              action: input.action,
+              unavailable_reason: "remote_host_unknown",
+            },
+            source_client: input.source_client,
+            source_model: input.source_model,
+            source_agent: input.source_agent,
+          });
+    return {
+      ok: false,
+      status: "unavailable",
+      source: "none",
+      generated_at: params.generatedAt,
+      current_utc: params.generatedAt,
+      freshness_seconds: null,
+      displays: [],
+      latest_frame_path: null,
+      screenshot_path: null,
+      stale_reason: null,
+      unavailable_reason: "remote_host_unknown",
+      authority_summary: params.authoritySummary,
+      recommended_next_action: "Stage and approve the remote host before requesting its desktop context.",
+      event_id: event?.event_id ?? null,
+      ...identity,
+    };
+  }
+
+  const remoteAccess = remoteAccessForHost(host);
+  const desktopContextAllowed =
+    host.capabilities.desktop_context === true ||
+    host.capabilities.desktop_observe === true ||
+    readString(remoteAccess.permission_profile) === "operator";
+  const approved =
+    host.enabled &&
+    host.transport === "ssh" &&
+    Boolean(host.ssh_destination) &&
+    readString(remoteAccess.status) === "approved" &&
+    desktopContextAllowed;
+  const baseIdentity = remoteHostContextIdentity(input, host);
+  if (!approved) {
+    const unavailableReason = desktopContextAllowed ? "remote_host_not_approved" : "remote_host_desktop_context_not_allowed";
+    const event =
+      input.action === "status"
+        ? null
+        : recordRuntimeEvent(storage, {
+            event_type: "desktop.context",
+            status: "unavailable",
+            summary: `desktop.context unavailable: remote host ${host.host_id} is not approved for SSH context capture`,
+            details: {
+              ...baseIdentity,
+              source: "none",
+              action: input.action,
+              unavailable_reason: unavailableReason,
+            },
+            source_client: input.source_client,
+            source_model: input.source_model,
+            source_agent: input.source_agent,
+          });
+    recordHostDesktopContext(storage, host.host_id, {
+      status: "unavailable",
+      source: "none",
+      generated_at: params.generatedAt,
+      freshness_seconds: null,
+      display_count: 0,
+      latest_frame_path: null,
+      screenshot_path: null,
+      stale_reason: null,
+      unavailable_reason: unavailableReason,
+      event_id: event?.event_id ?? null,
+    });
+    return {
+      ok: false,
+      status: "unavailable",
+      source: "none",
+      generated_at: params.generatedAt,
+      current_utc: params.generatedAt,
+      freshness_seconds: null,
+      displays: [],
+      latest_frame_path: null,
+      screenshot_path: null,
+      stale_reason: null,
+      unavailable_reason: unavailableReason,
+      authority_summary: params.authoritySummary,
+      recommended_next_action: "Approve the host in Agent Office with desktop-context permission before using it as a context source.",
+      event_id: event?.event_id ?? null,
+      ...baseIdentity,
+    };
+  }
+
+  const probeAction = input.action === "search" ? "search" : "latest";
+  const shouldTryChronicle = input.prefer_source !== "desktop_observe";
+  const shouldTryScreenshot = input.prefer_source === "desktop_observe" || input.fallback_screenshot;
+  const chronicle = shouldTryChronicle
+    ? runRemoteContextProbe({ host, action: probeAction, input, timeoutMs: params.timeoutMs })
+    : null;
+  const chroniclePayload = chronicle?.parsed ?? null;
+  const chronicleStatus = chronicle ? remoteProbeStatus(chroniclePayload) : "unavailable";
+  const shouldReturnChronicle =
+    chronicle &&
+    (chronicleStatus === "available" || input.prefer_source === "chronicle" || input.action === "status" || !shouldTryScreenshot);
+  if (shouldReturnChronicle) {
+    const identity = remoteHostContextIdentity(input, host, chroniclePayload);
+    const event =
+      input.action === "status"
+        ? null
+        : recordRuntimeEvent(storage, {
+            event_type: "desktop.context",
+            status: chronicleStatus,
+            summary:
+              chronicleStatus === "available"
+                ? `desktop.context read remote Chronicle context from ${host.host_id}`
+                : `desktop.context remote Chronicle degraded for ${host.host_id}`,
+            details: {
+              ...identity,
+              source: readString(chroniclePayload?.source) ?? "chronicle",
+              action: input.action,
+              latest_frame_path: readString(chroniclePayload?.latest_frame_path),
+              freshness_seconds: typeof chroniclePayload?.freshness_seconds === "number" ? chroniclePayload.freshness_seconds : null,
+              stale_reason: readString(chroniclePayload?.stale_reason),
+              unavailable_reason: readString(chroniclePayload?.unavailable_reason),
+              ocr_hit_count: remoteProbeOcrHits(chroniclePayload)?.length ?? 0,
+              ssh_destination: host.ssh_destination,
+            },
+            source_client: input.source_client,
+            source_model: input.source_model,
+            source_agent: input.source_agent,
+          });
+    recordHostDesktopContext(storage, host.host_id, {
+      status: chronicleStatus,
+      source: chronicleStatus === "unavailable" ? "none" : (readString(chroniclePayload?.source) ?? "chronicle"),
+      generated_at: readString(chroniclePayload?.generated_at) ?? params.generatedAt,
+      freshness_seconds: typeof chroniclePayload?.freshness_seconds === "number" ? chroniclePayload.freshness_seconds : null,
+      display_count: remoteProbeDisplays(chroniclePayload).length,
+      latest_frame_path: readString(chroniclePayload?.latest_frame_path),
+      screenshot_path: null,
+      stale_reason: readString(chroniclePayload?.stale_reason),
+      unavailable_reason: readString(chroniclePayload?.unavailable_reason),
+      event_id: event?.event_id ?? null,
+    });
+    return {
+      ok: chronicleStatus !== "unavailable",
+      status: chronicleStatus,
+      source: chronicleStatus === "unavailable" ? "none" : (readString(chroniclePayload?.source) ?? "chronicle"),
+      generated_at: readString(chroniclePayload?.generated_at) ?? params.generatedAt,
+      current_utc: readString(chroniclePayload?.current_utc) ?? params.generatedAt,
+      freshness_seconds: typeof chroniclePayload?.freshness_seconds === "number" ? chroniclePayload.freshness_seconds : null,
+      displays: remoteProbeDisplays(chroniclePayload),
+      latest_frame_path: readString(chroniclePayload?.latest_frame_path),
+      screenshot_path: null,
+      ocr_hits: remoteProbeOcrHits(chroniclePayload),
+      ocr_note: readString(chroniclePayload?.ocr_note),
+      stale_reason: readString(chroniclePayload?.stale_reason),
+      unavailable_reason: readString(chroniclePayload?.unavailable_reason),
+      authority_summary: params.authoritySummary,
+      recommended_next_action:
+        chronicleStatus === "available"
+          ? "Use the remote frame path for visual context, then switch to app/file/connectors for authoritative work."
+          : "Refresh Chronicle on the remote host or retry with fallback_screenshot=true and a mutation.",
+      event_id: event?.event_id ?? null,
+      ...identity,
+    };
+  }
+
+  if (!shouldTryScreenshot) {
+    const reason =
+      readString(chroniclePayload?.stale_reason) ??
+      readString(chroniclePayload?.unavailable_reason) ??
+      (chronicle?.result.status === 0 ? "remote_context_source_unavailable" : "remote_context_probe_failed");
+    const event =
+      input.action === "status"
+        ? null
+        : recordRuntimeEvent(storage, {
+            event_type: "desktop.context",
+            status: "unavailable",
+            summary: `desktop.context unavailable for ${host.host_id}: ${reason}`,
+            details: {
+              ...baseIdentity,
+              source: "none",
+              action: input.action,
+              unavailable_reason: reason,
+            },
+            source_client: input.source_client,
+            source_model: input.source_model,
+            source_agent: input.source_agent,
+          });
+    recordHostDesktopContext(storage, host.host_id, {
+      status: "unavailable",
+      source: "none",
+      generated_at: params.generatedAt,
+      freshness_seconds: null,
+      display_count: remoteProbeDisplays(chroniclePayload).length,
+      latest_frame_path: null,
+      screenshot_path: null,
+      stale_reason: readString(chroniclePayload?.stale_reason),
+      unavailable_reason: reason,
+      event_id: event?.event_id ?? null,
+    });
+    return {
+      ok: false,
+      status: "unavailable",
+      source: "none",
+      generated_at: params.generatedAt,
+      current_utc: params.generatedAt,
+      freshness_seconds: null,
+      displays: remoteProbeDisplays(chroniclePayload),
+      latest_frame_path: null,
+      screenshot_path: null,
+      stale_reason: readString(chroniclePayload?.stale_reason),
+      unavailable_reason: reason,
+      authority_summary: params.authoritySummary,
+      recommended_next_action: "Enable remote screenshot fallback or restore Chronicle on the requested host.",
+      event_id: event?.event_id ?? null,
+      ...baseIdentity,
+    };
+  }
+
+  if (!input.mutation) {
+    const event =
+      input.action === "status"
+        ? null
+        : recordRuntimeEvent(storage, {
+            event_type: "desktop.context",
+            status: "unavailable",
+            summary: `desktop.context remote screenshot fallback for ${host.host_id} requires an idempotent mutation`,
+            details: {
+              ...baseIdentity,
+              source: "none",
+              action: input.action,
+              unavailable_reason: "desktop_context_screenshot_requires_mutation",
+            },
+            source_client: input.source_client,
+            source_model: input.source_model,
+            source_agent: input.source_agent,
+          });
+    recordHostDesktopContext(storage, host.host_id, {
+      status: "unavailable",
+      source: "none",
+      generated_at: params.generatedAt,
+      freshness_seconds: null,
+      display_count: remoteProbeDisplays(chroniclePayload).length,
+      latest_frame_path: null,
+      screenshot_path: null,
+      stale_reason: readString(chroniclePayload?.stale_reason),
+      unavailable_reason: "desktop_context_screenshot_requires_mutation",
+      event_id: event?.event_id ?? null,
+    });
+    return {
+      ok: false,
+      status: "unavailable",
+      source: "none",
+      generated_at: params.generatedAt,
+      current_utc: params.generatedAt,
+      freshness_seconds: null,
+      displays: remoteProbeDisplays(chroniclePayload),
+      latest_frame_path: null,
+      screenshot_path: null,
+      stale_reason: readString(chroniclePayload?.stale_reason),
+      unavailable_reason: "desktop_context_screenshot_requires_mutation",
+      authority_summary: params.authoritySummary,
+      recommended_next_action: "Retry with a mutation so MASTER-MOLD can capture and log the remote screenshot fallback.",
+      event_id: event?.event_id ?? null,
+      ...baseIdentity,
+    };
+  }
+
+  return runIdempotentMutation({
+    storage,
+    tool_name: "desktop.context",
+    mutation: input.mutation,
+    payload: input,
+    execute: () => {
+      const screenshotProbe = runRemoteContextProbe({ host, action: "screenshot", input, timeoutMs: params.timeoutMs });
+      const screenshotPayload = screenshotProbe.parsed;
+      const identity = remoteHostContextIdentity(input, host, screenshotPayload);
+      const capturedAt = readString(screenshotPayload?.generated_at) ?? new Date().toISOString();
+      const outputPath = buildOutputPath(params.screenshotDir, `desktop-context-${host.host_id}`, "png", input.filename);
+      const base64 = readString(screenshotPayload?.screenshot_base64);
+      const remoteScreenshot = readRecord(screenshotPayload?.screenshot);
+      const dryRun = Boolean(remoteScreenshot.dry_run);
+      let sizeBytes = typeof remoteScreenshot.size_bytes === "number" ? remoteScreenshot.size_bytes : 0;
+      let captured = false;
+      if (base64 && !dryRun) {
+        const buffer = Buffer.from(base64, "base64");
+        fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+        fs.writeFileSync(outputPath, buffer);
+        sizeBytes = buffer.length;
+        captured = true;
+      }
+      const status = captured ? "available" : screenshotProbe.result.status === 0 ? "degraded" : "unavailable";
+      const event = recordRuntimeEvent(storage, {
+        event_type: "desktop.context",
+        status,
+        summary: `desktop.context ${captured ? "captured" : "planned"} remote screenshot fallback from ${host.host_id} -> ${outputPath}`,
+        details: {
+          ...identity,
+          source: captured || screenshotProbe.result.status === 0 ? "desktop_observe" : "none",
+          action: input.action,
+          screenshot_path: outputPath,
+          remote_screenshot_path: readString(screenshotPayload?.screenshot_path),
+          dry_run: dryRun,
+          size_bytes: sizeBytes,
+          fallback_from: readString(chroniclePayload?.stale_reason) ?? readString(chroniclePayload?.unavailable_reason),
+          screen_recording_proven: captured,
+          ssh_destination: host.ssh_destination,
+        },
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      });
+      recordHostDesktopContext(storage, host.host_id, {
+        status,
+        source: status === "unavailable" ? "none" : "desktop_observe",
+        generated_at: capturedAt,
+        freshness_seconds: captured ? 0 : null,
+        display_count: remoteProbeDisplays(chroniclePayload).length,
+        latest_frame_path: null,
+        screenshot_path: outputPath,
+        stale_reason: readString(chroniclePayload?.stale_reason),
+        unavailable_reason:
+          status === "unavailable"
+            ? readString(screenshotPayload?.unavailable_reason) ?? "remote_screenshot_failed"
+            : readString(chroniclePayload?.unavailable_reason),
+        event_id: event.event_id,
+      });
+      return {
+        ok: status !== "unavailable",
+        status,
+        source: status === "unavailable" ? "none" : "desktop_observe",
+        generated_at: capturedAt,
+        current_utc: capturedAt,
+        freshness_seconds: captured ? 0 : null,
+        displays: remoteProbeDisplays(chroniclePayload),
+        latest_frame_path: null,
+        screenshot_path: outputPath,
+        screenshot: {
+          dry_run: dryRun,
+          captured,
+          output_path: outputPath,
+          remote_output_path: readString(screenshotPayload?.screenshot_path),
+          size_bytes: sizeBytes,
+          format: "png",
+        },
+        ocr_hits: input.query ? [] : undefined,
+        stale_reason: readString(chroniclePayload?.stale_reason),
+        unavailable_reason:
+          status === "unavailable"
+            ? readString(screenshotPayload?.unavailable_reason) ?? "remote_screenshot_failed"
+            : readString(chroniclePayload?.unavailable_reason),
+        authority_summary: params.authoritySummary,
+        recommended_next_action: "Use the ingested remote screenshot as visual context, then switch to app, file, or connector data for authoritative work.",
+        event_id: event.event_id,
+        ...identity,
+      };
+    },
+  });
 }
 
 function runFrontmostAppQuery(timeoutMs: number) {
@@ -952,8 +1495,10 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
   const state = storage.getDesktopControlState();
   const authoritySummary = summarizeDesktopControlState(state);
   const observationAllowed = state.enabled && state.allow_observe;
+  const requestedHostId = input.host_id?.trim() || "local";
 
   if (!observationAllowed) {
+    const identity = desktopContextIdentity(input, { captured_from_host_id: requestedHostId });
     const event =
       input.action === "status"
         ? null
@@ -962,6 +1507,7 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
             status: "unavailable",
             summary: "desktop.context unavailable: desktop observation is disabled by policy",
             details: {
+              ...identity,
               source: "none",
               unavailable_reason: "desktop_observation_disabled_by_policy",
               action: input.action,
@@ -986,8 +1532,20 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
       authority_summary: authoritySummary,
       recommended_next_action: "Enable desktop.control with allow_observe before exposing screen context to MCP clients.",
       event_id: event?.event_id ?? null,
+      ...identity,
     };
   }
+
+  if (requestedHostId !== "local") {
+    return desktopContextRemote(storage, input, {
+      generatedAt,
+      authoritySummary,
+      timeoutMs: state.action_timeout_ms,
+      screenshotDir: state.screenshot_dir,
+    });
+  }
+
+  const identity = desktopContextIdentity(input, { captured_from_host_id: "local" });
 
   const shouldTryChronicle = input.prefer_source !== "desktop_observe";
   const shouldTryScreenshot = input.prefer_source === "desktop_observe" || input.fallback_screenshot;
@@ -1015,6 +1573,7 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
                   ? `desktop.context read ${freshDisplays.length} fresh Chronicle display frame(s)`
                   : `desktop.context Chronicle degraded: ${chronicle.stale_reason ?? chronicle.unavailable_reason ?? "unknown"}`,
               details: {
+                ...identity,
                 source: "chronicle",
                 action: input.action,
                 display_count: chronicle.displays.length,
@@ -1050,6 +1609,7 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
             ? "Use the frame path for visual context, then switch to app, file, or connector data once the target is identified."
             : "Refresh Chronicle or call desktop.context with fallback_screenshot=true and a mutation to capture a fresh screenshot.",
         event_id: event?.event_id ?? null,
+        ...identity,
       };
     }
   }
@@ -1064,6 +1624,7 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
             status: "unavailable",
             summary: `desktop.context unavailable: ${reason}`,
             details: {
+              ...identity,
               source: "none",
               action: input.action,
               unavailable_reason: reason,
@@ -1088,6 +1649,7 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
       authority_summary: authoritySummary,
       recommended_next_action: "Enable fallback_screenshot or restore Chronicle before requesting screen context.",
       event_id: event?.event_id ?? null,
+      ...identity,
     };
   }
 
@@ -1101,6 +1663,7 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
             status: "unavailable",
             summary: "desktop.context screenshot fallback requires an idempotent mutation",
             details: {
+              ...identity,
               source: "none",
               action: input.action,
               unavailable_reason: reason,
@@ -1126,6 +1689,7 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
       authority_summary: authoritySummary,
       recommended_next_action: "Retry with a mutation so MASTER-MOLD can capture and log a fresh screenshot fallback.",
       event_id: event?.event_id ?? null,
+      ...identity,
     };
   }
 
@@ -1153,6 +1717,7 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
         status,
         summary: `desktop.context ${screenshot.dry_run ? "planned" : "captured"} screenshot fallback -> ${outputPath}`,
         details: {
+          ...identity,
           source: "desktop_observe",
           action: input.action,
           screenshot_path: outputPath,
@@ -1188,6 +1753,7 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
         authority_summary: nextAuthoritySummary,
         recommended_next_action: "Use the screenshot as current visual context, then switch to app, file, or connector data for authoritative work.",
         event_id: event.event_id,
+        ...identity,
       };
     },
   });
