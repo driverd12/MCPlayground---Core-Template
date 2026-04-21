@@ -34,6 +34,16 @@ const taskExecutionCandidateSchema = z.object({
   score: z.number().optional(),
 });
 
+const reasoningComputePolicySchema = z.object({
+  mode: z.enum(["single_path", "adaptive_best_of_n"]).optional(),
+  candidate_count: z.number().int().min(1).max(4).optional(),
+  max_candidate_count: z.number().int().min(1).max(4).optional(),
+  selection_strategy: z.enum(["single_path", "evidence_rerank"]).optional(),
+  activation_reasons: z.array(z.string().min(1)).optional(),
+  evidence_required: z.boolean().optional(),
+  transcript_policy: z.string().min(1).optional(),
+});
+
 export const taskExecutionSchema = z.object({
   preferred_host_ids: z.array(z.string().min(1)).optional(),
   allowed_host_ids: z.array(z.string().min(1)).optional(),
@@ -56,6 +66,7 @@ export const taskExecutionSchema = z.object({
   focus: z.string().min(1).optional(),
   reasoning_candidate_count: z.number().int().min(1).max(4).optional(),
   reasoning_selection_strategy: z.enum(["single_path", "evidence_rerank"]).optional(),
+  reasoning_compute_policy: reasoningComputePolicySchema.optional(),
   require_plan_pass: z.boolean().optional(),
   require_verification_pass: z.boolean().optional(),
   runtime_id: z.enum(["codex", "shell"]).optional(),
@@ -430,6 +441,31 @@ function normalizeTaskExecutionMetadata(value: unknown) {
         })
         .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
     : [];
+  const reasoningComputePolicy = isRecord(value.reasoning_compute_policy) ? value.reasoning_compute_policy : null;
+  const policyMode = readString(reasoningComputePolicy?.mode);
+  const policyCandidateCount =
+    typeof reasoningComputePolicy?.candidate_count === "number" && Number.isFinite(reasoningComputePolicy.candidate_count)
+      ? Math.max(1, Math.min(4, Math.round(reasoningComputePolicy.candidate_count)))
+      : reasoning_candidate_count;
+  const policyMaxCandidateCount =
+    typeof reasoningComputePolicy?.max_candidate_count === "number" && Number.isFinite(reasoningComputePolicy.max_candidate_count)
+      ? Math.max(1, Math.min(4, Math.round(reasoningComputePolicy.max_candidate_count)))
+      : null;
+  const policySelectionStrategy = readString(reasoningComputePolicy?.selection_strategy);
+  const normalizedReasoningComputePolicy = reasoningComputePolicy
+    ? {
+        mode: policyMode === "adaptive_best_of_n" || policyMode === "single_path" ? policyMode : null,
+        candidate_count: policyCandidateCount,
+        max_candidate_count: policyMaxCandidateCount,
+        selection_strategy:
+          policySelectionStrategy === "single_path" || policySelectionStrategy === "evidence_rerank"
+            ? policySelectionStrategy
+            : null,
+        activation_reasons: normalizeStringArray(reasoningComputePolicy.activation_reasons),
+        evidence_required: reasoningComputePolicy.evidence_required === true,
+        transcript_policy: readString(reasoningComputePolicy.transcript_policy),
+      }
+    : null;
 
   return {
     preferred_host_ids: normalizeStringArray(value.preferred_host_ids),
@@ -471,6 +507,7 @@ function normalizeTaskExecutionMetadata(value: unknown) {
       reasoning_selection_strategy === "single_path" || reasoning_selection_strategy === "evidence_rerank"
         ? reasoning_selection_strategy
         : null,
+    reasoning_compute_policy: normalizedReasoningComputePolicy,
     require_plan_pass: value.require_plan_pass === true,
     require_verification_pass: value.require_verification_pass === true,
     runtime_id: runtime_id === "codex" || runtime_id === "shell" ? runtime_id : null,

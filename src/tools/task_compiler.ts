@@ -272,7 +272,7 @@ function readMemoryPreflightSummary(value: unknown): SwarmMemoryPreflightSummary
   };
 }
 
-function uniqueStrings(values: Iterable<string>) {
+function uniqueStrings(values: Iterable<string | null | undefined>) {
   return [...new Set([...values].map((entry) => String(entry ?? "").trim()).filter(Boolean))];
 }
 
@@ -357,6 +357,14 @@ function applyAdaptiveReasoningPolicy(
   const taskKind = typeof nextTaskMetadata.task_kind === "string" ? nextTaskMetadata.task_kind : null;
   const focus = typeof nextTaskMetadata.focus === "string" ? nextTaskMetadata.focus : null;
   const reflectionBoost = memoryPreflight.reflection_match_count > 0 ? 1 : 0;
+  const activationReasons = uniqueStrings([
+    stream.step_kind === "analysis" ? "analysis_step" : null,
+    stream.step_kind === "verification" ? "verification_step" : null,
+    taskKind === "research" ? "research_task" : null,
+    taskKind === "verification" ? "verification_task" : null,
+    nextTaskMetadata.quality_preference === "quality" ? "quality_preference" : null,
+    reflectionBoost > 0 ? "grounded_reflection_match" : null,
+  ]);
   const shouldMultiSample =
     stream.step_kind === "analysis" ||
     stream.step_kind === "verification" ||
@@ -374,6 +382,15 @@ function applyAdaptiveReasoningPolicy(
     if (typeof nextTaskMetadata.reasoning_selection_strategy !== "string") {
       nextTaskMetadata.reasoning_selection_strategy = "evidence_rerank";
     }
+    nextTaskMetadata.reasoning_compute_policy = {
+      mode: "adaptive_best_of_n",
+      candidate_count: nextTaskMetadata.reasoning_candidate_count,
+      max_candidate_count: 4,
+      selection_strategy: nextTaskMetadata.reasoning_selection_strategy,
+      activation_reasons: activationReasons,
+      evidence_required: true,
+      transcript_policy: "compact_evidence_only",
+    };
   }
   if (
     stream.step_kind === "analysis" ||

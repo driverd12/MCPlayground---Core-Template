@@ -79,11 +79,14 @@ test("task.compile surfaces grounded reflection memories in memory preflight and
     const finalDecisionStep = compiled.steps.find((step) => step.step_kind === "decision");
     assert.equal(verificationStep?.metadata.task_execution.reasoning_candidate_count, 3);
     assert.equal(verificationStep?.metadata.task_execution.reasoning_selection_strategy, "evidence_rerank");
+    assert.equal(verificationStep?.metadata.task_execution.reasoning_compute_policy.candidate_count, 3);
+    assert.ok(verificationStep?.metadata.task_execution.reasoning_compute_policy.activation_reasons.includes("grounded_reflection_match"));
     assert.equal(verificationStep?.metadata.task_execution.require_verification_pass, true);
     assert.equal(verificationStep?.metadata.working_memory.current_stream_id, "verification");
     assert.ok(verificationStep?.metadata.working_memory.known_failures.length >= 1);
     assert.equal(finalDecisionStep?.metadata.task_execution.reasoning_candidate_count, 3);
     assert.equal(finalDecisionStep?.metadata.task_execution.reasoning_selection_strategy, "evidence_rerank");
+    assert.equal(finalDecisionStep?.metadata.task_execution.reasoning_compute_policy.evidence_required, true);
     assert.equal(finalDecisionStep?.metadata.task_execution.require_plan_pass, true);
     assert.equal(finalDecisionStep?.metadata.task_execution.require_verification_pass, true);
     assert.equal(finalDecisionStep?.metadata.working_memory.current_stream_id, "verification-finalize");

@@ -155,7 +155,15 @@ function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExec
   const requirePlanPass = taskExecution.require_plan_pass === true;
   const requireVerificationPass = taskExecution.require_verification_pass === true;
   const orgSignals = readNullableRecord(taskMetadata.org_program_signals);
+  const computePolicy = readNullableRecord(taskExecution.reasoning_compute_policy);
+  const policyMode = readString(computePolicy?.mode);
+  const activationReasons = readStringArray(computePolicy?.activation_reasons);
+  const transcriptPolicy = readString(computePolicy?.transcript_policy);
   const lines = uniqueStrings([
+    policyMode === "adaptive_best_of_n"
+      ? `Adaptive compute policy: best-of-N with ${reasoningCandidateCount ?? computePolicy?.candidate_count ?? "bounded"} candidate(s).`
+      : null,
+    activationReasons.length > 0 ? `Activation reasons: ${activationReasons.join(", ")}.` : null,
     reasoningCandidateCount && reasoningCandidateCount > 1
       ? `Generate ${reasoningCandidateCount} bounded candidate approaches or failure hypotheses before committing to one path.`
       : taskKind === "research" || taskKind === "verification" || qualityPreference === "quality"
@@ -175,6 +183,9 @@ function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExec
       : null,
     orgSignals?.fail_closed === true
       ? "If evidence is weak or contradictory, stop and report the blocker instead of guessing."
+      : null,
+    transcriptPolicy === "compact_evidence_only"
+      ? "Keep reasoning evidence compact; do not dump raw transcripts or hidden chains of thought."
       : null,
   ]);
   return renderBulletSection("Reasoning policy", lines);

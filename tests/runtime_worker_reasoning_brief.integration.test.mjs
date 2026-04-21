@@ -64,6 +64,15 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
         focus: "verification",
         reasoning_candidate_count: 4,
         reasoning_selection_strategy: "evidence_rerank",
+        reasoning_compute_policy: {
+          mode: "adaptive_best_of_n",
+          candidate_count: 4,
+          max_candidate_count: 4,
+          selection_strategy: "evidence_rerank",
+          activation_reasons: ["verification_task", "quality_preference", "grounded_reflection_match"],
+          evidence_required: true,
+          transcript_policy: "compact_evidence_only",
+        },
         require_plan_pass: true,
         require_verification_pass: true,
       },
@@ -143,12 +152,15 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.equal(fs.existsSync(runtimeStatus.brief_path), true);
     const sessionBrief = fs.readFileSync(runtimeStatus.brief_path, "utf8");
     assert.match(sessionBrief, /Reasoning policy/);
+    assert.match(sessionBrief, /Adaptive compute policy: best-of-N with 4 candidate/i);
+    assert.match(sessionBrief, /Activation reasons: verification_task, quality_preference, grounded_reflection_match/i);
     assert.match(sessionBrief, /Generate 4 bounded candidate approaches or failure hypotheses/i);
     assert.match(sessionBrief, /Rerank candidate paths by concrete evidence and contradiction risk/i);
     assert.match(sessionBrief, /Try to falsify the current answer with concrete checks before declaring success/i);
     assert.match(sessionBrief, /Write a short plan first so unknowns, evidence needs, and rollback are explicit before mutation/i);
     assert.match(sessionBrief, /Choose the path with the strongest evidence trail/i);
     assert.match(sessionBrief, /If evidence is weak or contradictory, stop and report the blocker/i);
+    assert.match(sessionBrief, /Keep reasoning evidence compact/i);
     assert.match(sessionBrief, /Grounded reflections/);
     assert.match(sessionBrief, /accepted a plausible answer without trying to falsify it/i);
     assert.match(sessionBrief, /Working memory/);

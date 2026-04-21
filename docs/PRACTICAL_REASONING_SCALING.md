@@ -35,6 +35,12 @@ Implementation shape:
 3. Score candidates with the existing verification or evidence lane instead of majority vote alone.
 4. Log candidate count, selection rationale, token cost, and downstream success.
 
+Current MASTER-MOLD contract:
+
+- `task.compile` now emits an explicit `task_execution.reasoning_compute_policy` for adaptive best-of-N lanes.
+- Runtime workers render that policy into their session brief and require compact `reasoning-evidence.json` instead of hidden reasoning dumps.
+- The durable policy records activation reasons, candidate count, evidence rerank strategy, and compact-evidence-only transcript handling.
+
 Do not:
 
 - run best-of-N on every task
