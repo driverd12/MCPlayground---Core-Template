@@ -3682,6 +3682,71 @@ test("plan.dispatch injects adaptive assignment guidance into worker tasks", asy
   }
 });
 
+test("worker.fabric stages and approves a remote Mac host with durable identity metadata", async () => {
+  const testId = `${Date.now()}-worker-fabric-remote-host-pairing`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-worker-fabric-remote-host-pairing-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const staged = await callTool(client, "worker.fabric", {
+      action: "stage_remote_host",
+      mutation: nextMutation(testId, "worker.fabric.stage_remote_host", () => mutationCounter++),
+      remote_host: {
+        host_id: "dans-mbp",
+        display_name: "Dan's MacBook Pro",
+        hostname: "Dans-MBP.local",
+        ip_address: "10.1.2.76",
+        ssh_user: "dan.driver",
+        workspace_root: "/Users/dan.driver/Documents/Playground/Agentic Playground/MASTER-MOLD",
+        worker_count: 1,
+        agent_runtime: "claude",
+        model_label: "Claude Opus",
+        permission_profile: "task_worker",
+        tags: ["mac", "remote", "agent-host"],
+      },
+    });
+    const stagedHost = staged.state.hosts.find((host) => host.host_id === "dans-mbp");
+    assert.ok(stagedHost);
+    assert.equal(stagedHost.enabled, false);
+    assert.equal(stagedHost.transport, "ssh");
+    assert.equal(stagedHost.ssh_destination, "dan.driver@Dans-MBP.local");
+    assert.equal(stagedHost.metadata.remote_access.status, "pending");
+    assert.equal(stagedHost.metadata.remote_access.ip_address, "10.1.2.76");
+    assert.equal(stagedHost.metadata.remote_access.agent_runtime, "claude");
+    assert.equal(stagedHost.metadata.remote_access.model_label, "Claude Opus");
+    assert.ok(stagedHost.metadata.remote_access.allowed_addresses.includes("10.1.2.76"));
+    assert.equal(typeof stagedHost.metadata.remote_access.pairing_code, "string");
+
+    const approved = await callTool(client, "worker.fabric", {
+      action: "approve_remote_host",
+      mutation: nextMutation(testId, "worker.fabric.approve_remote_host", () => mutationCounter++),
+      host_id: "dans-mbp",
+    });
+    const approvedHost = approved.state.hosts.find((host) => host.host_id === "dans-mbp");
+    assert.ok(approvedHost);
+    assert.equal(approvedHost.enabled, true);
+    assert.equal(approvedHost.metadata.remote_access.status, "approved");
+    assert.equal(approvedHost.capabilities.approved_remote_host, true);
+    assert.ok(approvedHost.tags.includes("approved-host"));
+    assert.equal(approvedHost.tags.includes("pending-host"), false);
+
+    const summary = await callTool(client, "kernel.summary", {});
+    const summaryHost = summary.worker_fabric.hosts.find((host) => host.host_id === "dans-mbp");
+    assert.ok(summaryHost);
+    assert.equal(summaryHost.remote_access_status, "approved");
+    assert.equal(summaryHost.remote_hostname, "Dans-MBP.local");
+    assert.equal(summaryHost.remote_ip_address, "10.1.2.76");
+    assert.equal(summaryHost.remote_agent_runtime, "claude");
+    assert.equal(summaryHost.remote_model_label, "Claude Opus");
+    assert.ok(summaryHost.remote_allowed_addresses.includes("10.1.2.76"));
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("plan.dispatch materializes a concrete task execution plan from model router and worker fabric state", async () => {
   const testId = `${Date.now()}-dispatch-task-execution`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-dispatch-task-execution-"));

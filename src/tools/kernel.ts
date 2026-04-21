@@ -163,6 +163,17 @@ type HostFabricSummary = {
     recommended_runtime_worker_limit: number | null;
     recommended_tmux_worker_count: number | null;
     recommended_tmux_target_queue_per_worker: number | null;
+    ssh_destination: string | null;
+    workspace_root: string;
+    remote_access_status: string | null;
+    remote_display_name: string | null;
+    remote_hostname: string | null;
+    remote_ip_address: string | null;
+    remote_agent_runtime: string | null;
+    remote_model_label: string | null;
+    remote_allowed_addresses: string[];
+    remote_pairing_code: string | null;
+    remote_approved_at: string | null;
     tags: string[];
   }>;
 };
@@ -1246,24 +1257,40 @@ function summarizeWorkerFabric(storage: Storage, state?: WorkerFabricStateRecord
     active_worker_count: enabledHosts.reduce((sum, host) => sum + host.worker_count, 0),
     health_counts: healthCounts,
     transport_counts: transportCounts,
-    hosts: hosts.map((host) => ({
-      ...resolveHostCapacityProfile(host),
-      host_id: host.host_id,
-      transport: host.transport,
-      enabled: host.enabled,
-      worker_count: host.worker_count,
-      health_state: host.telemetry.health_state,
-      health_score: computeHostHealthScore(host.telemetry),
-      queue_depth: host.telemetry.queue_depth,
-      active_tasks: host.telemetry.active_tasks,
-      heartbeat_at: host.telemetry.heartbeat_at,
-      cpu_utilization: host.telemetry.cpu_utilization,
-      ram_available_gb: host.telemetry.ram_available_gb,
-      ram_total_gb: host.telemetry.ram_total_gb,
-      swap_used_gb: host.telemetry.swap_used_gb,
-      thermal_pressure: host.telemetry.thermal_pressure,
-      tags: host.tags,
-    })),
+    hosts: hosts.map((host) => {
+      const remoteAccess = isRecord(host.metadata.remote_access) ? host.metadata.remote_access : {};
+      return {
+        ...resolveHostCapacityProfile(host),
+        host_id: host.host_id,
+        transport: host.transport,
+        enabled: host.enabled,
+        worker_count: host.worker_count,
+        health_state: host.telemetry.health_state,
+        health_score: computeHostHealthScore(host.telemetry),
+        queue_depth: host.telemetry.queue_depth,
+        active_tasks: host.telemetry.active_tasks,
+        heartbeat_at: host.telemetry.heartbeat_at,
+        cpu_utilization: host.telemetry.cpu_utilization,
+        ram_available_gb: host.telemetry.ram_available_gb,
+        ram_total_gb: host.telemetry.ram_total_gb,
+        swap_used_gb: host.telemetry.swap_used_gb,
+        thermal_pressure: host.telemetry.thermal_pressure,
+        ssh_destination: host.ssh_destination,
+        workspace_root: host.workspace_root,
+        remote_access_status: readString(remoteAccess.status),
+        remote_display_name: readString(remoteAccess.display_name),
+        remote_hostname: readString(remoteAccess.hostname),
+        remote_ip_address: readString(remoteAccess.ip_address),
+        remote_agent_runtime: readString(remoteAccess.agent_runtime),
+        remote_model_label: readString(remoteAccess.model_label),
+        remote_allowed_addresses: Array.isArray(remoteAccess.allowed_addresses)
+          ? remoteAccess.allowed_addresses.map((entry) => String(entry ?? "").trim()).filter(Boolean)
+          : [],
+        remote_pairing_code: readString(remoteAccess.pairing_code),
+        remote_approved_at: readString(remoteAccess.approved_at),
+        tags: host.tags,
+      };
+    }),
   };
 }
 

@@ -26,6 +26,7 @@
     workbenchView: document.querySelector("#workbench-view"),
     briefingView: document.querySelector("#briefing-view"),
     workersView: document.querySelector("#workers-view"),
+    hostsView: document.querySelector("#hosts-view"),
     patientZeroView: document.querySelector("#patient-zero-view"),
     eventsView: document.querySelector("#events-view"),
     tabs: Array.prototype.slice.call(document.querySelectorAll(".tabs__button")),
@@ -1463,6 +1464,185 @@
       "</div>";
   }
 
+  function hostTone(host) {
+    var status = String(host.remote_access_status || "").toLowerCase();
+    if (status === "approved" && host.enabled) return "good";
+    if (status === "pending") return "warn";
+    if (status === "rejected" || String(host.health_state || "").toLowerCase() === "offline") return "bad";
+    return "neutral";
+  }
+
+  function remoteHostsFromSnapshot() {
+    var fabric = state.snapshot && state.snapshot.summary ? state.snapshot.summary.worker_fabric || {} : {};
+    var hosts = Array.isArray(fabric.hosts) ? fabric.hosts : [];
+    return hosts.filter(function (host) {
+      return host && (host.transport === "ssh" || host.remote_access_status);
+    });
+  }
+
+  function postHostAction(payload) {
+    return getJson("/office/api/hosts", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload || {}),
+    }).then(function (result) {
+      setResultText(JSON.stringify(result, null, 2));
+      return fetchSnapshot({ forceLive: true, explicitForceLive: true }).then(function () {
+        return result;
+      });
+    });
+  }
+
+  function submitHostPairing(event) {
+    event.preventDefault();
+    var form = event.currentTarget;
+    var get = function (name) {
+      var node = form.querySelector('[name="' + name + '"]');
+      return node ? String(node.value || "").trim() : "";
+    };
+    var approveNode = form.querySelector('[name="approve"]');
+    var remoteHost = {
+      host_id: get("host_id"),
+      display_name: get("display_name"),
+      hostname: get("hostname"),
+      ip_address: get("ip_address"),
+      ssh_user: get("ssh_user"),
+      workspace_root: get("workspace_root"),
+      agent_runtime: get("agent_runtime"),
+      model_label: get("model_label"),
+      worker_count: Number(get("worker_count") || "1"),
+      permission_profile: get("permission_profile") || "task_worker",
+      allowed_addresses: [get("ip_address")].filter(Boolean),
+      tags: ["mac", "remote", "agent-host"],
+      approve: approveNode ? !!approveNode.checked : false,
+    };
+    if (!remoteHost.workspace_root) {
+      setResultText("Remote workspace root is required.");
+      return;
+    }
+    postHostAction({
+      action: "stage_remote_host",
+      remote_host: remoteHost,
+    }).catch(function (error) {
+      setResultText(String(error));
+    });
+  }
+
+  function renderHostsView() {
+    if (!state.snapshot) {
+      if (els.hostsView) els.hostsView.innerHTML = "";
+      return;
+    }
+    if (!els.hostsView) return;
+    var summary = state.snapshot.summary || {};
+    var fabric = summary.worker_fabric || {};
+    var hosts = Array.isArray(fabric.hosts) ? fabric.hosts : [];
+    var remoteHosts = remoteHostsFromSnapshot();
+    var pendingCount = remoteHosts.filter(function (host) {
+      return String(host.remote_access_status || "").toLowerCase() === "pending";
+    }).length;
+    var approvedCount = remoteHosts.filter(function (host) {
+      return String(host.remote_access_status || "").toLowerCase() === "approved";
+    }).length;
+    var hostRows = hosts.length
+      ? hosts
+          .map(function (host) {
+            var tone = hostTone(host);
+            var status = host.remote_access_status || (host.enabled ? "enabled" : "disabled");
+            var title = host.display_name || host.host_id || "host";
+            var detail = [
+              host.remote_hostname || host.ssh_destination || host.transport,
+              host.remote_ip_address,
+              host.remote_agent_runtime,
+              host.remote_model_label,
+            ].filter(Boolean).join(" · ");
+            var allowed = Array.isArray(host.remote_allowed_addresses) && host.remote_allowed_addresses.length
+              ? host.remote_allowed_addresses.join(", ")
+              : "loopback/local only";
+            return (
+              '<article class="host-row host-row--' + escapeHtml(tone) + '">' +
+              '<div class="host-row__main">' +
+              '<div class="host-row__eyebrow">' + escapeHtml(String(host.transport || "local").toUpperCase() + " · " + String(status).toUpperCase()) + "</div>" +
+              '<strong>' + escapeHtml(title) + '</strong>' +
+              '<span>' + escapeHtml(detail || "No remote identity metadata recorded.") + '</span>' +
+              '<small>' + escapeHtml("allowed: " + allowed + " · workspace: " + (host.workspace_root || "n/a")) + '</small>' +
+              '</div>' +
+              '<div class="host-row__metrics">' +
+              '<div><span>Health</span><strong>' + escapeHtml(String(host.health_state || "n/a")) + '</strong></div>' +
+              '<div><span>Workers</span><strong>' + String(host.worker_count || 0) + '</strong></div>' +
+              '<div><span>Queue</span><strong>' + String(host.queue_depth || 0) + '</strong></div>' +
+              '</div>' +
+              '<div class="host-row__actions">' +
+              (host.transport === "ssh"
+                ? '<button class="button" data-host-action="verify_remote_host" data-host-id="' + escapeHtml(host.host_id || "") + '">Verify</button>'
+                : "") +
+              (String(host.remote_access_status || "").toLowerCase() === "pending"
+                ? '<button class="button button--primary" data-host-action="approve_remote_host" data-host-id="' + escapeHtml(host.host_id || "") + '">Approve</button>'
+                : "") +
+              (String(host.remote_access_status || "").toLowerCase() !== "rejected" && host.transport === "ssh"
+                ? '<button class="button" data-host-action="reject_remote_host" data-host-id="' + escapeHtml(host.host_id || "") + '">Revoke</button>'
+                : "") +
+              '</div>' +
+              '</article>'
+            );
+          })
+          .join("")
+      : '<article class="host-row"><div class="host-row__main"><strong>No hosts configured</strong><span>The local implicit host is available, but no durable fabric state has been saved yet.</span></div></article>';
+
+    els.hostsView.innerHTML =
+      '<div class="hosts-grid">' +
+      '<section class="hosts-hero">' +
+      '<div><div class="section-title">Host Pairing</div><h2>Approve remote Macs without opening the whole LAN.</h2><p>Pairing adds a device identity, allowed address, runtime label, and task-worker scope before any remote host can use the local MCP surface.</p></div>' +
+      '<div class="hosts-hero__stats">' +
+      '<article><span>Total hosts</span><strong>' + String(fabric.host_count || hosts.length || 0) + '</strong></article>' +
+      '<article><span>Approved remote</span><strong>' + String(approvedCount) + '</strong></article>' +
+      '<article><span>Pending</span><strong>' + String(pendingCount) + '</strong></article>' +
+      '<article><span>Strategy</span><strong>' + escapeHtml(fabric.strategy || "balanced") + '</strong></article>' +
+      '</div>' +
+      '</section>' +
+      '<section class="hosts-panel hosts-panel--pair">' +
+      '<div class="section-title">Add Remote Host</div>' +
+      '<form class="host-pair-form" id="host-pair-form">' +
+      '<div class="host-pair-form__row"><label>Host ID<input name="host_id" value="dans-mbp" /></label><label>Display name<input name="display_name" value="Dan&apos;s MacBook Pro" /></label></div>' +
+      '<div class="host-pair-form__row"><label>Hostname<input name="hostname" value="Dans-MBP.local" /></label><label>IP address<input name="ip_address" value="10.1.2.76" /></label></div>' +
+      '<div class="host-pair-form__row"><label>SSH user<input name="ssh_user" value="dan.driver" /></label><label>Workers<input name="worker_count" value="1" inputmode="numeric" /></label></div>' +
+      '<label>Workspace root<input name="workspace_root" value="/Users/dan.driver/Documents/Playground/Agentic Playground/MASTER-MOLD" /></label>' +
+      '<div class="host-pair-form__row"><label>Agent runtime<input name="agent_runtime" value="claude" /></label><label>Model label<input name="model_label" value="Claude Opus" /></label></div>' +
+      '<div class="host-pair-form__row"><label>Permission<select name="permission_profile"><option value="task_worker" selected>task worker</option><option value="read_only">read only</option><option value="artifact_writer">artifact writer</option><option value="operator">operator</option></select></label><label class="host-pair-form__check"><input name="approve" type="checkbox" /> Approve immediately</label></div>' +
+      '<button type="submit" class="button button--primary">Stage Host</button>' +
+      '</form>' +
+      '</section>' +
+      '<section class="hosts-panel hosts-panel--wide">' +
+      '<div class="section-title">Approved / Pending Fabric</div>' +
+      '<div class="host-list">' + hostRows + '</div>' +
+      '</section>' +
+      '<section class="hosts-panel">' +
+      '<div class="section-title">LAN Guard</div>' +
+      '<div class="metric-list">' +
+      '<div class="metric"><span>LAN bind</span><strong>MCP_HTTP_ALLOW_LAN=1 required</strong></div>' +
+      '<div class="metric"><span>Bearer</span><strong>still required for MCP calls</strong></div>' +
+      '<div class="metric"><span>Remote check</span><strong>approved host IP + status</strong></div>' +
+      '<div class="metric"><span>Default</span><strong>loopback only</strong></div>' +
+      '</div>' +
+      '</section>' +
+      '</div>';
+
+    var form = els.hostsView.querySelector("#host-pair-form");
+    if (form) {
+      form.addEventListener("submit", submitHostPairing);
+    }
+    Array.prototype.slice.call(els.hostsView.querySelectorAll("[data-host-action]")).forEach(function (button) {
+      button.addEventListener("click", function () {
+        postHostAction({
+          action: button.getAttribute("data-host-action") || "",
+          host_id: button.getAttribute("data-host-id") || "",
+        }).catch(function (error) {
+          setResultText(String(error));
+        });
+      });
+    });
+  }
+
   function renderPatientZeroView() {
     if (!state.snapshot) {
       els.patientZeroView.innerHTML = "";
@@ -1673,6 +1853,7 @@
     renderWorkbenchView();
     renderBriefingView();
     renderWorkersView();
+    renderHostsView();
     renderPatientZeroView();
     renderEventsView();
     renderAgentDetail();

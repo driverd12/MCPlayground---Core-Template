@@ -3723,6 +3723,8 @@ async function main() {
             : [],
         };
       },
+      officeHostFabric: (input) => workerFabric(storage, input as z.infer<typeof workerFabricSchema>),
+      trustedRemoteHosts: () => storage.getWorkerFabricState()?.hosts ?? [],
     });
     if (startupConvergenceDelayMs > 0) {
       const timer = setTimeout(() => {

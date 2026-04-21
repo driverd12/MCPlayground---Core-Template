@@ -972,6 +972,45 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         recommended_worker_count: parseAnyInt(localHost.recommended_worker_count),
         max_local_model_concurrency: parseAnyInt(localHost.max_local_model_concurrency),
       },
+      worker_fabric: {
+        enabled: Boolean(kernelWorkerFabric.enabled),
+        strategy: String(kernelWorkerFabric.strategy ?? "n/a"),
+        default_host_id: String(kernelWorkerFabric.default_host_id ?? "local"),
+        host_count: parseAnyInt(kernelWorkerFabric.host_count),
+        enabled_host_count: parseAnyInt(kernelWorkerFabric.enabled_host_count),
+        worker_count: parseAnyInt(kernelWorkerFabric.worker_count),
+        active_worker_count: parseAnyInt(kernelWorkerFabric.active_worker_count),
+        health_counts: asDict(kernelWorkerFabric.health_counts),
+        transport_counts: asDict(kernelWorkerFabric.transport_counts),
+        hosts: asList(kernelWorkerFabric.hosts).map((entry) => {
+          const host = asDict(entry);
+          return {
+            host_id: String(host.host_id ?? ""),
+            display_name: String(host.remote_display_name ?? host.host_id ?? ""),
+            transport: String(host.transport ?? "local"),
+            enabled: Boolean(host.enabled),
+            worker_count: parseAnyInt(host.worker_count),
+            health_state: String(host.health_state ?? "offline"),
+            health_score: parseAnyFloat(host.health_score),
+            queue_depth: parseAnyInt(host.queue_depth),
+            active_tasks: parseAnyInt(host.active_tasks),
+            heartbeat_at: String(host.heartbeat_at ?? ""),
+            ssh_destination: String(host.ssh_destination ?? ""),
+            workspace_root: String(host.workspace_root ?? ""),
+            remote_access_status: String(host.remote_access_status ?? ""),
+            remote_hostname: String(host.remote_hostname ?? ""),
+            remote_ip_address: String(host.remote_ip_address ?? ""),
+            remote_agent_runtime: String(host.remote_agent_runtime ?? ""),
+            remote_model_label: String(host.remote_model_label ?? ""),
+            remote_allowed_addresses: asList(host.remote_allowed_addresses)
+              .map((item) => String(item ?? "").trim())
+              .filter(Boolean),
+            remote_pairing_code: String(host.remote_pairing_code ?? ""),
+            remote_approved_at: String(host.remote_approved_at ?? ""),
+            tags: asList(host.tags).map((item) => String(item ?? "").trim()).filter(Boolean),
+          };
+        }),
+      },
       router: {
         backend_count: parseAnyInt(kernelModelRouter.backend_count),
         enabled_backend_count: parseAnyInt(kernelModelRouter.enabled_backend_count),

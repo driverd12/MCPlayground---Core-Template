@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -27,6 +27,249 @@ test("parseJsonText recovers a trailing JSON object from noisy child stdout", ()
     ok: true,
     agents: [{ agent_id: "ring-leader" }],
   });
+});
+
+test("HTTP transport refuses LAN binds unless explicitly enabled", { concurrency: false }, async () => {
+  const previousLan = process.env.MCP_HTTP_ALLOW_LAN;
+  delete process.env.MCP_HTTP_ALLOW_LAN;
+  const port = await reservePort();
+
+  try {
+    await assert.rejects(
+      () =>
+        startHttpTransport(
+          () =>
+            new Server(
+              {
+                name: "http-lan-bind-test",
+                version: "1.0.0",
+              },
+              {
+                capabilities: {
+                  tools: {},
+                },
+              }
+            ),
+          {
+            host: "0.0.0.0",
+            port,
+            allowedOrigins: ["http://127.0.0.1"],
+            bearerToken: "lan-bind-token",
+          }
+        ),
+      /MCP_HTTP_ALLOW_LAN=1/
+    );
+  } finally {
+    if (previousLan === undefined) {
+      delete process.env.MCP_HTTP_ALLOW_LAN;
+    } else {
+      process.env.MCP_HTTP_ALLOW_LAN = previousLan;
+    }
+  }
+});
+
+test("/office/api/hosts bridges GUI host pairing actions into worker.fabric mutations", { concurrency: false }, async () => {
+  const calls = [];
+  const port = await reservePort();
+  const server = await startHttpTransport(
+    () =>
+      new Server(
+        {
+          name: "http-office-hosts-api-test",
+          version: "1.0.0",
+        },
+        {
+          capabilities: {
+            tools: {},
+          },
+        }
+      ),
+    {
+      host: "127.0.0.1",
+      port,
+      allowedOrigins: ["http://127.0.0.1"],
+      bearerToken: "office-hosts-token",
+      officeHostFabric: async (input) => {
+        calls.push(input);
+        return {
+          ok: true,
+          action: input.action,
+          host_id: input.host_id ?? input.remote_host?.host_id ?? null,
+        };
+      },
+    }
+  );
+
+  try {
+    const status = await fetchHttpJsonResponse(port, "/office/api/hosts");
+    assert.equal(status.statusCode, 200);
+    assert.equal(status.body.ok, true);
+    assert.equal(calls[0].action, "status");
+    assert.equal(calls[0].source_client, "office.api");
+
+    const staged = await fetchHttpJsonResponse(port, "/office/api/hosts", {
+      method: "POST",
+      headers: {
+        Origin: "http://127.0.0.1",
+        "Content-Type": "application/json",
+      },
+      body: {
+        action: "stage_remote_host",
+        remote_host: {
+          host_id: "dans-mbp",
+          display_name: "Dan's MacBook Pro",
+          hostname: "Dans-MBP.local",
+          ip_address: "10.1.2.76",
+          workspace_root: "/Users/dan.driver/Documents/Playground/Agentic Playground/MASTER-MOLD",
+        },
+      },
+    });
+    assert.equal(staged.statusCode, 200);
+    assert.equal(staged.body.ok, true);
+    assert.equal(staged.body.action, "stage_remote_host");
+    assert.equal(calls[1].action, "stage_remote_host");
+    assert.equal(calls[1].remote_host.host_id, "dans-mbp");
+    assert.equal(typeof calls[1].mutation.idempotency_key, "string");
+
+    const approved = await fetchHttpJsonResponse(port, "/office/api/hosts", {
+      method: "POST",
+      headers: {
+        Origin: "http://127.0.0.1",
+        "Content-Type": "application/json",
+      },
+      body: {
+        action: "approve_remote_host",
+        host_id: "dans-mbp",
+      },
+    });
+    assert.equal(approved.statusCode, 200);
+    assert.equal(approved.body.ok, true);
+    assert.equal(calls[2].action, "approve_remote_host");
+    assert.equal(calls[2].host_id, "dans-mbp");
+    assert.equal(calls[2].source_agent, "operator");
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+});
+
+test("/office/api/hosts verifies an SSH host with a bounded liveness probe", { concurrency: false }, async () => {
+  const previousPath = process.env.PATH;
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "mcp-office-host-verify-"));
+  const sshPath = path.join(tempDir, "ssh");
+  await writeFile(sshPath, "#!/bin/sh\nprintf mcp-host-ok\n");
+  await chmod(sshPath, 0o755);
+  process.env.PATH = `${tempDir}${path.delimiter}${previousPath ?? ""}`;
+
+  const calls = [];
+  const fabricState = {
+    hosts: [
+      {
+        host_id: "dans-mbp",
+        enabled: true,
+        transport: "ssh",
+        ssh_destination: "dan.driver@Dans-MBP.local",
+        workspace_root: "/Users/dan.driver/Documents/Playground/Agentic Playground/MASTER-MOLD",
+        worker_count: 1,
+        capabilities: {},
+        tags: ["remote", "approved-host"],
+        telemetry: {
+          health_state: "degraded",
+          heartbeat_at: new Date(0).toISOString(),
+        },
+        metadata: {
+          remote_access: {
+            status: "approved",
+            ip_address: "10.1.2.76",
+            allowed_addresses: ["10.1.2.76"],
+          },
+        },
+      },
+    ],
+  };
+  const port = await reservePort();
+  const server = await startHttpTransport(
+    () =>
+      new Server(
+        {
+          name: "http-office-hosts-verify-test",
+          version: "1.0.0",
+        },
+        {
+          capabilities: {
+            tools: {},
+          },
+        }
+      ),
+    {
+      host: "127.0.0.1",
+      port,
+      allowedOrigins: ["http://127.0.0.1"],
+      bearerToken: "office-hosts-verify-token",
+      officeHostFabric: async (input) => {
+        calls.push(input);
+        if (input.action === "heartbeat") {
+          fabricState.hosts[0].telemetry = {
+            ...fabricState.hosts[0].telemetry,
+            ...input.telemetry,
+          };
+          fabricState.hosts[0].capabilities = {
+            ...fabricState.hosts[0].capabilities,
+            ...input.capabilities,
+          };
+        }
+        return {
+          state: fabricState,
+        };
+      },
+    }
+  );
+
+  try {
+    const response = await fetchHttpJsonResponse(port, "/office/api/hosts", {
+      method: "POST",
+      headers: {
+        Origin: "http://127.0.0.1",
+        "Content-Type": "application/json",
+      },
+      body: {
+        action: "verify_remote_host",
+        host_id: "dans-mbp",
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.ok, true);
+    assert.equal(response.body.verification.connected, true);
+    assert.equal(calls[0].action, "status");
+    assert.equal(calls[1].action, "heartbeat");
+    assert.equal(calls[1].host_id, "dans-mbp");
+    assert.equal(calls[1].telemetry.health_state, "healthy");
+    assert.equal(calls[1].capabilities.remote_verify_ok, true);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+    if (previousPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = previousPath;
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("/ready falls back to the last successful cached snapshot when the live health snapshot stalls", { concurrency: false }, async () => {

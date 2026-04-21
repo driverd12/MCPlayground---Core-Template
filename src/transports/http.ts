@@ -24,6 +24,8 @@ export type HttpOptions = {
   officeRealtimeSignals?: () =>
     | { generated_at?: string | null; diagnostics?: unknown[]; stale?: boolean }
     | Promise<{ generated_at?: string | null; diagnostics?: unknown[]; stale?: boolean }>;
+  officeHostFabric?: (input: Record<string, unknown>) => unknown | Promise<unknown>;
+  trustedRemoteHosts?: () => unknown[] | Promise<unknown[]>;
 };
 
 type SessionBinding = {
@@ -871,6 +873,13 @@ async function readOfficeSnapshotForRefresh(
     if (rawPreferred) {
       return rawPreferred;
     }
+    if (!options.officeRawSnapshot && options.officeSnapshot) {
+      return options.officeSnapshot({
+        threadId: input.threadId,
+        theme: input.theme,
+        forceLive: input.forceLive,
+      });
+    }
   }
 
   if (officeSnapshotRefreshMode() === "stdio" && fs.existsSync(stdioServerEntry)) {
@@ -955,9 +964,123 @@ async function readOfficeSnapshotForRefresh(
   });
 }
 
+function isLoopbackBindHost(host: string) {
+  const normalized = host.trim().toLowerCase();
+  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1";
+}
+
+function lanHttpEnabled() {
+  return ["1", "true", "yes", "on"].includes(String(process.env.MCP_HTTP_ALLOW_LAN || "").trim().toLowerCase());
+}
+
+function normalizeClientIp(value: unknown): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return null;
+  }
+  if (raw.startsWith("::ffff:")) {
+    return raw.slice("::ffff:".length);
+  }
+  return raw === "::1" ? "127.0.0.1" : raw;
+}
+
+function isLoopbackClientIp(value: string | null) {
+  return value === "127.0.0.1" || value === "localhost" || value === "::1";
+}
+
+function parseTrustedClientEnv() {
+  return String(process.env.MCP_HTTP_ALLOWED_CLIENTS || process.env.MCP_HTTP_ALLOWED_CLIENT_IPS || "")
+    .split(",")
+    .map((entry) => normalizeClientIp(entry))
+    .filter((entry): entry is string => Boolean(entry));
+}
+
+function readRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function readStringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((entry) => String(entry ?? "").trim()).filter(Boolean) : [];
+}
+
+function truncateOfficeOutput(value: unknown, maxLength = 2000) {
+  const text = String(value ?? "").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function readWorkerFabricHosts(result: unknown): Record<string, unknown>[] {
+  const root = readRecord(result);
+  const state = readRecord(root?.state);
+  const hosts = Array.isArray(state?.hosts) ? state.hosts : [];
+  return hosts.map(readRecord).filter((entry): entry is Record<string, unknown> => entry !== null);
+}
+
+async function validateNetworkClient(req: http.IncomingMessage, options: HttpOptions) {
+  const remoteAddress = normalizeClientIp(req.socket.remoteAddress);
+  if (isLoopbackClientIp(remoteAddress)) {
+    return {
+      allowed: true,
+      remote_address: remoteAddress,
+      reason: "loopback",
+      host_id: "local",
+    };
+  }
+  if (!lanHttpEnabled()) {
+    return {
+      allowed: false,
+      remote_address: remoteAddress,
+      reason: "lan_disabled",
+      host_id: null,
+    };
+  }
+
+  const envAllowed = parseTrustedClientEnv();
+  if (remoteAddress && envAllowed.includes(remoteAddress)) {
+    return {
+      allowed: true,
+      remote_address: remoteAddress,
+      reason: "env_allowlist",
+      host_id: null,
+    };
+  }
+
+  const hosts = options.trustedRemoteHosts ? await Promise.resolve(options.trustedRemoteHosts()) : [];
+  for (const rawHost of hosts) {
+    const host = readRecord(rawHost);
+    if (!host || host.enabled === false) {
+      continue;
+    }
+    const metadata = readRecord(host.metadata) ?? {};
+    const remoteAccess = readRecord(metadata.remote_access) ?? {};
+    if (String(remoteAccess.status ?? "").trim() !== "approved") {
+      continue;
+    }
+    const allowedAddresses = readStringList(remoteAccess.allowed_addresses);
+    const ipAddress = normalizeClientIp(remoteAccess.ip_address);
+    const allowed = [...allowedAddresses.map(normalizeClientIp).filter(Boolean), ipAddress].filter(
+      (entry): entry is string => Boolean(entry)
+    );
+    if (remoteAddress && allowed.includes(remoteAddress)) {
+      return {
+        allowed: true,
+        remote_address: remoteAddress,
+        reason: "approved_host",
+        host_id: String(host.host_id ?? "").trim() || null,
+      };
+    }
+  }
+
+  return {
+    allowed: false,
+    remote_address: remoteAddress,
+    reason: "not_allowlisted",
+    host_id: null,
+  };
+}
+
 export async function startHttpTransport(createServer: () => Server, options: HttpOptions) {
-  if (options.host !== "127.0.0.1" && options.host !== "localhost") {
-    throw new Error("HTTP transport must bind to 127.0.0.1 or localhost");
+  if (!isLoopbackBindHost(options.host) && !lanHttpEnabled()) {
+    throw new Error("HTTP transport LAN bind requires MCP_HTTP_ALLOW_LAN=1");
   }
   if (!options.bearerToken) {
     throw new Error("MCP_HTTP_BEARER_TOKEN is required for HTTP transport");
@@ -976,7 +1099,23 @@ export async function startHttpTransport(createServer: () => Server, options: Ht
     res.setHeader("connection", "close");
     const requestUrl = new URL(req.url ?? "/", `http://${options.host}:${options.port}`);
     const pathname = requestUrl.pathname;
-    Promise.resolve(handleFastPathRequest(req, res, requestUrl, options))
+    Promise.resolve(validateNetworkClient(req, options))
+      .then((networkGate) => {
+        if (!networkGate.allowed) {
+          sendApiError(res, pathname, 403, {
+            error: "forbidden_remote_host",
+            detail: `Remote client ${networkGate.remote_address ?? "unknown"} is not allowlisted: ${networkGate.reason}.`,
+          });
+          return true;
+        }
+        return false;
+      })
+      .then((blocked) => {
+        if (blocked) {
+          return true;
+        }
+        return handleFastPathRequest(req, res, requestUrl, options);
+      })
       .then((handled) => {
         if (handled) {
           return true;
@@ -1468,6 +1607,183 @@ async function maybeHandleOfficeRequest(
       live_status_interval_ms: officeRealtimeIntervalMs(),
       dispatch_runtime: process.env.TRICHAT_OFFICE_TMUX_SESSION_NAME ? "tmux" : "launchd",
       tmux_session_name: process.env.TRICHAT_OFFICE_TMUX_SESSION_NAME || null,
+    });
+    return true;
+  }
+
+  if (pathname === "/office/api/hosts" && method === "GET") {
+    if (!options.officeHostFabric) {
+      sendJson(res, 503, {
+        ok: false,
+        error: "hosts_unavailable",
+        detail: "Office host controls are not wired for this HTTP transport.",
+      });
+      return true;
+    }
+    const result = await Promise.resolve(
+      options.officeHostFabric({
+        action: "status",
+        fallback_workspace_root: repoRoot,
+        fallback_worker_count: 1,
+        fallback_shell: "/bin/zsh",
+        source_client: "office.api",
+        source_agent: "operator",
+      })
+    );
+    sendJson(res, 200, {
+      ok: true,
+      result,
+    });
+    return true;
+  }
+
+  if (pathname === "/office/api/hosts" && method === "POST") {
+    if (!options.officeHostFabric) {
+      sendJson(res, 503, {
+        ok: false,
+        error: "hosts_unavailable",
+        detail: "Office host controls are not wired for this HTTP transport.",
+      });
+      return true;
+    }
+    const body = await readJsonBody(req);
+    const action = String(body.action || "").trim();
+    const supportedActions = new Set([
+      "stage_remote_host",
+      "approve_remote_host",
+      "reject_remote_host",
+      "remove_host",
+      "heartbeat",
+      "verify_remote_host",
+    ]);
+    if (!supportedActions.has(action)) {
+      sendJson(res, 400, {
+        ok: false,
+        error: "unsupported_host_action",
+        detail:
+          "Supported host actions are stage_remote_host, approve_remote_host, reject_remote_host, remove_host, heartbeat, and verify_remote_host.",
+      });
+      return true;
+    }
+    if (action === "verify_remote_host") {
+      const hostId = String(body.host_id || "").trim();
+      if (!hostId) {
+        sendJson(res, 400, {
+          ok: false,
+          error: "missing_host_id",
+          detail: "host_id is required to verify a remote host.",
+        });
+        return true;
+      }
+      const fabricStatus = await Promise.resolve(
+        options.officeHostFabric({
+          action: "status",
+          fallback_workspace_root: repoRoot,
+          fallback_worker_count: 1,
+          fallback_shell: "/bin/zsh",
+          source_client: "office.api",
+          source_agent: "operator",
+        })
+      );
+      const host = readWorkerFabricHosts(fabricStatus).find((entry) => String(entry.host_id ?? "").trim() === hostId);
+      if (!host) {
+        sendJson(res, 404, {
+          ok: false,
+          error: "unknown_host",
+          detail: `Unknown worker fabric host: ${hostId}`,
+        });
+        return true;
+      }
+      const sshDestination = String(host.ssh_destination ?? "").trim();
+      if (String(host.transport ?? "") !== "ssh" || !sshDestination) {
+        sendJson(res, 400, {
+          ok: false,
+          error: "host_not_remote_ssh",
+          detail: "Only SSH worker fabric hosts can be verified from the Office Hosts panel.",
+        });
+        return true;
+      }
+
+      const verifiedAt = new Date().toISOString();
+      let verification: Record<string, unknown>;
+      try {
+        const probe = await runLocalCommand(
+          "ssh",
+          ["-o", "BatchMode=yes", "-o", "ConnectTimeout=4", sshDestination, "printf mcp-host-ok"],
+          { timeoutMs: 6500 }
+        );
+        const connected = probe.code === 0 && probe.stdout.includes("mcp-host-ok");
+        verification = {
+          connected,
+          verified_at: verifiedAt,
+          host_id: hostId,
+          ssh_destination: sshDestination,
+          code: probe.code,
+          stdout: truncateOfficeOutput(probe.stdout),
+          stderr: truncateOfficeOutput(probe.stderr),
+        };
+      } catch (error) {
+        verification = {
+          connected: false,
+          verified_at: verifiedAt,
+          host_id: hostId,
+          ssh_destination: sshDestination,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+
+      const heartbeatResult = await Promise.resolve(
+        options.officeHostFabric({
+          action: "heartbeat",
+          mutation: buildOfficeMutation(`worker-fabric-verify-${hostId}`),
+          source_client: "office.api",
+          source_agent: "operator",
+          host_id: hostId,
+          capabilities: {
+            remote_last_verified_at: verifiedAt,
+            remote_verify_ok: verification.connected === true,
+          },
+          telemetry: {
+            heartbeat_at: verifiedAt,
+            health_state: verification.connected === true ? "healthy" : "degraded",
+          },
+        })
+      );
+      invalidateOfficeSnapshotCaches();
+      sendJson(res, 200, {
+        ok: true,
+        action,
+        result: heartbeatResult,
+        verification,
+      });
+      return true;
+    }
+    const remoteHostBody =
+      body.remote_host && typeof body.remote_host === "object" && !Array.isArray(body.remote_host)
+        ? (body.remote_host as Record<string, unknown>)
+        : null;
+    const hostMutationKey = String(body.host_id || remoteHostBody?.host_id || "host");
+    const toolArgs: Record<string, unknown> = {
+      action,
+      mutation: buildOfficeMutation(`worker-fabric-${action}-${hostMutationKey}`),
+      source_client: "office.api",
+      source_agent: "operator",
+    };
+    if (body.host_id) {
+      toolArgs.host_id = String(body.host_id);
+    }
+    if (remoteHostBody) {
+      toolArgs.remote_host = remoteHostBody;
+    }
+    if (body.telemetry && typeof body.telemetry === "object" && !Array.isArray(body.telemetry)) {
+      toolArgs.telemetry = body.telemetry;
+    }
+    const result = await Promise.resolve(options.officeHostFabric(toolArgs));
+    invalidateOfficeSnapshotCaches();
+    sendJson(res, 200, {
+      ok: true,
+      action,
+      result,
     });
     return true;
   }

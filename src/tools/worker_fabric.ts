@@ -1,4 +1,5 @@
 import { isAbsolute, join, normalize, sep } from "node:path";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   Storage,
@@ -53,9 +54,42 @@ const workerFabricHostSchema = z.object({
   metadata: recordSchema.optional(),
 });
 
+const remoteHostPairingSchema = z.object({
+  host_id: z.string().min(1).optional(),
+  display_name: z.string().min(1).optional(),
+  hostname: z.string().min(1).optional(),
+  ip_address: z.string().min(1).optional(),
+  ssh_user: z.string().min(1).optional(),
+  ssh_destination: z.string().min(1).optional(),
+  workspace_root: z.string().min(1),
+  worker_count: z.number().int().min(1).max(64).optional(),
+  shell: z.string().min(1).optional(),
+  agent_runtime: z.string().min(1).optional(),
+  model_label: z.string().min(1).optional(),
+  device_fingerprint: z.string().min(1).optional(),
+  public_key_fingerprint: z.string().min(1).optional(),
+  permission_profile: z.enum(["read_only", "task_worker", "artifact_writer", "operator"]).optional(),
+  allowed_addresses: z.array(z.string().min(1)).optional(),
+  capabilities: recordSchema.optional(),
+  tags: z.array(z.string().min(1)).optional(),
+  approve: z.boolean().optional(),
+  operator_note: z.string().optional(),
+});
+
 export const workerFabricSchema = z
   .object({
-    action: z.enum(["status", "configure", "upsert_host", "heartbeat", "remove_host"]).default("status"),
+    action: z
+      .enum([
+        "status",
+        "configure",
+        "upsert_host",
+        "heartbeat",
+        "remove_host",
+        "stage_remote_host",
+        "approve_remote_host",
+        "reject_remote_host",
+      ])
+      .default("status"),
     mutation: mutationSchema.optional(),
     enabled: z.boolean().optional(),
     strategy: z.enum(["balanced", "prefer_local", "prefer_capacity", "resource_aware"]).optional(),
@@ -63,6 +97,7 @@ export const workerFabricSchema = z
     host_id: z.string().min(1).optional(),
     host: workerFabricHostSchema.optional(),
     telemetry: workerFabricTelemetrySchema.optional(),
+    remote_host: remoteHostPairingSchema.optional(),
     capabilities: recordSchema.optional(),
     tags: z.array(z.string().min(1)).optional(),
     include_disabled: z.boolean().optional(),
@@ -86,6 +121,13 @@ export const workerFabricSchema = z
         path: ["host"],
       });
     }
+    if (value.action === "stage_remote_host" && !value.remote_host) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "remote_host is required for stage_remote_host",
+        path: ["remote_host"],
+      });
+    }
     if (value.action === "remove_host" && !value.host_id?.trim()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -97,6 +139,13 @@ export const workerFabricSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "host_id is required for heartbeat",
+        path: ["host_id"],
+      });
+    }
+    if ((value.action === "approve_remote_host" || value.action === "reject_remote_host") && !value.host_id?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "host_id is required for remote host approval actions",
         path: ["host_id"],
       });
     }
@@ -238,6 +287,96 @@ function normalizeStringArray(value: unknown): string[] {
 
 function mergeUniqueStrings(...values: Array<string[] | undefined>) {
   return [...new Set(values.flatMap((entry) => entry ?? []).map((entry) => entry.trim()).filter(Boolean))];
+}
+
+function slugHostId(value: string) {
+  return (
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/\.local$/i, "")
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^[-.]+|[-.]+$/g, "") || "remote-host"
+  ).slice(0, 80);
+}
+
+function buildRemoteSshDestination(input: z.infer<typeof remoteHostPairingSchema>) {
+  const explicit = readString(input.ssh_destination);
+  if (explicit) {
+    return explicit;
+  }
+  const target = readString(input.hostname) ?? readString(input.ip_address);
+  if (!target) {
+    return null;
+  }
+  const user = readString(input.ssh_user);
+  return user ? `${user}@${target}` : target;
+}
+
+function normalizeRemoteAllowedAddresses(input: z.infer<typeof remoteHostPairingSchema>) {
+  return mergeUniqueStrings(input.allowed_addresses, [readString(input.ip_address) ?? ""].filter(Boolean));
+}
+
+function normalizeRemotePermissionProfile(
+  value: unknown
+): "read_only" | "task_worker" | "artifact_writer" | "operator" | null {
+  const profile = readString(value);
+  return profile === "read_only" || profile === "task_worker" || profile === "artifact_writer" || profile === "operator"
+    ? profile
+    : null;
+}
+
+function mergeRemoteAccessMetadata(params: {
+  existingMetadata: Record<string, unknown>;
+  remoteHost: z.infer<typeof remoteHostPairingSchema>;
+  status: "pending" | "approved" | "rejected";
+  existingRemoteAccess?: Record<string, unknown> | null;
+  sourceAgent?: string;
+}) {
+  const now = new Date().toISOString();
+  const existingRemoteAccess = isRecord(params.existingRemoteAccess)
+    ? params.existingRemoteAccess
+    : isRecord(params.existingMetadata.remote_access)
+      ? params.existingMetadata.remote_access
+      : {};
+  const allowedAddresses = normalizeRemoteAllowedAddresses(params.remoteHost);
+  return {
+    ...params.existingMetadata,
+    remote_access: {
+      ...existingRemoteAccess,
+      status: params.status,
+      display_name: readString(params.remoteHost.display_name) ?? readString(existingRemoteAccess.display_name),
+      hostname: readString(params.remoteHost.hostname) ?? readString(existingRemoteAccess.hostname),
+      ip_address: readString(params.remoteHost.ip_address) ?? readString(existingRemoteAccess.ip_address),
+      allowed_addresses: allowedAddresses.length
+        ? allowedAddresses
+        : normalizeStringArray(existingRemoteAccess.allowed_addresses),
+      ssh_user: readString(params.remoteHost.ssh_user) ?? readString(existingRemoteAccess.ssh_user),
+      agent_runtime: readString(params.remoteHost.agent_runtime) ?? readString(existingRemoteAccess.agent_runtime),
+      model_label: readString(params.remoteHost.model_label) ?? readString(existingRemoteAccess.model_label),
+      device_fingerprint:
+        readString(params.remoteHost.device_fingerprint) ?? readString(existingRemoteAccess.device_fingerprint),
+      public_key_fingerprint:
+        readString(params.remoteHost.public_key_fingerprint) ?? readString(existingRemoteAccess.public_key_fingerprint),
+      permission_profile:
+        normalizeRemotePermissionProfile(params.remoteHost.permission_profile) ??
+        normalizeRemotePermissionProfile(existingRemoteAccess.permission_profile) ??
+        "task_worker",
+      pairing_code: readString(existingRemoteAccess.pairing_code) ?? randomUUID().slice(0, 8).toUpperCase(),
+      operator_note: readString(params.remoteHost.operator_note) ?? readString(existingRemoteAccess.operator_note),
+      staged_at: readString(existingRemoteAccess.staged_at) ?? now,
+      approved_at: params.status === "approved" ? now : readString(existingRemoteAccess.approved_at),
+      approved_by:
+        params.status === "approved"
+          ? params.sourceAgent ?? readString(existingRemoteAccess.approved_by) ?? "operator"
+          : readString(existingRemoteAccess.approved_by),
+      rejected_at: params.status === "rejected" ? now : readString(existingRemoteAccess.rejected_at),
+      rejected_by:
+        params.status === "rejected"
+          ? params.sourceAgent ?? readString(existingRemoteAccess.rejected_by) ?? "operator"
+          : readString(existingRemoteAccess.rejected_by),
+    },
+  };
 }
 
 function normalizeTelemetry(input: Partial<WorkerFabricHostTelemetryRecord> | Record<string, unknown> | null | undefined) {
@@ -1033,6 +1172,139 @@ export function workerFabric(storage: Storage, input: z.infer<typeof workerFabri
             default_host_id: existing.default_host_id ?? host.host_id,
             hosts: nextHosts,
           }),
+        };
+      }
+
+      if (input.action === "stage_remote_host") {
+        const remoteHost = input.remote_host!;
+        const identitySource =
+          readString(remoteHost.host_id) ??
+          readString(remoteHost.hostname) ??
+          readString(remoteHost.ip_address) ??
+          readString(remoteHost.display_name) ??
+          "remote-host";
+        const hostId = slugHostId(identitySource);
+        const existingHost = existing.hosts.find((entry) => entry.host_id === hostId) ?? null;
+        const sshDestination = buildRemoteSshDestination(remoteHost);
+        if (!sshDestination) {
+          throw new Error("remote_host requires hostname, ip_address, or ssh_destination");
+        }
+        const status = remoteHost.approve === true ? "approved" : "pending";
+        const statusTag = status === "approved" ? "approved-host" : "pending-host";
+        const staleStatusTags = new Set(status === "approved" ? ["pending-host", "rejected-host"] : ["approved-host", "rejected-host"]);
+        const nextMetadata = mergeRemoteAccessMetadata({
+          existingMetadata: existingHost?.metadata ?? {},
+          remoteHost,
+          status,
+          sourceAgent: input.source_agent,
+        });
+        const nextHost: WorkerFabricHostRecord = {
+          host_id: hostId,
+          enabled: status === "approved",
+          transport: "ssh",
+          ssh_destination: sshDestination,
+          workspace_root: remoteHost.workspace_root,
+          worker_count: remoteHost.worker_count ?? existingHost?.worker_count ?? 1,
+          shell: remoteHost.shell?.trim() || existingHost?.shell || "/bin/zsh",
+          capabilities: {
+            ...(existingHost?.capabilities ?? {}),
+            ...(remoteHost.capabilities ?? {}),
+            remote_control: true,
+            approved_remote_host: status === "approved",
+          },
+          tags: mergeUniqueStrings(
+            existingHost?.tags.filter((tag) => !staleStatusTags.has(tag)),
+            remoteHost.tags,
+            ["remote", statusTag]
+          ),
+          telemetry: normalizeTelemetry({
+            ...(existingHost?.telemetry ?? {}),
+            heartbeat_at: existingHost?.telemetry.heartbeat_at ?? new Date().toISOString(),
+            health_state: status === "approved" ? existingHost?.telemetry.health_state ?? "degraded" : "degraded",
+          }),
+          metadata: nextMetadata,
+          updated_at: new Date().toISOString(),
+        };
+        const nextHosts = existing.hosts.filter((entry) => entry.host_id !== hostId).concat([nextHost]);
+        return {
+          state: storage.setWorkerFabricState({
+            enabled: true,
+            strategy: existing.strategy,
+            default_host_id: existing.default_host_id ?? hostId,
+            hosts: nextHosts,
+          }),
+          host: nextHost,
+          pairing: nextMetadata.remote_access,
+        };
+      }
+
+      if (input.action === "approve_remote_host" || input.action === "reject_remote_host") {
+        const hostId = input.host_id!.trim();
+        const existingHost = existing.hosts.find((entry) => entry.host_id === hostId);
+        if (!existingHost) {
+          throw new Error(`Unknown worker fabric host: ${hostId}`);
+        }
+        const existingRemoteAccess = isRecord(existingHost.metadata.remote_access)
+          ? existingHost.metadata.remote_access
+          : {};
+        const remoteHost = {
+          workspace_root: existingHost.workspace_root,
+          display_name: readString(existingRemoteAccess.display_name) ?? existingHost.host_id,
+          hostname: readString(existingRemoteAccess.hostname) ?? undefined,
+          ip_address: readString(existingRemoteAccess.ip_address) ?? undefined,
+          ssh_user: readString(existingRemoteAccess.ssh_user) ?? undefined,
+          agent_runtime: readString(existingRemoteAccess.agent_runtime) ?? undefined,
+          model_label: readString(existingRemoteAccess.model_label) ?? undefined,
+          allowed_addresses: normalizeStringArray(existingRemoteAccess.allowed_addresses),
+          permission_profile: normalizeRemotePermissionProfile(existingRemoteAccess.permission_profile) ?? undefined,
+          operator_note: input.remote_host?.operator_note,
+        };
+        const status = input.action === "approve_remote_host" ? "approved" : "rejected";
+        const nextMetadata = mergeRemoteAccessMetadata({
+          existingMetadata: existingHost.metadata,
+          remoteHost,
+          status,
+          existingRemoteAccess,
+          sourceAgent: input.source_agent,
+        });
+        const nextHosts = existing.hosts.map((entry) =>
+          entry.host_id === hostId
+            ? {
+                ...entry,
+                enabled: status === "approved",
+                tags:
+                  status === "approved"
+                    ? mergeUniqueStrings(entry.tags.filter((tag) => tag !== "pending-host" && tag !== "rejected-host"), [
+                        "approved-host",
+                        "remote",
+                      ])
+                    : mergeUniqueStrings(entry.tags.filter((tag) => tag !== "pending-host" && tag !== "approved-host"), [
+                        "rejected-host",
+                        "remote",
+                      ]),
+                capabilities: {
+                  ...entry.capabilities,
+                  approved_remote_host: status === "approved",
+                },
+                telemetry: normalizeTelemetry({
+                  ...entry.telemetry,
+                  heartbeat_at: new Date().toISOString(),
+                  health_state: status === "approved" ? "degraded" : "offline",
+                }),
+                metadata: nextMetadata,
+                updated_at: new Date().toISOString(),
+              }
+            : entry
+        );
+        return {
+          state: storage.setWorkerFabricState({
+            enabled: true,
+            strategy: existing.strategy,
+            default_host_id: existing.default_host_id ?? hostId,
+            hosts: nextHosts,
+          }),
+          host: nextHosts.find((entry) => entry.host_id === hostId) ?? null,
+          pairing: nextMetadata.remote_access,
         };
       }
 
