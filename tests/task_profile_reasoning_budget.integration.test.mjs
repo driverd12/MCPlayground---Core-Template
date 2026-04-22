@@ -293,10 +293,21 @@ test("task profiles treat high test-time-compute policy as high complexity for r
               "final_answer_delta",
             ],
           },
+          shallow_branch_search: {
+            enabled: true,
+            max_depth: 2,
+            branch_count: 2,
+            prune_with: ["artifact_fit", "contradiction_risk"],
+          },
         },
       },
       tags: ["reasoning-budget", "budget-forcing"],
     });
+    const budgetForcingSummary = await callTool(client, "task.summary", {
+      running_limit: 10,
+    });
+    assert.equal(budgetForcingSummary.reasoning_policy.branch_search_count, 1);
+    assert.equal(budgetForcingSummary.reasoning_policy.budget_forcing_count, 1);
 
     const missingBudgetForcingClaim = await callTool(client, "task.claim", {
       mutation: nextMutation(testId, "task.claim.missing-budget-forcing", () => mutationCounter++),
@@ -317,11 +328,13 @@ test("task profiles treat high test-time-compute policy as high complexity for r
         ],
         selected_candidate_id: "candidate-b",
         selection_rationale: "candidate-b has better regression evidence",
+        branch_search_summary: "Expanded two candidates and pruned candidate-a before selecting candidate-b.",
       },
     });
     assert.equal(missingBudgetForcingCompletion.completed, true);
     assert.equal(missingBudgetForcingCompletion.task.result.reasoning_policy_audit.status, "needs_review");
     assert.ok(missingBudgetForcingCompletion.task.result.reasoning_policy_audit.missing_fields.includes("budget_forcing_review"));
+    assert.ok(missingBudgetForcingCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("branch_search"));
 
     const failedTask = await callTool(client, "task.create", {
       mutation: nextMutation(testId, "task.create.failure-reflection", () => mutationCounter++),

@@ -940,6 +940,8 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
           candidate_total: parseAnyInt(taskReasoningPolicy.total_candidate_count),
           max_candidate_count: parseAnyInt(taskReasoningPolicy.max_candidate_count),
           evidence_rerank_count: parseAnyInt(taskReasoningPolicy.evidence_rerank_count),
+          branch_search_count: parseAnyInt(taskReasoningPolicy.branch_search_count),
+          budget_forcing_count: parseAnyInt(taskReasoningPolicy.budget_forcing_count),
           completion_review_needs_count: taskReasoningReviewNeedsCount,
           completion_review_audited_count: parseAnyInt(taskReasoningCompletionReview.audited_completed_count),
           completion_review_satisfied_count: parseAnyInt(taskReasoningCompletionReview.satisfied_count),
@@ -1264,6 +1266,9 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
           running_count: parseAnyInt(taskReasoningPolicy.running_count),
           candidate_total: parseAnyInt(taskReasoningPolicy.total_candidate_count),
           max_candidate_count: parseAnyInt(taskReasoningPolicy.max_candidate_count),
+          evidence_rerank_count: parseAnyInt(taskReasoningPolicy.evidence_rerank_count),
+          branch_search_count: parseAnyInt(taskReasoningPolicy.branch_search_count),
+          budget_forcing_count: parseAnyInt(taskReasoningPolicy.budget_forcing_count),
           completion_review: {
             audited_completed_count: parseAnyInt(taskReasoningCompletionReview.audited_completed_count),
             needs_review_count: taskReasoningReviewNeedsCount,

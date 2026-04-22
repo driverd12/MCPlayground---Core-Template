@@ -176,6 +176,7 @@ Current MASTER-MOLD contract:
 - Activation is limited to high or critical risk goals, multi-stream plans, or constraint-heavy objectives; ordinary mutation lanes stay single-path.
 - The policy caps search at depth 2, expands only top-scoring candidates, and prunes with artifact fit, contradiction risk, rollback safety, and environment feedback.
 - Runtime worker briefs now render the branch-search contract and task completion audits require compact branch-search evidence before marking the reasoning policy satisfied.
+- Task summaries and Agent Office now expose active branch-search counts so operators can see when this expensive lane is in use.
 
 ## 7. Newer lane worth testing, but not making default
 
@@ -195,6 +196,7 @@ Current MASTER-MOLD contract:
 - Budget forcing is explicit opt-in through `metadata.reasoning_experiments.budget_forcing` or a direct `reasoning_compute_policy.budget_forcing` contract.
 - Runtime worker briefs require one bounded forced second-look pass after initial candidate selection.
 - Completion audits mark the reasoning policy `needs_review` unless compact `budget_forcing_review` or `forced_second_look` evidence is present.
+- Task summaries and Agent Office expose active budget-forcing counts so this experimental lane stays operator-visible.
 
 Do not:
 

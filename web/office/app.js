@@ -654,6 +654,8 @@
         "Reasoning",
         "active " + String(taskReasoning.active_count || 0) +
           " | review " + String(taskReasoning.completion_review_needs_count || 0) +
+          " | branch " + String(taskReasoning.branch_search_count || 0) +
+          " | budget " + String(taskReasoning.budget_forcing_count || 0) +
           " | maxN " + String(taskReasoning.max_candidate_count || 0),
         (taskReasoning.completion_review_needs_count || 0) > 0
           ? "bad"
@@ -1017,7 +1019,8 @@
         tone: reasoningReviewCount ? "bad" : (queueReasoning.active_count || 0) > 0 ? "warn" : "good",
         detail: reasoningReviewCount
           ? compactIntakeText(reasoningReviewFieldLabels.join(" · ") || "completion evidence missing", 84)
-          : "policy evidence clean",
+          : "branch " + String(queueReasoning.branch_search_count || 0) +
+            " · budget " + String(queueReasoning.budget_forcing_count || 0),
       },
       {
         label: "Providers",

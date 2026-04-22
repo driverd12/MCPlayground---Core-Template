@@ -262,6 +262,8 @@ test("office gui snapshot surfaces reasoning-policy review pressure in workbench
           evidence_rerank_count: 0,
           plan_pass_count: 0,
           verification_pass_count: 0,
+          branch_search_count: 2,
+          budget_forcing_count: 1,
           total_candidate_count: 0,
           max_candidate_count: 0,
           high_compute_task_ids: [],
@@ -325,10 +327,14 @@ test("office gui snapshot surfaces reasoning-policy review pressure in workbench
 
   assert.equal(snapshot.summary.tasks.reasoning_policy.completion_review_needs_count, 1);
   assert.equal(snapshot.summary.tasks.reasoning_policy.completion_review_audited_count, 2);
+  assert.equal(snapshot.summary.tasks.reasoning_policy.branch_search_count, 2);
+  assert.equal(snapshot.summary.tasks.reasoning_policy.budget_forcing_count, 1);
   assert.deepEqual(snapshot.summary.tasks.reasoning_policy.completion_review_task_ids, ["task-review-1"]);
   assert.equal(snapshot.summary.workbench.blocker_count, 1);
   assert.equal(snapshot.summary.workbench.reasoning_review_count, 1);
   assert.equal(snapshot.workbench.queue.reasoning_policy.completion_review.needs_review_count, 1);
+  assert.equal(snapshot.workbench.queue.reasoning_policy.branch_search_count, 2);
+  assert.equal(snapshot.workbench.queue.reasoning_policy.budget_forcing_count, 1);
   assert.equal(snapshot.workbench.queue.reasoning_policy.completion_review.missing_field_counts.verification_pass, 1);
   assert.equal(snapshot.workbench.blockers[0].kind, "reasoning_policy_review");
   assert.deepEqual(snapshot.workbench.blockers[0].task_ids, ["task-review-1"]);

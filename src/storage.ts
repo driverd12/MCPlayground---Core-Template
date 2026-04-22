@@ -728,6 +728,8 @@ export type TaskSummaryRecord = {
     evidence_rerank_count: number;
     plan_pass_count: number;
     verification_pass_count: number;
+    branch_search_count: number;
+    budget_forcing_count: number;
     total_candidate_count: number;
     max_candidate_count: number;
     high_compute_task_ids: string[];
@@ -14411,6 +14413,8 @@ function summarizeTaskReasoningPolicy(
     evidence_rerank_count: 0,
     plan_pass_count: 0,
     verification_pass_count: 0,
+    branch_search_count: 0,
+    budget_forcing_count: 0,
     total_candidate_count: 0,
     max_candidate_count: 0,
     high_compute_task_ids: [],
@@ -14426,6 +14430,8 @@ function summarizeTaskReasoningPolicy(
     const evidenceRerank = resolveTaskReasoningSelectionStrategy(execution) === "evidence_rerank";
     const planPass = execution.require_plan_pass === true;
     const verificationPass = execution.require_verification_pass === true;
+    const branchSearch = taskReasoningComputePolicyRequiresBranchSearch(execution);
+    const budgetForcing = taskReasoningComputePolicyRequiresBudgetForcing(execution);
     const taskKind = String(execution.task_kind ?? "").trim();
     const qualityPreference = String(execution.quality_preference ?? "").trim();
     const qualityBiased =
@@ -14436,6 +14442,8 @@ function summarizeTaskReasoningPolicy(
       planPass ||
       verificationPass ||
       taskReasoningComputePolicyRequiresEvidence(execution) ||
+      branchSearch ||
+      budgetForcing ||
       qualityBiased;
     if (!highCompute) {
       continue;
@@ -14455,6 +14463,12 @@ function summarizeTaskReasoningPolicy(
     }
     if (verificationPass) {
       summary.verification_pass_count += 1;
+    }
+    if (branchSearch) {
+      summary.branch_search_count += 1;
+    }
+    if (budgetForcing) {
+      summary.budget_forcing_count += 1;
     }
     summary.total_candidate_count += candidateCount;
     summary.max_candidate_count = Math.max(summary.max_candidate_count, candidateCount);
