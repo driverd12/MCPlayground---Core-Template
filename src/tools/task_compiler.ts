@@ -208,6 +208,15 @@ function readMetadataStringArray(value: unknown) {
   return [...new Set(value.map((entry) => String(entry ?? "").trim()).filter(Boolean))];
 }
 
+function readMetadataRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function readBudgetForcingOptIn(metadata: Record<string, unknown> | undefined) {
+  const experiments = readMetadataRecord(metadata?.reasoning_experiments);
+  return metadata?.budget_forcing === true || experiments?.budget_forcing === true;
+}
+
 function readMemoryPreflightSummary(value: unknown): SwarmMemoryPreflightSummary | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -356,6 +365,7 @@ function applyAdaptiveReasoningPolicy(
     risk_tier?: GoalRiskTier | null;
     stream_count?: number;
     constraint_count?: number;
+    budget_forcing_enabled?: boolean;
   }
 ) {
   const nextTaskMetadata = { ...taskMetadata };
@@ -366,6 +376,10 @@ function applyAdaptiveReasoningPolicy(
   const multiStreamPlan = (context?.stream_count ?? 0) >= 4;
   const constraintPressure = (context?.constraint_count ?? 0) >= 3;
   const hardBranch = highRiskGoal || multiStreamPlan || constraintPressure;
+  const budgetForcingEnabled =
+    context?.budget_forcing_enabled === true ||
+    nextTaskMetadata.budget_forcing === true ||
+    nextTaskMetadata.experimental_budget_forcing === true;
   const activationReasons = uniqueStrings([
     stream.step_kind === "analysis" ? "analysis_step" : null,
     stream.step_kind === "verification" ? "verification_step" : null,
@@ -376,6 +390,7 @@ function applyAdaptiveReasoningPolicy(
     highRiskGoal ? "high_risk_goal" : null,
     multiStreamPlan ? "multi_stream_plan" : null,
     constraintPressure ? "constraint_pressure" : null,
+    budgetForcingEnabled ? "budget_forcing_opt_in" : null,
   ]);
   const shouldMultiSample =
     stream.step_kind === "analysis" ||
@@ -418,6 +433,20 @@ function applyAdaptiveReasoningPolicy(
         expand_policy: "top_scoring_candidates_only",
         prune_with: ["artifact_fit", "contradiction_risk", "rollback_safety", "environment_feedback"],
         fallback: "single_path_when_branch_confidence_high",
+      };
+    }
+    if (budgetForcingEnabled) {
+      reasoningComputePolicy.budget_forcing = {
+        enabled: true,
+        max_revision_passes: 1,
+        force_after: "initial_candidate_selection",
+        stop_condition: "selected_candidate_survives_second_look",
+        required_evidence_fields: [
+          "initial_answer_summary",
+          "forced_second_look",
+          "changed_decision",
+          "final_answer_delta",
+        ],
       };
     }
     nextTaskMetadata.reasoning_compute_policy = reasoningComputePolicy;
@@ -809,6 +838,7 @@ export function compileObjectivePreview(
           risk_tier: input.risk_tier,
           stream_count: streams.length,
           constraint_count: input.constraints?.length ?? 0,
+          budget_forcing_enabled: readBudgetForcingOptIn(input.metadata),
         }
       );
       if (
@@ -886,6 +916,7 @@ export function compileObjectivePreview(
       risk_tier: input.risk_tier,
       stream_count: streams.length,
       constraint_count: input.constraints?.length ?? 0,
+      budget_forcing_enabled: readBudgetForcingOptIn(input.metadata),
     }
   );
 

@@ -155,6 +155,61 @@ test("task.compile enables shallow branch search for hard reasoning branches", a
   }
 });
 
+test("task.compile keeps budget forcing opt-in for experimental reasoning budgets", async () => {
+  const testId = `task-compile-budget-forcing-${Date.now()}`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-task-compile-budget-forcing-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, { MCP_NOTIFIER_DRY_RUN: "1" });
+  try {
+    const goal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Budget forcing compile goal",
+      objective: "Verify an experimental budget-forcing reasoning policy stays explicit and bounded",
+      status: "active",
+      priority: 6,
+      risk_tier: "medium",
+      autonomy_mode: "recommend",
+      acceptance_criteria: ["Budget forcing is opt-in and evidence-gated"],
+      constraints: ["Do not enable budget forcing by default"],
+      tags: ["compiler", "reasoning"],
+    });
+
+    const compiled = await callTool(client, "task.compile", {
+      mutation: nextMutation(testId, "task.compile", () => mutationCounter++),
+      goal_id: goal.goal.goal_id,
+      objective: "Verify the budget-forcing policy renders only when explicitly enabled",
+      title: "Budget forcing compile",
+      create_plan: true,
+      selected: true,
+      metadata: {
+        reasoning_experiments: {
+          budget_forcing: true,
+        },
+      },
+      success_criteria: ["Budget forcing policy is present and bounded"],
+    });
+
+    const verificationStep = compiled.steps.find(
+      (step) => step.metadata.owner_role_id === "verification-director" && step.step_kind === "verification"
+    );
+    const finalDecisionStep = compiled.steps.find((step) => step.step_kind === "decision");
+    const budgetForcing = verificationStep?.metadata.task_execution.reasoning_compute_policy.budget_forcing;
+
+    assert.equal(budgetForcing?.enabled, true);
+    assert.equal(budgetForcing?.max_revision_passes, 1);
+    assert.equal(budgetForcing?.force_after, "initial_candidate_selection");
+    assert.ok(
+      verificationStep?.metadata.task_execution.reasoning_compute_policy.activation_reasons.includes("budget_forcing_opt_in")
+    );
+    assert.equal(finalDecisionStep?.metadata.task_execution.reasoning_compute_policy.budget_forcing.enabled, true);
+  } finally {
+    await client.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function openClient(dbPath, extraEnv) {
   const transport = new StdioClientTransport({
     command: "node",

@@ -13891,6 +13891,12 @@ function taskReasoningComputePolicyRequiresBranchSearch(execution: Record<string
   return branchSearch?.enabled === true;
 }
 
+function taskReasoningComputePolicyRequiresBudgetForcing(execution: Record<string, unknown>): boolean {
+  const computePolicy = readTaskReasoningComputePolicy(execution);
+  const budgetForcing = readPlainObject(computePolicy?.budget_forcing);
+  return budgetForcing?.enabled === true;
+}
+
 function isTaskExecutionHighCompute(execution: Record<string, unknown> | null): boolean {
   if (!execution) {
     return false;
@@ -13906,6 +13912,7 @@ function isTaskExecutionHighCompute(execution: Record<string, unknown> | null): 
     execution.require_verification_pass === true ||
     taskReasoningComputePolicyRequiresEvidence(execution) ||
     taskReasoningComputePolicyRequiresBranchSearch(execution) ||
+    taskReasoningComputePolicyRequiresBudgetForcing(execution) ||
     (qualityPreference === "quality" && (taskKind === "research" || taskKind === "verification"))
   );
 }
@@ -13924,6 +13931,7 @@ function buildTaskCompletionReasoningAudit(
   const verificationRequired = execution.require_verification_pass === true;
   const policyEvidenceRequired = taskReasoningComputePolicyRequiresEvidence(execution);
   const branchSearchRequired = taskReasoningComputePolicyRequiresBranchSearch(execution);
+  const budgetForcingRequired = taskReasoningComputePolicyRequiresBudgetForcing(execution);
   const verifierRequiredSelectedFields = readVerifierRerankRequiredSelectedFields(execution);
   const taskKind = String(execution.task_kind ?? "").trim();
   const qualityPreference = String(execution.quality_preference ?? "").trim();
@@ -13933,6 +13941,7 @@ function buildTaskCompletionReasoningAudit(
     planRequired ||
     verificationRequired ||
     branchSearchRequired ||
+    budgetForcingRequired ||
     evidenceRerank ||
     policyEvidenceRequired ||
     (candidateRequirement !== null && candidateRequirement > 1) ||
@@ -14008,6 +14017,16 @@ function buildTaskCompletionReasoningAudit(
       "branch_evaluations",
       "pruned_branches",
       "environment_feedback",
+    ]));
+  }
+  if (budgetForcingRequired) {
+    requireField("budget_forcing_review", hasCompletionEvidence(result, [
+      "budget_forcing_review",
+      "forced_second_look",
+      "second_look_summary",
+      "revision_summary",
+      "final_answer_delta",
+      "changed_decision",
     ]));
   }
   if ((policyEvidenceRequired || qualityBiased) && requiredFields.length === 0) {

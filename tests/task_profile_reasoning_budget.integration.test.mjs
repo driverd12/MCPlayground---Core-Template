@@ -262,6 +262,67 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       /missing required verifier rerank fields/
     );
 
+    const missingBudgetForcingTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.missing-budget-forcing", () => mutationCounter++),
+      objective: "Require a forced second look before accepting the selected verification answer.",
+      project_dir: REPO_ROOT,
+      priority: 6,
+      routing: {
+        allowed_agent_ids: ["budget-forcing-worker"],
+      },
+      task_execution: {
+        task_kind: "verification",
+        quality_preference: "quality",
+        reasoning_compute_policy: {
+          mode: "adaptive_best_of_n",
+          candidate_count: 2,
+          max_candidate_count: 4,
+          selection_strategy: "evidence_rerank",
+          activation_reasons: ["verification_task", "budget_forcing_opt_in"],
+          evidence_required: true,
+          transcript_policy: "compact_evidence_only",
+          budget_forcing: {
+            enabled: true,
+            max_revision_passes: 1,
+            force_after: "initial_candidate_selection",
+            stop_condition: "selected_candidate_survives_second_look",
+            required_evidence_fields: [
+              "initial_answer_summary",
+              "forced_second_look",
+              "changed_decision",
+              "final_answer_delta",
+            ],
+          },
+        },
+      },
+      tags: ["reasoning-budget", "budget-forcing"],
+    });
+
+    const missingBudgetForcingClaim = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim.missing-budget-forcing", () => mutationCounter++),
+      worker_id: "budget-forcing-worker",
+      task_id: missingBudgetForcingTask.task.task_id,
+    });
+    assert.equal(missingBudgetForcingClaim.claimed, true);
+
+    const missingBudgetForcingCompletion = await callTool(client, "task.complete", {
+      mutation: nextMutation(testId, "task.complete.missing-budget-forcing", () => mutationCounter++),
+      task_id: missingBudgetForcingTask.task.task_id,
+      worker_id: "budget-forcing-worker",
+      summary: "Completed candidate selection without the forced second look evidence.",
+      result: {
+        candidates: [
+          { id: "candidate-a", evidence: "passed smoke check" },
+          { id: "candidate-b", selected: true, evidence: "passed regression check" },
+        ],
+        selected_candidate_id: "candidate-b",
+        selection_rationale: "candidate-b has better regression evidence",
+      },
+    });
+    assert.equal(missingBudgetForcingCompletion.completed, true);
+    assert.equal(missingBudgetForcingCompletion.task.result.reasoning_policy_audit.status, "needs_review");
+    assert.ok(missingBudgetForcingCompletion.task.result.reasoning_policy_audit.missing_fields.includes("budget_forcing_review"));
+
     const failedTask = await callTool(client, "task.create", {
       mutation: nextMutation(testId, "task.create.failure-reflection", () => mutationCounter++),
       objective: "Investigate a brittle verification path and learn from the failed attempt.",

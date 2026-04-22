@@ -145,6 +145,12 @@ function resolveShallowBranchSearch(taskExecution: Record<string, unknown>) {
   return branchSearch?.enabled === true ? branchSearch : null;
 }
 
+function resolveBudgetForcing(taskExecution: Record<string, unknown>) {
+  const computePolicy = resolveReasoningComputePolicy(taskExecution);
+  const budgetForcing = readNullableRecord(computePolicy?.budget_forcing);
+  return budgetForcing?.enabled === true ? budgetForcing : null;
+}
+
 function extractDelegationBrief(task: { payload: Record<string, unknown>; metadata: Record<string, unknown> }) {
   const nested =
     readNullableRecord(task.payload.delegation_brief) ??
@@ -205,6 +211,12 @@ function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExec
     typeof shallowBranchSearch?.max_depth === "number" && Number.isFinite(shallowBranchSearch.max_depth)
       ? Math.max(1, Math.round(shallowBranchSearch.max_depth))
       : null;
+  const budgetForcing = resolveBudgetForcing(taskExecution);
+  const budgetRevisionPasses =
+    typeof budgetForcing?.max_revision_passes === "number" && Number.isFinite(budgetForcing.max_revision_passes)
+      ? Math.max(1, Math.round(budgetForcing.max_revision_passes))
+      : 1;
+  const budgetRequiredFields = readStringArray(budgetForcing?.required_evidence_fields);
   const lines = uniqueStrings([
     policyMode === "adaptive_best_of_n"
       ? `Adaptive compute policy: best-of-N with ${reasoningCandidateCount ?? computePolicy?.candidate_count ?? "bounded"} candidate(s).`
@@ -226,6 +238,12 @@ function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExec
       : null,
     branchPruneSignals.length > 0
       ? `Prune branches with ${branchPruneSignals.join(", ")}; fall back to a single path when confidence is high.`
+      : null,
+    budgetForcing
+      ? `Budget forcing: after the initial selection, spend ${budgetRevisionPasses} bounded revision pass(es) trying to disprove or improve it before finalizing.`
+      : null,
+    budgetRequiredFields.length > 0
+      ? `Budget-forcing evidence must include ${budgetRequiredFields.join(", ")}.`
       : null,
     requirePlanPass || taskKind === "research" || focus === "implementation_research" || focus === "task_breakdown"
       ? "Write a short plan first so unknowns, evidence needs, and rollback are explicit before mutation."
@@ -331,8 +349,18 @@ function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: 
   const verifierRerank = readNullableRecord(computePolicy?.verifier_rerank);
   const verifierRequiredFields = readStringArray(verifierRerank?.required_selected_fields);
   const needsBranchSearch = resolveShallowBranchSearch(taskExecution) !== null;
+  const needsBudgetForcing = resolveBudgetForcing(taskExecution) !== null;
   const qualityBiased = qualityPreference === "quality" && (taskKind === "research" || taskKind === "verification");
-  if (!needsCandidateEvidence && !needsRerank && !needsPlan && !needsVerification && !needsBranchSearch && !qualityBiased && !policyEvidenceRequired) {
+  if (
+    !needsCandidateEvidence &&
+    !needsRerank &&
+    !needsPlan &&
+    !needsVerification &&
+    !needsBranchSearch &&
+    !needsBudgetForcing &&
+    !qualityBiased &&
+    !policyEvidenceRequired
+  ) {
     return renderBulletSection("Completion evidence handoff", []);
   }
 
@@ -354,6 +382,9 @@ function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: 
   }
   if (needsBranchSearch) {
     lines.push("Include branch_search_summary or branch_evaluations showing which branches were expanded, pruned, and why.");
+  }
+  if (needsBudgetForcing) {
+    lines.push("Include budget_forcing_review or forced_second_look showing the revision pass and whether the answer changed.");
   }
   if (needsPlan) {
     lines.push("Include plan_summary or planned_steps proving a plan pass happened before mutation.");

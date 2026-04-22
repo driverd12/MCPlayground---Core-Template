@@ -53,6 +53,15 @@ const reasoningComputePolicySchema = z.object({
       fallback: z.string().min(1).optional(),
     })
     .optional(),
+  budget_forcing: z
+    .object({
+      enabled: z.boolean().optional(),
+      max_revision_passes: z.number().int().min(1).max(3).optional(),
+      force_after: z.string().min(1).optional(),
+      stop_condition: z.string().min(1).optional(),
+      required_evidence_fields: z.array(z.string().min(1)).optional(),
+    })
+    .optional(),
 });
 
 export const taskExecutionSchema = z.object({
@@ -466,6 +475,9 @@ function normalizeTaskExecutionMetadata(value: unknown) {
   const policyShallowBranchSearch = isRecord(reasoningComputePolicy?.shallow_branch_search)
     ? reasoningComputePolicy.shallow_branch_search
     : null;
+  const policyBudgetForcing = isRecord(reasoningComputePolicy?.budget_forcing)
+    ? reasoningComputePolicy.budget_forcing
+    : null;
   const normalizedReasoningComputePolicy = reasoningComputePolicy
     ? {
         mode: policyMode === "adaptive_best_of_n" || policyMode === "single_path" ? policyMode : null,
@@ -504,6 +516,19 @@ function normalizeTaskExecutionMetadata(value: unknown) {
               expand_policy: readString(policyShallowBranchSearch.expand_policy),
               prune_with: normalizeStringArray(policyShallowBranchSearch.prune_with),
               fallback: readString(policyShallowBranchSearch.fallback),
+            }
+          : null,
+        budget_forcing: policyBudgetForcing
+          ? {
+              enabled: policyBudgetForcing.enabled === true,
+              max_revision_passes:
+                typeof policyBudgetForcing.max_revision_passes === "number" &&
+                Number.isFinite(policyBudgetForcing.max_revision_passes)
+                  ? Math.max(1, Math.min(3, Math.round(policyBudgetForcing.max_revision_passes)))
+                  : null,
+              force_after: readString(policyBudgetForcing.force_after),
+              stop_condition: readString(policyBudgetForcing.stop_condition),
+              required_evidence_fields: normalizeStringArray(policyBudgetForcing.required_evidence_fields),
             }
           : null,
       }

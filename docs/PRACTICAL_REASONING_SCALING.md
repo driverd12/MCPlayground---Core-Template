@@ -190,6 +190,12 @@ How to use it here:
 - keep it as an experimental router policy on reasoning-capable backends
 - measure whether extra thinking tokens improve verification pass rate more than they increase latency
 
+Current MASTER-MOLD contract:
+
+- Budget forcing is explicit opt-in through `metadata.reasoning_experiments.budget_forcing` or a direct `reasoning_compute_policy.budget_forcing` contract.
+- Runtime worker briefs require one bounded forced second-look pass after initial candidate selection.
+- Completion audits mark the reasoning policy `needs_review` unless compact `budget_forcing_review` or `forced_second_look` evidence is present.
+
 Do not:
 
 - assume this helps all providers
