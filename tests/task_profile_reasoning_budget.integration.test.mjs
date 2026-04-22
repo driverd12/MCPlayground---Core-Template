@@ -107,6 +107,16 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       new Set(completedWithoutEvidence.task.result.reasoning_policy_audit.missing_fields),
       new Set(["candidate_evidence", "selection_rationale", "verification_pass"])
     );
+    assert.equal(typeof completedWithoutEvidence.auto_reflection.memory_id, "number");
+    assert.ok(completedWithoutEvidence.auto_reflection.keywords.includes("task-reasoning-review"));
+    assert.ok(completedWithoutEvidence.auto_reflection.keywords.includes("missing_candidate_evidence"));
+
+    const reviewReflection = await callTool(client, "memory.get", {
+      id: completedWithoutEvidence.auto_reflection.memory_id,
+    });
+    assert.equal(reviewReflection.found, true);
+    assert.match(reviewReflection.memory.content, /Reasoning review needed for high-compute task/);
+    assert.match(reviewReflection.memory.content, /Missing compact evidence fields: candidate_evidence, selection_rationale, verification_pass/i);
 
     const reviewTimeline = await callTool(client, "task.timeline", {
       task_id: task.task.task_id,

@@ -1,5 +1,12 @@
 import { z } from "zod";
-import { Storage, type AgentSessionRecord, type PlanRecord, type PlanStepRecord, type TaskRecord } from "../storage.js";
+import {
+  Storage,
+  type AgentSessionRecord,
+  type PlanRecord,
+  type PlanStepRecord,
+  type TaskFailureReflectionCapture,
+  type TaskRecord,
+} from "../storage.js";
 import {
   mergeDeclaredPermissionProfile,
   recordBudgetLedgerUsage,
@@ -1337,6 +1344,69 @@ function buildReasoningPolicyRecoveryEvidenceRequirements(missingFields: string[
   return requirements;
 }
 
+function compactAgentSingleLine(value: unknown, limit = 320): string {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, limit - 3))}...`;
+}
+
+function mergeAutoReflectionIntoMemoryPreflight(
+  storage: Storage,
+  existingPreflight: unknown,
+  autoReflection: TaskFailureReflectionCapture | null | undefined,
+  query: string
+): Record<string, unknown> | null {
+  if (!autoReflection) {
+    return isRecord(existingPreflight) ? existingPreflight : null;
+  }
+  const memory = storage.getMemoryById(autoReflection.memory_id);
+  if (!memory) {
+    return isRecord(existingPreflight) ? existingPreflight : null;
+  }
+  const existing = isRecord(existingPreflight) ? existingPreflight : {};
+  const existingTopReflections = Array.isArray(existing.top_reflections)
+    ? existing.top_reflections.filter((entry) => isRecord(entry))
+    : [];
+  const reflectionEntry = {
+    id: String(memory.id),
+    score: 1,
+    text_preview: compactAgentSingleLine(memory.content, 320),
+    citation: {
+      source: "memory",
+      id: String(memory.id),
+      event_id: autoReflection.event_id,
+    },
+    keywords: memory.keywords.slice(0, 12),
+  };
+  const seen = new Set<string>();
+  const topReflections = [reflectionEntry, ...existingTopReflections]
+    .filter((entry) => {
+      const record = isRecord(entry) ? entry : null;
+      const id = String(record?.id ?? "").trim();
+      if (!id || seen.has(id)) {
+        return false;
+      }
+      seen.add(id);
+      return true;
+    })
+    .slice(0, 3);
+  return {
+    ...existing,
+    query: readString(existing.query) ?? query,
+    strategy: "reasoning_review_reflection",
+    match_count: Math.max(topReflections.length, readPositiveInt(existing.match_count) ?? 0),
+    top_matches: Array.isArray(existing.top_matches) ? existing.top_matches : [],
+    reflection_match_count: Math.max(topReflections.length, readPositiveInt(existing.reflection_match_count) ?? 0),
+    top_reflections: topReflections,
+    reasoning_review_reflection_memory_ids: dedupeStrings([
+      String(autoReflection.memory_id),
+      ...normalizeStringArray(existing.reasoning_review_reflection_memory_ids),
+    ]),
+  };
+}
+
 function readTaskPermissionProfile(value: unknown): "read_only" | "bounded_execute" | "network_enabled" | "high_risk" | undefined {
   const text = readString(value);
   return text === "read_only" || text === "bounded_execute" || text === "network_enabled" || text === "high_risk"
@@ -1354,6 +1424,7 @@ async function queueReasoningPolicyRecoveryTask(params: {
   reasoningPolicyAudit: Record<string, unknown> | null;
   producedArtifactIds: string[];
   autoReportArtifactId: string;
+  autoReflection?: TaskFailureReflectionCapture | null;
 }): Promise<ReasoningPolicyRecoveryQueueResult> {
   const skipped = (skippedReason: string, error?: string): ReasoningPolicyRecoveryQueueResult => ({
     queued: false,
@@ -1434,6 +1505,8 @@ async function queueReasoningPolicyRecoveryTask(params: {
     warnings,
     produced_artifact_ids: params.producedArtifactIds,
     auto_report_artifact_id: params.autoReportArtifactId,
+    auto_reflection_memory_id: params.autoReflection?.memory_id ?? null,
+    auto_reflection_event_id: params.autoReflection?.event_id ?? null,
     source_task_execution: sourceExecution,
   };
   const metadata: Record<string, unknown> = {
@@ -1452,8 +1525,14 @@ async function queueReasoningPolicyRecoveryTask(params: {
   if (params.task.metadata.working_memory !== undefined) {
     metadata.working_memory = params.task.metadata.working_memory;
   }
-  if (params.task.metadata.memory_preflight !== undefined) {
-    metadata.memory_preflight = params.task.metadata.memory_preflight;
+  const mergedMemoryPreflight = mergeAutoReflectionIntoMemoryPreflight(
+    params.storage,
+    params.task.metadata.memory_preflight,
+    params.autoReflection,
+    params.task.task_id
+  );
+  if (mergedMemoryPreflight) {
+    metadata.memory_preflight = mergedMemoryPreflight;
   }
 
   let taskCreateResult: unknown;
@@ -2701,9 +2780,9 @@ export async function agentReportResult(
           ? (outcomeResult as ReturnType<typeof storage.completeTask>).completed
           : (outcomeResult as ReturnType<typeof storage.failTask>).failed;
       const autoReflection =
-        input.outcome === "failed"
-          ? (outcomeResult as ReturnType<typeof storage.failTask>).auto_reflection ?? null
-          : null;
+        input.outcome === "completed"
+          ? (outcomeResult as ReturnType<typeof storage.completeTask>).auto_reflection ?? null
+          : (outcomeResult as ReturnType<typeof storage.failTask>).auto_reflection ?? null;
       if (!reported) {
         return {
           reported: false,
@@ -2806,6 +2885,7 @@ export async function agentReportResult(
             reasoningPolicyAudit,
             producedArtifactIds,
             autoReportArtifactId: autoReportArtifact.artifact_id,
+            autoReflection,
           })
         : {
             queued: false,

@@ -103,6 +103,12 @@ Do not:
 - append full prior transcripts
 - let reflection mutate into vague postmortems
 
+Current MASTER-MOLD contract:
+
+- High-compute task failures capture a compact, grounded reflection and inject it into retry memory preflight.
+- Completed tasks that fail reasoning-policy audit now also capture a `task-reasoning-review` reflection instead of treating `needs_review` as a transient event only.
+- Agent-session recovery tasks inherit the review reflection through `memory_preflight.top_reflections`, so the next attempt sees the missing evidence fields without replaying transcripts.
+
 ## 4. Verifier-guided reranking
 
 Why it matters:

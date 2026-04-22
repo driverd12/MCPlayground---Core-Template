@@ -4676,6 +4676,9 @@ test("agent.report_result blocks plan advancement when reasoning-policy audit ne
     assert.equal(reported.reasoning_policy_review.required, true);
     assert.equal(reported.reasoning_policy_recovery.queued, true);
     assert.equal(reported.reasoning_policy_recovery.created, true);
+    assert.equal(typeof reported.auto_reflection.memory_id, "number");
+    assert.ok(reported.auto_reflection.keywords.includes("task-reasoning-review"));
+    assert.ok(reported.auto_reflection.keywords.includes("missing_candidate_evidence"));
     assert.equal(reported.adaptive_worker_profile.total_evidence_blocks, 1);
     assert.equal(typeof reported.reasoning_policy_recovery.task_id, "string");
     assert.equal(
@@ -4695,6 +4698,12 @@ test("agent.report_result blocks plan advancement when reasoning-policy audit ne
     );
     assert.ok(recoveryTask);
     assert.equal(recoveryTask.metadata.reasoning_policy_recovery.source_task_id, claimed.task.task_id);
+    assert.equal(recoveryTask.metadata.reasoning_policy_recovery.auto_reflection_memory_id, reported.auto_reflection.memory_id);
+    assert.equal(recoveryTask.metadata.memory_preflight.strategy, "reasoning_review_reflection");
+    assert.deepEqual(recoveryTask.metadata.memory_preflight.reasoning_review_reflection_memory_ids, [
+      String(reported.auto_reflection.memory_id),
+    ]);
+    assert.match(recoveryTask.metadata.memory_preflight.top_reflections[0].text_preview, /Reasoning review needed/i);
     assert.equal(recoveryTask.metadata.reasoning_policy_recovery.step_id, "reasoning-step");
     assert.deepEqual(
       new Set(recoveryTask.metadata.reasoning_policy_recovery.missing_fields),
@@ -4705,6 +4714,15 @@ test("agent.report_result blocks plan advancement when reasoning-policy audit ne
     assert.equal(recoveryTask.metadata.task_execution.require_plan_pass, true);
     assert.equal(recoveryTask.metadata.task_execution.require_verification_pass, true);
     assert.equal(recoveryTask.metadata.task_execution.reasoning_selection_strategy, "evidence_rerank");
+    const reviewReflection = await callTool(client, "memory.get", {
+      id: reported.auto_reflection.memory_id,
+    });
+    assert.equal(reviewReflection.found, true);
+    assert.match(reviewReflection.memory.content, /Reasoning review needed for high-compute task/);
+    assert.match(
+      reviewReflection.memory.content,
+      /Missing compact evidence fields: candidate_evidence, selection_rationale, plan_pass, verification_pass/i
+    );
     const recoveryComputePolicy = recoveryTask.metadata.task_execution.reasoning_compute_policy;
     assert.equal(recoveryComputePolicy.mode, "adaptive_best_of_n");
     assert.equal(recoveryComputePolicy.candidate_count, 2);

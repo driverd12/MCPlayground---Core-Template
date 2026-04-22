@@ -58,6 +58,9 @@ test("task completion audit enforces declared plan quality gates", async () => {
     });
 
     assert.equal(missingGateCompletion.task.result.reasoning_policy_audit.status, "needs_review");
+    assert.equal(typeof missingGateCompletion.auto_reflection.memory_id, "number");
+    assert.ok(missingGateCompletion.auto_reflection.keywords.includes("task-reasoning-review"));
+    assert.ok(missingGateCompletion.auto_reflection.keywords.includes("missing_plan_quality_constraints_covered"));
     assert.ok(missingGateCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("plan_pass"));
     assert.deepEqual(
       new Set(missingGateCompletion.task.result.reasoning_policy_audit.missing_fields),

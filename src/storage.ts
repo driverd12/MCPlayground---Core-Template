@@ -7778,7 +7778,7 @@ export class Storage {
     worker_id: string;
     result?: Record<string, unknown>;
     summary?: string;
-  }): { completed: boolean; reason: string; task?: TaskRecord } {
+  }): { completed: boolean; reason: string; task?: TaskRecord; auto_reflection?: TaskFailureReflectionCapture | null } {
     const taskId = params.task_id.trim();
     const workerId = params.worker_id.trim();
     if (!taskId || !workerId) {
@@ -7838,6 +7838,7 @@ export class Storage {
         },
       });
       const reasoningAudit = readPlainObject(result.reasoning_policy_audit);
+      let autoReflection: TaskFailureReflectionCapture | null = null;
       if (reasoningAudit?.status === "needs_review") {
         const missingFields = Array.isArray(reasoningAudit.missing_fields)
           ? reasoningAudit.missing_fields.map((entry) => String(entry ?? "").trim()).filter(Boolean)
@@ -7863,12 +7864,22 @@ export class Storage {
             warnings: Array.isArray(reasoningAudit.warnings) ? reasoningAudit.warnings : [],
           },
         });
+        const reviewTask = this.getTaskById(taskId);
+        autoReflection = reviewTask
+          ? captureTaskReasoningReviewReflection(this, reviewTask, {
+              worker_id: workerId,
+              summary: params.summary,
+              result,
+              reasoning_audit: reasoningAudit,
+            })
+          : null;
       }
       const task = this.getTaskById(taskId);
       return {
         completed: true,
         reason: "completed",
         task: task ?? undefined,
+        auto_reflection: autoReflection,
       };
     });
     return complete();
@@ -13796,6 +13807,116 @@ function captureTaskFailureReflection(
     created_at: memory.created_at,
     event_id: event.event_id,
     keywords: normalizeKeywords(["reflection", "task-failure", "high-compute", ...policySignals]),
+  };
+}
+
+function captureTaskReasoningReviewReflection(
+  storage: Storage,
+  task: TaskRecord,
+  input: {
+    worker_id: string;
+    summary?: string;
+    result?: Record<string, unknown>;
+    reasoning_audit: Record<string, unknown>;
+  }
+): TaskFailureReflectionCapture | null {
+  const execution = readPlainObject(task.metadata.task_execution);
+  if (!execution || !isTaskExecutionHighCompute(execution)) {
+    return null;
+  }
+
+  const missingFields = asStringArrayForStorage(input.reasoning_audit.missing_fields).slice(0, 12);
+  const satisfiedFields = asStringArrayForStorage(input.reasoning_audit.satisfied_fields).slice(0, 12);
+  const warnings = asStringArrayForStorage(input.reasoning_audit.warnings).slice(0, 5);
+  const taskKind = String(execution.task_kind ?? "").trim() || "task";
+  const computePolicy = readTaskReasoningComputePolicy(execution);
+  const candidateCount = resolveTaskReasoningCandidateRequirement(execution);
+  const selectionStrategy = resolveTaskReasoningSelectionStrategy(execution);
+  const policyMode = String(computePolicy?.mode ?? "").trim();
+  const activationReasons = asStringArrayForStorage(computePolicy?.activation_reasons).slice(0, 6);
+  const transcriptPolicy = String(computePolicy?.transcript_policy ?? "").trim();
+  const resultKeys = Object.keys(input.result ?? {}).slice(0, 12);
+  const groundedFeedback = [
+    `Task ${task.task_id} completed but reasoning-policy audit required review.`,
+    missingFields.length > 0 ? `Missing compact evidence fields: ${missingFields.join(", ")}.` : null,
+    satisfiedFields.length > 0 ? `Satisfied fields before review: ${satisfiedFields.join(", ")}.` : null,
+    input.summary ? `Worker summary: ${compactStorageSingleLine(input.summary, 220)}` : null,
+    resultKeys.length > 0 ? `Completion result keys: ${resultKeys.join(", ")}` : null,
+    ...warnings.map((warning) => `Audit warning: ${compactStorageSingleLine(warning, 220)}`),
+  ].filter((entry): entry is string => Boolean(entry));
+  const policySignals = [
+    policyMode ? `mode=${policyMode}` : null,
+    candidateCount && candidateCount > 1 ? `candidate_count=${candidateCount}` : null,
+    selectionStrategy ? `selection=${selectionStrategy}` : null,
+    computePolicy?.evidence_required === true ? "evidence_required" : null,
+    transcriptPolicy ? `transcript_policy=${transcriptPolicy}` : null,
+    ...activationReasons.map((reason) => `activation=${reason}`),
+    execution.require_plan_pass === true ? "plan_pass_required" : null,
+    execution.require_verification_pass === true ? "verification_pass_required" : null,
+    readPlainObject(execution.plan_quality_gate)?.required === true ? "plan_quality_gate_required" : null,
+  ].filter((entry): entry is string => Boolean(entry));
+  const content = [
+    `Reflection Case: Reasoning review needed for high-compute task ${task.task_id}`,
+    `Objective: ${compactStorageSingleLine(task.objective, 360)}`,
+    "Attempted action: Task reported completion before all required reasoning-policy evidence was present.",
+    "Grounded feedback:",
+    ...groundedFeedback.map((entry) => `- ${entry}`),
+    "Reasoning policy signals:",
+    ...(policySignals.length > 0 ? policySignals.map((entry) => `- ${entry}`) : ["- none"]),
+    "Reflection:",
+    "Recovery should preserve the selected useful work, fill only the missing compact evidence fields, and fail closed if the missing evidence cannot be grounded.",
+    "Next actions:",
+    "- Inspect the audit missing_fields and the completed result before retrying.",
+    "- Produce the smallest evidence patch that satisfies the missing reasoning-policy fields.",
+    "- Do not replay transcripts; cite concrete artifacts, candidates, plan gates, or verification checks.",
+    "Evidence references:",
+    `- [run] storage.completeTask reasoning_policy_audit (task:${task.task_id})`,
+  ].join("\n");
+
+  const keywords = normalizeKeywords([
+    "reflection",
+    "episodic",
+    "grounded",
+    "task-reasoning-review",
+    "high-compute",
+    "reasoning-policy",
+    task.task_id,
+    taskKind,
+    ...missingFields.map((field) => `missing_${field}`),
+    ...policySignals,
+    ...task.tags,
+  ]);
+  const memory = storage.insertMemory({
+    content,
+    keywords,
+  });
+  const event = storage.appendRuntimeEvent({
+    event_type: "memory.reflection_captured",
+    entity_type: "memory",
+    entity_id: String(memory.id),
+    status: "active",
+    summary: `auto reasoning-review reflection captured for task ${task.task_id}`,
+    details: {
+      task_id: task.task_id,
+      worker_id: input.worker_id,
+      missing_fields: missingFields,
+      satisfied_fields: satisfiedFields,
+      grounded_feedback_count: groundedFeedback.length,
+      source: "storage.completeTask.reasoning_policy_review",
+      policy_signals: policySignals,
+    },
+  });
+  return {
+    memory_id: memory.id,
+    created_at: memory.created_at,
+    event_id: event.event_id,
+    keywords: normalizeKeywords([
+      "reflection",
+      "task-reasoning-review",
+      "high-compute",
+      ...missingFields.map((field) => `missing_${field}`),
+      ...policySignals,
+    ]),
   };
 }
 
