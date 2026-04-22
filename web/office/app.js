@@ -1581,6 +1581,8 @@
               host.remote_mac_address,
               host.remote_agent_runtime,
               host.remote_model_label,
+              host.remote_permission_profile ? "scope " + host.remote_permission_profile : "",
+              host.remote_identity_public_key_configured ? "signed identity" : "",
             ].filter(Boolean).join(" · ");
             var allowed = Array.isArray(host.remote_allowed_addresses) && host.remote_allowed_addresses.length
               ? host.remote_allowed_addresses.join(", ")
@@ -1652,7 +1654,7 @@
       '<div class="metric-list">' +
       '<div class="metric"><span>LAN bind</span><strong>MCP_HTTP_ALLOW_LAN=1 required</strong></div>' +
       '<div class="metric"><span>Bearer</span><strong>still required for MCP calls</strong></div>' +
-      '<div class="metric"><span>Remote check</span><strong>approved host IP + status</strong></div>' +
+      '<div class="metric"><span>Remote check</span><strong>hostname/MAC + signed host gate</strong></div>' +
       '<div class="metric"><span>Default</span><strong>loopback only</strong></div>' +
       '</div>' +
       '</section>' +

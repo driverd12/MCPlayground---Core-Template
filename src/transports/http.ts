@@ -36,7 +36,29 @@ type SessionBinding = {
   networkGate: NetworkGateResult;
 };
 
-type NetworkGateResult = {
+type SignatureVerificationResult = {
+  status: "not_required" | "not_configured" | "verified" | "missing" | "invalid" | "expired" | "host_mismatch" | "replayed";
+  verified: boolean;
+  signed_at: string | null;
+  signed_agent_id: string | null;
+  identity_public_key_fingerprint: string | null;
+};
+
+type NetworkApprovalScope = {
+  status: string;
+  matched_by: string;
+  permission_profile: "read_only" | "task_worker" | "artifact_writer" | "operator" | null;
+  hostname: string | null;
+  mac_address: string | null;
+  allowed_addresses: string[];
+  approved_at: string | null;
+  approved_by: string | null;
+  device_fingerprint: string | null;
+  public_key_fingerprint: string | null;
+  identity_public_key_fingerprint: string | null;
+};
+
+export type NetworkGateResult = {
   allowed: boolean;
   remote_address: string | null;
   reason: string;
@@ -48,6 +70,11 @@ type NetworkGateResult = {
   model_label?: string | null;
   permission_profile?: "read_only" | "task_worker" | "artifact_writer" | "operator" | null;
   signature_status?: "not_required" | "not_configured" | "verified" | "missing" | "invalid" | "expired" | "host_mismatch" | "replayed";
+  signed_at?: string | null;
+  received_at?: string | null;
+  signature_verification?: SignatureVerificationResult | null;
+  approval_scope?: NetworkApprovalScope | null;
+  whitelist_scope?: NetworkApprovalScope | null;
   signed_agent_id?: string | null;
   identity_public_key_fingerprint?: string | null;
 };
@@ -1152,6 +1179,7 @@ export function verifyHostIdentitySignature(input: {
     return {
       ok: true,
       status: "not_configured" as const,
+      signed_at: null,
       agent_id: null,
       fingerprint: null,
     };
@@ -1163,6 +1191,7 @@ export function verifyHostIdentitySignature(input: {
     return {
       ok: false,
       status: "host_mismatch" as const,
+      signed_at: null,
       agent_id: null,
       fingerprint,
     };
@@ -1176,6 +1205,7 @@ export function verifyHostIdentitySignature(input: {
     return {
       ok: false,
       status: "missing" as const,
+      signed_at: timestamp,
       agent_id: agentId,
       fingerprint,
     };
@@ -1188,6 +1218,7 @@ export function verifyHostIdentitySignature(input: {
     return {
       ok: false,
       status: "expired" as const,
+      signed_at: timestamp,
       agent_id: agentId,
       fingerprint,
     };
@@ -1222,6 +1253,7 @@ export function verifyHostIdentitySignature(input: {
             return {
               ok: false,
               status: "replayed" as const,
+              signed_at: timestamp,
               agent_id: agentId,
               fingerprint,
             };
@@ -1229,6 +1261,7 @@ export function verifyHostIdentitySignature(input: {
           return {
             ok: true,
             status: "verified" as const,
+            signed_at: timestamp,
             agent_id: agentId,
             fingerprint,
           };
@@ -1242,6 +1275,7 @@ export function verifyHostIdentitySignature(input: {
   return {
     ok: false,
     status: "invalid" as const,
+    signed_at: timestamp,
     agent_id: agentId,
     fingerprint,
   };
@@ -1309,6 +1343,52 @@ export async function approvedHostNetworkMatch(
     return { reason: "approved_host_hostname", remoteAccess, hostname, observedMac };
   }
   return null;
+}
+
+function signatureVerificationResult(input: {
+  status: NetworkGateResult["signature_status"];
+  signed_at?: string | null;
+  signed_agent_id?: string | null;
+  identity_public_key_fingerprint?: string | null;
+}): SignatureVerificationResult | null {
+  if (!input.status) {
+    return null;
+  }
+  return {
+    status: input.status,
+    verified: input.status === "verified",
+    signed_at: input.signed_at ?? null,
+    signed_agent_id: input.signed_agent_id ?? null,
+    identity_public_key_fingerprint: input.identity_public_key_fingerprint ?? null,
+  };
+}
+
+function buildApprovalScope(input: {
+  status: string;
+  matched_by: string;
+  permission_profile: NetworkApprovalScope["permission_profile"];
+  remoteAccess?: Record<string, unknown> | null;
+  hostname?: string | null;
+  mac_address?: string | null;
+  identity_public_key_fingerprint?: string | null;
+}): NetworkApprovalScope {
+  const remoteAccess = input.remoteAccess ?? {};
+  return {
+    status: readStringValue(remoteAccess.status) ?? input.status,
+    matched_by: input.matched_by,
+    permission_profile: input.permission_profile,
+    hostname: input.hostname ?? readStringValue(remoteAccess.hostname),
+    mac_address: input.mac_address ?? normalizeMacAddress(remoteAccess.mac_address) ?? normalizeMacAddress(remoteAccess.hardware_address),
+    allowed_addresses: readStringList(remoteAccess.allowed_addresses)
+      .map(normalizeClientIp)
+      .filter((entry): entry is string => Boolean(entry)),
+    approved_at: readStringValue(remoteAccess.approved_at),
+    approved_by: readStringValue(remoteAccess.approved_by),
+    device_fingerprint: readStringValue(remoteAccess.device_fingerprint),
+    public_key_fingerprint: readStringValue(remoteAccess.public_key_fingerprint),
+    identity_public_key_fingerprint:
+      input.identity_public_key_fingerprint ?? publicKeyFingerprint(hostIdentityPublicKey(remoteAccess)),
+  };
 }
 
 function truncateOfficeOutput(value: unknown, maxLength = 2000) {
@@ -1463,7 +1543,14 @@ async function maybeHandleRemoteAccessRequest(
 
 async function validateNetworkClient(req: http.IncomingMessage, options: HttpOptions) {
   const remoteAddress = normalizeClientIp(req.socket.remoteAddress);
+  const receivedAt = new Date().toISOString();
   if (isLoopbackClientIp(remoteAddress)) {
+    const signatureVerification = signatureVerificationResult({ status: "not_required" });
+    const approvalScope = buildApprovalScope({
+      status: "local",
+      matched_by: "loopback",
+      permission_profile: "operator",
+    });
     return {
       allowed: true,
       remote_address: remoteAddress,
@@ -1471,6 +1558,11 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
       host_id: "local",
       permission_profile: "operator" as const,
       signature_status: "not_required" as const,
+      signed_at: null,
+      received_at: receivedAt,
+      signature_verification: signatureVerification,
+      approval_scope: approvalScope,
+      whitelist_scope: approvalScope,
     };
   }
   if (!lanHttpEnabled()) {
@@ -1479,6 +1571,7 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
       remote_address: remoteAddress,
       reason: "lan_disabled",
       host_id: null,
+      received_at: receivedAt,
     };
   }
 
@@ -1491,12 +1584,28 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
     const match = await approvedHostNetworkMatch(remoteAddress, host);
     if (match) {
       const requireSignedRemote = process.env.MCP_HTTP_REQUIRE_SIGNED_REMOTE === "1";
+      const permissionProfile = readRemotePermissionProfile(match.remoteAccess.permission_profile) ?? "task_worker";
       const signature = verifyHostIdentitySignature({
         method: String(req.method ?? "GET").toUpperCase(),
         path: req.url ?? "/",
         headers: req.headers as Record<string, unknown>,
         host,
         enforceReplayProtection: true,
+      });
+      const signatureVerification = signatureVerificationResult({
+        status: signature.status,
+        signed_at: signature.signed_at,
+        signed_agent_id: signature.agent_id,
+        identity_public_key_fingerprint: signature.fingerprint,
+      });
+      const approvalScope = buildApprovalScope({
+        status: "approved",
+        matched_by: match.reason,
+        permission_profile: permissionProfile,
+        remoteAccess: match.remoteAccess,
+        hostname: match.hostname,
+        mac_address: match.observedMac ?? normalizeMacAddress(match.remoteAccess.mac_address),
+        identity_public_key_fingerprint: signature.fingerprint,
       });
       if (!signature.ok || (requireSignedRemote && signature.status === "not_configured")) {
         return {
@@ -1509,8 +1618,13 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
           display_name: String(match.remoteAccess.display_name ?? "").trim() || null,
           agent_runtime: String(match.remoteAccess.agent_runtime ?? "").trim() || null,
           model_label: String(match.remoteAccess.model_label ?? "").trim() || null,
-          permission_profile: readRemotePermissionProfile(match.remoteAccess.permission_profile) ?? "task_worker",
+          permission_profile: permissionProfile,
           signature_status: signature.status,
+          signed_at: signature.signed_at,
+          received_at: receivedAt,
+          signature_verification: signatureVerification,
+          approval_scope: approvalScope,
+          whitelist_scope: approvalScope,
           signed_agent_id: signature.agent_id,
           identity_public_key_fingerprint: signature.fingerprint,
         };
@@ -1525,8 +1639,13 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
         display_name: String(match.remoteAccess.display_name ?? "").trim() || null,
         agent_runtime: String(match.remoteAccess.agent_runtime ?? "").trim() || null,
         model_label: String(match.remoteAccess.model_label ?? "").trim() || null,
-        permission_profile: readRemotePermissionProfile(match.remoteAccess.permission_profile) ?? "task_worker",
+        permission_profile: permissionProfile,
         signature_status: signature.status,
+        signed_at: signature.signed_at,
+        received_at: receivedAt,
+        signature_verification: signatureVerification,
+        approval_scope: approvalScope,
+        whitelist_scope: approvalScope,
         signed_agent_id: signature.agent_id,
         identity_public_key_fingerprint: signature.fingerprint,
       };
@@ -1535,13 +1654,25 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
 
   const envAllowed = parseTrustedClientEnv();
   if (remoteAddress && envAllowed.includes(remoteAddress)) {
+    const permissionProfile = readRemotePermissionProfile(process.env.MCP_HTTP_ENV_ALLOWLIST_PERMISSION) ?? "read_only";
+    const approvalScope = buildApprovalScope({
+      status: "env_allowlist",
+      matched_by: "env_allowlist",
+      permission_profile: permissionProfile,
+      remoteAccess: { allowed_addresses: envAllowed },
+    });
     return {
       allowed: true,
       remote_address: remoteAddress,
       reason: "env_allowlist",
       host_id: null,
-      permission_profile: readRemotePermissionProfile(process.env.MCP_HTTP_ENV_ALLOWLIST_PERMISSION) ?? "read_only",
+      permission_profile: permissionProfile,
       signature_status: "not_configured" as const,
+      signed_at: null,
+      received_at: receivedAt,
+      signature_verification: signatureVerificationResult({ status: "not_configured" }),
+      approval_scope: approvalScope,
+      whitelist_scope: approvalScope,
     };
   }
 
@@ -1550,6 +1681,7 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
     remote_address: remoteAddress,
     reason: "not_allowlisted",
     host_id: null,
+    received_at: receivedAt,
   };
 }
 
@@ -3038,6 +3170,8 @@ function networkIdentityPayload(networkGate: NetworkGateResult) {
     requesting_network_gate_reason: networkGate.reason,
     requesting_permission_profile: networkGate.permission_profile ?? undefined,
     requesting_signature_status: networkGate.signature_status ?? undefined,
+    requesting_signed_at: networkGate.signed_at ?? undefined,
+    requesting_received_at: networkGate.received_at ?? undefined,
     requesting_signed_agent_id: networkGate.signed_agent_id ?? undefined,
     requesting_identity_public_key_fingerprint: networkGate.identity_public_key_fingerprint ?? undefined,
     requesting_hostname: networkGate.host_hostname ?? undefined,
@@ -3045,6 +3179,11 @@ function networkIdentityPayload(networkGate: NetworkGateResult) {
     requesting_display_name: networkGate.display_name ?? undefined,
     requesting_agent_runtime: networkGate.agent_runtime ?? undefined,
     requesting_model_label: networkGate.model_label ?? undefined,
+    signed_at: networkGate.signed_at ?? undefined,
+    received_at: networkGate.received_at ?? undefined,
+    signature_verification_result: networkGate.signature_verification ?? undefined,
+    approval_scope: networkGate.approval_scope ?? undefined,
+    whitelist_scope: networkGate.whitelist_scope ?? undefined,
   };
 }
 
@@ -3258,6 +3397,11 @@ function attachNetworkIdentity(req: http.IncomingMessage, networkGate: NetworkGa
         reason: networkGate.reason,
         permission_profile: networkGate.permission_profile ?? null,
         signature_status: networkGate.signature_status ?? null,
+        signed_at: networkGate.signed_at ?? null,
+        received_at: networkGate.received_at ?? null,
+        signature_verification: networkGate.signature_verification ?? null,
+        approval_scope: networkGate.approval_scope ?? null,
+        whitelist_scope: networkGate.whitelist_scope ?? null,
         signed_agent_id: networkGate.signed_agent_id ?? null,
         identity_public_key_fingerprint: networkGate.identity_public_key_fingerprint ?? null,
         hostname: networkGate.host_hostname ?? null,

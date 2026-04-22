@@ -608,6 +608,45 @@ function federationPayloadSummary(payload: Record<string, unknown>) {
   };
 }
 
+function federationApprovalScope(networkGate: Record<string, unknown>) {
+  const approvalScope = isRecord(networkGate.approval_scope) ? networkGate.approval_scope : null;
+  const whitelistScope = isRecord(networkGate.whitelist_scope) ? networkGate.whitelist_scope : approvalScope;
+  return sanitizeFederationValue(approvalScope ?? whitelistScope ?? null);
+}
+
+function federationSignatureVerification(networkGate: Record<string, unknown>) {
+  const explicit = isRecord(networkGate.signature_verification) ? networkGate.signature_verification : null;
+  if (explicit) {
+    return sanitizeFederationValue(explicit);
+  }
+  const status = readString(networkGate.signature_status) ?? "unknown";
+  return {
+    status,
+    verified: status === "verified",
+    signed_at: readString(networkGate.signed_at) ?? null,
+    signed_agent_id: readString(networkGate.signed_agent_id) ?? null,
+    identity_public_key_fingerprint: readString(networkGate.identity_public_key_fingerprint) ?? null,
+  };
+}
+
+function federationIdentityEnvelope(payload: Record<string, unknown>, networkGate: Record<string, unknown>, receivedAt: string) {
+  const hostPayload = isRecord(payload.host) ? payload.host : {};
+  const approvalScope = federationApprovalScope(networkGate);
+  return {
+    requesting_host_id: readString(networkGate.host_id) ?? null,
+    requesting_remote_address: readString(networkGate.remote_address) ?? null,
+    captured_from_host_id: readString(hostPayload.host_id) ?? readString(networkGate.host_id) ?? "unknown-peer",
+    captured_hostname: readString(hostPayload.hostname) ?? readString(networkGate.host_hostname) ?? null,
+    captured_agent_runtime: readString(hostPayload.agent_runtime) ?? readString(networkGate.agent_runtime) ?? null,
+    captured_model_label: readString(hostPayload.model_label) ?? readString(networkGate.model_label) ?? null,
+    signed_at: readString(networkGate.signed_at) ?? null,
+    received_at: readString(networkGate.received_at) ?? receivedAt,
+    signature_verification_result: federationSignatureVerification(networkGate),
+    approval_scope: approvalScope,
+    whitelist_scope: approvalScope,
+  };
+}
+
 function stableFederationMutation(hostId: string, streamId: string, sequence: number | null, createdAt: string) {
   const digest = crypto.createHash("sha256").update(`${hostId}|${streamId}|${sequence ?? createdAt}`).digest("hex");
   return {
@@ -619,11 +658,14 @@ function stableFederationMutation(hostId: string, streamId: string, sequence: nu
 function ingestFederationPayload(storage: Storage, payload: Record<string, unknown>, networkGate: Record<string, unknown>) {
   const createdAt = new Date().toISOString();
   const hostPayload = isRecord(payload.host) ? payload.host : {};
-  const hostId = readString(networkGate.host_id) ?? readString(hostPayload.host_id) ?? "unknown-peer";
+  const capturedHostId = readString(hostPayload.host_id);
+  const requestHostId = readString(networkGate.host_id);
+  const hostId = requestHostId ?? capturedHostId ?? "unknown-peer";
   const streamId = readString(payload.stream_id) ?? `${hostId}:default`;
   const sequence = readFiniteNumber(payload.sequence);
   const roundedSequence = sequence === undefined ? null : Math.round(sequence);
   const summaryPayload = federationPayloadSummary(payload);
+  const identityEnvelope = federationIdentityEnvelope(payload, networkGate, createdAt);
   const sourceAgent =
     readString(networkGate.signed_agent_id) ??
     readString(networkGate.agent_runtime) ??
@@ -639,7 +681,9 @@ function ingestFederationPayload(storage: Storage, payload: Record<string, unkno
     status: "received",
     summary: `federation ingest from ${hostId}${roundedSequence === null ? "" : ` seq=${roundedSequence}`}`,
     details: {
+      ...identityEnvelope,
       network_gate: sanitizeFederationValue(networkGate),
+      federation_identity: sanitizeFederationValue(identityEnvelope),
       ...summaryPayload,
     },
     source_client: "federation.sidecar",
@@ -660,6 +704,7 @@ function ingestFederationPayload(storage: Storage, payload: Record<string, unkno
       },
       metadata: {
         federation: {
+          identity: identityEnvelope,
           ...summaryPayload,
           last_ingest_at: createdAt,
           last_ingest_event_id: event.event_id,

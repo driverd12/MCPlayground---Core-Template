@@ -83,7 +83,7 @@ npm run federation:secrets:bootstrap -- \
   --write-env
 ```
 
-The script assumes `op` is installed and unlocked on that host. Use `--op-path /path/to/op` when SSH or launchd does not inherit the normal shell PATH.
+The script prefers `op` when 1Password CLI is installed and unlocked on that host. Use `--op-path /path/to/op` when SSH or launchd does not inherit the normal shell PATH. If 1Password is missing, locked, or not configured, the bootstrap now still creates the local bearer token and Ed25519 host key, reports `one_password.status="unavailable"`, and leaves recovery material in local files only. Pass `--require-1password` when a team rollout should fail closed instead, or `--local-only` for an intentional local-file bootstrap.
 
 For the first same-day mesh, use a shared MCP bearer token across the whitelisted peers or run a separate sidecar process per peer/token. The Ed25519 host signature is still the durable host identity; the bearer token is the HTTP transport gate. To seed a shared token on a host, pass `--shared-bearer-token` or set `MASTER_MOLD_FEDERATION_SHARED_BEARER_TOKEN` before running the bootstrap script.
 
@@ -91,7 +91,7 @@ The script performs these local actions:
 
 - Creates or reuses `data/imprint/http_bearer_token` with `0600` permissions.
 - Creates or reuses `~/.master-mold/identity/<host-id>-ed25519.pem`.
-- Saves the bearer token, private key, public key, host ID, hostname, workspace path, and peer list into a 1Password API Credential item.
+- Saves the bearer token, private key, public key, host ID, hostname, workspace path, and peer list into a 1Password API Credential item when `op` is available.
 - Optionally writes only non-secret federation settings into `.env`.
 
 After secrets exist, request access from each peer that should trust this host:
@@ -110,6 +110,8 @@ Approve the pending host in Agent Office. Then start the sidecar:
 npm run federation:sidecar -- --once
 npm run federation:launchd:install
 ```
+
+Each accepted federation ingest event records a first-class identity envelope: `requesting_host_id`, `requesting_remote_address`, `captured_from_host_id`, `captured_hostname`, `captured_agent_runtime`, `captured_model_label`, `signed_at`, `received_at`, `signature_verification_result`, and the approved whitelist scope. The receiver derives that envelope from the approved network gate and verified host signature, not from caller-provided `source_*` fields.
 
 ## Payload Boundary
 

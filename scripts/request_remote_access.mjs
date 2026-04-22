@@ -23,8 +23,15 @@ function shell(command, args) {
   return result.status === 0 ? result.stdout.trim() : "";
 }
 
+function expandHome(filePath) {
+  const text = String(filePath || "").trim();
+  if (text === "~") return os.homedir();
+  if (text.startsWith("~/")) return path.join(os.homedir(), text.slice(2));
+  return text;
+}
+
 function identityDir() {
-  return path.join(os.homedir(), ".master-mold", "identity");
+  return expandHome(argValue("identity-dir", path.join(os.homedir(), ".master-mold", "identity")));
 }
 
 function identityKeyBase(hostId) {
@@ -37,11 +44,31 @@ function identityKeyBase(hostId) {
   return path.join(identityDir(), `${safeHostId}-ed25519`);
 }
 
-function ensureHostIdentity(hostId) {
+function identityKeyPaths(hostId) {
+  const explicitPrivate = expandHome(argValue("identity-key-path", ""));
+  const explicitPublic = expandHome(argValue("identity-public-key-path", ""));
+  if (explicitPrivate) {
+    const publicKeyPath =
+      explicitPublic ||
+      (explicitPrivate.endsWith(".pem")
+        ? explicitPrivate.replace(/\.pem$/i, ".pub.pem")
+        : `${explicitPrivate}.pub.pem`);
+    return {
+      privateKeyPath: explicitPrivate,
+      publicKeyPath,
+    };
+  }
   const base = identityKeyBase(hostId);
-  const privateKeyPath = `${base}.pem`;
-  const publicKeyPath = `${base}.pub.pem`;
+  return {
+    privateKeyPath: `${base}.pem`,
+    publicKeyPath: `${base}.pub.pem`,
+  };
+}
+
+function ensureHostIdentity(hostId) {
+  const { privateKeyPath, publicKeyPath } = identityKeyPaths(hostId);
   fs.mkdirSync(path.dirname(privateKeyPath), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.dirname(publicKeyPath), { recursive: true, mode: 0o700 });
   if (fs.existsSync(privateKeyPath) && fs.existsSync(publicKeyPath)) {
     return {
       privateKeyPath,
@@ -59,7 +86,7 @@ function ensureHostIdentity(hostId) {
 
 async function main() {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    console.log(`Usage: node scripts/request_remote_access.mjs --server http://MAIN-MAC:8787 --host-id my-mac --workspace-root /path/to/MASTER-MOLD [--agent-runtime claude] [--model-label "Claude Opus"] [--desktop-context true]
+    console.log(`Usage: node scripts/request_remote_access.mjs --server http://MAIN-MAC:8787 --host-id my-mac --workspace-root /path/to/MASTER-MOLD [--identity-key-path ~/.master-mold/identity/my-mac-ed25519.pem] [--agent-runtime claude] [--model-label "Claude Opus"] [--desktop-context true]
 
 Run this independently on each host that should request MASTER-MOLD access. The script creates a local Ed25519 host identity under ~/.master-mold/identity, stages the public key with the main Mac, and leaves approval operator-controlled in Agent Office.`);
     return;

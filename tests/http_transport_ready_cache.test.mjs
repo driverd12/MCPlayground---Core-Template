@@ -109,6 +109,7 @@ test("signed host identity verifies Ed25519 proof and permission scopes deny hig
   });
   assert.equal(verified.ok, true);
   assert.equal(verified.status, "verified");
+  assert.equal(verified.signed_at, timestamp);
   assert.equal(verified.agent_id, agentId);
   assert.match(verified.fingerprint, /^sha256:/);
 
@@ -182,6 +183,7 @@ test("signed host identity replay protection rejects reused nonces inside the fr
   });
   assert.equal(first.ok, true);
   assert.equal(first.status, "verified");
+  assert.equal(first.signed_at, timestamp);
 
   const replayed = verifyHostIdentitySignature({
     method: "POST",
@@ -248,6 +250,7 @@ test("signed host identity proofs bind federation ingest to the request path", (
   });
   assert.equal(verified.ok, true);
   assert.equal(verified.status, "verified");
+  assert.equal(verified.signed_at, timestamp);
 
   const wrongPath = verifyHostIdentitySignature({
     method: "POST",
@@ -558,6 +561,10 @@ test("/federation/ingest accepts a sidecar payload into the ingest callback", { 
     assert.equal(ingests[0].payload.schema_version, "master-mold-federation-v1");
     assert.equal(ingests[0].payload.stream_id, "mesh-peer:master-mold");
     assert.equal(ingests[0].networkGate.host_id, "local");
+    assert.equal(typeof ingests[0].networkGate.received_at, "string");
+    assert.equal(ingests[0].networkGate.signature_verification.status, "not_required");
+    assert.equal(ingests[0].networkGate.approval_scope.matched_by, "loopback");
+    assert.equal(ingests[0].networkGate.approval_scope.permission_profile, "operator");
 
     const noOrigin = await fetchHttpJsonResponse(port, "/federation/ingest", {
       method: "POST",

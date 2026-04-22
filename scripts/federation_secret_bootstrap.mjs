@@ -219,6 +219,16 @@ function upsertOnePasswordItem(options, payload) {
   return { action: "created", title: parsed.title ?? payload.title, vault: options.vault, item_id: parsed.id ?? null };
 }
 
+function onePasswordUnavailableResult(error, options) {
+  return {
+    status: "unavailable",
+    vault: options.vault,
+    op_path: options.opPath,
+    error: error instanceof Error ? error.message : String(error),
+    fallback: "local_secrets_only",
+  };
+}
+
 function parseOptions() {
   const hostname = String(argValue("hostname", os.hostname())).trim();
   const username = String(argValue("username", os.userInfo().username)).trim();
@@ -241,6 +251,8 @@ function parseOptions() {
     identityDir: path.join(os.homedir(), ".master-mold", "identity"),
     writeEnv: boolArg("write-env", false),
     dryRun: boolArg("dry-run", false),
+    localOnly: boolArg("local-only", false) || boolArg("skip-1password", false),
+    requireOnePassword: boolArg("require-1password", false),
     opTimeoutMs: Math.max(5_000, Number(argValue("op-timeout-ms", "60000")) || 60_000),
   };
 }
@@ -262,6 +274,8 @@ Useful options:
   --shared-bearer-token     Write an existing shared mesh bearer token into this host's token file.
   --item-title <title>      Override the default item title.
   --write-env               Write non-secret federation settings into .env.
+  --local-only              Skip 1Password and leave secrets in local files only.
+  --require-1password       Fail instead of falling back when 1Password is unavailable.
   --dry-run                 Validate without writing to 1Password.`);
 }
 
@@ -277,7 +291,31 @@ async function main() {
     writeNonSecretEnv(options, identity);
   }
   const payload = buildItemPayload(options, identity, bearerToken);
-  const opResult = upsertOnePasswordItem(options, payload);
+  let opResult = null;
+  let onePassword = null;
+  if (options.localOnly) {
+    onePassword = {
+      status: "skipped",
+      vault: options.vault,
+      op_path: options.opPath,
+      fallback: "local_secrets_only",
+    };
+  } else {
+    try {
+      opResult = upsertOnePasswordItem(options, payload);
+      onePassword = {
+        status: "stored",
+        vault: options.vault,
+        op_path: options.opPath,
+        item_id: opResult.item_id ?? null,
+      };
+    } catch (error) {
+      if (options.requireOnePassword) {
+        throw error;
+      }
+      onePassword = onePasswordUnavailableResult(error, options);
+    }
+  }
   console.log(
     JSON.stringify(
       {
@@ -286,6 +324,7 @@ async function main() {
         hostname: options.hostname,
         vault: options.vault,
         item: opResult,
+        one_password: onePassword,
         token_file: options.tokenPath,
         identity_key_path: identity.privateKeyPath,
         public_key_path: identity.publicKeyPath,

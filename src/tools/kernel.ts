@@ -172,7 +172,11 @@ type HostFabricSummary = {
     remote_mac_address: string | null;
     remote_agent_runtime: string | null;
     remote_model_label: string | null;
+    remote_permission_profile: string | null;
     remote_allowed_addresses: string[];
+    remote_device_fingerprint: string | null;
+    remote_public_key_fingerprint: string | null;
+    remote_identity_public_key_configured: boolean;
     remote_pairing_code: string | null;
     remote_approved_at: string | null;
     desktop_context: Record<string, unknown> | null;
@@ -1287,9 +1291,13 @@ function summarizeWorkerFabric(storage: Storage, state?: WorkerFabricStateRecord
         remote_mac_address: readString(remoteAccess.mac_address),
         remote_agent_runtime: readString(remoteAccess.agent_runtime),
         remote_model_label: readString(remoteAccess.model_label),
+        remote_permission_profile: readString(remoteAccess.permission_profile),
         remote_allowed_addresses: Array.isArray(remoteAccess.allowed_addresses)
           ? remoteAccess.allowed_addresses.map((entry) => String(entry ?? "").trim()).filter(Boolean)
           : [],
+        remote_device_fingerprint: readString(remoteAccess.device_fingerprint),
+        remote_public_key_fingerprint: readString(remoteAccess.public_key_fingerprint),
+        remote_identity_public_key_configured: Boolean(readString(remoteAccess.identity_public_key)),
         remote_pairing_code: readString(remoteAccess.pairing_code),
         remote_approved_at: readString(remoteAccess.approved_at),
         desktop_context: desktopContext,

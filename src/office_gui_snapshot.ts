@@ -1018,9 +1018,13 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
             remote_mac_address: String(host.remote_mac_address ?? ""),
             remote_agent_runtime: String(host.remote_agent_runtime ?? ""),
             remote_model_label: String(host.remote_model_label ?? ""),
+            remote_permission_profile: String(host.remote_permission_profile ?? ""),
             remote_allowed_addresses: asList(host.remote_allowed_addresses)
               .map((item) => String(item ?? "").trim())
               .filter(Boolean),
+            remote_device_fingerprint: String(host.remote_device_fingerprint ?? ""),
+            remote_public_key_fingerprint: String(host.remote_public_key_fingerprint ?? ""),
+            remote_identity_public_key_configured: Boolean(host.remote_identity_public_key_configured),
             remote_pairing_code: String(host.remote_pairing_code ?? ""),
             remote_approved_at: String(host.remote_approved_at ?? ""),
             desktop_context: asDict(host.desktop_context),

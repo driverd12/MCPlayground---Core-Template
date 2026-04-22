@@ -122,6 +122,23 @@ export const desktopContextSchema = z
     delay_ms: z.number().int().min(0).max(10000).default(0),
     requesting_host_id: z.string().min(1).max(120).optional(),
     requesting_remote_address: z.string().min(1).max(120).optional(),
+    requesting_network_gate_reason: z.string().min(1).max(120).optional(),
+    requesting_permission_profile: z.string().min(1).max(120).optional(),
+    requesting_signature_status: z.string().min(1).max(120).optional(),
+    requesting_signed_at: z.string().min(1).max(120).optional(),
+    requesting_received_at: z.string().min(1).max(120).optional(),
+    requesting_signed_agent_id: z.string().min(1).max(200).optional(),
+    requesting_identity_public_key_fingerprint: z.string().min(1).max(240).optional(),
+    requesting_hostname: z.string().min(1).max(255).optional(),
+    requesting_mac_address: z.string().min(1).max(120).optional(),
+    requesting_display_name: z.string().min(1).max(200).optional(),
+    requesting_agent_runtime: z.string().min(1).max(120).optional(),
+    requesting_model_label: z.string().min(1).max(200).optional(),
+    signed_at: z.string().min(1).max(120).optional(),
+    received_at: z.string().min(1).max(120).optional(),
+    signature_verification_result: z.record(z.unknown()).optional(),
+    approval_scope: z.record(z.unknown()).optional(),
+    whitelist_scope: z.record(z.unknown()).optional(),
     ...sourceSchema.shape,
   })
   .superRefine((value, ctx) => {
@@ -538,6 +555,11 @@ function readRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function readOptionalRecord(value: unknown): Record<string, unknown> | null {
+  const record = readRecord(value);
+  return Object.keys(record).length > 0 ? record : null;
+}
+
 function shellQuote(value: string) {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
@@ -556,10 +578,25 @@ function desktopContextIdentity(input: z.infer<typeof desktopContextSchema>, par
   return {
     requesting_host_id: readString(input.requesting_host_id) ?? null,
     requesting_remote_address: readString(input.requesting_remote_address) ?? null,
+    requesting_network_gate_reason: readString(input.requesting_network_gate_reason) ?? null,
+    requesting_permission_profile: readString(input.requesting_permission_profile) ?? null,
+    requesting_signature_status: readString(input.requesting_signature_status) ?? null,
+    requesting_signed_agent_id: readString(input.requesting_signed_agent_id) ?? null,
+    requesting_identity_public_key_fingerprint: readString(input.requesting_identity_public_key_fingerprint) ?? null,
+    requesting_hostname: readString(input.requesting_hostname) ?? null,
+    requesting_mac_address: readString(input.requesting_mac_address) ?? null,
+    requesting_display_name: readString(input.requesting_display_name) ?? null,
+    requesting_agent_runtime: readString(input.requesting_agent_runtime) ?? null,
+    requesting_model_label: readString(input.requesting_model_label) ?? null,
     captured_from_host_id: capturedFromHostId,
     captured_hostname: params?.captured_hostname ?? (capturedFromHostId === "local" ? os.hostname() : null),
     captured_agent_runtime: params?.captured_agent_runtime ?? (capturedFromHostId === "local" ? "local" : null),
     captured_model_label: params?.captured_model_label ?? null,
+    signed_at: readString(input.signed_at) ?? readString(input.requesting_signed_at) ?? null,
+    received_at: readString(input.received_at) ?? readString(input.requesting_received_at) ?? null,
+    signature_verification_result: readOptionalRecord(input.signature_verification_result),
+    approval_scope: readOptionalRecord(input.approval_scope),
+    whitelist_scope: readOptionalRecord(input.whitelist_scope),
   };
 }
 
