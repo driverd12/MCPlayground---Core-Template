@@ -291,8 +291,8 @@ function describeMemoryGuidance(taskMetadata: Record<string, unknown>) {
       if (!reflection) {
         return [];
       }
-      const preview = readString(reflection.text_preview);
-      const keywords = readStringArray(reflection.keywords);
+      const preview = compactBriefText(reflection.text_preview, 220);
+      const keywords = readStringArray(reflection.keywords).slice(0, 12).map((keyword) => compactBriefText(keyword, 48));
       const suffix = keywords.length > 0 ? ` [keywords: ${keywords.join(", ")}]` : "";
       return preview ? [`${preview}${suffix}`] : [];
     })

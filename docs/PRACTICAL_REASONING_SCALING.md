@@ -172,6 +172,7 @@ Current MASTER-MOLD contract:
 - `working_memory.refresh_triggers` tells workers when to refresh the compact state: failed reasoning audits, new grounded reflections, plan or constraint changes, or contradiction from fresh evidence.
 - Retry and reasoning-review recovery paths now normalize merged `memory_preflight.top_reflections`, dedupe by memory ID, cap previews at 320 chars, and cap keywords so stale transcript-sized reflections cannot leak back into retries.
 - `task.compile` now treats `memory_preflight` and `working_memory` as compiler-owned fields in plan metadata, so caller-provided metadata cannot override the compact memory budget or re-enable transcript replay.
+- Runtime worker briefs compact externally supplied grounded-reflection previews and keyword lists before display, protecting hand-authored tasks from replaying transcript-sized memory into the execution prompt.
 
 ## 6. Shallow tree search on hard branches
 

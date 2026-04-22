@@ -26,6 +26,13 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
 
   const { client } = await openClient(dbPath, {});
   try {
+    const oversizedReflectionPreview = `Earlier verification failed because the agent accepted a plausible answer without trying to falsify it. ${"raw transcript filler ".repeat(40)}REFLECTION_TAIL_SENTINEL`;
+    const oversizedReflectionKeywords = [
+      "reflection",
+      "verification",
+      ...Array.from({ length: 16 }, (_, index) => `overflow-keyword-${index}`),
+    ];
+
     const task = await callTool(client, "task.create", {
       mutation: nextMutation(testId, "task.create", () => mutationCounter++),
       objective: "Verify a bounded runtime-worker execution brief.",
@@ -164,8 +171,8 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
           top_reflections: [
             {
               id: "reflection-brief-1",
-              text_preview: "Earlier verification failed because the agent accepted a plausible answer without trying to falsify it.",
-              keywords: ["reflection", "verification"],
+              text_preview: oversizedReflectionPreview,
+              keywords: oversizedReflectionKeywords,
             },
           ],
         },
@@ -184,8 +191,8 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
           known_failures: [
             {
               id: "reflection-brief-1",
-              text_preview: "Earlier verification failed because the agent accepted a plausible answer without trying to falsify it.",
-              keywords: ["reflection", "verification"],
+              text_preview: oversizedReflectionPreview,
+              keywords: oversizedReflectionKeywords,
             },
           ],
           current_plan: [
@@ -256,6 +263,8 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.match(sessionBrief, /Keep reasoning evidence compact/i);
     assert.match(sessionBrief, /Grounded reflections/);
     assert.match(sessionBrief, /accepted a plausible answer without trying to falsify it/i);
+    assert.doesNotMatch(sessionBrief, /REFLECTION_TAIL_SENTINEL/);
+    assert.doesNotMatch(sessionBrief, /overflow-keyword-10/);
     assert.match(sessionBrief, /Working memory/);
     assert.match(sessionBrief, /Use compact state first/i);
     assert.match(sessionBrief, /Current lane: verification owned by verification-director/i);
