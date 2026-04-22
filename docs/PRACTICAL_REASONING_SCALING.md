@@ -43,6 +43,7 @@ Current MASTER-MOLD contract:
 - Adaptive policies now carry a non-blocking `compute_budget` contract so workers can log candidate count, latency, token usage, and estimated cost for ROI review.
 - `task.summary`, `kernel.summary`, and Agent Office now aggregate compute telemetry from completed reasoning audits so high-compute ROI is operator-visible.
 - Kernel and Agent Office summaries now also expose compute-telemetry coverage, missing telemetry task IDs, and an attention item when completed high-compute work skipped requested telemetry.
+- Completion audits now mark adaptive tasks `needs_review` when observed candidates exceed the declared compute-budget cap, even if the selected candidate evidence is otherwise valid.
 
 Do not:
 

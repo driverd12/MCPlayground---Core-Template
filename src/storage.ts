@@ -14169,6 +14169,7 @@ function buildTaskCompletionReasoningAudit(
   const missingFields: string[] = [];
   const warnings: string[] = [];
   const observedCandidateCount = readCompletionCandidateCount(result);
+  const maxCandidateBudget = computeBudget?.max_candidate_count ?? null;
   const selectionAudit = buildCompletionSelectionAudit(
     result,
     observedCandidateCount,
@@ -14264,9 +14265,6 @@ function buildTaskCompletionReasoningAudit(
     ]));
   }
 
-  if (missingFields.length > 0) {
-    warnings.push("Completion accepted, but reasoning-policy evidence is incomplete; review before treating as verified.");
-  }
   if (
     candidateRequirement !== null &&
     candidateRequirement > 1 &&
@@ -14274,6 +14272,19 @@ function buildTaskCompletionReasoningAudit(
     observedCandidateCount < candidateRequirement
   ) {
     warnings.push(`Observed ${observedCandidateCount} candidate(s), below required ${candidateRequirement}.`);
+  }
+  if (
+    maxCandidateBudget !== null &&
+    observedCandidateCount !== null &&
+    observedCandidateCount > maxCandidateBudget
+  ) {
+    requireField("candidate_budget", false);
+    warnings.push(
+      `Observed ${observedCandidateCount} candidate(s), above compute budget cap ${maxCandidateBudget}.`
+    );
+  }
+  if (missingFields.length > 0) {
+    warnings.push("Completion accepted, but reasoning-policy evidence is incomplete; review before treating as verified.");
   }
   if (evidenceRerank && selectionAudit.selection_rationale_present && !completionSelectionAuditIsSatisfied(selectionAudit)) {
     warnings.push(

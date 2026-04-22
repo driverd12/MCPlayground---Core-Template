@@ -272,6 +272,73 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       /missing required verifier rerank fields/
     );
 
+    const overBudgetTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.over-budget-candidates", () => mutationCounter++),
+      objective: "Keep adaptive candidate exploration inside the declared compute budget.",
+      project_dir: REPO_ROOT,
+      priority: 6,
+      routing: {
+        allowed_agent_ids: ["candidate-budget-worker"],
+      },
+      task_execution: {
+        task_kind: "verification",
+        quality_preference: "quality",
+        reasoning_compute_policy: {
+          mode: "adaptive_best_of_n",
+          candidate_count: 2,
+          max_candidate_count: 2,
+          selection_strategy: "evidence_rerank",
+          activation_reasons: ["verification_task"],
+          evidence_required: true,
+          transcript_policy: "compact_evidence_only",
+          compute_budget: {
+            candidate_budget: 2,
+            max_candidate_count: 2,
+            max_branch_depth: 0,
+            max_branch_count: 0,
+            max_revision_passes: 0,
+            evidence_char_limit: 6000,
+            telemetry_required: false,
+            telemetry_fields: [],
+          },
+        },
+      },
+      tags: ["reasoning-budget", "candidate-budget"],
+    });
+
+    const overBudgetClaim = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim.over-budget-candidates", () => mutationCounter++),
+      worker_id: "candidate-budget-worker",
+      task_id: overBudgetTask.task.task_id,
+    });
+    assert.equal(overBudgetClaim.claimed, true);
+
+    const overBudgetCompletion = await callTool(client, "task.complete", {
+      mutation: nextMutation(testId, "task.complete.over-budget-candidates", () => mutationCounter++),
+      task_id: overBudgetTask.task.task_id,
+      worker_id: "candidate-budget-worker",
+      summary: "Completed by expanding too many candidates.",
+      result: {
+        candidates: [
+          { id: "candidate-a", evidence: "passed smoke check" },
+          { id: "candidate-b", evidence: "passed regression check" },
+          { id: "candidate-c", selected: true, evidence: "passed an extra exploratory check" },
+        ],
+        selected_candidate_id: "candidate-c",
+        selection_rationale: "candidate-c had the strongest extra exploratory evidence",
+      },
+    });
+    assert.equal(overBudgetCompletion.completed, true);
+    assert.equal(overBudgetCompletion.task.result.reasoning_policy_audit.status, "needs_review");
+    assert.equal(overBudgetCompletion.task.result.reasoning_policy_audit.observed_candidate_count, 3);
+    assert.ok(overBudgetCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("candidate_evidence"));
+    assert.ok(overBudgetCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("selection_rationale"));
+    assert.ok(overBudgetCompletion.task.result.reasoning_policy_audit.missing_fields.includes("candidate_budget"));
+    assert.match(
+      overBudgetCompletion.task.result.reasoning_policy_audit.warnings.join(" "),
+      /above compute budget cap 2/
+    );
+
     const missingBudgetForcingTask = await callTool(client, "task.create", {
       mutation: nextMutation(testId, "task.create.missing-budget-forcing", () => mutationCounter++),
       objective: "Require a forced second look before accepting the selected verification answer.",
