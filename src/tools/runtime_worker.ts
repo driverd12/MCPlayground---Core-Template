@@ -185,6 +185,12 @@ function uniqueStrings(items: Array<string | null | undefined>) {
   return [...new Set(items.map((item) => readString(item)).filter((item): item is string => Boolean(item)))];
 }
 
+function compactBriefList(value: unknown, maxItems = 8, itemLimit = 64) {
+  return readStringArray(value)
+    .slice(0, maxItems)
+    .map((entry) => compactBriefText(entry, itemLimit));
+}
+
 function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExecution: Record<string, unknown>) {
   const taskKind = readString(taskExecution.task_kind);
   const qualityPreference = readString(taskExecution.quality_preference);
@@ -196,19 +202,19 @@ function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExec
   const orgSignals = readNullableRecord(taskMetadata.org_program_signals);
   const computePolicy = resolveReasoningComputePolicy(taskExecution);
   const policyMode = readString(computePolicy?.mode);
-  const activationReasons = readStringArray(computePolicy?.activation_reasons);
+  const activationReasons = compactBriefList(computePolicy?.activation_reasons, 8, 64);
   const transcriptPolicy = readString(computePolicy?.transcript_policy);
   const verifierRerank = readNullableRecord(computePolicy?.verifier_rerank);
-  const verifierScoreFields = readStringArray(verifierRerank?.score_fields);
-  const verifierRequiredFields = readStringArray(verifierRerank?.required_selected_fields);
+  const verifierScoreFields = compactBriefList(verifierRerank?.score_fields, 8, 64);
+  const verifierRequiredFields = compactBriefList(verifierRerank?.required_selected_fields, 8, 64);
   const computeBudget = readNullableRecord(computePolicy?.compute_budget);
-  const computeTelemetryFields = readStringArray(computeBudget?.telemetry_fields);
+  const computeTelemetryFields = compactBriefList(computeBudget?.telemetry_fields, 8, 64);
   const evidenceCharLimit =
     typeof computeBudget?.evidence_char_limit === "number" && Number.isFinite(computeBudget.evidence_char_limit)
       ? Math.max(256, Math.round(computeBudget.evidence_char_limit))
       : null;
   const shallowBranchSearch = resolveShallowBranchSearch(taskExecution);
-  const branchPruneSignals = readStringArray(shallowBranchSearch?.prune_with);
+  const branchPruneSignals = compactBriefList(shallowBranchSearch?.prune_with, 8, 64);
   const branchCount =
     typeof shallowBranchSearch?.branch_count === "number" && Number.isFinite(shallowBranchSearch.branch_count)
       ? Math.max(1, Math.round(shallowBranchSearch.branch_count))
@@ -222,14 +228,14 @@ function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExec
     typeof budgetForcing?.max_revision_passes === "number" && Number.isFinite(budgetForcing.max_revision_passes)
       ? Math.max(1, Math.round(budgetForcing.max_revision_passes))
       : 1;
-  const budgetRequiredFields = readStringArray(budgetForcing?.required_evidence_fields);
+  const budgetRequiredFields = compactBriefList(budgetForcing?.required_evidence_fields, 8, 64);
   const lines = uniqueStrings([
     policyMode === "adaptive_best_of_n"
       ? `Adaptive compute policy: best-of-N with ${reasoningCandidateCount ?? computePolicy?.candidate_count ?? "bounded"} candidate(s).`
       : null,
     activationReasons.length > 0 ? `Activation reasons: ${activationReasons.join(", ")}.` : null,
     computeBudget
-      ? `Compute budget: candidates<=${String(computeBudget.max_candidate_count ?? computeBudget.candidate_budget ?? reasoningCandidateCount ?? "bounded")}, branches<=${String(computeBudget.max_branch_count ?? 0)}, revisions<=${String(computeBudget.max_revision_passes ?? 0)}${evidenceCharLimit ? `, evidence<=${evidenceCharLimit} chars` : ""}.`
+      ? `Compute budget: candidates<=${compactMemoryBudgetValue(computeBudget.max_candidate_count ?? computeBudget.candidate_budget ?? reasoningCandidateCount ?? "bounded")}, branches<=${compactMemoryBudgetValue(computeBudget.max_branch_count ?? 0)}, revisions<=${compactMemoryBudgetValue(computeBudget.max_revision_passes ?? 0)}${evidenceCharLimit ? `, evidence<=${evidenceCharLimit} chars` : ""}.`
       : null,
     computeTelemetryFields.length > 0
       ? `Log compute telemetry when available: ${computeTelemetryFields.join(", ")}.`
@@ -376,7 +382,7 @@ function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: 
   const needsVerification = taskExecution.require_verification_pass === true;
   const planQualityGate = readNullableRecord(taskExecution.plan_quality_gate);
   const planQualityRequired = needsPlan && planQualityGate?.required === true;
-  const planQualityRequiredFields = readStringArray(planQualityGate?.required_fields);
+  const planQualityRequiredFields = compactBriefList(planQualityGate?.required_fields, 8, 64);
   const maxPlannedSteps =
     typeof planQualityGate?.max_planned_steps === "number" && Number.isFinite(planQualityGate.max_planned_steps)
       ? Math.max(1, Math.round(planQualityGate.max_planned_steps))
@@ -386,9 +392,9 @@ function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: 
   const computePolicy = resolveReasoningComputePolicy(taskExecution);
   const policyEvidenceRequired = computePolicy?.evidence_required === true || readString(computePolicy?.mode) === "adaptive_best_of_n";
   const computeBudget = readNullableRecord(computePolicy?.compute_budget);
-  const computeTelemetryFields = readStringArray(computeBudget?.telemetry_fields);
+  const computeTelemetryFields = compactBriefList(computeBudget?.telemetry_fields, 8, 64);
   const verifierRerank = readNullableRecord(computePolicy?.verifier_rerank);
-  const verifierRequiredFields = readStringArray(verifierRerank?.required_selected_fields);
+  const verifierRequiredFields = compactBriefList(verifierRerank?.required_selected_fields, 8, 64);
   const needsBranchSearch = resolveShallowBranchSearch(taskExecution) !== null;
   const needsBudgetForcing = resolveBudgetForcing(taskExecution) !== null;
   const qualityBiased = qualityPreference === "quality" && (taskKind === "research" || taskKind === "verification");

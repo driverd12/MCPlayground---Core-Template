@@ -174,6 +174,7 @@ Current MASTER-MOLD contract:
 - `task.compile` now treats `memory_preflight` and `working_memory` as compiler-owned fields in plan metadata, so caller-provided metadata cannot override the compact memory budget or re-enable transcript replay.
 - Runtime worker briefs compact externally supplied grounded-reflection previews and keyword lists before display, protecting hand-authored tasks from replaying transcript-sized memory into the execution prompt.
 - Runtime worker briefs also compact externally supplied working-memory policy text, lane labels, failure IDs, and budget display values before rendering, so hand-authored metadata cannot expand prompt state through control fields.
+- Runtime worker reasoning-policy and completion-handoff sections now bound externally supplied policy field lists before rendering, keeping activation reasons, telemetry fields, score fields, and branch-prune signals compact in execution prompts.
 
 ## 6. Shallow tree search on hard branches
 

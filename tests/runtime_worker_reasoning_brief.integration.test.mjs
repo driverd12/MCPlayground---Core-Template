@@ -33,6 +33,9 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
       ...Array.from({ length: 16 }, (_, index) => `overflow-keyword-${index}`),
     ];
     const oversizedCompressionPolicy = `Use this compact state first; retrieve cited memory only if a decision needs more context. ${"raw policy filler ".repeat(40)}COMPRESSION_POLICY_TAIL_SENTINEL`;
+    const overflowPolicyFields = Array.from({ length: 12 }, (_, index) =>
+      index === 11 ? "POLICY_FIELD_TAIL_SENTINEL" : `overflow-policy-field-${index}`
+    );
 
     const task = await callTool(client, "task.create", {
       mutation: nextMutation(testId, "task.create", () => mutationCounter++),
@@ -109,7 +112,12 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
           candidate_count: 4,
           max_candidate_count: 4,
           selection_strategy: "evidence_rerank",
-          activation_reasons: ["verification_task", "quality_preference", "grounded_reflection_match"],
+          activation_reasons: [
+            "verification_task",
+            "quality_preference",
+            "grounded_reflection_match",
+            ...overflowPolicyFields,
+          ],
           evidence_required: true,
           transcript_policy: "compact_evidence_only",
           compute_budget: {
@@ -120,10 +128,23 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
             max_revision_passes: 1,
             evidence_char_limit: 6000,
             telemetry_required: true,
-            telemetry_fields: ["candidate_count", "selected_candidate_id", "latency_ms", "token_usage", "estimated_cost_usd"],
+            telemetry_fields: [
+              "candidate_count",
+              "selected_candidate_id",
+              "latency_ms",
+              "token_usage",
+              "estimated_cost_usd",
+              ...overflowPolicyFields,
+            ],
           },
           verifier_rerank: {
-            score_fields: ["evidence_strength", "artifact_fit", "contradiction_risk", "rollback_safety"],
+            score_fields: [
+              "evidence_strength",
+              "artifact_fit",
+              "contradiction_risk",
+              "rollback_safety",
+              ...overflowPolicyFields,
+            ],
             required_selected_fields: ["selected_candidate_id", "selection_rationale", "verifier_score", "contradiction_risk"],
             minimum_selected_score: 0.6,
             contradiction_risk_fail_closed: true,
@@ -132,7 +153,13 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
             enabled: true,
             max_depth: 2,
             branch_count: 4,
-            prune_with: ["artifact_fit", "contradiction_risk", "rollback_safety", "environment_feedback"],
+            prune_with: [
+              "artifact_fit",
+              "contradiction_risk",
+              "rollback_safety",
+              "environment_feedback",
+              ...overflowPolicyFields,
+            ],
             fallback: "single_path_when_branch_confidence_high",
           },
           budget_forcing: {
@@ -247,6 +274,7 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.match(sessionBrief, /Reasoning policy/);
     assert.match(sessionBrief, /Adaptive compute policy: best-of-N with 4 candidate/i);
     assert.match(sessionBrief, /Activation reasons: verification_task, quality_preference, grounded_reflection_match/i);
+    assert.doesNotMatch(sessionBrief, /POLICY_FIELD_TAIL_SENTINEL/);
     assert.match(sessionBrief, /Compute budget: candidates<=4, branches<=4, revisions<=1, evidence<=6000 chars/i);
     assert.match(sessionBrief, /Log compute telemetry when available: candidate_count, selected_candidate_id, latency_ms, token_usage, estimated_cost_usd/i);
     assert.match(sessionBrief, /Generate 4 bounded candidate approaches or failure hypotheses/i);
