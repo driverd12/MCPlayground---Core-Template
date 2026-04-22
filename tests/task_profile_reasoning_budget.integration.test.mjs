@@ -272,6 +272,79 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       /missing required verifier rerank fields/
     );
 
+    const lowScoreVerifierTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.low-score-verifier", () => mutationCounter++),
+      objective: "Reject selected candidates that fail verifier score or contradiction risk thresholds.",
+      project_dir: REPO_ROOT,
+      priority: 6,
+      routing: {
+        allowed_agent_ids: ["low-score-verifier-worker"],
+      },
+      task_execution: {
+        task_kind: "verification",
+        quality_preference: "quality",
+        reasoning_compute_policy: {
+          mode: "adaptive_best_of_n",
+          candidate_count: 2,
+          max_candidate_count: 4,
+          selection_strategy: "evidence_rerank",
+          activation_reasons: ["verification_task"],
+          evidence_required: true,
+          transcript_policy: "compact_evidence_only",
+          verifier_rerank: {
+            score_fields: ["evidence_strength", "artifact_fit", "contradiction_risk", "rollback_safety"],
+            required_selected_fields: [
+              "selected_candidate_id",
+              "selection_rationale",
+              "verifier_score",
+              "contradiction_risk",
+            ],
+            minimum_selected_score: 0.6,
+            contradiction_risk_fail_closed: true,
+          },
+        },
+      },
+      tags: ["reasoning-budget", "verifier-rerank"],
+    });
+
+    const lowScoreVerifierClaim = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim.low-score-verifier", () => mutationCounter++),
+      worker_id: "low-score-verifier-worker",
+      task_id: lowScoreVerifierTask.task.task_id,
+    });
+    assert.equal(lowScoreVerifierClaim.claimed, true);
+
+    const lowScoreVerifierCompletion = await callTool(client, "task.complete", {
+      mutation: nextMutation(testId, "task.complete.low-score-verifier", () => mutationCounter++),
+      task_id: lowScoreVerifierTask.task.task_id,
+      worker_id: "low-score-verifier-worker",
+      summary: "Selected a candidate with verifier fields present but unsafe values.",
+      result: {
+        candidates: [
+          { id: "candidate-a", evidence: "passed smoke check", verifier_score: 0.58, contradiction_risk: "medium" },
+          { id: "candidate-b", selected: true, evidence: "passed regression check", verifier_score: 0.42, contradiction_risk: "high" },
+        ],
+        selected_candidate_id: "candidate-b",
+        selection_rationale: "candidate-b had regression evidence but weak verifier confidence",
+      },
+    });
+    assert.equal(lowScoreVerifierCompletion.completed, true);
+    assert.equal(lowScoreVerifierCompletion.task.result.reasoning_policy_audit.status, "needs_review");
+    assert.equal(lowScoreVerifierCompletion.task.result.reasoning_policy_audit.selection.verifier_score, 0.42);
+    assert.equal(lowScoreVerifierCompletion.task.result.reasoning_policy_audit.selection.contradiction_risk, "high");
+    assert.ok(lowScoreVerifierCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("verifier_score"));
+    assert.ok(lowScoreVerifierCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("contradiction_risk"));
+    assert.ok(lowScoreVerifierCompletion.task.result.reasoning_policy_audit.missing_fields.includes("verifier_score_threshold"));
+    assert.ok(lowScoreVerifierCompletion.task.result.reasoning_policy_audit.missing_fields.includes("contradiction_risk_fail_closed"));
+    assert.match(
+      lowScoreVerifierCompletion.task.result.reasoning_policy_audit.warnings.join(" "),
+      /below required minimum 0.6/
+    );
+    assert.match(
+      lowScoreVerifierCompletion.task.result.reasoning_policy_audit.warnings.join(" "),
+      /contradiction_risk is high/
+    );
+
     const overBudgetTask = await callTool(client, "task.create", {
       mutation: nextMutation(testId, "task.create.over-budget-candidates", () => mutationCounter++),
       objective: "Keep adaptive candidate exploration inside the declared compute budget.",

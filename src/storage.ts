@@ -492,6 +492,8 @@ export type TaskCompletionReasoningAudit = {
     selected_candidate_in_candidates: boolean | null;
     selected_candidate_has_evidence: boolean;
     evidence_scored_candidate_count: number;
+    verifier_score: number | null;
+    contradiction_risk: string | number | boolean | null;
   };
   required_fields: string[];
   satisfied_fields: string[];
@@ -14168,6 +14170,7 @@ function buildTaskCompletionReasoningAudit(
   const planQualityMaxSteps = readTaskPlanQualityMaxSteps(execution);
   const planQualityGateRequired = planRequired && planQualityRequiredFields.length > 0;
   const verifierRequiredSelectedFields = readVerifierRerankRequiredSelectedFields(execution);
+  const verifierRerankPolicy = readVerifierRerankPolicy(execution);
   const taskKind = String(execution.task_kind ?? "").trim();
   const qualityPreference = String(execution.quality_preference ?? "").trim();
   const qualityBiased =
@@ -14317,6 +14320,26 @@ function buildTaskCompletionReasoningAudit(
     requireField("branch_depth_budget", false);
     warnings.push(`Observed branch depth ${observedBranchDepth}, above compute budget cap ${maxBranchDepth}.`);
   }
+  if (
+    verifierRerankPolicy.minimum_selected_score !== null &&
+    ((selectionAudit.verifier_score === null && !missingFields.includes("verifier_score")) ||
+      (selectionAudit.verifier_score !== null && selectionAudit.verifier_score < verifierRerankPolicy.minimum_selected_score))
+  ) {
+    requireField("verifier_score_threshold", false);
+    warnings.push(selectionAudit.verifier_score === null
+      ? `Selected candidate verifier_score is missing; verifier rerank requires minimum ${verifierRerankPolicy.minimum_selected_score}.`
+      : `Selected candidate verifier_score ${selectionAudit.verifier_score} is below required minimum ${verifierRerankPolicy.minimum_selected_score}.`);
+  }
+  if (
+    verifierRerankPolicy.contradiction_risk_fail_closed &&
+    ((selectionAudit.contradiction_risk === null && !missingFields.includes("contradiction_risk")) ||
+      completionContradictionRiskIsHigh(selectionAudit.contradiction_risk))
+  ) {
+    requireField("contradiction_risk_fail_closed", false);
+    warnings.push(selectionAudit.contradiction_risk === null
+      ? "Selected candidate contradiction_risk is missing; verifier rerank policy requires fail-closed review."
+      : "Selected candidate contradiction_risk is high; verifier rerank policy requires fail-closed review.");
+  }
   if (missingFields.length > 0) {
     warnings.push("Completion accepted, but reasoning-policy evidence is incomplete; review before treating as verified.");
   }
@@ -14368,6 +14391,19 @@ function readVerifierRerankRequiredSelectedFields(execution: Record<string, unkn
   return [...new Set(asStringArrayForStorage(verifierRerank?.required_selected_fields))];
 }
 
+function readVerifierRerankPolicy(execution: Record<string, unknown>): {
+  minimum_selected_score: number | null;
+  contradiction_risk_fail_closed: boolean;
+} {
+  const computePolicy = readTaskReasoningComputePolicy(execution);
+  const verifierRerank = readPlainObject(computePolicy?.verifier_rerank);
+  const rawMinimumScore = asNullableFiniteNumber(verifierRerank?.minimum_selected_score);
+  return {
+    minimum_selected_score: rawMinimumScore === null ? null : Math.max(0, Math.min(1, rawMinimumScore)),
+    contradiction_risk_fail_closed: verifierRerank?.contradiction_risk_fail_closed === true,
+  };
+}
+
 function buildCompletionSelectionAudit(
   result: Record<string, unknown>,
   observedCandidateCount: number | null,
@@ -14387,6 +14423,7 @@ function buildCompletionSelectionAudit(
   const selectedCandidateHasEvidence =
     selectedCandidate?.has_evidence === true ||
     (selectedCandidateObject ? completionCandidateHasEvidence(selectedCandidateObject) : false);
+  const selectedCandidateRecords = readCompletionSelectedCandidateRecords(result, selectedCandidateId);
   return {
     strategy,
     selection_rationale_present: hasCompletionEvidence(result, [
@@ -14400,6 +14437,8 @@ function buildCompletionSelectionAudit(
     selected_candidate_in_candidates: selectedCandidateInCandidates,
     selected_candidate_has_evidence: selectedCandidateHasEvidence,
     evidence_scored_candidate_count: candidates.filter((entry) => entry.has_evidence).length,
+    verifier_score: readSelectedCandidateNumber(selectedCandidateRecords, ["verifier_score", "score"]),
+    contradiction_risk: readSelectedCandidateRisk(selectedCandidateRecords),
   };
 }
 
@@ -14537,6 +14576,65 @@ function completionSelectedCandidateHasRequiredField(
   return readCompletionSelectedCandidateRecords(result, selectedCandidateId).some((record) =>
     keys.some((key) => isCompletionEvidenceValue(record[key]))
   );
+}
+
+function readSelectedCandidateNumber(records: Record<string, unknown>[], keys: string[]): number | null {
+  for (const record of records) {
+    for (const key of keys) {
+      const value = record[key];
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return Number(value.toFixed(6));
+      }
+      if (typeof value === "string" && value.trim()) {
+        const parsed = Number(value.trim());
+        if (Number.isFinite(parsed)) {
+          return Number(parsed.toFixed(6));
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function readSelectedCandidateRisk(records: Record<string, unknown>[]): string | number | boolean | null {
+  for (const record of records) {
+    for (const key of ["contradiction_risk", "contradictionRisk", "risk"]) {
+      const value = record[key];
+      if (typeof value === "boolean") {
+        return value;
+      }
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return Number(value.toFixed(6));
+      }
+      if (typeof value === "string" && value.trim()) {
+        const text = value.trim();
+        const parsed = Number(text);
+        return Number.isFinite(parsed) ? Number(parsed.toFixed(6)) : text;
+      }
+    }
+  }
+  return null;
+}
+
+function completionContradictionRiskIsHigh(value: string | number | boolean | null): boolean {
+  if (value === true) {
+    return true;
+  }
+  if (typeof value === "number") {
+    return value >= 0.5;
+  }
+  if (typeof value !== "string") {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  const numeric = Number(normalized);
+  if (Number.isFinite(numeric)) {
+    return numeric >= 0.5;
+  }
+  return ["high", "critical", "severe", "unsafe", "blocked", "true", "yes"].includes(normalized);
 }
 
 function completionPlanQualityFieldKeys(field: string): string[] {
