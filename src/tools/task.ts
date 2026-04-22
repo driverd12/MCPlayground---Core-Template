@@ -43,6 +43,18 @@ const reasoningComputePolicySchema = z.object({
   evidence_required: z.boolean().optional(),
   transcript_policy: z.string().min(1).optional(),
   verifier_rerank: z.record(z.unknown()).optional(),
+  compute_budget: z
+    .object({
+      candidate_budget: z.number().int().min(1).max(4).optional(),
+      max_candidate_count: z.number().int().min(1).max(4).optional(),
+      max_branch_depth: z.number().int().min(0).max(3).optional(),
+      max_branch_count: z.number().int().min(0).max(4).optional(),
+      max_revision_passes: z.number().int().min(0).max(3).optional(),
+      evidence_char_limit: z.number().int().min(256).max(50000).optional(),
+      telemetry_required: z.boolean().optional(),
+      telemetry_fields: z.array(z.string().min(1)).optional(),
+    })
+    .optional(),
   shallow_branch_search: z
     .object({
       enabled: z.boolean().optional(),
@@ -487,6 +499,9 @@ function normalizeTaskExecutionMetadata(value: unknown) {
   const policyBudgetForcing = isRecord(reasoningComputePolicy?.budget_forcing)
     ? reasoningComputePolicy.budget_forcing
     : null;
+  const policyComputeBudget = isRecord(reasoningComputePolicy?.compute_budget)
+    ? reasoningComputePolicy.compute_budget
+    : null;
   const planQualityGate = isRecord(value.plan_quality_gate) ? value.plan_quality_gate : null;
   const normalizedReasoningComputePolicy = reasoningComputePolicy
     ? {
@@ -510,6 +525,42 @@ function normalizeTaskExecutionMetadata(value: unknown) {
                   ? Math.max(0, Math.min(1, Number(reasoningComputePolicy.verifier_rerank.minimum_selected_score.toFixed(4))))
                   : null,
               contradiction_risk_fail_closed: reasoningComputePolicy.verifier_rerank.contradiction_risk_fail_closed === true,
+            }
+          : null,
+        compute_budget: policyComputeBudget
+          ? {
+              candidate_budget:
+                typeof policyComputeBudget.candidate_budget === "number" &&
+                Number.isFinite(policyComputeBudget.candidate_budget)
+                  ? Math.max(1, Math.min(4, Math.round(policyComputeBudget.candidate_budget)))
+                  : null,
+              max_candidate_count:
+                typeof policyComputeBudget.max_candidate_count === "number" &&
+                Number.isFinite(policyComputeBudget.max_candidate_count)
+                  ? Math.max(1, Math.min(4, Math.round(policyComputeBudget.max_candidate_count)))
+                  : null,
+              max_branch_depth:
+                typeof policyComputeBudget.max_branch_depth === "number" &&
+                Number.isFinite(policyComputeBudget.max_branch_depth)
+                  ? Math.max(0, Math.min(3, Math.round(policyComputeBudget.max_branch_depth)))
+                  : null,
+              max_branch_count:
+                typeof policyComputeBudget.max_branch_count === "number" &&
+                Number.isFinite(policyComputeBudget.max_branch_count)
+                  ? Math.max(0, Math.min(4, Math.round(policyComputeBudget.max_branch_count)))
+                  : null,
+              max_revision_passes:
+                typeof policyComputeBudget.max_revision_passes === "number" &&
+                Number.isFinite(policyComputeBudget.max_revision_passes)
+                  ? Math.max(0, Math.min(3, Math.round(policyComputeBudget.max_revision_passes)))
+                  : null,
+              evidence_char_limit:
+                typeof policyComputeBudget.evidence_char_limit === "number" &&
+                Number.isFinite(policyComputeBudget.evidence_char_limit)
+                  ? Math.max(256, Math.min(50000, Math.round(policyComputeBudget.evidence_char_limit)))
+                  : null,
+              telemetry_required: policyComputeBudget.telemetry_required === true,
+              telemetry_fields: normalizeStringArray(policyComputeBudget.telemetry_fields),
             }
           : null,
         shallow_branch_search: policyShallowBranchSearch

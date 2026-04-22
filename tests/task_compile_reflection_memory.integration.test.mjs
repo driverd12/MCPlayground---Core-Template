@@ -85,6 +85,8 @@ test("task.compile surfaces grounded reflection memories in memory preflight and
     assert.equal(verificationStep?.metadata.task_execution.reasoning_candidate_count, 3);
     assert.equal(verificationStep?.metadata.task_execution.reasoning_selection_strategy, "evidence_rerank");
     assert.equal(verificationStep?.metadata.task_execution.reasoning_compute_policy.candidate_count, 3);
+    assert.equal(verificationStep?.metadata.task_execution.reasoning_compute_policy.compute_budget.candidate_budget, 3);
+    assert.equal(verificationStep?.metadata.task_execution.reasoning_compute_policy.compute_budget.telemetry_required, true);
     assert.ok(verificationStep?.metadata.task_execution.reasoning_compute_policy.activation_reasons.includes("grounded_reflection_match"));
     assert.equal(verificationStep?.metadata.task_execution.require_verification_pass, true);
     assert.equal(verificationStep?.metadata.working_memory.current_stream_id, "verification");

@@ -79,6 +79,15 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
               rollback_noted: true,
               evidence_requirements_mapped: true,
             },
+            compute_usage: {
+              latency_ms: 42,
+              input_tokens: 1200,
+              output_tokens: 320,
+              total_tokens: 1520,
+              estimated_cost_usd: 0.0123,
+              provider: "test-provider",
+              model_id: "test-model",
+            },
             verification_summary: "Created runtime-brief-proof.txt and reasoning-evidence.json in the runtime worktree.",
             checks: ["runtime-brief-proof.txt written", "reasoning-evidence.json written"],
           }),
@@ -95,6 +104,16 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
           activation_reasons: ["verification_task", "quality_preference", "grounded_reflection_match"],
           evidence_required: true,
           transcript_policy: "compact_evidence_only",
+          compute_budget: {
+            candidate_budget: 4,
+            max_candidate_count: 4,
+            max_branch_depth: 2,
+            max_branch_count: 4,
+            max_revision_passes: 1,
+            evidence_char_limit: 6000,
+            telemetry_required: true,
+            telemetry_fields: ["candidate_count", "selected_candidate_id", "latency_ms", "token_usage", "estimated_cost_usd"],
+          },
           verifier_rerank: {
             score_fields: ["evidence_strength", "artifact_fit", "contradiction_risk", "rollback_safety"],
             required_selected_fields: ["selected_candidate_id", "selection_rationale", "verifier_score", "contradiction_risk"],
@@ -221,6 +240,8 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.match(sessionBrief, /Reasoning policy/);
     assert.match(sessionBrief, /Adaptive compute policy: best-of-N with 4 candidate/i);
     assert.match(sessionBrief, /Activation reasons: verification_task, quality_preference, grounded_reflection_match/i);
+    assert.match(sessionBrief, /Compute budget: candidates<=4, branches<=4, revisions<=1, evidence<=6000 chars/i);
+    assert.match(sessionBrief, /Log compute telemetry when available: candidate_count, selected_candidate_id, latency_ms, token_usage, estimated_cost_usd/i);
     assert.match(sessionBrief, /Generate 4 bounded candidate approaches or failure hypotheses/i);
     assert.match(sessionBrief, /Rerank candidate paths by concrete evidence and contradiction risk/i);
     assert.match(sessionBrief, /Include verifier rerank fields for the selected path: selected_candidate_id, selection_rationale, verifier_score, contradiction_risk/i);
@@ -246,6 +267,7 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.match(sessionBrief, /Completion evidence handoff/);
     assert.match(sessionBrief, /reasoning-evidence\.json/);
     assert.match(sessionBrief, /Include candidates or candidate_count showing at least 4 bounded candidates/i);
+    assert.match(sessionBrief, /Include compute_usage when available with candidate_count, selected_candidate_id, latency_ms, token_usage, estimated_cost_usd/i);
     assert.match(sessionBrief, /Include selected_candidate_id plus selection_rationale/i);
     assert.match(sessionBrief, /Include branch_search_summary or branch_evaluations/i);
     assert.match(sessionBrief, /Include budget_forcing_review or forced_second_look/i);
@@ -258,6 +280,9 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.equal(completedTask.result.reasoning_policy_audit.status, "satisfied");
     assert.equal(completedTask.result.reasoning_policy_audit.observed_candidate_count, 4);
     assert.equal(completedTask.result.reasoning_policy_audit.required_candidate_count, 4);
+    assert.equal(completedTask.result.reasoning_policy_audit.compute_budget.max_candidate_count, 4);
+    assert.equal(completedTask.result.reasoning_policy_audit.observed_compute_usage.total_tokens, 1520);
+    assert.equal(completedTask.result.reasoning_policy_audit.observed_compute_usage.estimated_cost_usd, 0.0123);
     assert.deepEqual(completedTask.result.reasoning_policy_audit.missing_fields, []);
     assert.equal(completedTask.result.reasoning_policy_audit.selection.selected_candidate_id, "candidate-d");
     assert.equal(completedTask.result.reasoning_policy_audit.selection.selected_candidate_has_evidence, true);

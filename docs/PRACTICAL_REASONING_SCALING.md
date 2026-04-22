@@ -40,6 +40,7 @@ Current MASTER-MOLD contract:
 - `task.compile` now emits an explicit `task_execution.reasoning_compute_policy` for adaptive best-of-N lanes.
 - Runtime workers render that policy into their session brief and require compact `reasoning-evidence.json` instead of hidden reasoning dumps.
 - The durable policy records activation reasons, candidate count, evidence rerank strategy, and compact-evidence-only transcript handling.
+- Adaptive policies now carry a non-blocking `compute_budget` contract so workers can log candidate count, latency, token usage, and estimated cost for ROI review.
 
 Do not:
 

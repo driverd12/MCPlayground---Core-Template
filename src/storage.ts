@@ -463,6 +463,25 @@ export type TaskCompletionReasoningAudit = {
   status: "not_required" | "satisfied" | "needs_review";
   required_candidate_count: number | null;
   observed_candidate_count: number | null;
+  compute_budget: {
+    candidate_budget: number | null;
+    max_candidate_count: number | null;
+    max_branch_depth: number | null;
+    max_branch_count: number | null;
+    max_revision_passes: number | null;
+    evidence_char_limit: number | null;
+    telemetry_required: boolean;
+    telemetry_fields: string[];
+  } | null;
+  observed_compute_usage: {
+    latency_ms: number | null;
+    input_tokens: number | null;
+    output_tokens: number | null;
+    total_tokens: number | null;
+    estimated_cost_usd: number | null;
+    provider: string | null;
+    model_id: string | null;
+  } | null;
   selection: {
     strategy: string | null;
     selection_rationale_present: boolean;
@@ -14020,6 +14039,38 @@ function taskReasoningComputePolicyRequiresBudgetForcing(execution: Record<strin
   return budgetForcing?.enabled === true;
 }
 
+function readTaskReasoningComputeBudget(execution: Record<string, unknown>): TaskCompletionReasoningAudit["compute_budget"] {
+  const computePolicy = readTaskReasoningComputePolicy(execution);
+  const budget = readPlainObject(computePolicy?.compute_budget);
+  if (!budget) {
+    return null;
+  }
+  return {
+    candidate_budget: boundedReasoningPolicyCandidateCount(budget.candidate_budget),
+    max_candidate_count: boundedReasoningPolicyCandidateCount(budget.max_candidate_count),
+    max_branch_depth: readBoundedNonNegativeInteger(budget.max_branch_depth, 3),
+    max_branch_count: readBoundedNonNegativeInteger(budget.max_branch_count, 4),
+    max_revision_passes: readBoundedNonNegativeInteger(budget.max_revision_passes, 3),
+    evidence_char_limit: readBoundedPositiveInteger(budget.evidence_char_limit, 50000),
+    telemetry_required: budget.telemetry_required === true,
+    telemetry_fields: [...new Set(asStringArrayForStorage(budget.telemetry_fields))].slice(0, 12),
+  };
+}
+
+function readBoundedNonNegativeInteger(value: unknown, max: number): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.max(0, Math.min(max, Math.round(value)));
+}
+
+function readBoundedPositiveInteger(value: unknown, max: number): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.max(1, Math.min(max, Math.round(value)));
+}
+
 function readTaskPlanQualityGate(execution: Record<string, unknown>): Record<string, unknown> | null {
   const gate = readPlainObject(execution.plan_quality_gate);
   return gate?.required === true ? gate : null;
@@ -14077,6 +14128,8 @@ function buildTaskCompletionReasoningAudit(
   const policyEvidenceRequired = taskReasoningComputePolicyRequiresEvidence(execution);
   const branchSearchRequired = taskReasoningComputePolicyRequiresBranchSearch(execution);
   const budgetForcingRequired = taskReasoningComputePolicyRequiresBudgetForcing(execution);
+  const computeBudget = readTaskReasoningComputeBudget(execution);
+  const observedComputeUsage = readCompletionComputeUsage(result);
   const planQualityRequiredFields = readTaskPlanQualityRequiredFields(execution);
   const planQualityMaxSteps = readTaskPlanQualityMaxSteps(execution);
   const planQualityGateRequired = planRequired && planQualityRequiredFields.length > 0;
@@ -14221,12 +14274,21 @@ function buildTaskCompletionReasoningAudit(
   if (missingFields.some((field) => field.startsWith("plan_quality_"))) {
     warnings.push("Plan quality gate is incomplete; constraints, rollback, or evidence mapping may have been skipped.");
   }
+  if (
+    computeBudget?.telemetry_required === true &&
+    !observedComputeUsage &&
+    missingFields.length === 0
+  ) {
+    warnings.push("Compute telemetry was requested but not provided; ROI for extra reasoning compute cannot be measured.");
+  }
 
   return {
     required: true,
     status: missingFields.length === 0 ? "satisfied" : "needs_review",
     required_candidate_count: candidateRequirement && candidateRequirement > 1 ? candidateRequirement : null,
     observed_candidate_count: observedCandidateCount,
+    compute_budget: computeBudget,
+    observed_compute_usage: observedComputeUsage,
     selection: selectionAudit,
     required_fields: requiredFields,
     satisfied_fields: satisfiedFields,
@@ -14534,6 +14596,49 @@ function readCompletionCandidateCount(result: Record<string, unknown>): number |
     }
   }
   return count;
+}
+
+function readCompletionComputeUsage(result: Record<string, unknown>): TaskCompletionReasoningAudit["observed_compute_usage"] {
+  for (const source of completionEvidenceSources(result)) {
+    const usage = readPlainObject(source.compute_usage) ?? readPlainObject(source.usage) ?? readPlainObject(source.token_usage);
+    if (!usage) {
+      continue;
+    }
+    const inputTokens =
+      asNullableFiniteNumber(usage.input_tokens) ??
+      asNullableFiniteNumber(usage.prompt_tokens) ??
+      asNullableFiniteNumber(usage.projected_input_tokens);
+    const outputTokens =
+      asNullableFiniteNumber(usage.output_tokens) ??
+      asNullableFiniteNumber(usage.completion_tokens) ??
+      asNullableFiniteNumber(usage.projected_output_tokens);
+    const totalTokens =
+      asNullableFiniteNumber(usage.total_tokens) ??
+      asNullableFiniteNumber(usage.tokens_total) ??
+      (inputTokens !== null || outputTokens !== null ? (inputTokens ?? 0) + (outputTokens ?? 0) : null);
+    return {
+      latency_ms: asNullableFiniteNumber(usage.latency_ms),
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      total_tokens: totalTokens,
+      estimated_cost_usd:
+        asNullableFiniteNumber(usage.estimated_cost_usd) ??
+        asNullableFiniteNumber(usage.cost_usd) ??
+        asNullableFiniteNumber(usage.projected_cost_usd),
+      provider: typeof usage.provider === "string" && usage.provider.trim() ? usage.provider.trim() : null,
+      model_id:
+        typeof usage.model_id === "string" && usage.model_id.trim()
+          ? usage.model_id.trim()
+          : typeof usage.model === "string" && usage.model.trim()
+            ? usage.model.trim()
+            : null,
+    };
+  }
+  return null;
+}
+
+function asNullableFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? Number(value.toFixed(6)) : null;
 }
 
 function readCompletionPlannedStepCount(result: Record<string, unknown>): number | null {

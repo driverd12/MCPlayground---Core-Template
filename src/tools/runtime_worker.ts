@@ -201,6 +201,12 @@ function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExec
   const verifierRerank = readNullableRecord(computePolicy?.verifier_rerank);
   const verifierScoreFields = readStringArray(verifierRerank?.score_fields);
   const verifierRequiredFields = readStringArray(verifierRerank?.required_selected_fields);
+  const computeBudget = readNullableRecord(computePolicy?.compute_budget);
+  const computeTelemetryFields = readStringArray(computeBudget?.telemetry_fields);
+  const evidenceCharLimit =
+    typeof computeBudget?.evidence_char_limit === "number" && Number.isFinite(computeBudget.evidence_char_limit)
+      ? Math.max(256, Math.round(computeBudget.evidence_char_limit))
+      : null;
   const shallowBranchSearch = resolveShallowBranchSearch(taskExecution);
   const branchPruneSignals = readStringArray(shallowBranchSearch?.prune_with);
   const branchCount =
@@ -222,6 +228,12 @@ function describeReasoningPolicy(taskMetadata: Record<string, unknown>, taskExec
       ? `Adaptive compute policy: best-of-N with ${reasoningCandidateCount ?? computePolicy?.candidate_count ?? "bounded"} candidate(s).`
       : null,
     activationReasons.length > 0 ? `Activation reasons: ${activationReasons.join(", ")}.` : null,
+    computeBudget
+      ? `Compute budget: candidates<=${String(computeBudget.max_candidate_count ?? computeBudget.candidate_budget ?? reasoningCandidateCount ?? "bounded")}, branches<=${String(computeBudget.max_branch_count ?? 0)}, revisions<=${String(computeBudget.max_revision_passes ?? 0)}${evidenceCharLimit ? `, evidence<=${evidenceCharLimit} chars` : ""}.`
+      : null,
+    computeTelemetryFields.length > 0
+      ? `Log compute telemetry when available: ${computeTelemetryFields.join(", ")}.`
+      : null,
     reasoningCandidateCount && reasoningCandidateCount > 1
       ? `Generate ${reasoningCandidateCount} bounded candidate approaches or failure hypotheses before committing to one path.`
       : taskKind === "research" || taskKind === "verification" || qualityPreference === "quality"
@@ -363,6 +375,8 @@ function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: 
   const qualityPreference = readString(taskExecution.quality_preference);
   const computePolicy = resolveReasoningComputePolicy(taskExecution);
   const policyEvidenceRequired = computePolicy?.evidence_required === true || readString(computePolicy?.mode) === "adaptive_best_of_n";
+  const computeBudget = readNullableRecord(computePolicy?.compute_budget);
+  const computeTelemetryFields = readStringArray(computeBudget?.telemetry_fields);
   const verifierRerank = readNullableRecord(computePolicy?.verifier_rerank);
   const verifierRequiredFields = readStringArray(verifierRerank?.required_selected_fields);
   const needsBranchSearch = resolveShallowBranchSearch(taskExecution) !== null;
@@ -388,6 +402,11 @@ function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: 
   ];
   if (needsCandidateEvidence) {
     lines.push(`Include candidates or candidate_count showing at least ${reasoningCandidateCount} bounded candidates.`);
+  }
+  if (computeBudget?.telemetry_required === true || computeTelemetryFields.length > 0) {
+    lines.push(
+      `Include compute_usage when available with ${computeTelemetryFields.join(", ") || "latency_ms, token_usage, estimated_cost_usd"}; this is telemetry for compute ROI, not hidden reasoning.`
+    );
   }
   if (needsRerank) {
     lines.push(

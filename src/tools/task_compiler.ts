@@ -435,6 +435,16 @@ function applyAdaptiveReasoningPolicy(
       activation_reasons: activationReasons,
       evidence_required: true,
       transcript_policy: "compact_evidence_only",
+      compute_budget: {
+        candidate_budget: nextTaskMetadata.reasoning_candidate_count,
+        max_candidate_count: 4,
+        max_branch_depth: hardBranch ? 2 : 0,
+        max_branch_count: hardBranch ? Math.min(3, Number(nextTaskMetadata.reasoning_candidate_count) || resolvedCount) : 0,
+        max_revision_passes: budgetForcingEnabled ? 1 : 0,
+        evidence_char_limit: 6000,
+        telemetry_required: true,
+        telemetry_fields: ["candidate_count", "selected_candidate_id", "latency_ms", "token_usage", "estimated_cost_usd"],
+      },
       verifier_rerank: {
         score_fields: ["evidence_strength", "artifact_fit", "contradiction_risk", "rollback_safety"],
         required_selected_fields: ["selected_candidate_id", "selection_rationale", "verifier_score", "contradiction_risk"],

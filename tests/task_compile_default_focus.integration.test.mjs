@@ -55,6 +55,11 @@ test("task.compile default streams carry explicit focus, routing hints, and adap
     assert.equal(researchStep?.metadata.task_execution.reasoning_selection_strategy, "evidence_rerank");
     assert.equal(researchStep?.metadata.task_execution.reasoning_compute_policy.mode, "adaptive_best_of_n");
     assert.equal(researchStep?.metadata.task_execution.reasoning_compute_policy.candidate_count, 2);
+    assert.equal(researchStep?.metadata.task_execution.reasoning_compute_policy.compute_budget.candidate_budget, 2);
+    assert.equal(researchStep?.metadata.task_execution.reasoning_compute_policy.compute_budget.telemetry_required, true);
+    assert.ok(
+      researchStep?.metadata.task_execution.reasoning_compute_policy.compute_budget.telemetry_fields.includes("estimated_cost_usd")
+    );
     assert.deepEqual(researchStep?.metadata.task_execution.reasoning_compute_policy.verifier_rerank.score_fields, [
       "evidence_strength",
       "artifact_fit",
@@ -95,6 +100,7 @@ test("task.compile default streams carry explicit focus, routing hints, and adap
     assert.equal(finalDecisionStep?.metadata.task_execution.reasoning_candidate_count, 2);
     assert.equal(finalDecisionStep?.metadata.task_execution.reasoning_selection_strategy, "evidence_rerank");
     assert.equal(finalDecisionStep?.metadata.task_execution.reasoning_compute_policy.transcript_policy, "compact_evidence_only");
+    assert.equal(finalDecisionStep?.metadata.task_execution.reasoning_compute_policy.compute_budget.evidence_char_limit, 6000);
     assert.equal(finalDecisionStep?.metadata.task_execution.require_plan_pass, true);
     assert.equal(finalDecisionStep?.metadata.task_execution.plan_quality_gate.required, true);
     assert.equal(finalDecisionStep?.metadata.task_execution.require_verification_pass, true);
@@ -148,6 +154,8 @@ test("task.compile enables shallow branch search for hard reasoning branches", a
     assert.equal(implementationStep?.metadata.task_execution.reasoning_compute_policy, undefined);
     assert.equal(verificationStep?.metadata.task_execution.reasoning_candidate_count, 3);
     assert.equal(branchSearch?.enabled, true);
+    assert.equal(verificationStep?.metadata.task_execution.reasoning_compute_policy.compute_budget.max_branch_depth, 2);
+    assert.equal(verificationStep?.metadata.task_execution.reasoning_compute_policy.compute_budget.max_branch_count, 3);
     assert.equal(branchSearch?.max_depth, 2);
     assert.equal(branchSearch?.branch_count, 3);
     assert.deepEqual(branchSearch?.prune_with, [
@@ -203,9 +211,11 @@ test("task.compile keeps budget forcing opt-in for experimental reasoning budget
     );
     const finalDecisionStep = compiled.steps.find((step) => step.step_kind === "decision");
     const budgetForcing = verificationStep?.metadata.task_execution.reasoning_compute_policy.budget_forcing;
+    const computeBudget = verificationStep?.metadata.task_execution.reasoning_compute_policy.compute_budget;
 
     assert.equal(budgetForcing?.enabled, true);
     assert.equal(budgetForcing?.max_revision_passes, 1);
+    assert.equal(computeBudget?.max_revision_passes, 1);
     assert.equal(budgetForcing?.force_after, "initial_candidate_selection");
     assert.ok(
       verificationStep?.metadata.task_execution.reasoning_compute_policy.activation_reasons.includes("budget_forcing_opt_in")
