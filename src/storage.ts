@@ -14075,6 +14075,15 @@ function taskReasoningComputePolicyRequiresBudgetForcing(execution: Record<strin
   return budgetForcing?.enabled === true;
 }
 
+function readBudgetForcingRequiredEvidenceFields(execution: Record<string, unknown>): string[] {
+  const computePolicy = readTaskReasoningComputePolicy(execution);
+  const budgetForcing = readPlainObject(computePolicy?.budget_forcing);
+  return [...new Set(asStringArrayForStorage(budgetForcing?.required_evidence_fields))]
+    .map((entry) => entry.trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_"))
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
 function readTaskReasoningComputeBudget(execution: Record<string, unknown>): TaskCompletionReasoningAudit["compute_budget"] {
   const computePolicy = readTaskReasoningComputePolicy(execution);
   const budget = readPlainObject(computePolicy?.compute_budget);
@@ -14164,6 +14173,7 @@ function buildTaskCompletionReasoningAudit(
   const policyEvidenceRequired = taskReasoningComputePolicyRequiresEvidence(execution);
   const branchSearchRequired = taskReasoningComputePolicyRequiresBranchSearch(execution);
   const budgetForcingRequired = taskReasoningComputePolicyRequiresBudgetForcing(execution);
+  const budgetForcingRequiredFields = readBudgetForcingRequiredEvidenceFields(execution);
   const computeBudget = readTaskReasoningComputeBudget(execution);
   const observedComputeUsage = readCompletionComputeUsage(result);
   const planQualityRequiredFields = readTaskPlanQualityRequiredFields(execution);
@@ -14282,6 +14292,9 @@ function buildTaskCompletionReasoningAudit(
       "final_answer_delta",
       "changed_decision",
     ]));
+    for (const field of budgetForcingRequiredFields) {
+      requireField(`budget_forcing_${field}`, completionBudgetForcingHasField(result, field));
+    }
   }
   if ((policyEvidenceRequired || qualityBiased) && requiredFields.length === 0) {
     requireField("evidence_summary", hasCompletionEvidence(result, [
@@ -14649,6 +14662,53 @@ function completionPlanQualityFieldKeys(field: string): string[] {
     return ["evidence_requirements_mapped", "evidence_map", "expected_evidence_mapped"];
   }
   return normalized ? [normalized] : [];
+}
+
+function completionBudgetForcingFieldKeys(field: string): string[] {
+  const normalized = field.trim();
+  if (normalized === "initial_answer_summary") {
+    return ["initial_answer_summary", "initial_summary", "first_pass_summary", "initial_answer"];
+  }
+  if (normalized === "forced_second_look") {
+    return ["forced_second_look", "second_look_summary", "revision_summary", "second_look"];
+  }
+  if (normalized === "changed_decision") {
+    return ["changed_decision", "decision_changed"];
+  }
+  if (normalized === "final_answer_delta") {
+    return ["final_answer_delta", "answer_delta", "revision_delta", "final_delta"];
+  }
+  return normalized ? [normalized] : [];
+}
+
+function completionBudgetForcingHasField(result: Record<string, unknown>, field: string): boolean {
+  const keys = completionBudgetForcingFieldKeys(field);
+  if (keys.length === 0) {
+    return false;
+  }
+  for (const source of completionEvidenceSources(result)) {
+    const nestedReviews = [
+      readPlainObject(source.budget_forcing_review),
+      readPlainObject(source.forced_second_look),
+      readPlainObject(source.second_look),
+    ].filter((entry): entry is Record<string, unknown> => entry !== null);
+    for (const review of nestedReviews) {
+      if (keys.some((key) => isCompletionBudgetForcingEvidenceValue(review[key]))) {
+        return true;
+      }
+    }
+    if (keys.some((key) => isCompletionBudgetForcingEvidenceValue(source[key]))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isCompletionBudgetForcingEvidenceValue(value: unknown): boolean {
+  if (typeof value === "boolean") {
+    return true;
+  }
+  return isCompletionEvidenceValue(value);
 }
 
 function completionPlanQualityGateHasField(result: Record<string, unknown>, field: string): boolean {

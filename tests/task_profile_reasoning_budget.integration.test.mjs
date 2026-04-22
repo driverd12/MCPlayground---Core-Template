@@ -494,6 +494,26 @@ test("task profiles treat high test-time-compute policy as high complexity for r
     assert.equal(missingBudgetForcingCompletion.completed, true);
     assert.equal(missingBudgetForcingCompletion.task.result.reasoning_policy_audit.status, "needs_review");
     assert.ok(missingBudgetForcingCompletion.task.result.reasoning_policy_audit.missing_fields.includes("budget_forcing_review"));
+    assert.ok(
+      missingBudgetForcingCompletion.task.result.reasoning_policy_audit.missing_fields.includes(
+        "budget_forcing_initial_answer_summary"
+      )
+    );
+    assert.ok(
+      missingBudgetForcingCompletion.task.result.reasoning_policy_audit.missing_fields.includes(
+        "budget_forcing_forced_second_look"
+      )
+    );
+    assert.ok(
+      missingBudgetForcingCompletion.task.result.reasoning_policy_audit.missing_fields.includes(
+        "budget_forcing_changed_decision"
+      )
+    );
+    assert.ok(
+      missingBudgetForcingCompletion.task.result.reasoning_policy_audit.missing_fields.includes(
+        "budget_forcing_final_answer_delta"
+      )
+    );
     assert.ok(missingBudgetForcingCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("branch_search"));
 
     const missingTelemetrySummary = await callTool(client, "task.summary", {
