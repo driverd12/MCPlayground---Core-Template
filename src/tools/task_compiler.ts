@@ -85,6 +85,15 @@ type CompileWorkingMemory = {
   }>;
   memory_citations: Array<Record<string, unknown>>;
   compression_policy: string;
+  memory_budget: {
+    expected_evidence_limit: number;
+    unresolved_question_limit: number;
+    known_failure_limit: number;
+    citation_limit: number;
+    text_preview_char_limit: number;
+    transcript_replay_allowed: boolean;
+  };
+  refresh_triggers: string[];
   generated_at: string;
 };
 
@@ -544,6 +553,10 @@ function buildCompileWorkingMemory(input: {
       ? ["Confirm retrieved memory still applies before treating it as current truth."]
       : []),
   ]).slice(0, 8);
+  const memoryCitations = [
+    ...input.memory_preflight.top_matches.map((match) => match.citation),
+    ...input.memory_preflight.top_reflections.map((reflection) => reflection.citation),
+  ].filter((entry) => Object.keys(entry).length > 0).slice(0, 6);
   return {
     objective: compactCompilerText(input.objective, 600),
     goal_id: input.goal_id,
@@ -561,12 +574,23 @@ function buildCompileWorkingMemory(input: {
       depends_on: stream.depends_on,
       evidence_requirements: stream.evidence_requirements,
     })),
-    memory_citations: [
-      ...input.memory_preflight.top_matches.map((match) => match.citation),
-      ...input.memory_preflight.top_reflections.map((reflection) => reflection.citation),
-    ].filter((entry) => Object.keys(entry).length > 0),
+    memory_citations: memoryCitations,
     compression_policy:
       "Use this compact state first; retrieve cited memory only when a decision needs more context, and avoid replaying raw transcripts by default.",
+    memory_budget: {
+      expected_evidence_limit: 12,
+      unresolved_question_limit: 8,
+      known_failure_limit: 3,
+      citation_limit: 6,
+      text_preview_char_limit: 360,
+      transcript_replay_allowed: false,
+    },
+    refresh_triggers: uniqueStrings([
+      "task fails or verifier marks reasoning_policy_audit needs_review",
+      "new grounded reflection is captured for this objective",
+      "success criteria, constraints, or selected plan changes",
+      "retrieved memory is contradicted by fresh evidence",
+    ]),
     generated_at: input.generated_at,
   };
 }
@@ -586,7 +610,14 @@ function describeWorkingMemory(workingMemory: CompileWorkingMemory) {
     `- compression_policy: ${workingMemory.compression_policy}`,
     `- expected_evidence_count: ${workingMemory.expected_evidence.length}`,
     `- known_failure_count: ${workingMemory.known_failures.length}`,
+    `- memory_budget: evidence<=${workingMemory.memory_budget.expected_evidence_limit} questions<=${workingMemory.memory_budget.unresolved_question_limit} failures<=${workingMemory.memory_budget.known_failure_limit} citations<=${workingMemory.memory_budget.citation_limit}`,
   ];
+  if (workingMemory.refresh_triggers.length > 0) {
+    lines.push("- refresh_triggers:");
+    for (const trigger of workingMemory.refresh_triggers.slice(0, 4)) {
+      lines.push(`  - ${trigger}`);
+    }
+  }
   if (workingMemory.constraints.length > 0) {
     lines.push("- constraints:");
     for (const constraint of workingMemory.constraints.slice(0, 6)) {

@@ -73,6 +73,11 @@ test("task.compile surfaces grounded reflection memories in memory preflight and
     assert.ok(compiled.compile_brief.content_json.working_memory.known_failures.length >= 1);
     assert.match(compiled.working_memory.known_failures[0].text_preview, /bridge[- ]target/i);
     assert.ok(compiled.working_memory.unresolved_questions.length >= 1);
+    assert.equal(compiled.working_memory.memory_budget.expected_evidence_limit, 12);
+    assert.equal(compiled.working_memory.memory_budget.transcript_replay_allowed, false);
+    assert.ok(compiled.working_memory.refresh_triggers.some((entry) => /reasoning_policy_audit needs_review/i.test(entry)));
+    assert.match(compiled.compile_brief.content_text, /memory_budget: evidence<=12 questions<=8 failures<=3 citations<=6/i);
+    assert.match(compiled.compile_brief.content_text, /refresh_triggers:/i);
     const verificationStep = compiled.steps.find(
       (step) => step.metadata.owner_role_id === "verification-director" && step.step_kind === "verification"
     );

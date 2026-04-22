@@ -145,6 +145,12 @@ Implementation shape:
 2. Retrieve from durable memory first, then only pull transcript slices when needed.
 3. Refresh summaries when the system learns something materially new.
 
+Current MASTER-MOLD contract:
+
+- `task.compile` emits a compact `working_memory.memory_budget` with limits for expected evidence, unresolved questions, known failures, citations, and text previews.
+- Runtime worker briefs render the memory budget and explicitly block raw transcript replay by default.
+- `working_memory.refresh_triggers` tells workers when to refresh the compact state: failed reasoning audits, new grounded reflections, plan or constraint changes, or contradiction from fresh evidence.
+
 ## 6. Shallow tree search on hard branches
 
 Why it matters:

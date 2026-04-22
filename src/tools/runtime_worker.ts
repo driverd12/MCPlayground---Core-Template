@@ -313,6 +313,16 @@ function describeWorkingMemory(taskMetadata: Record<string, unknown>) {
   if (expectedEvidence.length > 0) {
     lines.push(`Expected evidence: ${expectedEvidence.map((entry) => compactBriefText(entry, 140)).join(" | ")}`);
   }
+  const memoryBudget = readNullableRecord(workingMemory.memory_budget);
+  if (memoryBudget) {
+    lines.push(
+      `Memory budget: evidence<=${String(memoryBudget.expected_evidence_limit ?? "n/a")} questions<=${String(memoryBudget.unresolved_question_limit ?? "n/a")} failures<=${String(memoryBudget.known_failure_limit ?? "n/a")} citations<=${String(memoryBudget.citation_limit ?? "n/a")}; transcript replay ${memoryBudget.transcript_replay_allowed === true ? "allowed" : "blocked"}.`
+    );
+  }
+  const refreshTriggers = readStringArray(workingMemory.refresh_triggers).slice(0, 4);
+  if (refreshTriggers.length > 0) {
+    lines.push(`Refresh triggers: ${refreshTriggers.map((entry) => compactBriefText(entry, 140)).join(" | ")}`);
+  }
   const unresolvedQuestions = readStringArray(workingMemory.unresolved_questions).slice(0, 5);
   if (unresolvedQuestions.length > 0) {
     lines.push(`Unresolved questions: ${unresolvedQuestions.map((entry) => compactBriefText(entry, 140)).join(" | ")}`);

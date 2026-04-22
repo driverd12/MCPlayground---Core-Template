@@ -173,6 +173,18 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
           memory_citations: [{ source: "memory", id: "reflection-brief-1" }],
           compression_policy:
             "Use this compact state first; retrieve cited memory only if a decision needs more context.",
+          memory_budget: {
+            expected_evidence_limit: 12,
+            unresolved_question_limit: 8,
+            known_failure_limit: 3,
+            citation_limit: 6,
+            text_preview_char_limit: 360,
+            transcript_replay_allowed: false,
+          },
+          refresh_triggers: [
+            "task fails or verifier marks reasoning_policy_audit needs_review",
+            "new grounded reflection is captured for this objective",
+          ],
           generated_at: new Date().toISOString(),
         },
       },
@@ -215,6 +227,8 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.match(sessionBrief, /Use compact state first/i);
     assert.match(sessionBrief, /Current lane: verification owned by verification-director/i);
     assert.match(sessionBrief, /Expected evidence: .*runtime-brief-proof\.txt/i);
+    assert.match(sessionBrief, /Memory budget: evidence<=12 questions<=8 failures<=3 citations<=6; transcript replay blocked/i);
+    assert.match(sessionBrief, /Refresh triggers: .*reasoning_policy_audit needs_review/i);
     assert.match(sessionBrief, /Unresolved questions: .*renders working memory/i);
     assert.match(sessionBrief, /Known failure memory:reflection-brief-1/i);
     assert.match(sessionBrief, /Completion evidence handoff/);
