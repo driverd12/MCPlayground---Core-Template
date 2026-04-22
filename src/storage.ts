@@ -15043,9 +15043,6 @@ function completionCandidateHasEvidence(candidate: Record<string, unknown>): boo
     "verification_evidence",
     "test_results",
     "checks",
-    "score",
-    "verifier_score",
-    "contradiction_risk",
   ]) {
     if (isCompletionEvidenceValue(candidate[key])) {
       return true;

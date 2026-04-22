@@ -345,6 +345,76 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       /contradiction_risk is high/
     );
 
+    const scoreOnlyVerifierTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.score-only-verifier", () => mutationCounter++),
+      objective: "Do not let verifier score metadata substitute for selected candidate evidence.",
+      project_dir: REPO_ROOT,
+      priority: 6,
+      routing: {
+        allowed_agent_ids: ["score-only-verifier-worker"],
+      },
+      task_execution: {
+        task_kind: "verification",
+        quality_preference: "quality",
+        reasoning_compute_policy: {
+          mode: "adaptive_best_of_n",
+          candidate_count: 2,
+          max_candidate_count: 4,
+          selection_strategy: "evidence_rerank",
+          activation_reasons: ["verification_task"],
+          evidence_required: true,
+          transcript_policy: "compact_evidence_only",
+          verifier_rerank: {
+            required_selected_fields: [
+              "selected_candidate_id",
+              "selection_rationale",
+              "verifier_score",
+              "contradiction_risk",
+            ],
+            minimum_selected_score: 0.6,
+            contradiction_risk_fail_closed: true,
+          },
+        },
+      },
+      tags: ["reasoning-budget", "verifier-rerank"],
+    });
+
+    const scoreOnlyVerifierClaim = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim.score-only-verifier", () => mutationCounter++),
+      worker_id: "score-only-verifier-worker",
+      task_id: scoreOnlyVerifierTask.task.task_id,
+    });
+    assert.equal(scoreOnlyVerifierClaim.claimed, true);
+
+    const scoreOnlyVerifierCompletion = await callTool(client, "task.complete", {
+      mutation: nextMutation(testId, "task.complete.score-only-verifier", () => mutationCounter++),
+      task_id: scoreOnlyVerifierTask.task.task_id,
+      worker_id: "score-only-verifier-worker",
+      summary: "Selected a scored candidate without concrete selected-path evidence.",
+      result: {
+        candidates: [
+          { id: "candidate-a", evidence: "passed smoke check", verifier_score: 0.72, contradiction_risk: "low" },
+          { id: "candidate-b", selected: true, verifier_score: 0.91, contradiction_risk: "low" },
+        ],
+        selected_candidate_id: "candidate-b",
+        selection_rationale: "candidate-b had the highest verifier score",
+      },
+    });
+    assert.equal(scoreOnlyVerifierCompletion.completed, true);
+    assert.equal(scoreOnlyVerifierCompletion.task.result.reasoning_policy_audit.status, "needs_review");
+    assert.equal(
+      scoreOnlyVerifierCompletion.task.result.reasoning_policy_audit.selection.selected_candidate_has_evidence,
+      false
+    );
+    assert.equal(scoreOnlyVerifierCompletion.task.result.reasoning_policy_audit.selection.evidence_scored_candidate_count, 1);
+    assert.ok(scoreOnlyVerifierCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("verifier_score"));
+    assert.ok(scoreOnlyVerifierCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("contradiction_risk"));
+    assert.ok(scoreOnlyVerifierCompletion.task.result.reasoning_policy_audit.missing_fields.includes("selection_rationale"));
+    assert.match(
+      scoreOnlyVerifierCompletion.task.result.reasoning_policy_audit.warnings.join(" "),
+      /not grounded in the candidate evidence/
+    );
+
     const overBudgetTask = await callTool(client, "task.create", {
       mutation: nextMutation(testId, "task.create.over-budget-candidates", () => mutationCounter++),
       objective: "Keep adaptive candidate exploration inside the declared compute budget.",

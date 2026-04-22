@@ -142,6 +142,7 @@ Current MASTER-MOLD contract:
 - `verifier_rerank.required_selected_fields` is now enforced by task completion audits when evidence rerank is active.
 - A selected candidate must provide compact selected-path verifier evidence such as `verifier_score` and `contradiction_risk`; otherwise the task can complete, but the reasoning policy is marked `needs_review`.
 - Completion audits now also enforce `minimum_selected_score` and `contradiction_risk_fail_closed`, so a selected candidate with present-but-weak verifier values is marked `needs_review` instead of passing on field presence alone.
+- Verifier metadata such as `verifier_score` and `contradiction_risk` no longer counts as selected candidate evidence by itself; the selected path still needs concrete evidence, checks, or verification output.
 
 ## 5. Retrieval-backed working memory compression
 
