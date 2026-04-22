@@ -299,12 +299,21 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     const taskSummary = await callTool(client, "task.summary", { running_limit: 10 });
     assert.equal(taskSummary.reasoning_policy.completion_review.compute_usage.telemetry_requested_count, 1);
     assert.equal(taskSummary.reasoning_policy.completion_review.compute_usage.telemetry_present_count, 1);
+    assert.equal(taskSummary.reasoning_policy.completion_review.compute_usage.telemetry_missing_count, 0);
+    assert.equal(taskSummary.reasoning_policy.completion_review.compute_usage.telemetry_coverage_ratio, 1);
     assert.equal(taskSummary.reasoning_policy.completion_review.compute_usage.total_tokens, 1520);
     assert.equal(taskSummary.reasoning_policy.completion_review.compute_usage.total_estimated_cost_usd, 0.0123);
     assert.equal(taskSummary.reasoning_policy.completion_review.compute_usage.average_latency_ms, 42);
+    assert.deepEqual(taskSummary.reasoning_policy.completion_review.compute_usage.missing_telemetry_task_ids, []);
     assert.ok(
       taskSummary.reasoning_policy.completion_review.compute_usage.recent_telemetry_task_ids.includes(task.task.task_id)
     );
+
+    const kernelSummary = await callTool(client, "kernel.summary", { task_running_limit: 10 });
+    assert.equal(kernelSummary.overview.reasoning_compute.telemetry_requested_count, 1);
+    assert.equal(kernelSummary.overview.reasoning_compute.telemetry_present_count, 1);
+    assert.equal(kernelSummary.overview.reasoning_compute.telemetry_coverage_ratio, 1);
+    assert.equal(kernelSummary.overview.reasoning_compute.total_tokens, 1520);
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

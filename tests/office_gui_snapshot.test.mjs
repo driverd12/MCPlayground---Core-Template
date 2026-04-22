@@ -275,10 +275,12 @@ test("office gui snapshot surfaces reasoning-policy review pressure in workbench
               telemetry_requested_count: 2,
               telemetry_present_count: 1,
               telemetry_missing_count: 1,
+              telemetry_coverage_ratio: 0.5,
               total_tokens: 1520,
               total_estimated_cost_usd: 0.0123,
               average_latency_ms: 42,
               max_latency_ms: 42,
+              missing_telemetry_task_ids: ["task-missing-telemetry-1"],
               recent_telemetry_task_ids: ["task-telemetry-1"],
             },
             missing_field_counts: {
@@ -341,8 +343,12 @@ test("office gui snapshot surfaces reasoning-policy review pressure in workbench
   assert.equal(snapshot.summary.tasks.reasoning_policy.budget_forcing_count, 1);
   assert.equal(snapshot.summary.tasks.reasoning_policy.compute_usage.telemetry_requested_count, 2);
   assert.equal(snapshot.summary.tasks.reasoning_policy.compute_usage.telemetry_present_count, 1);
+  assert.equal(snapshot.summary.tasks.reasoning_policy.compute_usage.telemetry_coverage_ratio, 0.5);
   assert.equal(snapshot.summary.tasks.reasoning_policy.compute_usage.total_tokens, 1520);
   assert.equal(snapshot.summary.tasks.reasoning_policy.compute_usage.total_estimated_cost_usd, 0.0123);
+  assert.deepEqual(snapshot.summary.tasks.reasoning_policy.compute_usage.missing_telemetry_task_ids, [
+    "task-missing-telemetry-1",
+  ]);
   assert.deepEqual(snapshot.summary.tasks.reasoning_policy.completion_review_task_ids, ["task-review-1"]);
   assert.equal(snapshot.summary.workbench.blocker_count, 1);
   assert.equal(snapshot.summary.workbench.reasoning_review_count, 1);
@@ -350,6 +356,9 @@ test("office gui snapshot surfaces reasoning-policy review pressure in workbench
   assert.equal(snapshot.workbench.queue.reasoning_policy.branch_search_count, 2);
   assert.equal(snapshot.workbench.queue.reasoning_policy.budget_forcing_count, 1);
   assert.equal(snapshot.workbench.queue.reasoning_policy.completion_review.compute_usage.telemetry_missing_count, 1);
+  assert.deepEqual(snapshot.workbench.queue.reasoning_policy.completion_review.compute_usage.missing_telemetry_task_ids, [
+    "task-missing-telemetry-1",
+  ]);
   assert.deepEqual(snapshot.workbench.queue.reasoning_policy.completion_review.compute_usage.recent_telemetry_task_ids, [
     "task-telemetry-1",
   ]);

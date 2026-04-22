@@ -2439,6 +2439,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   );
   const taskFailuresRecovered = taskFailuresRecoveredByActiveSessions(taskSummary, activeSessions);
   const staleTaskFailures = taskFailuresAreStale(taskSummary) || taskFailuresRecovered;
+  const reasoningComputeUsage = taskSummary.reasoning_policy.completion_review.compute_usage;
 
   const state = deriveKernelState({
     failed_goal_count: goalCounts.failed ?? 0,
@@ -2495,6 +2496,11 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   }
   if ((taskSummary.expired_running_count ?? 0) > 0) {
     attention.push(`Expired running task leases detected: ${taskSummary.expired_running_count}.`);
+  }
+  if (reasoningComputeUsage.telemetry_missing_count > 0) {
+    attention.push(
+      `Reasoning compute telemetry is missing for ${reasoningComputeUsage.telemetry_missing_count} completed high-compute task(s); ROI review is incomplete.`
+    );
   }
   if (totals.blocked_approval_count > 0) {
     attention.push(
@@ -2843,6 +2849,18 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
         projected_cost_usd: budgetLedgerSummary.projected_cost_usd,
         actual_cost_usd: budgetLedgerSummary.actual_cost_usd,
         tokens_total: budgetLedgerSummary.tokens_total,
+      },
+      reasoning_compute: {
+        telemetry_requested_count: reasoningComputeUsage.telemetry_requested_count,
+        telemetry_present_count: reasoningComputeUsage.telemetry_present_count,
+        telemetry_missing_count: reasoningComputeUsage.telemetry_missing_count,
+        telemetry_coverage_ratio: reasoningComputeUsage.telemetry_coverage_ratio,
+        total_tokens: reasoningComputeUsage.total_tokens,
+        total_estimated_cost_usd: reasoningComputeUsage.total_estimated_cost_usd,
+        average_latency_ms: reasoningComputeUsage.average_latency_ms,
+        max_latency_ms: reasoningComputeUsage.max_latency_ms,
+        missing_telemetry_task_ids: reasoningComputeUsage.missing_telemetry_task_ids,
+        recent_telemetry_task_ids: reasoningComputeUsage.recent_telemetry_task_ids,
       },
       warm_cache: {
         enabled: warmCacheState.enabled,

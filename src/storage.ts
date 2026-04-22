@@ -760,10 +760,12 @@ export type TaskSummaryRecord = {
         telemetry_requested_count: number;
         telemetry_present_count: number;
         telemetry_missing_count: number;
+        telemetry_coverage_ratio: number | null;
         total_tokens: number;
         total_estimated_cost_usd: number;
         average_latency_ms: number | null;
         max_latency_ms: number | null;
+        missing_telemetry_task_ids: string[];
         recent_telemetry_task_ids: string[];
       };
       missing_field_counts: Record<string, number>;
@@ -14821,10 +14823,12 @@ function summarizeTaskCompletionReasoningReview(
       telemetry_requested_count: 0,
       telemetry_present_count: 0,
       telemetry_missing_count: 0,
+      telemetry_coverage_ratio: null,
       total_tokens: 0,
       total_estimated_cost_usd: 0,
       average_latency_ms: null,
       max_latency_ms: null,
+      missing_telemetry_task_ids: [],
       recent_telemetry_task_ids: [],
     },
     missing_field_counts: {},
@@ -14849,6 +14853,9 @@ function summarizeTaskCompletionReasoningReview(
       summary.compute_usage.telemetry_requested_count += 1;
       if (!computeUsage) {
         summary.compute_usage.telemetry_missing_count += 1;
+        if (taskId && summary.compute_usage.missing_telemetry_task_ids.length < 10) {
+          summary.compute_usage.missing_telemetry_task_ids.push(taskId);
+        }
       }
     }
     if (computeUsage) {
@@ -14903,6 +14910,13 @@ function summarizeTaskCompletionReasoningReview(
   }
   if (latencyCount > 0) {
     summary.compute_usage.average_latency_ms = Number((latencyTotal / latencyCount).toFixed(4));
+  }
+  if (summary.compute_usage.telemetry_requested_count > 0) {
+    const satisfiedCount =
+      summary.compute_usage.telemetry_requested_count - summary.compute_usage.telemetry_missing_count;
+    summary.compute_usage.telemetry_coverage_ratio = Number(
+      (Math.max(0, satisfiedCount) / summary.compute_usage.telemetry_requested_count).toFixed(4)
+    );
   }
 
   return summary;

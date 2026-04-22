@@ -291,6 +291,16 @@ test("task profiles treat high test-time-compute policy as high complexity for r
           activation_reasons: ["verification_task", "budget_forcing_opt_in"],
           evidence_required: true,
           transcript_policy: "compact_evidence_only",
+          compute_budget: {
+            candidate_budget: 2,
+            max_candidate_count: 4,
+            max_branch_depth: 2,
+            max_branch_count: 2,
+            max_revision_passes: 1,
+            evidence_char_limit: 6000,
+            telemetry_required: true,
+            telemetry_fields: ["candidate_count", "selected_candidate_id", "latency_ms", "token_usage", "estimated_cost_usd"],
+          },
           budget_forcing: {
             enabled: true,
             max_revision_passes: 1,
@@ -345,6 +355,31 @@ test("task profiles treat high test-time-compute policy as high complexity for r
     assert.equal(missingBudgetForcingCompletion.task.result.reasoning_policy_audit.status, "needs_review");
     assert.ok(missingBudgetForcingCompletion.task.result.reasoning_policy_audit.missing_fields.includes("budget_forcing_review"));
     assert.ok(missingBudgetForcingCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("branch_search"));
+
+    const missingTelemetrySummary = await callTool(client, "task.summary", {
+      running_limit: 10,
+    });
+    assert.equal(missingTelemetrySummary.reasoning_policy.completion_review.compute_usage.telemetry_requested_count, 1);
+    assert.equal(missingTelemetrySummary.reasoning_policy.completion_review.compute_usage.telemetry_present_count, 0);
+    assert.equal(missingTelemetrySummary.reasoning_policy.completion_review.compute_usage.telemetry_missing_count, 1);
+    assert.equal(missingTelemetrySummary.reasoning_policy.completion_review.compute_usage.telemetry_coverage_ratio, 0);
+    assert.deepEqual(missingTelemetrySummary.reasoning_policy.completion_review.compute_usage.missing_telemetry_task_ids, [
+      missingBudgetForcingTask.task.task_id,
+    ]);
+
+    const missingTelemetryKernel = await callTool(client, "kernel.summary", {
+      goal_limit: 5,
+      event_limit: 10,
+      artifact_limit: 5,
+      session_limit: 10,
+    });
+    assert.equal(missingTelemetryKernel.overview.reasoning_compute.telemetry_missing_count, 1);
+    assert.deepEqual(missingTelemetryKernel.overview.reasoning_compute.missing_telemetry_task_ids, [
+      missingBudgetForcingTask.task.task_id,
+    ]);
+    assert.ok(
+      missingTelemetryKernel.attention.some((entry) => /Reasoning compute telemetry is missing for 1 completed high-compute task/i.test(entry))
+    );
 
     const failedTask = await callTool(client, "task.create", {
       mutation: nextMutation(testId, "task.create.failure-reflection", () => mutationCounter++),
