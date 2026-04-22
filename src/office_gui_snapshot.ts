@@ -733,6 +733,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const taskCounts = asDict(taskSummary.counts);
   const taskReasoningPolicy = asDict(taskSummary.reasoning_policy);
   const taskReasoningCompletionReview = asDict(taskReasoningPolicy.completion_review);
+  const taskReasoningComputeUsage = asDict(taskReasoningCompletionReview.compute_usage);
   const taskReasoningReviewTaskIds = asList(taskReasoningCompletionReview.needs_review_task_ids)
     .map((entry) => String(entry ?? "").trim())
     .filter(Boolean)
@@ -947,6 +948,16 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
           completion_review_satisfied_count: parseAnyInt(taskReasoningCompletionReview.satisfied_count),
           completion_review_task_ids: taskReasoningReviewTaskIds,
           completion_review_missing_field_counts: taskReasoningMissingFieldCounts,
+          compute_usage: {
+            telemetry_requested_count: parseAnyInt(taskReasoningComputeUsage.telemetry_requested_count),
+            telemetry_present_count: parseAnyInt(taskReasoningComputeUsage.telemetry_present_count),
+            telemetry_missing_count: parseAnyInt(taskReasoningComputeUsage.telemetry_missing_count),
+            total_tokens: parseAnyFloat(taskReasoningComputeUsage.total_tokens),
+            total_estimated_cost_usd: parseAnyFloat(taskReasoningComputeUsage.total_estimated_cost_usd),
+            average_latency_ms: parseAnyFloat(taskReasoningComputeUsage.average_latency_ms),
+            max_latency_ms: parseAnyFloat(taskReasoningComputeUsage.max_latency_ms),
+            recent_telemetry_task_ids: asList(taskReasoningComputeUsage.recent_telemetry_task_ids).map((entry) => String(entry)),
+          },
         },
       },
       tmux: {
@@ -1277,6 +1288,16 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
             needs_review_task_ids: taskReasoningReviewTaskIds,
             last_needs_review_task_id: String(taskReasoningCompletionReview.last_needs_review_task_id ?? "").trim(),
             last_needs_review_at: String(taskReasoningCompletionReview.last_needs_review_at ?? "").trim(),
+            compute_usage: {
+              telemetry_requested_count: parseAnyInt(taskReasoningComputeUsage.telemetry_requested_count),
+              telemetry_present_count: parseAnyInt(taskReasoningComputeUsage.telemetry_present_count),
+              telemetry_missing_count: parseAnyInt(taskReasoningComputeUsage.telemetry_missing_count),
+              total_tokens: parseAnyFloat(taskReasoningComputeUsage.total_tokens),
+              total_estimated_cost_usd: parseAnyFloat(taskReasoningComputeUsage.total_estimated_cost_usd),
+              average_latency_ms: parseAnyFloat(taskReasoningComputeUsage.average_latency_ms),
+              max_latency_ms: parseAnyFloat(taskReasoningComputeUsage.max_latency_ms),
+              recent_telemetry_task_ids: asList(taskReasoningComputeUsage.recent_telemetry_task_ids).map((entry) => String(entry)),
+            },
           },
         },
       },

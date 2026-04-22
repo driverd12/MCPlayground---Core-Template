@@ -756,6 +756,16 @@ export type TaskSummaryRecord = {
       audited_completed_count: number;
       needs_review_count: number;
       satisfied_count: number;
+      compute_usage: {
+        telemetry_requested_count: number;
+        telemetry_present_count: number;
+        telemetry_missing_count: number;
+        total_tokens: number;
+        total_estimated_cost_usd: number;
+        average_latency_ms: number | null;
+        max_latency_ms: number | null;
+        recent_telemetry_task_ids: string[];
+      };
       missing_field_counts: Record<string, number>;
       needs_review_task_ids: string[];
       last_needs_review_task_id: string | null;
@@ -14807,11 +14817,23 @@ function summarizeTaskCompletionReasoningReview(
     audited_completed_count: 0,
     needs_review_count: 0,
     satisfied_count: 0,
+    compute_usage: {
+      telemetry_requested_count: 0,
+      telemetry_present_count: 0,
+      telemetry_missing_count: 0,
+      total_tokens: 0,
+      total_estimated_cost_usd: 0,
+      average_latency_ms: null,
+      max_latency_ms: null,
+      recent_telemetry_task_ids: [],
+    },
     missing_field_counts: {},
     needs_review_task_ids: [],
     last_needs_review_task_id: null,
     last_needs_review_at: null,
   };
+  let latencyTotal = 0;
+  let latencyCount = 0;
 
   for (const row of rows) {
     const result = parseNullableJsonObject(row.result_json);
@@ -14820,6 +14842,40 @@ function summarizeTaskCompletionReasoningReview(
       continue;
     }
     summary.audited_completed_count += 1;
+    const taskId = String(row.task_id ?? "").trim();
+    const computeBudget = readPlainObject(audit.compute_budget);
+    const computeUsage = readPlainObject(audit.observed_compute_usage);
+    if (computeBudget?.telemetry_required === true) {
+      summary.compute_usage.telemetry_requested_count += 1;
+      if (!computeUsage) {
+        summary.compute_usage.telemetry_missing_count += 1;
+      }
+    }
+    if (computeUsage) {
+      summary.compute_usage.telemetry_present_count += 1;
+      const totalTokens = asNullableFiniteNumber(computeUsage.total_tokens);
+      const estimatedCost = asNullableFiniteNumber(computeUsage.estimated_cost_usd);
+      const latencyMs = asNullableFiniteNumber(computeUsage.latency_ms);
+      if (totalTokens !== null) {
+        summary.compute_usage.total_tokens += totalTokens;
+      }
+      if (estimatedCost !== null) {
+        summary.compute_usage.total_estimated_cost_usd = Number(
+          (summary.compute_usage.total_estimated_cost_usd + estimatedCost).toFixed(6)
+        );
+      }
+      if (latencyMs !== null) {
+        latencyTotal += latencyMs;
+        latencyCount += 1;
+        summary.compute_usage.max_latency_ms =
+          summary.compute_usage.max_latency_ms === null
+            ? latencyMs
+            : Math.max(summary.compute_usage.max_latency_ms, latencyMs);
+      }
+      if (taskId && summary.compute_usage.recent_telemetry_task_ids.length < 10) {
+        summary.compute_usage.recent_telemetry_task_ids.push(taskId);
+      }
+    }
     const status = String(audit.status ?? "").trim();
     if (status === "satisfied") {
       summary.satisfied_count += 1;
@@ -14829,7 +14885,6 @@ function summarizeTaskCompletionReasoningReview(
       continue;
     }
     summary.needs_review_count += 1;
-    const taskId = String(row.task_id ?? "").trim();
     if (!summary.last_needs_review_task_id) {
       summary.last_needs_review_task_id = taskId || null;
       summary.last_needs_review_at = asNullableString(row.updated_at);
@@ -14845,6 +14900,9 @@ function summarizeTaskCompletionReasoningReview(
       }
       summary.missing_field_counts[key] = (summary.missing_field_counts[key] ?? 0) + 1;
     }
+  }
+  if (latencyCount > 0) {
+    summary.compute_usage.average_latency_ms = Number((latencyTotal / latencyCount).toFixed(4));
   }
 
   return summary;

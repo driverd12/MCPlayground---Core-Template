@@ -295,6 +295,16 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.match(completedTask.result.reasoning_policy_evidence.selection_rationale, /brief instructions and completion evidence/i);
     assert.match(completedTask.result.reasoning_policy_evidence.branch_search_summary, /Expanded four candidate checks/i);
     assert.equal(completedTask.result.reasoning_policy_evidence.budget_forcing_review.changed_decision, false);
+
+    const taskSummary = await callTool(client, "task.summary", { running_limit: 10 });
+    assert.equal(taskSummary.reasoning_policy.completion_review.compute_usage.telemetry_requested_count, 1);
+    assert.equal(taskSummary.reasoning_policy.completion_review.compute_usage.telemetry_present_count, 1);
+    assert.equal(taskSummary.reasoning_policy.completion_review.compute_usage.total_tokens, 1520);
+    assert.equal(taskSummary.reasoning_policy.completion_review.compute_usage.total_estimated_cost_usd, 0.0123);
+    assert.equal(taskSummary.reasoning_policy.completion_review.compute_usage.average_latency_ms, 42);
+    assert.ok(
+      taskSummary.reasoning_policy.completion_review.compute_usage.recent_telemetry_task_ids.includes(task.task.task_id)
+    );
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
