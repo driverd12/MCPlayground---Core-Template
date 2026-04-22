@@ -772,6 +772,53 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       "raw_transcript",
     ]);
 
+    const transcriptOnlyTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.transcript-policy-only", () => mutationCounter++),
+      objective: "Apply compact evidence redaction even when no other high-compute trigger is set.",
+      project_dir: REPO_ROOT,
+      priority: 4,
+      routing: {
+        allowed_agent_ids: ["transcript-only-worker"],
+      },
+      task_execution: {
+        reasoning_compute_policy: {
+          transcript_policy: "compact_evidence_only",
+        },
+      },
+      tags: ["reasoning-budget", "transcript-policy"],
+    });
+
+    const transcriptOnlyClaim = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim.transcript-policy-only", () => mutationCounter++),
+      worker_id: "transcript-only-worker",
+      task_id: transcriptOnlyTask.task.task_id,
+    });
+    assert.equal(transcriptOnlyClaim.claimed, true);
+
+    const transcriptOnlyCompletion = await callTool(client, "task.complete", {
+      mutation: nextMutation(testId, "task.complete.transcript-policy-only", () => mutationCounter++),
+      task_id: transcriptOnlyTask.task.task_id,
+      worker_id: "transcript-only-worker",
+      summary: "Completed with only a forbidden transcript payload.",
+      result: {
+        raw_transcript: "transcript-only private payload must not persist",
+      },
+    });
+    assert.equal(transcriptOnlyCompletion.completed, true);
+    assert.equal(transcriptOnlyCompletion.task.result.reasoning_policy_audit.status, "needs_review");
+    assert.deepEqual(transcriptOnlyCompletion.task.result.reasoning_policy_audit.transcript_policy_violation_keys, [
+      "raw_transcript",
+    ]);
+    assert.ok(transcriptOnlyCompletion.task.result.reasoning_policy_audit.missing_fields.includes("evidence_summary"));
+    assert.match(
+      transcriptOnlyCompletion.task.result.raw_transcript,
+      /redacted: compact_evidence_only forbids raw transcript/i
+    );
+    assert.equal(
+      JSON.stringify(transcriptOnlyCompletion.task.result).includes("transcript-only private payload must not persist"),
+      false
+    );
+
     const missingTelemetrySummary = await callTool(client, "task.summary", {
       running_limit: 10,
     });

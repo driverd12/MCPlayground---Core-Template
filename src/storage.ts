@@ -14072,7 +14072,11 @@ function taskReasoningComputePolicyRequiresEvidence(execution: Record<string, un
   if (!computePolicy) {
     return false;
   }
-  return computePolicy.evidence_required === true || String(computePolicy.mode ?? "").trim() === "adaptive_best_of_n";
+  return (
+    computePolicy.evidence_required === true ||
+    String(computePolicy.mode ?? "").trim() === "adaptive_best_of_n" ||
+    String(computePolicy.transcript_policy ?? "").trim() === "compact_evidence_only"
+  );
 }
 
 function taskReasoningComputePolicyRequiresBranchSearch(execution: Record<string, unknown>): boolean {
