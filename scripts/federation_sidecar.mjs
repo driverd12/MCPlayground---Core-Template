@@ -316,13 +316,27 @@ function compactKernelSummary(summary) {
   });
 }
 
+function compactEventSummary(summary) {
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return summary;
+  }
+  return sanitizeValue({
+    count: summary.count ?? null,
+    max_event_seq: summary.max_event_seq ?? null,
+    latest_created_at: summary.latest_created_at ?? null,
+    event_type_counts: Array.isArray(summary.event_type_counts) ? summary.event_type_counts.slice(0, 25) : [],
+    entity_type_counts: Array.isArray(summary.entity_type_counts) ? summary.entity_type_counts.slice(0, 25) : [],
+    filters: summary.filters ?? null,
+  });
+}
+
 function collectLocalMcp(options) {
-  const summary = runMcpTool("kernel.summary", {}, options);
-  if (!summary.ok) {
+  const summary = runMcpTool("event.summary", {}, options);
+  if (!summary.ok || !summary.result || typeof summary.result !== "object" || Array.isArray(summary.result)) {
     return {
       status: "unavailable",
       source: "mcp_tool_call",
-      unavailable_reason: "kernel_summary_unavailable",
+      unavailable_reason: "event_summary_unavailable",
       detail: summary.result,
     };
   }
@@ -330,7 +344,7 @@ function collectLocalMcp(options) {
     status: "available",
     source: "mcp_tool_call",
     transport: options.localTransport,
-    kernel_summary: compactKernelSummary(summary.result),
+    event_summary: compactEventSummary(summary.result),
   };
 }
 
