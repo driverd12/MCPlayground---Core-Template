@@ -204,6 +204,66 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       /not grounded in the candidate evidence/
     );
 
+    const partialCandidateEvidenceTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.partial-candidate-evidence", () => mutationCounter++),
+      objective: "Require evidence on each bounded candidate path, not just candidate shells.",
+      project_dir: REPO_ROOT,
+      priority: 6,
+      routing: {
+        allowed_agent_ids: ["candidate-evidence-worker"],
+      },
+      task_execution: {
+        task_kind: "verification",
+        quality_preference: "quality",
+        reasoning_compute_policy: {
+          mode: "adaptive_best_of_n",
+          candidate_count: 3,
+          max_candidate_count: 4,
+          selection_strategy: "evidence_rerank",
+          activation_reasons: ["verification_task"],
+          evidence_required: true,
+          transcript_policy: "compact_evidence_only",
+        },
+      },
+      tags: ["reasoning-budget", "candidate-evidence"],
+    });
+
+    const partialCandidateEvidenceClaim = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim.partial-candidate-evidence", () => mutationCounter++),
+      worker_id: "candidate-evidence-worker",
+      task_id: partialCandidateEvidenceTask.task.task_id,
+    });
+    assert.equal(partialCandidateEvidenceClaim.claimed, true);
+
+    const partialCandidateEvidenceCompletion = await callTool(client, "task.complete", {
+      mutation: nextMutation(testId, "task.complete.partial-candidate-evidence", () => mutationCounter++),
+      task_id: partialCandidateEvidenceTask.task.task_id,
+      worker_id: "candidate-evidence-worker",
+      summary: "Completed with enough candidates, but only the selected path had evidence.",
+      result: {
+        candidates: [
+          { id: "candidate-a" },
+          { id: "candidate-b" },
+          { id: "candidate-c", selected: true, evidence: "passed regression check" },
+        ],
+        selected_candidate_id: "candidate-c",
+        selection_rationale: "candidate-c is the only path with concrete regression evidence.",
+      },
+    });
+    assert.equal(partialCandidateEvidenceCompletion.completed, true);
+    assert.equal(partialCandidateEvidenceCompletion.task.result.reasoning_policy_audit.status, "needs_review");
+    assert.equal(partialCandidateEvidenceCompletion.task.result.reasoning_policy_audit.observed_candidate_count, 3);
+    assert.equal(
+      partialCandidateEvidenceCompletion.task.result.reasoning_policy_audit.selection.evidence_scored_candidate_count,
+      1
+    );
+    assert.ok(partialCandidateEvidenceCompletion.task.result.reasoning_policy_audit.missing_fields.includes("candidate_evidence"));
+    assert.ok(partialCandidateEvidenceCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("selection_rationale"));
+    assert.match(
+      partialCandidateEvidenceCompletion.task.result.reasoning_policy_audit.warnings.join(" "),
+      /evidence-backed candidate\(s\), below required 3/
+    );
+
     const missingVerifierFieldsTask = await callTool(client, "task.create", {
       mutation: nextMutation(testId, "task.create.missing-verifier-fields", () => mutationCounter++),
       objective: "Select a candidate only after verifier rerank fields are present.",

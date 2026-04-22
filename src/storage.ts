@@ -14250,7 +14250,9 @@ function buildTaskCompletionReasoningAudit(
   if (candidateRequirement !== null && candidateRequirement > 1) {
     requireField(
       "candidate_evidence",
-      observedCandidateCount !== null && observedCandidateCount >= candidateRequirement
+      observedCandidateCount !== null &&
+        observedCandidateCount >= candidateRequirement &&
+        selectionAudit.evidence_scored_candidate_count >= candidateRequirement
     );
   }
   if (evidenceRerank) {
@@ -14337,6 +14339,17 @@ function buildTaskCompletionReasoningAudit(
     observedCandidateCount < candidateRequirement
   ) {
     warnings.push(`Observed ${observedCandidateCount} candidate(s), below required ${candidateRequirement}.`);
+  }
+  if (
+    candidateRequirement !== null &&
+    candidateRequirement > 1 &&
+    observedCandidateCount !== null &&
+    observedCandidateCount >= candidateRequirement &&
+    selectionAudit.evidence_scored_candidate_count < candidateRequirement
+  ) {
+    warnings.push(
+      `Observed ${selectionAudit.evidence_scored_candidate_count} evidence-backed candidate(s), below required ${candidateRequirement}.`
+    );
   }
   if (
     maxCandidateBudget !== null &&
