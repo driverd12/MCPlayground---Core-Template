@@ -308,17 +308,27 @@ function compactBriefText(value: unknown, limit = 240) {
   return `${text.slice(0, Math.max(0, limit - 3))}...`;
 }
 
+function compactMemoryBudgetValue(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return compactBriefText(value ?? "n/a", 24);
+}
+
 function describeWorkingMemory(taskMetadata: Record<string, unknown>) {
   const workingMemory = readNullableRecord(taskMetadata.working_memory);
   if (!workingMemory) {
     return renderBulletSection("Working memory", []);
   }
+  const compressionPolicy = readString(workingMemory.compression_policy);
+  const currentStreamId = readString(workingMemory.current_stream_id);
+  const currentOwnerRoleId = readString(workingMemory.current_owner_role_id);
   const lines = uniqueStrings([
-    readString(workingMemory.compression_policy)
-      ? `Use compact state first: ${readString(workingMemory.compression_policy)}`
+    compressionPolicy
+      ? `Use compact state first: ${compactBriefText(compressionPolicy, 240)}`
       : "Use compact state first; retrieve more context only when necessary.",
-    readString(workingMemory.current_stream_id)
-      ? `Current lane: ${readString(workingMemory.current_stream_id)}${readString(workingMemory.current_owner_role_id) ? ` owned by ${readString(workingMemory.current_owner_role_id)}` : ""}.`
+    currentStreamId
+      ? `Current lane: ${compactBriefText(currentStreamId, 80)}${currentOwnerRoleId ? ` owned by ${compactBriefText(currentOwnerRoleId, 80)}` : ""}.`
       : null,
   ]);
   const expectedEvidence = readStringArray(workingMemory.expected_evidence).slice(0, 5);
@@ -328,7 +338,7 @@ function describeWorkingMemory(taskMetadata: Record<string, unknown>) {
   const memoryBudget = readNullableRecord(workingMemory.memory_budget);
   if (memoryBudget) {
     lines.push(
-      `Memory budget: evidence<=${String(memoryBudget.expected_evidence_limit ?? "n/a")} questions<=${String(memoryBudget.unresolved_question_limit ?? "n/a")} failures<=${String(memoryBudget.known_failure_limit ?? "n/a")} citations<=${String(memoryBudget.citation_limit ?? "n/a")}; transcript replay ${memoryBudget.transcript_replay_allowed === true ? "allowed" : "blocked"}.`
+      `Memory budget: evidence<=${compactMemoryBudgetValue(memoryBudget.expected_evidence_limit)} questions<=${compactMemoryBudgetValue(memoryBudget.unresolved_question_limit)} failures<=${compactMemoryBudgetValue(memoryBudget.known_failure_limit)} citations<=${compactMemoryBudgetValue(memoryBudget.citation_limit)}; transcript replay ${memoryBudget.transcript_replay_allowed === true ? "allowed" : "blocked"}.`
     );
   }
   const refreshTriggers = readStringArray(workingMemory.refresh_triggers).slice(0, 4);
@@ -350,7 +360,7 @@ function describeWorkingMemory(taskMetadata: Record<string, unknown>) {
       continue;
     }
     const preview = readString(failure.text_preview);
-    const id = readString(failure.id) ?? "unknown";
+    const id = compactBriefText(readString(failure.id) ?? "unknown", 80);
     if (preview) {
       lines.push(`Known failure memory:${id}: ${compactBriefText(preview, 220)}`);
     }

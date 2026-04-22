@@ -32,6 +32,7 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
       "verification",
       ...Array.from({ length: 16 }, (_, index) => `overflow-keyword-${index}`),
     ];
+    const oversizedCompressionPolicy = `Use this compact state first; retrieve cited memory only if a decision needs more context. ${"raw policy filler ".repeat(40)}COMPRESSION_POLICY_TAIL_SENTINEL`;
 
     const task = await callTool(client, "task.create", {
       mutation: nextMutation(testId, "task.create", () => mutationCounter++),
@@ -209,8 +210,7 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
           current_owner_role_id: "verification-director",
           current_stream_title: "Verify runtime brief handoff",
           memory_citations: [{ source: "memory", id: "reflection-brief-1" }],
-          compression_policy:
-            "Use this compact state first; retrieve cited memory only if a decision needs more context.",
+          compression_policy: oversizedCompressionPolicy,
           memory_budget: {
             expected_evidence_limit: 12,
             unresolved_question_limit: 8,
@@ -267,6 +267,7 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.doesNotMatch(sessionBrief, /overflow-keyword-10/);
     assert.match(sessionBrief, /Working memory/);
     assert.match(sessionBrief, /Use compact state first/i);
+    assert.doesNotMatch(sessionBrief, /COMPRESSION_POLICY_TAIL_SENTINEL/);
     assert.match(sessionBrief, /Current lane: verification owned by verification-director/i);
     assert.match(sessionBrief, /Expected evidence: .*runtime-brief-proof\.txt/i);
     assert.match(sessionBrief, /Memory budget: evidence<=12 questions<=8 failures<=3 citations<=6; transcript replay blocked/i);
