@@ -61,12 +61,14 @@ test("approved host network matching treats IP as a locator and hostname/MAC as 
     lookupLanMacAddress: () => null,
   });
   assert.equal(hostnameMatch.reason, "approved_host_hostname");
+  assert.deepEqual(hostnameMatch.hostnameAddresses, ["10.1.3.224"]);
 
   const macMatch = await approvedHostNetworkMatch("10.1.4.88", host, {
     resolveHostnameAddresses: async () => [],
     lookupLanMacAddress: () => "aa:bb:cc:dd:ee:ff",
   });
   assert.equal(macMatch.reason, "approved_host_mac");
+  assert.deepEqual(macMatch.hostnameAddresses, []);
 });
 
 test("signed host identity verifies Ed25519 proof and permission scopes deny high-risk tools", () => {
@@ -565,6 +567,8 @@ test("/federation/ingest accepts a sidecar payload into the ingest callback", { 
     assert.equal(ingests[0].networkGate.signature_verification.status, "not_required");
     assert.equal(ingests[0].networkGate.approval_scope.matched_by, "loopback");
     assert.equal(ingests[0].networkGate.approval_scope.permission_profile, "operator");
+    assert.equal(ingests[0].networkGate.approval_scope.observed_remote_address, "127.0.0.1");
+    assert.deepEqual(ingests[0].networkGate.approval_scope.hostname_resolved_addresses, []);
 
     const noOrigin = await fetchHttpJsonResponse(port, "/federation/ingest", {
       method: "POST",

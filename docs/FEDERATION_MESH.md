@@ -10,7 +10,7 @@ flowchart LR
     AAgents["IDE/agent clients<br/>Codex, Claude, Cursor"]
     AMcp["MCP HTTP/STDIO<br/>tools + Agent Office"]
     AStore["Local SQLite<br/>events, worker.fabric, memories"]
-    AContext["Local capture<br/>kernel.summary, event.tail, desktop.context"]
+    AContext["Local capture<br/>event.summary, event.tail, desktop.context"]
     ASidecar["federation_sidecar.mjs<br/>bounded publisher"]
     ASecrets["Host secrets<br/>bearer token + Ed25519 identity"]
   end
@@ -111,13 +111,23 @@ npm run federation:sidecar -- --once
 npm run federation:launchd:install
 ```
 
+Before inviting another teammate into the mesh, run the doctor on each already-approved peer:
+
+```bash
+npm run federation:doctor
+npm run federation:doctor -- --ssh-probe
+npm run federation:doctor -- --json
+```
+
+The doctor checks local bearer-token/key presence, 1Password CLI availability, approved `worker.fabric` hosts, signed identity coverage, latest federation ingest freshness, current DNS/locator state, desktop-context freshness, and optional SSH liveness. It intentionally reports the current socket/DNS address separately from the approved-time IP because addresses move; durable trust should come from hostname, device fingerprint, MAC-style hardware evidence, and the signed Ed25519 host identity.
+
 Each accepted federation ingest event records a first-class identity envelope: `requesting_host_id`, `requesting_remote_address`, `captured_from_host_id`, `captured_hostname`, `captured_agent_runtime`, `captured_model_label`, `signed_at`, `received_at`, `signature_verification_result`, and the approved whitelist scope. The receiver derives that envelope from the approved network gate and verified host signature, not from caller-provided `source_*` fields.
 
 ## Payload Boundary
 
 The sidecar intentionally streams a compact subset by default:
 
-- `kernel.summary` highlights.
+- `event.summary` counts and latest event sequence as the default local MCP liveness/context proof.
 - Recent runtime event headers and summaries, excluding federation echo events.
 - `desktop.context` freshness, source, frame paths, and stale/unavailable reasons.
 - Host identity metadata such as host ID, hostname, agent runtime, and model label.

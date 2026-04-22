@@ -84,13 +84,35 @@ function readCachedOfficeSnapshot(cwd, args) {
   return null;
 }
 
+function writeAll(fd, value) {
+  const buffer = Buffer.from(String(value));
+  let offset = 0;
+  const retryBuffer = new SharedArrayBuffer(4);
+  const retryView = new Int32Array(retryBuffer);
+  const deadline = Date.now() + 30_000;
+  while (offset < buffer.length) {
+    try {
+      const written = fs.writeSync(fd, buffer, offset, buffer.length - offset);
+      if (written > 0) {
+        offset += written;
+        continue;
+      }
+    } catch (error) {
+      if (error?.code !== "EAGAIN" || Date.now() > deadline) {
+        throw error;
+      }
+    }
+    Atomics.wait(retryView, 0, 0, 10);
+  }
+}
+
 function writeJsonAndExit(value) {
-  fs.writeSync(process.stdout.fd, `${JSON.stringify(value, null, 2)}\n`);
+  writeAll(process.stdout.fd, `${JSON.stringify(value, null, 2)}\n`);
   process.exit(0);
 }
 
 function writeErrorAndExit(message) {
-  fs.writeSync(process.stderr.fd, `${message}\n`);
+  writeAll(process.stderr.fd, `${message}\n`);
   process.exit(1);
 }
 

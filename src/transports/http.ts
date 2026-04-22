@@ -50,7 +50,11 @@ type NetworkApprovalScope = {
   permission_profile: "read_only" | "task_worker" | "artifact_writer" | "operator" | null;
   hostname: string | null;
   mac_address: string | null;
+  observed_remote_address: string | null;
+  approved_ip_address: string | null;
   allowed_addresses: string[];
+  observed_address_in_allowed_addresses: boolean;
+  hostname_resolved_addresses: string[];
   approved_at: string | null;
   approved_by: string | null;
   device_fingerprint: string | null;
@@ -1333,14 +1337,14 @@ export async function approvedHostNetworkMatch(
   const expectedMacs = readMacList(remoteAccess.mac_address, remoteAccess.hardware_address, remoteAccess.mac_addresses);
   const observedMac = (deps.lookupLanMacAddress ?? lookupLanMacAddress)(remoteAddress);
   if (remoteAddress && allowed.includes(remoteAddress)) {
-    return { reason: "approved_host_address", remoteAccess, hostname, observedMac };
+    return { reason: "approved_host_address", remoteAccess, hostname, observedMac, hostnameAddresses: [] };
   }
   if (remoteAddress && expectedMacs.length > 0 && observedMac && expectedMacs.includes(observedMac)) {
-    return { reason: "approved_host_mac", remoteAccess, hostname, observedMac };
+    return { reason: "approved_host_mac", remoteAccess, hostname, observedMac, hostnameAddresses: [] };
   }
   const hostnameAddresses = await (deps.resolveHostnameAddresses ?? resolveHostnameAddresses)(hostname);
   if (remoteAddress && hostnameAddresses.includes(remoteAddress)) {
-    return { reason: "approved_host_hostname", remoteAccess, hostname, observedMac };
+    return { reason: "approved_host_hostname", remoteAccess, hostname, observedMac, hostnameAddresses };
   }
   return null;
 }
@@ -1370,16 +1374,26 @@ function buildApprovalScope(input: {
   remoteAccess?: Record<string, unknown> | null;
   hostname?: string | null;
   mac_address?: string | null;
+  observed_remote_address?: string | null;
+  hostname_resolved_addresses?: string[];
   identity_public_key_fingerprint?: string | null;
 }): NetworkApprovalScope {
   const remoteAccess = input.remoteAccess ?? {};
+  const allowedAddresses = readStringList(remoteAccess.allowed_addresses)
+    .map(normalizeClientIp)
+    .filter((entry): entry is string => Boolean(entry));
+  const observedRemoteAddress = normalizeClientIp(input.observed_remote_address);
   return {
     status: readStringValue(remoteAccess.status) ?? input.status,
     matched_by: input.matched_by,
     permission_profile: input.permission_profile,
     hostname: input.hostname ?? readStringValue(remoteAccess.hostname),
     mac_address: input.mac_address ?? normalizeMacAddress(remoteAccess.mac_address) ?? normalizeMacAddress(remoteAccess.hardware_address),
-    allowed_addresses: readStringList(remoteAccess.allowed_addresses)
+    observed_remote_address: observedRemoteAddress,
+    approved_ip_address: normalizeClientIp(remoteAccess.ip_address),
+    allowed_addresses: allowedAddresses,
+    observed_address_in_allowed_addresses: Boolean(observedRemoteAddress && allowedAddresses.includes(observedRemoteAddress)),
+    hostname_resolved_addresses: (input.hostname_resolved_addresses ?? [])
       .map(normalizeClientIp)
       .filter((entry): entry is string => Boolean(entry)),
     approved_at: readStringValue(remoteAccess.approved_at),
@@ -1550,6 +1564,7 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
       status: "local",
       matched_by: "loopback",
       permission_profile: "operator",
+      observed_remote_address: remoteAddress,
     });
     return {
       allowed: true,
@@ -1605,6 +1620,8 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
         remoteAccess: match.remoteAccess,
         hostname: match.hostname,
         mac_address: match.observedMac ?? normalizeMacAddress(match.remoteAccess.mac_address),
+        observed_remote_address: remoteAddress,
+        hostname_resolved_addresses: match.hostnameAddresses,
         identity_public_key_fingerprint: signature.fingerprint,
       });
       if (!signature.ok || (requireSignedRemote && signature.status === "not_configured")) {
@@ -1660,6 +1677,7 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
       matched_by: "env_allowlist",
       permission_profile: permissionProfile,
       remoteAccess: { allowed_addresses: envAllowed },
+      observed_remote_address: remoteAddress,
     });
     return {
       allowed: true,
