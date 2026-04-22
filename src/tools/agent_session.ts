@@ -1522,6 +1522,9 @@ async function queueReasoningPolicyRecoveryTask(params: {
     observed_branch_depth: params.reasoningPolicyAudit.observed_branch_depth ?? null,
     observed_revision_passes: params.reasoningPolicyAudit.observed_revision_passes ?? null,
     observed_evidence_char_count: params.reasoningPolicyAudit.observed_evidence_char_count ?? null,
+    transcript_policy_violation_keys: Array.isArray(params.reasoningPolicyAudit.transcript_policy_violation_keys)
+      ? params.reasoningPolicyAudit.transcript_policy_violation_keys
+      : [],
     selection: isRecord(params.reasoningPolicyAudit.selection) ? params.reasoningPolicyAudit.selection : null,
     warnings,
     produced_artifact_ids: params.producedArtifactIds,

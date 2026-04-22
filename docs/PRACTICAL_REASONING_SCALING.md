@@ -45,11 +45,13 @@ Current MASTER-MOLD contract:
 - Kernel and Agent Office summaries now also expose compute-telemetry coverage, missing telemetry task IDs, and an attention item when completed high-compute work skipped requested telemetry.
 - Completion audits now mark adaptive tasks `needs_review` when observed candidates exceed the declared compute-budget cap, even if the selected candidate evidence is otherwise valid.
 - Completion audits now extract compact evidence character count and mark tasks `needs_review` when reasoning evidence exceeds `compute_budget.evidence_char_limit`, preventing transcript-sized payloads from satisfying compact-evidence lanes.
+- Compact-evidence-only audits now also reject explicit raw transcript or hidden-reasoning fields such as `raw_transcript`, `chain_of_thought`, `hidden_reasoning`, and `scratchpad`, even when the payload is small enough to fit the character budget.
 
 Do not:
 
 - run best-of-N on every task
 - confuse longer traces with better traces
+- persist hidden reasoning or raw transcripts as a substitute for compact evidence
 
 ## 2. Plan-and-solve decomposition before execution
 

@@ -467,6 +467,7 @@ export type TaskCompletionReasoningAudit = {
   observed_branch_depth: number | null;
   observed_revision_passes: number | null;
   observed_evidence_char_count: number | null;
+  transcript_policy_violation_keys: string[];
   compute_budget: {
     candidate_budget: number | null;
     max_candidate_count: number | null;
@@ -7901,6 +7902,9 @@ export class Storage {
             observed_branch_depth: reasoningAudit.observed_branch_depth ?? null,
             observed_revision_passes: reasoningAudit.observed_revision_passes ?? null,
             observed_evidence_char_count: reasoningAudit.observed_evidence_char_count ?? null,
+            transcript_policy_violation_keys: Array.isArray(reasoningAudit.transcript_policy_violation_keys)
+              ? reasoningAudit.transcript_policy_violation_keys
+              : [],
             selection: readPlainObject(reasoningAudit.selection) ?? null,
             warnings: Array.isArray(reasoningAudit.warnings) ? reasoningAudit.warnings : [],
           },
@@ -14213,6 +14217,9 @@ function buildTaskCompletionReasoningAudit(
   const observedBranchDepth = readCompletionBranchDepth(result);
   const observedRevisionPasses = readCompletionRevisionPassCount(result);
   const observedEvidenceCharCount = readCompletionEvidenceCharCount(result);
+  const transcriptPolicy = String(readTaskReasoningComputePolicy(execution)?.transcript_policy ?? "").trim();
+  const transcriptPolicyViolationKeys =
+    transcriptPolicy === "compact_evidence_only" ? readCompletionTranscriptPolicyViolationKeys(result) : [];
   const maxBranchCount = computeBudget?.max_branch_count ?? null;
   const maxBranchDepth = computeBudget?.max_branch_depth ?? null;
   const maxRevisionPasses = computeBudget?.max_revision_passes ?? null;
@@ -14358,6 +14365,12 @@ function buildTaskCompletionReasoningAudit(
     requireField("evidence_char_budget", false);
     warnings.push(`Observed ${observedEvidenceCharCount} evidence char(s), above compact evidence budget ${evidenceCharLimit}.`);
   }
+  if (transcriptPolicyViolationKeys.length > 0) {
+    requireField("transcript_policy_compact_evidence_only", false);
+    warnings.push(
+      `Compact evidence policy forbids raw transcript or hidden reasoning fields: ${transcriptPolicyViolationKeys.join(", ")}.`
+    );
+  }
   if (
     verifierRerankPolicy.minimum_selected_score !== null &&
     ((selectionAudit.verifier_score === null && !missingFields.includes("verifier_score")) ||
@@ -14409,6 +14422,7 @@ function buildTaskCompletionReasoningAudit(
     observed_branch_depth: observedBranchDepth,
     observed_revision_passes: observedRevisionPasses,
     observed_evidence_char_count: observedEvidenceCharCount,
+    transcript_policy_violation_keys: transcriptPolicyViolationKeys,
     compute_budget: computeBudget,
     observed_compute_usage: observedComputeUsage,
     selection: selectionAudit,
@@ -14830,6 +14844,61 @@ function readCompletionEvidenceCharCount(result: Record<string, unknown>): numbe
     }
   }
   return total > 0 ? total : null;
+}
+
+const COMPLETION_TRANSCRIPT_POLICY_FORBIDDEN_KEYS = new Set([
+  "chain_of_thought",
+  "complete_transcript",
+  "cot",
+  "deliberation",
+  "full_transcript",
+  "hidden_reasoning",
+  "internal_monologue",
+  "raw_transcript",
+  "reasoning_trace",
+  "reasoning_transcript",
+  "scratchpad",
+  "transcript",
+]);
+
+function readCompletionTranscriptPolicyViolationKeys(result: Record<string, unknown>): string[] {
+  const found = new Set<string>();
+  const seenObjects = new WeakSet<object>();
+
+  const visit = (value: unknown, depth: number) => {
+    if (found.size >= 24 || depth > 8 || value === null || value === undefined || typeof value !== "object") {
+      return;
+    }
+    if (seenObjects.has(value)) {
+      return;
+    }
+    seenObjects.add(value);
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        visit(item, depth + 1);
+      }
+      return;
+    }
+
+    const record = value as Record<string, unknown>;
+    for (const [key, nestedValue] of Object.entries(record)) {
+      const normalizedKey = key.trim().toLowerCase();
+      if (
+        COMPLETION_TRANSCRIPT_POLICY_FORBIDDEN_KEYS.has(normalizedKey) &&
+        isCompletionEvidenceValue(nestedValue)
+      ) {
+        found.add(normalizedKey);
+      }
+      visit(nestedValue, depth + 1);
+    }
+  };
+
+  for (const source of completionEvidenceSources(result)) {
+    visit(source, 0);
+  }
+
+  return [...found].sort();
 }
 
 function completionBudgetForcingEvidenceSources(result: Record<string, unknown>): Record<string, unknown>[] {

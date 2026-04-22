@@ -662,6 +662,100 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       /above compact evidence budget 256/
     );
 
+    const transcriptPolicyTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.transcript-policy", () => mutationCounter++),
+      objective: "Reject raw transcript fields when compact reasoning evidence is required.",
+      project_dir: REPO_ROOT,
+      priority: 6,
+      routing: {
+        allowed_agent_ids: ["transcript-policy-worker"],
+      },
+      task_execution: {
+        task_kind: "verification",
+        quality_preference: "quality",
+        reasoning_compute_policy: {
+          mode: "adaptive_best_of_n",
+          candidate_count: 2,
+          max_candidate_count: 2,
+          selection_strategy: "evidence_rerank",
+          activation_reasons: ["verification_task"],
+          evidence_required: true,
+          transcript_policy: "compact_evidence_only",
+          compute_budget: {
+            candidate_budget: 2,
+            max_candidate_count: 2,
+            max_branch_depth: 0,
+            max_branch_count: 0,
+            max_revision_passes: 0,
+            evidence_char_limit: 6000,
+            telemetry_required: false,
+            telemetry_fields: [],
+          },
+        },
+      },
+      tags: ["reasoning-budget", "transcript-policy"],
+    });
+
+    const transcriptPolicyClaim = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim.transcript-policy", () => mutationCounter++),
+      worker_id: "transcript-policy-worker",
+      task_id: transcriptPolicyTask.task.task_id,
+    });
+    assert.equal(transcriptPolicyClaim.claimed, true);
+
+    const transcriptPolicyCompletion = await callTool(client, "task.complete", {
+      mutation: nextMutation(testId, "task.complete.transcript-policy", () => mutationCounter++),
+      task_id: transcriptPolicyTask.task.task_id,
+      worker_id: "transcript-policy-worker",
+      summary: "Completed with compact evidence plus forbidden transcript keys.",
+      result: {
+        candidates: [
+          { id: "candidate-a", evidence: "passed smoke check" },
+          {
+            id: "candidate-b",
+            selected: true,
+            evidence: "passed regression check",
+            chain_of_thought: "private scratch reasoning should not be persisted",
+          },
+        ],
+        selected_candidate_id: "candidate-b",
+        selection_rationale: "candidate-b has better regression evidence",
+        raw_transcript: "small but still forbidden raw transcript payload",
+      },
+    });
+    assert.equal(transcriptPolicyCompletion.completed, true);
+    assert.equal(transcriptPolicyCompletion.task.result.reasoning_policy_audit.status, "needs_review");
+    assert.deepEqual(
+      transcriptPolicyCompletion.task.result.reasoning_policy_audit.transcript_policy_violation_keys,
+      ["chain_of_thought", "raw_transcript"]
+    );
+    assert.ok(
+      transcriptPolicyCompletion.task.result.reasoning_policy_audit.missing_fields.includes(
+        "transcript_policy_compact_evidence_only"
+      )
+    );
+    assert.equal(
+      transcriptPolicyCompletion.task.result.reasoning_policy_audit.missing_fields.includes("evidence_char_budget"),
+      false
+    );
+    assert.match(
+      transcriptPolicyCompletion.task.result.reasoning_policy_audit.warnings.join(" "),
+      /forbids raw transcript or hidden reasoning fields/
+    );
+
+    const transcriptPolicyTimeline = await callTool(client, "task.timeline", {
+      task_id: transcriptPolicyTask.task.task_id,
+      limit: 20,
+    });
+    const transcriptReviewEvent = transcriptPolicyTimeline.events.find(
+      (event) => event.event_type === "reasoning_review_needed"
+    );
+    assert.ok(transcriptReviewEvent);
+    assert.deepEqual(transcriptReviewEvent.details.transcript_policy_violation_keys, [
+      "chain_of_thought",
+      "raw_transcript",
+    ]);
+
     const missingTelemetrySummary = await callTool(client, "task.summary", {
       running_limit: 10,
     });
