@@ -465,6 +465,7 @@ export type TaskCompletionReasoningAudit = {
   observed_candidate_count: number | null;
   observed_branch_count: number | null;
   observed_branch_depth: number | null;
+  observed_revision_passes: number | null;
   compute_budget: {
     candidate_budget: number | null;
     max_candidate_count: number | null;
@@ -7897,6 +7898,7 @@ export class Storage {
             observed_candidate_count: reasoningAudit.observed_candidate_count ?? null,
             observed_branch_count: reasoningAudit.observed_branch_count ?? null,
             observed_branch_depth: reasoningAudit.observed_branch_depth ?? null,
+            observed_revision_passes: reasoningAudit.observed_revision_passes ?? null,
             selection: readPlainObject(reasoningAudit.selection) ?? null,
             warnings: Array.isArray(reasoningAudit.warnings) ? reasoningAudit.warnings : [],
           },
@@ -14207,8 +14209,10 @@ function buildTaskCompletionReasoningAudit(
   const maxCandidateBudget = computeBudget?.max_candidate_count ?? null;
   const observedBranchCount = readCompletionBranchCount(result);
   const observedBranchDepth = readCompletionBranchDepth(result);
+  const observedRevisionPasses = readCompletionRevisionPassCount(result);
   const maxBranchCount = computeBudget?.max_branch_count ?? null;
   const maxBranchDepth = computeBudget?.max_branch_depth ?? null;
+  const maxRevisionPasses = computeBudget?.max_revision_passes ?? null;
   const selectionAudit = buildCompletionSelectionAudit(
     result,
     observedCandidateCount,
@@ -14334,6 +14338,15 @@ function buildTaskCompletionReasoningAudit(
     warnings.push(`Observed branch depth ${observedBranchDepth}, above compute budget cap ${maxBranchDepth}.`);
   }
   if (
+    maxRevisionPasses !== null &&
+    maxRevisionPasses > 0 &&
+    observedRevisionPasses !== null &&
+    observedRevisionPasses > maxRevisionPasses
+  ) {
+    requireField("revision_budget", false);
+    warnings.push(`Observed ${observedRevisionPasses} revision pass(es), above compute budget cap ${maxRevisionPasses}.`);
+  }
+  if (
     verifierRerankPolicy.minimum_selected_score !== null &&
     ((selectionAudit.verifier_score === null && !missingFields.includes("verifier_score")) ||
       (selectionAudit.verifier_score !== null && selectionAudit.verifier_score < verifierRerankPolicy.minimum_selected_score))
@@ -14382,6 +14395,7 @@ function buildTaskCompletionReasoningAudit(
     observed_candidate_count: observedCandidateCount,
     observed_branch_count: observedBranchCount,
     observed_branch_depth: observedBranchDepth,
+    observed_revision_passes: observedRevisionPasses,
     compute_budget: computeBudget,
     observed_compute_usage: observedComputeUsage,
     selection: selectionAudit,
@@ -14702,6 +14716,48 @@ function completionBudgetForcingHasField(result: Record<string, unknown>, field:
     }
   }
   return false;
+}
+
+function readCompletionRevisionPassCount(result: Record<string, unknown>): number | null {
+  let count: number | null = null;
+  for (const source of completionBudgetForcingEvidenceSources(result)) {
+    for (const key of [
+      "revision_pass_count",
+      "revision_count",
+      "revision_passes_count",
+      "revision_iterations",
+      "second_look_count",
+      "forced_second_look_count",
+    ]) {
+      const value = readBoundedNonNegativeInteger(source[key], 1000);
+      if (value !== null) {
+        count = Math.max(count ?? 0, value);
+      }
+    }
+    for (const key of ["revision_passes", "revisions", "second_looks", "forced_second_looks"]) {
+      const value = source[key];
+      if (Array.isArray(value)) {
+        count = Math.max(count ?? 0, value.length);
+      } else if (readPlainObject(value)) {
+        count = Math.max(count ?? 0, 1);
+      }
+    }
+  }
+  return count;
+}
+
+function completionBudgetForcingEvidenceSources(result: Record<string, unknown>): Record<string, unknown>[] {
+  const expanded: Record<string, unknown>[] = [];
+  for (const source of completionEvidenceSources(result)) {
+    expanded.push(source);
+    for (const key of ["budget_forcing_review", "forced_second_look", "second_look"]) {
+      const nested = readPlainObject(source[key]);
+      if (nested) {
+        expanded.push(nested);
+      }
+    }
+  }
+  return expanded;
 }
 
 function isCompletionBudgetForcingEvidenceValue(value: unknown): boolean {

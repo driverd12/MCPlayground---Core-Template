@@ -222,6 +222,7 @@ Current MASTER-MOLD contract:
 - Runtime worker briefs require one bounded forced second-look pass after initial candidate selection.
 - Completion audits mark the reasoning policy `needs_review` unless compact `budget_forcing_review` or `forced_second_look` evidence is present.
 - Completion audits now enforce configured `budget_forcing.required_evidence_fields` such as `initial_answer_summary`, `forced_second_look`, `changed_decision`, and `final_answer_delta`, with `changed_decision: false` accepted as explicit evidence.
+- Completion audits now extract observed revision pass counts and mark budget-forcing tasks `needs_review` when they exceed `compute_budget.max_revision_passes`.
 - Task summaries and Agent Office expose active budget-forcing counts so this experimental lane stays operator-visible.
 
 Do not:

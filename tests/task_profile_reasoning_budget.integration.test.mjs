@@ -516,6 +516,88 @@ test("task profiles treat high test-time-compute policy as high complexity for r
     );
     assert.ok(missingBudgetForcingCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("branch_search"));
 
+    const overBudgetRevisionTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.over-budget-revisions", () => mutationCounter++),
+      objective: "Keep budget forcing to one bounded forced second-look pass.",
+      project_dir: REPO_ROOT,
+      priority: 6,
+      routing: {
+        allowed_agent_ids: ["revision-budget-worker"],
+      },
+      task_execution: {
+        task_kind: "verification",
+        quality_preference: "quality",
+        reasoning_compute_policy: {
+          mode: "adaptive_best_of_n",
+          candidate_count: 2,
+          max_candidate_count: 4,
+          selection_strategy: "evidence_rerank",
+          activation_reasons: ["verification_task", "budget_forcing_opt_in"],
+          evidence_required: true,
+          transcript_policy: "compact_evidence_only",
+          compute_budget: {
+            candidate_budget: 2,
+            max_candidate_count: 4,
+            max_branch_depth: 0,
+            max_branch_count: 0,
+            max_revision_passes: 1,
+            evidence_char_limit: 6000,
+            telemetry_required: false,
+            telemetry_fields: [],
+          },
+          budget_forcing: {
+            enabled: true,
+            max_revision_passes: 1,
+            required_evidence_fields: [
+              "initial_answer_summary",
+              "forced_second_look",
+              "changed_decision",
+              "final_answer_delta",
+            ],
+          },
+        },
+      },
+      tags: ["reasoning-budget", "budget-forcing", "revision-budget"],
+    });
+
+    const overBudgetRevisionClaim = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim.over-budget-revisions", () => mutationCounter++),
+      worker_id: "revision-budget-worker",
+      task_id: overBudgetRevisionTask.task.task_id,
+    });
+    assert.equal(overBudgetRevisionClaim.claimed, true);
+
+    const overBudgetRevisionCompletion = await callTool(client, "task.complete", {
+      mutation: nextMutation(testId, "task.complete.over-budget-revisions", () => mutationCounter++),
+      task_id: overBudgetRevisionTask.task.task_id,
+      worker_id: "revision-budget-worker",
+      summary: "Completed with two forced revision passes.",
+      result: {
+        candidates: [
+          { id: "candidate-a", evidence: "passed smoke check" },
+          { id: "candidate-b", selected: true, evidence: "passed regression check" },
+        ],
+        selected_candidate_id: "candidate-b",
+        selection_rationale: "candidate-b has better regression evidence",
+        budget_forcing_review: {
+          initial_answer_summary: "candidate-b looked strongest",
+          forced_second_look: "rechecked the evidence twice",
+          changed_decision: false,
+          final_answer_delta: "kept candidate-b",
+          revision_pass_count: 2,
+        },
+      },
+    });
+    assert.equal(overBudgetRevisionCompletion.completed, true);
+    assert.equal(overBudgetRevisionCompletion.task.result.reasoning_policy_audit.status, "needs_review");
+    assert.equal(overBudgetRevisionCompletion.task.result.reasoning_policy_audit.observed_revision_passes, 2);
+    assert.ok(overBudgetRevisionCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("budget_forcing_changed_decision"));
+    assert.ok(overBudgetRevisionCompletion.task.result.reasoning_policy_audit.missing_fields.includes("revision_budget"));
+    assert.match(
+      overBudgetRevisionCompletion.task.result.reasoning_policy_audit.warnings.join(" "),
+      /above compute budget cap 1/
+    );
+
     const missingTelemetrySummary = await callTool(client, "task.summary", {
       running_limit: 10,
     });
