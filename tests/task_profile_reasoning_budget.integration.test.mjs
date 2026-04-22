@@ -598,6 +598,70 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       /above compute budget cap 1/
     );
 
+    const oversizedEvidenceTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.oversized-evidence", () => mutationCounter++),
+      objective: "Keep compact reasoning evidence under the declared character budget.",
+      project_dir: REPO_ROOT,
+      priority: 6,
+      routing: {
+        allowed_agent_ids: ["evidence-budget-worker"],
+      },
+      task_execution: {
+        task_kind: "verification",
+        quality_preference: "quality",
+        reasoning_compute_policy: {
+          mode: "adaptive_best_of_n",
+          candidate_count: 2,
+          max_candidate_count: 2,
+          selection_strategy: "evidence_rerank",
+          activation_reasons: ["verification_task"],
+          evidence_required: true,
+          transcript_policy: "compact_evidence_only",
+          compute_budget: {
+            candidate_budget: 2,
+            max_candidate_count: 2,
+            max_branch_depth: 0,
+            max_branch_count: 0,
+            max_revision_passes: 0,
+            evidence_char_limit: 256,
+            telemetry_required: false,
+            telemetry_fields: [],
+          },
+        },
+      },
+      tags: ["reasoning-budget", "evidence-budget"],
+    });
+
+    const oversizedEvidenceClaim = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim.oversized-evidence", () => mutationCounter++),
+      worker_id: "evidence-budget-worker",
+      task_id: oversizedEvidenceTask.task.task_id,
+    });
+    assert.equal(oversizedEvidenceClaim.claimed, true);
+
+    const oversizedEvidenceCompletion = await callTool(client, "task.complete", {
+      mutation: nextMutation(testId, "task.complete.oversized-evidence", () => mutationCounter++),
+      task_id: oversizedEvidenceTask.task.task_id,
+      worker_id: "evidence-budget-worker",
+      summary: "Completed with oversized evidence payload.",
+      result: {
+        candidates: [
+          { id: "candidate-a", evidence: "passed smoke check" },
+          { id: "candidate-b", selected: true, evidence: `passed regression check ${"with raw transcript-like detail ".repeat(20)}` },
+        ],
+        selected_candidate_id: "candidate-b",
+        selection_rationale: "candidate-b has better regression evidence",
+      },
+    });
+    assert.equal(oversizedEvidenceCompletion.completed, true);
+    assert.equal(oversizedEvidenceCompletion.task.result.reasoning_policy_audit.status, "needs_review");
+    assert.equal(oversizedEvidenceCompletion.task.result.reasoning_policy_audit.observed_evidence_char_count > 256, true);
+    assert.ok(oversizedEvidenceCompletion.task.result.reasoning_policy_audit.missing_fields.includes("evidence_char_budget"));
+    assert.match(
+      oversizedEvidenceCompletion.task.result.reasoning_policy_audit.warnings.join(" "),
+      /above compact evidence budget 256/
+    );
+
     const missingTelemetrySummary = await callTool(client, "task.summary", {
       running_limit: 10,
     });

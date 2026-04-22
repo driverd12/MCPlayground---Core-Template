@@ -466,6 +466,7 @@ export type TaskCompletionReasoningAudit = {
   observed_branch_count: number | null;
   observed_branch_depth: number | null;
   observed_revision_passes: number | null;
+  observed_evidence_char_count: number | null;
   compute_budget: {
     candidate_budget: number | null;
     max_candidate_count: number | null;
@@ -7899,6 +7900,7 @@ export class Storage {
             observed_branch_count: reasoningAudit.observed_branch_count ?? null,
             observed_branch_depth: reasoningAudit.observed_branch_depth ?? null,
             observed_revision_passes: reasoningAudit.observed_revision_passes ?? null,
+            observed_evidence_char_count: reasoningAudit.observed_evidence_char_count ?? null,
             selection: readPlainObject(reasoningAudit.selection) ?? null,
             warnings: Array.isArray(reasoningAudit.warnings) ? reasoningAudit.warnings : [],
           },
@@ -14210,9 +14212,11 @@ function buildTaskCompletionReasoningAudit(
   const observedBranchCount = readCompletionBranchCount(result);
   const observedBranchDepth = readCompletionBranchDepth(result);
   const observedRevisionPasses = readCompletionRevisionPassCount(result);
+  const observedEvidenceCharCount = readCompletionEvidenceCharCount(result);
   const maxBranchCount = computeBudget?.max_branch_count ?? null;
   const maxBranchDepth = computeBudget?.max_branch_depth ?? null;
   const maxRevisionPasses = computeBudget?.max_revision_passes ?? null;
+  const evidenceCharLimit = computeBudget?.evidence_char_limit ?? null;
   const selectionAudit = buildCompletionSelectionAudit(
     result,
     observedCandidateCount,
@@ -14347,6 +14351,14 @@ function buildTaskCompletionReasoningAudit(
     warnings.push(`Observed ${observedRevisionPasses} revision pass(es), above compute budget cap ${maxRevisionPasses}.`);
   }
   if (
+    evidenceCharLimit !== null &&
+    observedEvidenceCharCount !== null &&
+    observedEvidenceCharCount > evidenceCharLimit
+  ) {
+    requireField("evidence_char_budget", false);
+    warnings.push(`Observed ${observedEvidenceCharCount} evidence char(s), above compact evidence budget ${evidenceCharLimit}.`);
+  }
+  if (
     verifierRerankPolicy.minimum_selected_score !== null &&
     ((selectionAudit.verifier_score === null && !missingFields.includes("verifier_score")) ||
       (selectionAudit.verifier_score !== null && selectionAudit.verifier_score < verifierRerankPolicy.minimum_selected_score))
@@ -14396,6 +14408,7 @@ function buildTaskCompletionReasoningAudit(
     observed_branch_count: observedBranchCount,
     observed_branch_depth: observedBranchDepth,
     observed_revision_passes: observedRevisionPasses,
+    observed_evidence_char_count: observedEvidenceCharCount,
     compute_budget: computeBudget,
     observed_compute_usage: observedComputeUsage,
     selection: selectionAudit,
@@ -14744,6 +14757,79 @@ function readCompletionRevisionPassCount(result: Record<string, unknown>): numbe
     }
   }
   return count;
+}
+
+function readCompletionEvidenceCharCount(result: Record<string, unknown>): number | null {
+  let total = 0;
+  const seenObjects = new WeakSet<object>();
+  const addEvidenceValue = (value: unknown) => {
+    if (value === null || value === undefined) {
+      return;
+    }
+    if (typeof value === "object") {
+      if (seenObjects.has(value)) {
+        return;
+      }
+      seenObjects.add(value);
+    }
+    const serialized = typeof value === "string" ? value : JSON.stringify(value);
+    if (typeof serialized === "string" && serialized.length > 0) {
+      total += serialized.length;
+    }
+  };
+  for (const source of completionEvidenceSources(result)) {
+    for (const key of [
+      "reasoning_policy",
+      "reasoning_policy_evidence",
+      "completion_evidence",
+      "candidates",
+      "candidate_paths",
+      "options",
+      "alternatives",
+      "selected_candidate",
+      "chosen_candidate",
+      "winner",
+      "selection_rationale",
+      "rerank_rationale",
+      "selected_candidate_rationale",
+      "selected_candidate_reason",
+      "evidence",
+      "evidence_refs",
+      "evidence_summary",
+      "verification_summary",
+      "verification_evidence",
+      "test_results",
+      "checks",
+      "branch_search",
+      "branch_search_summary",
+      "branch_evaluation",
+      "branch_evaluations",
+      "pruned_branches",
+      "environment_feedback",
+      "budget_forcing_review",
+      "forced_second_look",
+      "second_look",
+      "second_look_summary",
+      "revision_summary",
+      "final_answer_delta",
+      "plan_quality_gate",
+      "plan_quality",
+      "plan_pass",
+      "plan_summary",
+      "planning_summary",
+      "planned_steps",
+      "reasoning_plan",
+      "raw_transcript",
+      "transcript",
+      "chain_of_thought",
+      "hidden_reasoning",
+    ]) {
+      if (Object.prototype.hasOwnProperty.call(source, key)) {
+        addEvidenceValue(source[key]);
+      }
+    }
+  }
+  return total > 0 ? total : null;
 }
 
 function completionBudgetForcingEvidenceSources(result: Record<string, unknown>): Record<string, unknown>[] {

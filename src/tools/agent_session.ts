@@ -1521,6 +1521,7 @@ async function queueReasoningPolicyRecoveryTask(params: {
     observed_branch_count: params.reasoningPolicyAudit.observed_branch_count ?? null,
     observed_branch_depth: params.reasoningPolicyAudit.observed_branch_depth ?? null,
     observed_revision_passes: params.reasoningPolicyAudit.observed_revision_passes ?? null,
+    observed_evidence_char_count: params.reasoningPolicyAudit.observed_evidence_char_count ?? null,
     selection: isRecord(params.reasoningPolicyAudit.selection) ? params.reasoningPolicyAudit.selection : null,
     warnings,
     produced_artifact_ids: params.producedArtifactIds,
