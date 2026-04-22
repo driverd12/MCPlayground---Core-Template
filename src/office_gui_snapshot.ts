@@ -760,6 +760,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const rawPrivilegedAccess = asDict(raw.privileged_access);
   const patientZeroSummary = asDict(kernelPatientZero.summary || rawPatientZero.summary);
   const patientZeroReport = asDict(rawPatientZero.report);
+  const patientZeroAuthorityProofs = asDict(patientZeroReport.authority_proofs);
   const patientZeroAutonomyControl = asDict(rawPatientZero.autonomy_control);
   const patientZeroToolkit = asDict(patientZeroAutonomyControl.toolkit || patientZeroReport.toolkit);
   const patientZeroReportedAutonomousControlEnabled = Boolean(patientZeroReport.autonomous_control_enabled);
@@ -773,6 +774,8 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const patientZeroMacosAuthorityReady =
     typeof patientZeroSummary.macos_authority_ready === "boolean"
       ? patientZeroSummary.macos_authority_ready
+      : typeof patientZeroAuthorityProofs.macos_authority_audit_ready === "boolean"
+        ? patientZeroAuthorityProofs.macos_authority_audit_ready
       : typeof patientZeroMacosAuthorityAudit.ready_for_patient_zero_full_authority === "boolean"
         ? patientZeroMacosAuthorityAudit.ready_for_patient_zero_full_authority
         : null;
@@ -783,8 +786,8 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const patientZeroAuthorityBlocked =
     patientZeroAuthorityBlockers.length > 0 ||
     patientZeroMacosAuthorityReady === false ||
-    patientZeroMacosAuthorityStatus === "blocked" ||
-    patientZeroMacosAuthorityStatus === "unavailable";
+    ((patientZeroMacosAuthorityStatus === "blocked" || patientZeroMacosAuthorityStatus === "unavailable") &&
+      patientZeroMacosAuthorityReady !== true);
   const privilegedAccessSummary = asDict(kernelPrivilegedAccess.summary || rawPrivilegedAccess.summary || rawPrivilegedAccess);
   const threadId = String(raw.thread_id ?? "ring-leader-main").trim() || "ring-leader-main";
   const latestAutopilotSession = asList(agentSessions.sessions).find((entry) => {

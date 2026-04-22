@@ -149,6 +149,7 @@ function resolvePatientZeroAuthoritySnapshot(patientZero: {
   const summary = asRecord(patientZero.summary);
   const report = asRecord(patientZero.report);
   const macosAuthorityAudit = asRecord(report.macos_authority_audit);
+  const reportAuthorityProofs = asRecord(report.authority_proofs);
   const authorityBlockers = dedupeText([
     ...asList(summary.authority_blockers),
     ...asList(report.authority_blockers),
@@ -162,6 +163,8 @@ function resolvePatientZeroAuthoritySnapshot(patientZero: {
   const macosAuthorityReady =
     typeof summary.macos_authority_ready === "boolean"
       ? summary.macos_authority_ready
+      : typeof reportAuthorityProofs.macos_authority_audit_ready === "boolean"
+        ? reportAuthorityProofs.macos_authority_audit_ready
       : typeof macosAuthorityAudit.ready_for_patient_zero_full_authority === "boolean"
         ? macosAuthorityAudit.ready_for_patient_zero_full_authority
         : null;
@@ -171,7 +174,8 @@ function resolvePatientZeroAuthoritySnapshot(patientZero: {
       : typeof report.full_control_authority === "boolean"
         ? report.full_control_authority
         : null;
-  const authorityBlockedByStatus = macosAuthorityStatus === "blocked" || macosAuthorityStatus === "unavailable";
+  const authorityBlockedByStatus =
+    (macosAuthorityStatus === "blocked" || macosAuthorityStatus === "unavailable") && macosAuthorityReady !== true;
   const authorityBlocked =
     authorityBlockers.length > 0 ||
     macosAuthorityReady === false ||
@@ -302,8 +306,9 @@ function normalizeWorkbenchMode(value: unknown) {
   return normalized || "";
 }
 
-function buildWorkbenchTaskCards(tasks: TaskRecord[]) {
-  return tasks.slice(0, 5).map((task) => ({
+function buildWorkbenchTaskCards(tasks: unknown) {
+  const taskList = Array.isArray(tasks) ? (tasks as TaskRecord[]) : [];
+  return taskList.slice(0, 5).map((task) => ({
     task_id: task.task_id,
     status: task.status,
     priority: task.priority,
@@ -332,6 +337,7 @@ function buildWorkbenchSummary(params: {
     summary: ReturnType<typeof summarizePatientZeroState>;
     report: ReturnType<typeof buildPatientZeroReport>;
   };
+  privilegedAccess: ReturnType<typeof buildPrivilegedAccessStatus>;
 }) {
   const counts = asRecord(params.taskSummaryPayload.counts);
   const operatorBriefRecord = asRecord(params.operatorBriefPayload);
@@ -430,7 +436,10 @@ function buildWorkbenchSummary(params: {
       },
     });
   }
-  if (params.patientZero.summary.enabled && patientZeroAuthority.authority_blocked) {
+  const patientZeroAuthorityNeedsWorkbenchBlocker =
+    patientZeroAuthority.authority_blocked &&
+    (params.patientZero.summary.enabled || setupFallback.patient_zero_authority_degraded === true);
+  if (patientZeroAuthorityNeedsWorkbenchBlocker) {
     const authorityDetail =
       patientZeroAuthority.authority_blockers.length > 0
         ? `Full-control claims are blocked by: ${patientZeroAuthority.authority_blockers.slice(0, 4).join(", ")}.`
@@ -450,7 +459,13 @@ function buildWorkbenchSummary(params: {
       },
     });
   }
-  if (params.patientZero.summary.enabled && controlPlane.privileged_access && asRecord(controlPlane.privileged_access).root_execution_ready !== true) {
+  const livePrivilegedAccessSummary = asRecord(params.privilegedAccess.summary);
+  const briefPrivilegedAccessSummary = asRecord(controlPlane.privileged_access);
+  const rootExecutionReady =
+    livePrivilegedAccessSummary.root_execution_ready === true ||
+    briefPrivilegedAccessSummary.root_execution_ready === true ||
+    patientZeroAuthority.full_control_authority === true;
+  if (params.patientZero.summary.enabled && !rootExecutionReady) {
     blockers.push({
       kind: "privileged_access",
       title: "Patient Zero is armed without a ready root lane",
@@ -1200,6 +1215,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     providerBridge,
     desktopControl,
     patientZero,
+    privilegedAccess,
   });
   return {
     generated_at: new Date().toISOString(),
@@ -1293,6 +1309,19 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
         desktopControl: liveDesktopControl,
         patientZero: livePatientZero,
       });
+      const liveWorkbench = buildWorkbenchSummary({
+        taskSummaryPayload: asRecord(cachedPayload.task_summary) as TaskSummaryPayload,
+        taskRunning: asRecord(cachedPayload.task_running) as TaskListPayload,
+        taskPending: asRecord(cachedPayload.task_pending) as TaskListPayload,
+        taskFailed: asRecord(cachedPayload.task_failed) as TaskListPayload,
+        operatorBriefPayload: asRecord(cachedPayload.operator_brief) as OperatorBriefPayload,
+        kernel: cachedKernel,
+        setupDiagnostics: asRecord(liveSetupDiagnostics),
+        providerBridge: cachedProviderBridgePayload,
+        desktopControl: liveDesktopControl,
+        patientZero: livePatientZero,
+        privilegedAccess: livePrivilegedAccess,
+      });
       return {
         ...cachedPayload,
         roster: liveRoster,
@@ -1308,6 +1337,7 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
         patient_zero: livePatientZero,
         privileged_access: livePrivilegedAccess,
         setup_diagnostics: liveSetupDiagnostics,
+        workbench: liveWorkbench,
         router_suppression_decisions: liveRouterSuppressionDecisions,
         cache: {
           hit: true,

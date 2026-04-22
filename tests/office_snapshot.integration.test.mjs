@@ -310,6 +310,93 @@ test("office.snapshot surfaces blocked Patient Zero authority with explicit reme
   }
 });
 
+test("office.snapshot does not show stale privileged blocker when live Patient Zero root lane is ready", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-snapshot-patient-zero-root-ready-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const client = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+    MCP_PRIVILEGED_EXEC_DRY_RUN: "1",
+    MCP_PRIVILEGED_EXEC_TEST_ACCOUNT_EXISTS: "1",
+    MCP_PRIVILEGED_EXEC_TEST_SECRET: "integration-secret",
+    MCP_PATIENT_ZERO_AUTHORITY_AUDIT_JSON: "{not-json",
+  });
+
+  try {
+    const storage = new Storage(dbPath);
+    const proofAt = new Date().toISOString();
+    storage.setPatientZeroState({
+      enabled: true,
+      autonomy_enabled: true,
+      allow_observe: true,
+      allow_act: true,
+      allow_listen: true,
+      browser_app: "Safari",
+      root_shell_reason: "office.snapshot stale root blocker seed",
+      audit_required: true,
+    });
+    storage.setDesktopControlState({
+      enabled: true,
+      allow_observe: true,
+      allow_act: true,
+      allow_listen: true,
+      capability_probe: {
+        can_observe: true,
+        can_act: true,
+        can_listen: true,
+      },
+      last_screenshot_at: proofAt,
+      last_action_at: proofAt,
+      last_listen_at: proofAt,
+      last_error: null,
+    });
+    await callTool(client, "warm.cache", {
+      action: "run_once",
+      thread_id: "ring-leader-main",
+      mutation: nextMutation("office-snapshot-root-ready", "warm.cache.stale-root", () => mutationCounter++),
+    });
+
+    await callTool(client, "patient.zero", {
+      action: "enable",
+      mutation: nextMutation("office-snapshot-root-ready", "patient.zero.enable", () => mutationCounter++),
+      source_client: "integration-test",
+      source_agent: "operator",
+    });
+
+    const now = new Date().toISOString();
+    storage.setDesktopControlState({
+      enabled: true,
+      allow_observe: true,
+      allow_act: true,
+      allow_listen: true,
+      capability_probe: {
+        can_observe: true,
+        can_act: true,
+        can_listen: true,
+      },
+      last_screenshot_at: now,
+      last_action_at: now,
+      last_listen_at: now,
+      last_error: null,
+    });
+
+    const snapshot = await callTool(client, "office.snapshot", {
+      thread_id: "ring-leader-main",
+      metadata: { source: "dashboard.direct" },
+    });
+
+    assert.equal(snapshot.cache.hit, true);
+    assert.equal(snapshot.setup_diagnostics.patient_zero.full_control_authority, true);
+    assert.equal(snapshot.privileged_access.summary.root_execution_ready, true);
+    assert.equal(snapshot.workbench.blockers.some((entry) => entry.kind === "privileged_access"), false);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("office.snapshot direct reads stay storage-backed when persisted provider bridge diagnostics are stale", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-snapshot-stale-provider-bridge-"));
   const dbPath = path.join(tempDir, "hub.sqlite");

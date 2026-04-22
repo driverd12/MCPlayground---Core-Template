@@ -399,18 +399,39 @@ function evaluateFullControlAuthority(params: {
   macosAuthorityAudit: MacosAuthorityAuditSnapshot;
 }) {
   const desktopLaneHealthy = !params.desktopState.last_error;
+  const screenRecordingProven =
+    params.desktopSummary.screen_recording_proven === true ||
+    (desktopLaneHealthy && hasIsoTimestamp(params.desktopState.last_screenshot_at));
+  const accessibilityActuationProven =
+    params.desktopSummary.accessibility_actuation_proven === true ||
+    (desktopLaneHealthy && hasIsoTimestamp(params.desktopState.last_action_at));
+  const microphoneListenProven =
+    params.desktopSummary.microphone_listen_proven === true ||
+    (desktopLaneHealthy && hasIsoTimestamp(params.desktopState.last_listen_at));
+  const liveControlProofsReady =
+    params.summary.enabled &&
+    params.summary.observe_ready &&
+    params.summary.act_ready &&
+    params.summary.listen_ready &&
+    params.summary.browser_ready &&
+    params.summary.root_shell_enabled &&
+    screenRecordingProven &&
+    accessibilityActuationProven &&
+    microphoneListenProven;
+  const auditUnavailable =
+    params.macosAuthorityAudit.status === "unavailable" ||
+    params.macosAuthorityAudit.blockers.includes("audit_unavailable");
+  const macosAuthorityAuditReady =
+    params.macosAuthorityAudit.ready_for_patient_zero_full_authority ||
+    (auditUnavailable && liveControlProofsReady);
   const proofs = {
-    screen_recording_proven:
-      params.desktopSummary.screen_recording_proven === true ||
-      (desktopLaneHealthy && hasIsoTimestamp(params.desktopState.last_screenshot_at)),
-    accessibility_actuation_proven:
-      params.desktopSummary.accessibility_actuation_proven === true ||
-      (desktopLaneHealthy && hasIsoTimestamp(params.desktopState.last_action_at)),
-    microphone_listen_proven:
-      params.desktopSummary.microphone_listen_proven === true ||
-      (desktopLaneHealthy && hasIsoTimestamp(params.desktopState.last_listen_at)),
-    macos_authority_audit_ready: params.macosAuthorityAudit.ready_for_patient_zero_full_authority,
+    screen_recording_proven: screenRecordingProven,
+    accessibility_actuation_proven: accessibilityActuationProven,
+    microphone_listen_proven: microphoneListenProven,
+    macos_authority_audit_ready: macosAuthorityAuditReady,
     macos_authority_audit_status: params.macosAuthorityAudit.status,
+    macos_authority_audit_satisfied_by_live_proofs:
+      !params.macosAuthorityAudit.ready_for_patient_zero_full_authority && macosAuthorityAuditReady,
   };
   const blockers: string[] = [];
   if (!params.summary.enabled) {
@@ -443,7 +464,7 @@ function evaluateFullControlAuthority(params: {
   if (!params.autonomyControlEnabled) {
     blockers.push("autonomy_control_not_ready");
   }
-  if (params.macosAuthorityAudit.applicable && !params.macosAuthorityAudit.ready_for_patient_zero_full_authority) {
+  if (params.macosAuthorityAudit.applicable && !macosAuthorityAuditReady) {
     for (const blocker of params.macosAuthorityAudit.blockers) {
       blockers.push(`macos_authority_${blocker}`);
     }
@@ -790,7 +811,7 @@ function buildPayload(storage: Storage) {
       authority_blockers: authority.blockers,
       authority_proofs: authority.proofs,
       macos_authority_audit_status: macosAuthorityAudit.status,
-      macos_authority_ready: macosAuthorityAudit.ready_for_patient_zero_full_authority,
+      macos_authority_ready: authority.proofs.macos_authority_audit_ready,
     },
     desktop_control: {
       state: desktopState,

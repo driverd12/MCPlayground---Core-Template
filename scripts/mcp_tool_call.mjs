@@ -47,7 +47,7 @@ function officeSnapshotStaleMaxAgeSeconds() {
 
 function defaultTimeoutMsForTool(transport, tool) {
   if (tool === "office.snapshot") {
-    return transport === "http" ? 10_000 : 12_000;
+    return 30_000;
   }
   return transport === "http" ? 15_000 : 60_000;
 }
