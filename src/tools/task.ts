@@ -64,6 +64,14 @@ const reasoningComputePolicySchema = z.object({
     .optional(),
 });
 
+const planQualityGateSchema = z.object({
+  required: z.boolean().optional(),
+  required_fields: z.array(z.string().min(1)).optional(),
+  max_planned_steps: z.number().int().min(1).max(20).optional(),
+  artifact_policy: z.string().min(1).optional(),
+  reject_if_missing: z.boolean().optional(),
+});
+
 export const taskExecutionSchema = z.object({
   preferred_host_ids: z.array(z.string().min(1)).optional(),
   allowed_host_ids: z.array(z.string().min(1)).optional(),
@@ -88,6 +96,7 @@ export const taskExecutionSchema = z.object({
   reasoning_selection_strategy: z.enum(["single_path", "evidence_rerank"]).optional(),
   reasoning_compute_policy: reasoningComputePolicySchema.optional(),
   require_plan_pass: z.boolean().optional(),
+  plan_quality_gate: planQualityGateSchema.optional(),
   require_verification_pass: z.boolean().optional(),
   runtime_id: z.enum(["codex", "shell"]).optional(),
   runtime_strategy: z.enum(["tmux_worktree"]).optional(),
@@ -478,6 +487,7 @@ function normalizeTaskExecutionMetadata(value: unknown) {
   const policyBudgetForcing = isRecord(reasoningComputePolicy?.budget_forcing)
     ? reasoningComputePolicy.budget_forcing
     : null;
+  const planQualityGate = isRecord(value.plan_quality_gate) ? value.plan_quality_gate : null;
   const normalizedReasoningComputePolicy = reasoningComputePolicy
     ? {
         mode: policyMode === "adaptive_best_of_n" || policyMode === "single_path" ? policyMode : null,
@@ -576,6 +586,18 @@ function normalizeTaskExecutionMetadata(value: unknown) {
         : null,
     reasoning_compute_policy: normalizedReasoningComputePolicy,
     require_plan_pass: value.require_plan_pass === true,
+    plan_quality_gate: planQualityGate
+      ? {
+          required: planQualityGate.required === true,
+          required_fields: normalizeStringArray(planQualityGate.required_fields),
+          max_planned_steps:
+            typeof planQualityGate.max_planned_steps === "number" && Number.isFinite(planQualityGate.max_planned_steps)
+              ? Math.max(1, Math.min(20, Math.round(planQualityGate.max_planned_steps)))
+              : null,
+          artifact_policy: readString(planQualityGate.artifact_policy),
+          reject_if_missing: planQualityGate.reject_if_missing !== false,
+        }
+      : null,
     require_verification_pass: value.require_verification_pass === true,
     runtime_id: runtime_id === "codex" || runtime_id === "shell" ? runtime_id : null,
     runtime_strategy: runtime_strategy === "tmux_worktree" ? runtime_strategy : null,

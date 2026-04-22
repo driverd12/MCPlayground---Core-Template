@@ -74,6 +74,11 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
               final_answer_delta: "kept candidate-d after the forced second look",
             },
             plan_summary: "Inspect the brief, write compact completion evidence, then let the wrapper report task completion.",
+            plan_quality_gate: {
+              constraints_covered: true,
+              rollback_noted: true,
+              evidence_requirements_mapped: true,
+            },
             verification_summary: "Created runtime-brief-proof.txt and reasoning-evidence.json in the runtime worktree.",
             checks: ["runtime-brief-proof.txt written", "reasoning-evidence.json written"],
           }),
@@ -117,6 +122,13 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
           },
         },
         require_plan_pass: true,
+        plan_quality_gate: {
+          required: true,
+          required_fields: ["constraints_covered", "rollback_noted", "evidence_requirements_mapped"],
+          max_planned_steps: 8,
+          artifact_policy: "compact_plan_summary_or_steps_only",
+          reject_if_missing: true,
+        },
         require_verification_pass: true,
       },
       metadata: {
@@ -237,6 +249,7 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.match(sessionBrief, /Include selected_candidate_id plus selection_rationale/i);
     assert.match(sessionBrief, /Include branch_search_summary or branch_evaluations/i);
     assert.match(sessionBrief, /Include budget_forcing_review or forced_second_look/i);
+    assert.match(sessionBrief, /Include plan_quality_gate with constraints_covered, rollback_noted, evidence_requirements_mapped and keep planned_steps<=8/i);
 
     const completedTask = await waitFor(async () => {
       const completed = await callTool(client, "task.list", { status: "completed", limit: 20 });
@@ -250,6 +263,9 @@ test("runtime.worker session brief includes reasoning policy and grounded reflec
     assert.equal(completedTask.result.reasoning_policy_audit.selection.selected_candidate_has_evidence, true);
     assert.ok(completedTask.result.reasoning_policy_audit.satisfied_fields.includes("branch_search"));
     assert.ok(completedTask.result.reasoning_policy_audit.satisfied_fields.includes("budget_forcing_review"));
+    assert.ok(completedTask.result.reasoning_policy_audit.satisfied_fields.includes("plan_quality_constraints_covered"));
+    assert.ok(completedTask.result.reasoning_policy_audit.satisfied_fields.includes("plan_quality_rollback_noted"));
+    assert.ok(completedTask.result.reasoning_policy_audit.satisfied_fields.includes("plan_quality_evidence_requirements_mapped"));
     assert.equal(completedTask.result.reasoning_policy_evidence.candidates.length, 4);
     assert.match(completedTask.result.reasoning_policy_evidence.selection_rationale, /brief instructions and completion evidence/i);
     assert.match(completedTask.result.reasoning_policy_evidence.branch_search_summary, /Expanded four candidate checks/i);

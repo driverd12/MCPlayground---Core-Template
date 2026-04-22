@@ -352,6 +352,13 @@ function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: 
   const needsRerank = resolveReasoningSelectionStrategy(taskExecution) === "evidence_rerank";
   const needsPlan = taskExecution.require_plan_pass === true;
   const needsVerification = taskExecution.require_verification_pass === true;
+  const planQualityGate = readNullableRecord(taskExecution.plan_quality_gate);
+  const planQualityRequired = needsPlan && planQualityGate?.required === true;
+  const planQualityRequiredFields = readStringArray(planQualityGate?.required_fields);
+  const maxPlannedSteps =
+    typeof planQualityGate?.max_planned_steps === "number" && Number.isFinite(planQualityGate.max_planned_steps)
+      ? Math.max(1, Math.round(planQualityGate.max_planned_steps))
+      : null;
   const taskKind = readString(taskExecution.task_kind);
   const qualityPreference = readString(taskExecution.quality_preference);
   const computePolicy = resolveReasoningComputePolicy(taskExecution);
@@ -398,6 +405,11 @@ function describeCompletionEvidenceHandoff(worktreePath: string, taskExecution: 
   }
   if (needsPlan) {
     lines.push("Include plan_summary or planned_steps proving a plan pass happened before mutation.");
+  }
+  if (planQualityRequired) {
+    lines.push(
+      `Include plan_quality_gate with ${planQualityRequiredFields.join(", ") || "constraints_covered, rollback_noted, evidence_requirements_mapped"}${maxPlannedSteps ? ` and keep planned_steps<=${maxPlannedSteps}` : ""}.`
+    );
   }
   if (needsVerification || qualityBiased) {
     lines.push("Include verification_summary, checks, test_results, or evidence_refs from concrete validation.");

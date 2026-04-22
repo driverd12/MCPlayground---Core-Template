@@ -70,6 +70,12 @@ Good default:
 - use this by default for broad objectives
 - skip it for tiny single-step tasks
 
+Current MASTER-MOLD contract:
+
+- Compiler-generated tasks that require a plan pass now carry `task_execution.plan_quality_gate`.
+- The gate requires compact proof that constraints were covered, rollback was noted, and evidence requirements were mapped before mutation or final decision.
+- Completion audits mark the reasoning policy `needs_review` when a declared plan quality gate is missing, while legacy hand-written tasks that only set `require_plan_pass` remain compatible.
+
 ## 3. Critique-revise loops with durable reflection
 
 Why it matters:

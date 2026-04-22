@@ -13899,6 +13899,28 @@ function taskReasoningComputePolicyRequiresBudgetForcing(execution: Record<strin
   return budgetForcing?.enabled === true;
 }
 
+function readTaskPlanQualityGate(execution: Record<string, unknown>): Record<string, unknown> | null {
+  const gate = readPlainObject(execution.plan_quality_gate);
+  return gate?.required === true ? gate : null;
+}
+
+function readTaskPlanQualityRequiredFields(execution: Record<string, unknown>): string[] {
+  const gate = readTaskPlanQualityGate(execution);
+  if (!gate) {
+    return [];
+  }
+  return [...new Set(asStringArrayForStorage(gate.required_fields))].slice(0, 8);
+}
+
+function readTaskPlanQualityMaxSteps(execution: Record<string, unknown>): number | null {
+  const gate = readTaskPlanQualityGate(execution);
+  const raw = gate?.max_planned_steps;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return null;
+  }
+  return Math.max(1, Math.min(20, Math.round(raw)));
+}
+
 function isTaskExecutionHighCompute(execution: Record<string, unknown> | null): boolean {
   if (!execution) {
     return false;
@@ -13934,6 +13956,9 @@ function buildTaskCompletionReasoningAudit(
   const policyEvidenceRequired = taskReasoningComputePolicyRequiresEvidence(execution);
   const branchSearchRequired = taskReasoningComputePolicyRequiresBranchSearch(execution);
   const budgetForcingRequired = taskReasoningComputePolicyRequiresBudgetForcing(execution);
+  const planQualityRequiredFields = readTaskPlanQualityRequiredFields(execution);
+  const planQualityMaxSteps = readTaskPlanQualityMaxSteps(execution);
+  const planQualityGateRequired = planRequired && planQualityRequiredFields.length > 0;
   const verifierRequiredSelectedFields = readVerifierRerankRequiredSelectedFields(execution);
   const taskKind = String(execution.task_kind ?? "").trim();
   const qualityPreference = String(execution.quality_preference ?? "").trim();
@@ -13944,6 +13969,7 @@ function buildTaskCompletionReasoningAudit(
     verificationRequired ||
     branchSearchRequired ||
     budgetForcingRequired ||
+    planQualityGateRequired ||
     evidenceRerank ||
     policyEvidenceRequired ||
     (candidateRequirement !== null && candidateRequirement > 1) ||
@@ -13997,6 +14023,16 @@ function buildTaskCompletionReasoningAudit(
       "reasoning_plan",
       "plan",
     ]));
+  }
+  if (planQualityGateRequired) {
+    for (const field of planQualityRequiredFields) {
+      requireField(`plan_quality_${field}`, completionPlanQualityGateHasField(result, field));
+    }
+    const plannedStepCount = readCompletionPlannedStepCount(result);
+    if (planQualityMaxSteps !== null && plannedStepCount !== null && plannedStepCount > planQualityMaxSteps) {
+      requireField("plan_step_budget", false);
+      warnings.push(`Plan pass listed ${plannedStepCount} planned step(s), above the compact limit ${planQualityMaxSteps}.`);
+    }
   }
   if (verificationRequired) {
     requireField("verification_pass", hasCompletionEvidence(result, [
@@ -14060,6 +14096,9 @@ function buildTaskCompletionReasoningAudit(
   }
   if (verifierRequiredSelectedFields.some((field) => missingFields.includes(field))) {
     warnings.push("Selected candidate is missing required verifier rerank fields.");
+  }
+  if (missingFields.some((field) => field.startsWith("plan_quality_"))) {
+    warnings.push("Plan quality gate is incomplete; constraints, rollback, or evidence mapping may have been skipped.");
   }
 
   return {
@@ -14258,6 +14297,43 @@ function completionSelectedCandidateHasRequiredField(
   );
 }
 
+function completionPlanQualityFieldKeys(field: string): string[] {
+  const normalized = field.trim();
+  if (normalized === "constraints_covered") {
+    return ["constraints_covered", "constraints_checked", "constraints_accounted_for"];
+  }
+  if (normalized === "rollback_noted") {
+    return ["rollback_noted", "rollback_notes", "rollback_ready"];
+  }
+  if (normalized === "evidence_requirements_mapped") {
+    return ["evidence_requirements_mapped", "evidence_map", "expected_evidence_mapped"];
+  }
+  return normalized ? [normalized] : [];
+}
+
+function completionPlanQualityGateHasField(result: Record<string, unknown>, field: string): boolean {
+  const keys = completionPlanQualityFieldKeys(field);
+  if (keys.length === 0) {
+    return false;
+  }
+  for (const source of completionEvidenceSources(result)) {
+    const nestedGates = [
+      readPlainObject(source.plan_quality_gate),
+      readPlainObject(source.plan_quality),
+      readPlainObject(readPlainObject(source.plan_pass)?.quality_gate),
+    ].filter((entry): entry is Record<string, unknown> => entry !== null);
+    for (const gate of nestedGates) {
+      if (keys.some((key) => isCompletionEvidenceValue(gate[key]))) {
+        return true;
+      }
+    }
+    if (keys.some((key) => isCompletionEvidenceValue(source[key]))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function readCompletionCandidateId(candidate: Record<string, unknown>): string | null {
   for (const key of ["id", "candidate_id", "label", "name", "key", "path_id", "title"]) {
     const value = candidate[key];
@@ -14330,6 +14406,25 @@ function readCompletionCandidateCount(result: Record<string, unknown>): number |
       }
     }
     for (const key of ["candidates", "candidate_paths", "options", "alternatives"]) {
+      const value = source[key];
+      if (Array.isArray(value)) {
+        count = Math.max(count ?? 0, value.length);
+      }
+    }
+  }
+  return count;
+}
+
+function readCompletionPlannedStepCount(result: Record<string, unknown>): number | null {
+  let count: number | null = null;
+  for (const source of completionEvidenceSources(result)) {
+    for (const key of ["planned_step_count", "plan_step_count"]) {
+      const value = source[key];
+      if (typeof value === "number" && Number.isFinite(value)) {
+        count = Math.max(count ?? 0, Math.max(0, Math.round(value)));
+      }
+    }
+    for (const key of ["planned_steps", "plan_steps"]) {
       const value = source[key];
       if (Array.isArray(value)) {
         count = Math.max(count ?? 0, value.length);

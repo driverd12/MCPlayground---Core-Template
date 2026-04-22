@@ -69,6 +69,12 @@ test("task.compile default streams carry explicit focus, routing hints, and adap
     ]);
     assert.ok(researchStep?.metadata.task_execution.reasoning_compute_policy.activation_reasons.includes("research_task"));
     assert.equal(researchStep?.metadata.task_execution.require_plan_pass, true);
+    assert.deepEqual(researchStep?.metadata.task_execution.plan_quality_gate.required_fields, [
+      "constraints_covered",
+      "rollback_noted",
+      "evidence_requirements_mapped",
+    ]);
+    assert.equal(researchStep?.metadata.task_execution.plan_quality_gate.max_planned_steps, 8);
     assert.equal(implementationStep?.metadata.task_execution.focus, "implementation");
     assert.equal(implementationStep?.metadata.task_execution.task_kind, "coding");
     assert.equal(implementationStep?.metadata.task_execution.quality_preference, "balanced");
@@ -90,6 +96,7 @@ test("task.compile default streams carry explicit focus, routing hints, and adap
     assert.equal(finalDecisionStep?.metadata.task_execution.reasoning_selection_strategy, "evidence_rerank");
     assert.equal(finalDecisionStep?.metadata.task_execution.reasoning_compute_policy.transcript_policy, "compact_evidence_only");
     assert.equal(finalDecisionStep?.metadata.task_execution.require_plan_pass, true);
+    assert.equal(finalDecisionStep?.metadata.task_execution.plan_quality_gate.required, true);
     assert.equal(finalDecisionStep?.metadata.task_execution.require_verification_pass, true);
     assert.equal(finalDecisionStep?.metadata.working_memory.current_stream_id, "verification-finalize");
   } finally {

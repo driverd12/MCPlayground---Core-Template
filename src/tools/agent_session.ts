@@ -1321,6 +1321,11 @@ function buildReasoningPolicyRecoveryEvidenceRequirements(missingFields: string[
       "Provide plan_summary or planned_steps before changing state so the verification path is decomposed and auditable."
     );
   }
+  if ([...missing].some((field) => field.startsWith("plan_quality_") || field === "plan_step_budget")) {
+    requirements.push(
+      "Provide a compact plan_quality_gate proving constraints were covered, rollback was noted, and evidence requirements were mapped before execution."
+    );
+  }
   if (missing.has("verification_pass")) {
     requirements.push(
       "Provide verification_summary plus checks, test_results, or evidence_refs that prove the selected path was validated."
@@ -1484,6 +1489,8 @@ async function queueReasoningPolicyRecoveryTask(params: {
             selection_rationale:
               "selected_candidate_id and selection_rationale must be grounded in the candidate evidence.",
             plan_pass: "Include plan_summary or planned_steps.",
+            plan_quality_gate:
+              "Include plan_quality_gate with constraints_covered, rollback_noted, and evidence_requirements_mapped.",
             verification_pass: "Include verification_summary plus checks, test_results, or evidence_refs.",
           },
           rollback: "If evidence remains weak or contradictory, fail closed and report the blocker instead of unblocking the step.",

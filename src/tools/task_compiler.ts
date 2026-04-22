@@ -16,6 +16,14 @@ const sourceSchema = z.object({
   source_agent: z.string().optional(),
 });
 
+const DEFAULT_PLAN_QUALITY_GATE = {
+  required: true,
+  required_fields: ["constraints_covered", "rollback_noted", "evidence_requirements_mapped"],
+  max_planned_steps: 8,
+  artifact_policy: "compact_plan_summary_or_steps_only",
+  reject_if_missing: true,
+};
+
 const compiledWorkstreamSchema = z.object({
   stream_id: z.string().min(1).optional(),
   title: z.string().min(1),
@@ -470,6 +478,22 @@ function applyAdaptiveReasoningPolicy(
   }
   if (stream.step_kind === "verification" || taskKind === "verification" || nextTaskMetadata.fail_closed === true) {
     nextTaskMetadata.require_verification_pass = true;
+  }
+  if (nextTaskMetadata.require_plan_pass === true) {
+    const existingGate = readMetadataRecord(nextTaskMetadata.plan_quality_gate);
+    nextTaskMetadata.plan_quality_gate = {
+      ...DEFAULT_PLAN_QUALITY_GATE,
+      ...(existingGate ?? {}),
+      required: existingGate?.required === false ? false : true,
+      required_fields: uniqueStrings([
+        ...DEFAULT_PLAN_QUALITY_GATE.required_fields,
+        ...readMetadataStringArray(existingGate?.required_fields),
+      ]),
+      max_planned_steps:
+        typeof existingGate?.max_planned_steps === "number" && Number.isFinite(existingGate.max_planned_steps)
+          ? Math.max(1, Math.min(20, Math.round(existingGate.max_planned_steps)))
+          : DEFAULT_PLAN_QUALITY_GATE.max_planned_steps,
+    };
   }
   return nextTaskMetadata;
 }

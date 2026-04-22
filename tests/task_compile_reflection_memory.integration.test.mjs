@@ -93,6 +93,11 @@ test("task.compile surfaces grounded reflection memories in memory preflight and
     assert.equal(finalDecisionStep?.metadata.task_execution.reasoning_selection_strategy, "evidence_rerank");
     assert.equal(finalDecisionStep?.metadata.task_execution.reasoning_compute_policy.evidence_required, true);
     assert.equal(finalDecisionStep?.metadata.task_execution.require_plan_pass, true);
+    assert.deepEqual(finalDecisionStep?.metadata.task_execution.plan_quality_gate.required_fields, [
+      "constraints_covered",
+      "rollback_noted",
+      "evidence_requirements_mapped",
+    ]);
     assert.equal(finalDecisionStep?.metadata.task_execution.require_verification_pass, true);
     assert.equal(finalDecisionStep?.metadata.working_memory.current_stream_id, "verification-finalize");
     assert.ok(finalDecisionStep?.metadata.working_memory.known_failures.length >= 1);
