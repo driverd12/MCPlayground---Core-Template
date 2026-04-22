@@ -13962,10 +13962,10 @@ function mergeTaskRetryReflectionPreflight(
 ): Record<string, unknown> {
   const existingPreflight = readPlainObject(metadata.memory_preflight) ?? {};
   const existingTopReflections = Array.isArray(existingPreflight.top_reflections)
-    ? existingPreflight.top_reflections.filter((entry) => readPlainObject(entry))
+    ? existingPreflight.top_reflections.flatMap(normalizeMemoryPreflightReflectionEntry)
     : [];
   const retryTopReflections = Array.isArray(retryPreflight.top_reflections)
-    ? retryPreflight.top_reflections.filter((entry) => readPlainObject(entry))
+    ? retryPreflight.top_reflections.flatMap(normalizeMemoryPreflightReflectionEntry)
     : [];
   const seen = new Set<string>();
   const topReflections = [...retryTopReflections, ...existingTopReflections]
@@ -13993,6 +13993,24 @@ function mergeTaskRetryReflectionPreflight(
       retry_reflection_injected_at: injectedAt,
     },
   };
+}
+
+function normalizeMemoryPreflightReflectionEntry(entry: unknown): Record<string, unknown>[] {
+  const record = readPlainObject(entry);
+  const id = String(record?.id ?? "").trim();
+  if (!record || !id) {
+    return [];
+  }
+  const score = asNullableFiniteNumber(record.score);
+  return [
+    {
+      id,
+      score,
+      text_preview: compactStorageSingleLine(record.text_preview ?? record.content ?? record.text ?? "", 320),
+      citation: readPlainObject(record.citation) ?? {},
+      keywords: asStringArrayForStorage(record.keywords).slice(0, 12),
+    },
+  ];
 }
 
 function boundedReasoningPolicyCandidateCount(value: unknown): number | null {

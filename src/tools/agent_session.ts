@@ -1367,7 +1367,7 @@ function mergeAutoReflectionIntoMemoryPreflight(
   }
   const existing = isRecord(existingPreflight) ? existingPreflight : {};
   const existingTopReflections = Array.isArray(existing.top_reflections)
-    ? existing.top_reflections.filter((entry) => isRecord(entry))
+    ? existing.top_reflections.flatMap(normalizeAgentMemoryPreflightReflection)
     : [];
   const reflectionEntry = {
     id: String(memory.id),
@@ -1405,6 +1405,23 @@ function mergeAutoReflectionIntoMemoryPreflight(
       ...normalizeStringArray(existing.reasoning_review_reflection_memory_ids),
     ]),
   };
+}
+
+function normalizeAgentMemoryPreflightReflection(entry: unknown): Record<string, unknown>[] {
+  const record = isRecord(entry) ? entry : null;
+  const id = readString(record?.id);
+  if (!record || !id) {
+    return [];
+  }
+  return [
+    {
+      id,
+      score: typeof record.score === "number" && Number.isFinite(record.score) ? Number(record.score.toFixed(6)) : null,
+      text_preview: compactAgentSingleLine(record.text_preview ?? record.content ?? record.text ?? "", 320),
+      citation: isRecord(record.citation) ? record.citation : {},
+      keywords: normalizeStringArray(record.keywords).slice(0, 12),
+    },
+  ];
 }
 
 function readTaskPermissionProfile(value: unknown): "read_only" | "bounded_execute" | "network_enabled" | "high_risk" | undefined {

@@ -552,6 +552,37 @@ test("task profiles treat high test-time-compute policy as high complexity for r
         },
       },
       tags: ["reasoning-budget", "failure-reflection"],
+      metadata: {
+        memory_preflight: {
+          strategy: "existing_retrieval",
+          match_count: 1,
+          top_matches: [],
+          reflection_match_count: 1,
+          top_reflections: [
+            {
+              id: "existing-large-reflection",
+              score: 0.7,
+              text_preview: `Existing reflection ${"with excessive stale transcript context ".repeat(40)}`,
+              citation: { source: "memory", id: "existing-large-reflection" },
+              keywords: [
+                "reflection",
+                "existing",
+                "oversized",
+                "transcript",
+                "retry",
+                "known-failure",
+                "compact",
+                "memory",
+                "budget",
+                "token",
+                "predictiveness",
+                "extra",
+                "overflow",
+              ],
+            },
+          ],
+        },
+      },
     });
 
     const policyOnlySummary = await callTool(client, "task.summary", {
@@ -614,7 +645,7 @@ test("task profiles treat high test-time-compute policy as high complexity for r
     });
     assert.equal(retried.retried, true);
     assert.equal(retried.task.metadata.memory_preflight.strategy, "retry_reflection");
-    assert.equal(retried.task.metadata.memory_preflight.reflection_match_count, 1);
+    assert.equal(retried.task.metadata.memory_preflight.reflection_match_count, 2);
     assert.deepEqual(retried.task.metadata.memory_preflight.retry_reflection_memory_ids, [
       String(failed.auto_reflection.memory_id),
     ]);
@@ -622,6 +653,12 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       retried.task.metadata.memory_preflight.top_reflections[0].text_preview,
       /Failed high-compute task/
     );
+    const existingReflection = retried.task.metadata.memory_preflight.top_reflections.find(
+      (entry) => entry.id === "existing-large-reflection"
+    );
+    assert.ok(existingReflection);
+    assert.equal(existingReflection.text_preview.length <= 320, true);
+    assert.equal(existingReflection.keywords.length, 12);
   } finally {
     await client.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
