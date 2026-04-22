@@ -729,6 +729,22 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       transcriptPolicyCompletion.task.result.reasoning_policy_audit.transcript_policy_violation_keys,
       ["chain_of_thought", "raw_transcript"]
     );
+    assert.match(
+      transcriptPolicyCompletion.task.result.raw_transcript,
+      /redacted: compact_evidence_only forbids raw transcript/i
+    );
+    assert.match(
+      transcriptPolicyCompletion.task.result.candidates[1].chain_of_thought,
+      /redacted: compact_evidence_only forbids raw transcript/i
+    );
+    assert.equal(
+      JSON.stringify(transcriptPolicyCompletion.task.result).includes("private scratch reasoning should not be persisted"),
+      false
+    );
+    assert.equal(
+      JSON.stringify(transcriptPolicyCompletion.task.result).includes("small but still forbidden raw transcript payload"),
+      false
+    );
     assert.ok(
       transcriptPolicyCompletion.task.result.reasoning_policy_audit.missing_fields.includes(
         "transcript_policy_compact_evidence_only"

@@ -13710,8 +13710,12 @@ function withTaskCompletionReasoningAudit(task: TaskRecord | null | undefined, r
   if (!audit) {
     return result;
   }
+  const safeResult =
+    audit.transcript_policy_violation_keys.length > 0
+      ? redactCompletionTranscriptPolicyPayload(result)
+      : result;
   return {
-    ...result,
+    ...safeResult,
     reasoning_policy_audit: audit,
   };
 }
@@ -14860,6 +14864,45 @@ const COMPLETION_TRANSCRIPT_POLICY_FORBIDDEN_KEYS = new Set([
   "scratchpad",
   "transcript",
 ]);
+
+const COMPLETION_TRANSCRIPT_POLICY_REDACTION =
+  "[redacted: compact_evidence_only forbids raw transcript or hidden reasoning payloads]";
+
+function redactCompletionTranscriptPolicyPayload(result: Record<string, unknown>): Record<string, unknown> {
+  const seenObjects = new WeakMap<object, unknown>();
+
+  const visit = (value: unknown): unknown => {
+    if (value === null || value === undefined || typeof value !== "object") {
+      return value;
+    }
+    const seen = seenObjects.get(value);
+    if (seen) {
+      return seen;
+    }
+    if (Array.isArray(value)) {
+      const copy: unknown[] = [];
+      seenObjects.set(value, copy);
+      for (const item of value) {
+        copy.push(visit(item));
+      }
+      return copy;
+    }
+
+    const copy: Record<string, unknown> = {};
+    seenObjects.set(value, copy);
+    for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+      const normalizedKey = key.trim().toLowerCase();
+      copy[key] =
+        COMPLETION_TRANSCRIPT_POLICY_FORBIDDEN_KEYS.has(normalizedKey) &&
+        isCompletionEvidenceValue(nestedValue)
+          ? COMPLETION_TRANSCRIPT_POLICY_REDACTION
+          : visit(nestedValue);
+    }
+    return copy;
+  };
+
+  return visit(result) as Record<string, unknown>;
+}
 
 function readCompletionTranscriptPolicyViolationKeys(result: Record<string, unknown>): string[] {
   const found = new Set<string>();
