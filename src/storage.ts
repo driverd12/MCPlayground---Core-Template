@@ -463,6 +463,8 @@ export type TaskCompletionReasoningAudit = {
   status: "not_required" | "satisfied" | "needs_review";
   required_candidate_count: number | null;
   observed_candidate_count: number | null;
+  observed_branch_count: number | null;
+  observed_branch_depth: number | null;
   compute_budget: {
     candidate_budget: number | null;
     max_candidate_count: number | null;
@@ -7891,6 +7893,8 @@ export class Storage {
             satisfied_fields: Array.isArray(reasoningAudit.satisfied_fields) ? reasoningAudit.satisfied_fields : [],
             required_candidate_count: reasoningAudit.required_candidate_count ?? null,
             observed_candidate_count: reasoningAudit.observed_candidate_count ?? null,
+            observed_branch_count: reasoningAudit.observed_branch_count ?? null,
+            observed_branch_depth: reasoningAudit.observed_branch_depth ?? null,
             selection: readPlainObject(reasoningAudit.selection) ?? null,
             warnings: Array.isArray(reasoningAudit.warnings) ? reasoningAudit.warnings : [],
           },
@@ -14170,6 +14174,10 @@ function buildTaskCompletionReasoningAudit(
   const warnings: string[] = [];
   const observedCandidateCount = readCompletionCandidateCount(result);
   const maxCandidateBudget = computeBudget?.max_candidate_count ?? null;
+  const observedBranchCount = readCompletionBranchCount(result);
+  const observedBranchDepth = readCompletionBranchDepth(result);
+  const maxBranchCount = computeBudget?.max_branch_count ?? null;
+  const maxBranchDepth = computeBudget?.max_branch_depth ?? null;
   const selectionAudit = buildCompletionSelectionAudit(
     result,
     observedCandidateCount,
@@ -14283,6 +14291,14 @@ function buildTaskCompletionReasoningAudit(
       `Observed ${observedCandidateCount} candidate(s), above compute budget cap ${maxCandidateBudget}.`
     );
   }
+  if (maxBranchCount !== null && maxBranchCount > 0 && observedBranchCount !== null && observedBranchCount > maxBranchCount) {
+    requireField("branch_budget", false);
+    warnings.push(`Observed ${observedBranchCount} branch(es), above compute budget cap ${maxBranchCount}.`);
+  }
+  if (maxBranchDepth !== null && maxBranchDepth > 0 && observedBranchDepth !== null && observedBranchDepth > maxBranchDepth) {
+    requireField("branch_depth_budget", false);
+    warnings.push(`Observed branch depth ${observedBranchDepth}, above compute budget cap ${maxBranchDepth}.`);
+  }
   if (missingFields.length > 0) {
     warnings.push("Completion accepted, but reasoning-policy evidence is incomplete; review before treating as verified.");
   }
@@ -14310,6 +14326,8 @@ function buildTaskCompletionReasoningAudit(
     status: missingFields.length === 0 ? "satisfied" : "needs_review",
     required_candidate_count: candidateRequirement && candidateRequirement > 1 ? candidateRequirement : null,
     observed_candidate_count: observedCandidateCount,
+    observed_branch_count: observedBranchCount,
+    observed_branch_depth: observedBranchDepth,
     compute_budget: computeBudget,
     observed_compute_usage: observedComputeUsage,
     selection: selectionAudit,
@@ -14681,6 +14699,76 @@ function readCompletionPlannedStepCount(result: Record<string, unknown>): number
     }
   }
   return count;
+}
+
+function readCompletionBranchCount(result: Record<string, unknown>): number | null {
+  let count: number | null = null;
+  for (const source of completionBranchEvidenceSources(result)) {
+    for (const key of [
+      "branch_count",
+      "branch_evaluation_count",
+      "evaluated_branch_count",
+      "expanded_branch_count",
+      "expanded_branches_count",
+      "searched_branch_count",
+    ]) {
+      const value = readBoundedNonNegativeInteger(source[key], 1000);
+      if (value !== null) {
+        count = Math.max(count ?? 0, value);
+      }
+    }
+    for (const key of ["branch_evaluations", "branch_evaluation", "branches", "branch_paths", "expanded_branches", "pruned_branches"]) {
+      const value = source[key];
+      if (Array.isArray(value)) {
+        count = Math.max(count ?? 0, value.length);
+      } else if (readPlainObject(value)) {
+        count = Math.max(count ?? 0, 1);
+      }
+    }
+  }
+  return count;
+}
+
+function readCompletionBranchDepth(result: Record<string, unknown>): number | null {
+  let depth: number | null = null;
+  for (const source of completionBranchEvidenceSources(result)) {
+    for (const key of ["max_branch_depth", "branch_depth", "observed_branch_depth", "search_depth", "depth"]) {
+      const value = readBoundedNonNegativeInteger(source[key], 1000);
+      if (value !== null) {
+        depth = Math.max(depth ?? 0, value);
+      }
+    }
+    for (const key of ["branch_evaluations", "branch_evaluation", "branches", "branch_paths", "expanded_branches", "pruned_branches"]) {
+      const value = source[key];
+      const records = Array.isArray(value) ? value.map((entry) => readPlainObject(entry)) : [readPlainObject(value)];
+      for (const record of records) {
+        if (!record) {
+          continue;
+        }
+        for (const depthKey of ["depth", "branch_depth", "search_depth"]) {
+          const branchDepth = readBoundedNonNegativeInteger(record[depthKey], 1000);
+          if (branchDepth !== null) {
+            depth = Math.max(depth ?? 0, branchDepth);
+          }
+        }
+      }
+    }
+  }
+  return depth;
+}
+
+function completionBranchEvidenceSources(result: Record<string, unknown>): Record<string, unknown>[] {
+  const expanded: Record<string, unknown>[] = [];
+  for (const source of completionEvidenceSources(result)) {
+    expanded.push(source);
+    for (const key of ["branch_search", "shallow_branch_search", "branch_evidence", "branch_tree"]) {
+      const nested = readPlainObject(source[key]);
+      if (nested) {
+        expanded.push(nested);
+      }
+    }
+  }
+  return expanded;
 }
 
 function hasCompletionEvidence(result: Record<string, unknown>, keys: string[]): boolean {

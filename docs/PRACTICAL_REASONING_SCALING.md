@@ -198,6 +198,7 @@ Current MASTER-MOLD contract:
 - Activation is limited to high or critical risk goals, multi-stream plans, or constraint-heavy objectives; ordinary mutation lanes stay single-path.
 - The policy caps search at depth 2, expands only top-scoring candidates, and prunes with artifact fit, contradiction risk, rollback safety, and environment feedback.
 - Runtime worker briefs now render the branch-search contract and task completion audits require compact branch-search evidence before marking the reasoning policy satisfied.
+- Completion audits now extract observed branch count and depth from compact branch evidence and mark shallow-search tasks `needs_review` when they exceed declared branch budgets.
 - Task summaries and Agent Office now expose active branch-search counts so operators can see when this expensive lane is in use.
 
 ## 7. Newer lane worth testing, but not making default

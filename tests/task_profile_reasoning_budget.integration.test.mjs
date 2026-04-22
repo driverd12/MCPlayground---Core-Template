@@ -448,6 +448,88 @@ test("task profiles treat high test-time-compute policy as high complexity for r
       missingTelemetryKernel.attention.some((entry) => /Reasoning compute telemetry is missing for 1 completed high-compute task/i.test(entry))
     );
 
+    const overBudgetBranchTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.over-budget-branches", () => mutationCounter++),
+      objective: "Keep shallow branch search inside the declared depth and width budget.",
+      project_dir: REPO_ROOT,
+      priority: 6,
+      routing: {
+        allowed_agent_ids: ["branch-budget-worker"],
+      },
+      task_execution: {
+        task_kind: "verification",
+        quality_preference: "quality",
+        reasoning_compute_policy: {
+          mode: "adaptive_best_of_n",
+          candidate_count: 2,
+          max_candidate_count: 2,
+          selection_strategy: "evidence_rerank",
+          activation_reasons: ["verification_task", "hard_branch"],
+          evidence_required: true,
+          transcript_policy: "compact_evidence_only",
+          compute_budget: {
+            candidate_budget: 2,
+            max_candidate_count: 2,
+            max_branch_depth: 2,
+            max_branch_count: 2,
+            max_revision_passes: 0,
+            evidence_char_limit: 6000,
+            telemetry_required: false,
+            telemetry_fields: [],
+          },
+          shallow_branch_search: {
+            enabled: true,
+            max_depth: 2,
+            branch_count: 2,
+            prune_with: ["artifact_fit", "contradiction_risk"],
+          },
+        },
+      },
+      tags: ["reasoning-budget", "branch-budget"],
+    });
+
+    const overBudgetBranchClaim = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim.over-budget-branches", () => mutationCounter++),
+      worker_id: "branch-budget-worker",
+      task_id: overBudgetBranchTask.task.task_id,
+    });
+    assert.equal(overBudgetBranchClaim.claimed, true);
+
+    const overBudgetBranchCompletion = await callTool(client, "task.complete", {
+      mutation: nextMutation(testId, "task.complete.over-budget-branches", () => mutationCounter++),
+      task_id: overBudgetBranchTask.task.task_id,
+      worker_id: "branch-budget-worker",
+      summary: "Completed by expanding a deeper and wider branch search than budgeted.",
+      result: {
+        candidates: [
+          { id: "candidate-a", evidence: "passed smoke check" },
+          { id: "candidate-b", selected: true, evidence: "passed regression check" },
+        ],
+        selected_candidate_id: "candidate-b",
+        selection_rationale: "candidate-b had better regression evidence",
+        branch_search: {
+          branch_count: 3,
+          max_branch_depth: 3,
+          branch_evaluations: [
+            { id: "branch-a", depth: 1, pruned: true },
+            { id: "branch-b", depth: 2, selected: true },
+            { id: "branch-c", depth: 3, pruned: true },
+          ],
+        },
+      },
+    });
+    assert.equal(overBudgetBranchCompletion.completed, true);
+    assert.equal(overBudgetBranchCompletion.task.result.reasoning_policy_audit.status, "needs_review");
+    assert.equal(overBudgetBranchCompletion.task.result.reasoning_policy_audit.observed_branch_count, 3);
+    assert.equal(overBudgetBranchCompletion.task.result.reasoning_policy_audit.observed_branch_depth, 3);
+    assert.ok(overBudgetBranchCompletion.task.result.reasoning_policy_audit.satisfied_fields.includes("branch_search"));
+    assert.ok(overBudgetBranchCompletion.task.result.reasoning_policy_audit.missing_fields.includes("branch_budget"));
+    assert.ok(overBudgetBranchCompletion.task.result.reasoning_policy_audit.missing_fields.includes("branch_depth_budget"));
+    assert.match(
+      overBudgetBranchCompletion.task.result.reasoning_policy_audit.warnings.join(" "),
+      /above compute budget cap 2/
+    );
+
     const failedTask = await callTool(client, "task.create", {
       mutation: nextMutation(testId, "task.create.failure-reflection", () => mutationCounter++),
       objective: "Investigate a brittle verification path and learn from the failed attempt.",
