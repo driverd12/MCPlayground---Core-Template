@@ -118,6 +118,88 @@ test("task.compile surfaces grounded reflection memories in memory preflight and
   }
 });
 
+test("task.compile keeps compiler-owned working memory compact when caller metadata is oversized", async () => {
+  const testId = `task-compile-memory-budget-${Date.now()}`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-task-compile-memory-budget-test-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, { MCP_NOTIFIER_DRY_RUN: "1" });
+  try {
+    const goal = await callTool(client, "goal.create", {
+      mutation: nextMutation(testId, "goal.create", () => mutationCounter++),
+      title: "Working memory budget compile goal",
+      objective: "Compile a plan without letting caller metadata replay raw transcript context.",
+      status: "active",
+      priority: 7,
+      risk_tier: "medium",
+      autonomy_mode: "recommend",
+      acceptance_criteria: ["The plan metadata keeps compiler-owned compact working memory"],
+      constraints: ["Do not persist raw transcript-sized working memory"],
+      tags: ["working-memory", "compiler"],
+    });
+
+    const oversizedPreview = `Oversized retrieved reflection ${"with raw transcript filler ".repeat(40)}`;
+    const callerRawWorkingMemory = `CALLER_RAW_WORKING_MEMORY_SENTINEL ${"must not override compiler compact state ".repeat(30)}`;
+    const compiled = await callTool(client, "task.compile", {
+      mutation: nextMutation(testId, "task.compile", () => mutationCounter++),
+      goal_id: goal.goal.goal_id,
+      objective: "Verify compact working memory metadata survives caller-provided oversized context",
+      title: "Compact working memory compile",
+      create_plan: true,
+      selected: true,
+      metadata: {
+        memory_preflight: {
+          query: "oversized caller memory preflight",
+          strategy: "caller_supplied",
+          match_count: 1,
+          top_matches: [
+            {
+              type: "memory",
+              id: "oversized-match",
+              score: 0.8,
+              text_preview: oversizedPreview,
+              citation: { source: "memory", id: "oversized-match" },
+            },
+          ],
+          reflection_match_count: 1,
+          top_reflections: [
+            {
+              id: "oversized-reflection",
+              score: 0.9,
+              text_preview: oversizedPreview,
+              citation: { source: "memory", id: "oversized-reflection" },
+              keywords: Array.from({ length: 20 }, (_, index) => `keyword-${index}`),
+            },
+          ],
+        },
+        working_memory: {
+          compression_policy: "Replay caller transcript context.",
+          expected_evidence: [callerRawWorkingMemory],
+          memory_budget: {
+            transcript_replay_allowed: true,
+          },
+        },
+      },
+    });
+
+    assert.equal(compiled.created_plan, true);
+    assert.equal(compiled.memory_preflight.top_matches[0].text_preview.length <= 320, true);
+    assert.equal(compiled.memory_preflight.top_reflections[0].text_preview.length <= 320, true);
+    assert.equal(compiled.memory_preflight.top_reflections[0].keywords.length, 12);
+    assert.equal(compiled.plan.metadata.memory_preflight.top_reflections[0].text_preview.length <= 320, true);
+    assert.equal(compiled.plan.metadata.working_memory.memory_budget.transcript_replay_allowed, false);
+    assert.equal(
+      JSON.stringify(compiled.plan.metadata.working_memory).includes("CALLER_RAW_WORKING_MEMORY_SENTINEL"),
+      false
+    );
+    assert.match(compiled.plan.metadata.working_memory.compression_policy, /compact state first/i);
+  } finally {
+    await client.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function openClient(dbPath, extraEnv) {
   const transport = new StdioClientTransport({
     command: "node",

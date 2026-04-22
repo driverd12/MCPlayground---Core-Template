@@ -266,7 +266,7 @@ function readMemoryPreflightSummary(value: unknown): SwarmMemoryPreflightSummary
             type: typeof match.type === "string" ? match.type : "unknown",
             id: typeof match.id === "string" ? match.id : "unknown",
             score: typeof match.score === "number" && Number.isFinite(match.score) ? match.score : null,
-            text_preview: typeof match.text_preview === "string" ? match.text_preview : "",
+            text_preview: compactCompilerText(match.text_preview, 320),
             citation: match.citation && typeof match.citation === "object" && !Array.isArray(match.citation) ? (match.citation as Record<string, unknown>) : {},
           },
         ];
@@ -283,13 +283,13 @@ function readMemoryPreflightSummary(value: unknown): SwarmMemoryPreflightSummary
           {
             id: typeof reflection.id === "string" ? reflection.id : "unknown",
             score: typeof reflection.score === "number" && Number.isFinite(reflection.score) ? reflection.score : null,
-            text_preview: typeof reflection.text_preview === "string" ? reflection.text_preview : "",
+            text_preview: compactCompilerText(reflection.text_preview, 320),
             citation:
               reflection.citation && typeof reflection.citation === "object" && !Array.isArray(reflection.citation)
                 ? (reflection.citation as Record<string, unknown>)
                 : {},
             keywords: Array.isArray(reflection.keywords)
-              ? reflection.keywords.map((keyword) => String(keyword ?? "").trim()).filter(Boolean)
+              ? reflection.keywords.map((keyword) => String(keyword ?? "").trim()).filter(Boolean).slice(0, 12)
               : [],
           },
         ];
@@ -1075,13 +1075,13 @@ export async function taskCompile(storage: Storage, input: z.infer<typeof taskCo
             rollback: rollbackNotes,
             budget: goal.budget,
             metadata: mergeDeclaredPermissionProfile({
+              ...(input.metadata ?? {}),
               compiler: "task.compile",
               objective: input.objective,
               swarm_profile: preview.swarm_profile,
               checkpoint_policy: preview.swarm_profile.checkpoint_policy,
               memory_preflight: preview.memory_preflight,
               working_memory: preview.working_memory,
-              ...(input.metadata ?? {}),
             }, typeof goal.metadata.permission_profile === "string" ? goal.metadata.permission_profile : null),
             steps: preview.steps,
             source_client: input.source_client,
