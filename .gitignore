@@ -17,6 +17,7 @@ data/recovery-*/
 data/hub.from_wal.*
 data/trichat.bus.sock
 data/imprint/
+data/federation/
 data/training/
 data/exports/
 coverage/

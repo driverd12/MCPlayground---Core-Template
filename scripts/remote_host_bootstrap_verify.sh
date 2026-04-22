@@ -49,22 +49,26 @@ git fetch --all --prune
 git checkout "$branch"
 git pull --ff-only origin "$branch"
 if [[ -f package-lock.json ]]; then
-  npm ci --ignore-scripts
+  npm ci
 else
-  npm install --ignore-scripts
+  npm install
 fi
 npm run build
+native_sqlite_json="$(
+  node -e 'import("better-sqlite3").then(({default: Database}) => { const db = new Database(":memory:"); db.prepare("select 1 as ok").get(); db.close(); console.log(JSON.stringify({ok:true, module:"better-sqlite3"})); }).catch((error) => { console.log(JSON.stringify({ok:false, module:"better-sqlite3", error: String(error && error.message || error)})); process.exit(1); })'
+)"
 context_json="$(node scripts/remote_context_probe.mjs --action=status 2>/dev/null || true)"
 mac_address="$(networksetup -listallhardwareports 2>/dev/null | awk '/Device:/{dev=$2} /Ethernet Address:/{print $3; exit}' || ifconfig en0 2>/dev/null | awk '/ether/{print $2; exit}' || true)"
 device_fingerprint="$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4; exit}' || true)"
 public_key_fingerprint="$(for f in ~/.ssh/*.pub; do [[ -f "$f" ]] && ssh-keygen -lf "$f" 2>/dev/null && break; done || true)"
-printf '{"ok":true,"hostname":%s,"repo_root":%s,"git_head":%s,"mac_address":%s,"device_fingerprint":%s,"public_key_fingerprint":%s,"context_probe":%s}\n' \
+printf '{"ok":true,"hostname":%s,"repo_root":%s,"git_head":%s,"mac_address":%s,"device_fingerprint":%s,"public_key_fingerprint":%s,"native_sqlite":%s,"context_probe":%s}\n' \
   "$(hostname | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
   "$(pwd | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
   "$(git rev-parse HEAD | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
   "$(printf '%s' "$mac_address" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
   "$(printf '%s' "$device_fingerprint" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
   "$(printf '%s' "$public_key_fingerprint" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
+  "${native_sqlite_json:-null}" \
   "${context_json:-null}"
 EOS
 )
