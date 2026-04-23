@@ -655,6 +655,22 @@ function stableFederationMutation(hostId: string, streamId: string, sequence: nu
   };
 }
 
+function classifyWorkerFabricHeartbeatFailure(hostId: string, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === `Unknown worker fabric host: ${hostId}`) {
+    return {
+      reason: "host_not_staged",
+      detail: `Verified peer ${hostId} is not staged in worker.fabric yet. Stage and approve the host before treating federation ingest as healthy.`,
+      error: message,
+    };
+  }
+  return {
+    reason: "worker_fabric_heartbeat_failed",
+    detail: `Federation ingest was accepted but worker.fabric heartbeat failed for ${hostId}.`,
+    error: message,
+  };
+}
+
 function ingestFederationPayload(storage: Storage, payload: Record<string, unknown>, networkGate: Record<string, unknown>) {
   const createdAt = new Date().toISOString();
   const hostPayload = isRecord(payload.host) ? payload.host : {};
@@ -693,6 +709,8 @@ function ingestFederationPayload(storage: Storage, payload: Record<string, unkno
 
   let workerFabricHeartbeatOk = false;
   let workerFabricHeartbeatError: string | null = null;
+  let workerFabricHeartbeatReason: string | null = null;
+  let workerFabricHeartbeatDetail: string | null = null;
   try {
     workerFabric(storage, {
       action: "heartbeat",
@@ -724,7 +742,10 @@ function ingestFederationPayload(storage: Storage, payload: Record<string, unkno
     } as z.infer<typeof workerFabricSchema>);
     workerFabricHeartbeatOk = true;
   } catch (error) {
-    workerFabricHeartbeatError = error instanceof Error ? error.message : String(error);
+    const heartbeatFailure = classifyWorkerFabricHeartbeatFailure(hostId, error);
+    workerFabricHeartbeatError = heartbeatFailure.error;
+    workerFabricHeartbeatReason = heartbeatFailure.reason;
+    workerFabricHeartbeatDetail = heartbeatFailure.detail;
     storage.appendRuntimeEvent({
       created_at: createdAt,
       event_type: "federation.ingest.warning",
@@ -734,6 +755,8 @@ function ingestFederationPayload(storage: Storage, payload: Record<string, unkno
       summary: `federation ingest could not update worker fabric host ${hostId}`,
       details: {
         error: workerFabricHeartbeatError,
+        reason: workerFabricHeartbeatReason,
+        detail: workerFabricHeartbeatDetail,
         stream_id: streamId,
         sequence: roundedSequence,
       },
@@ -752,6 +775,8 @@ function ingestFederationPayload(storage: Storage, payload: Record<string, unkno
     sequence: roundedSequence,
     worker_fabric_heartbeat_ok: workerFabricHeartbeatOk,
     worker_fabric_heartbeat_error: workerFabricHeartbeatError,
+    worker_fabric_heartbeat_reason: workerFabricHeartbeatReason,
+    worker_fabric_heartbeat_detail: workerFabricHeartbeatDetail,
   };
 }
 

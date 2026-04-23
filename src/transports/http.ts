@@ -1884,13 +1884,40 @@ async function maybeHandleFederationRequest(
     });
     return true;
   }
-  const payload = await readLimitedJsonBody(req, 512 * 1024);
+  let payload: Record<string, unknown>;
+  try {
+    payload = await readLimitedJsonBody(req, 512 * 1024);
+  } catch (error) {
+    sendJson(res, error instanceof Error && error.message === "request_body_too_large" ? 413 : 400, {
+      ok: false,
+      error: error instanceof Error ? error.message : "invalid_request",
+      detail:
+        error instanceof Error && error.message === "request_body_too_large"
+          ? "Federation ingest payload exceeded the 512 KiB limit."
+          : "Federation ingest payload must be a small JSON object.",
+    });
+    return true;
+  }
   const result = await Promise.resolve(options.federationIngest({ payload, networkGate }));
+  const resultRecord = readRecord(result);
+  const heartbeatOk = resultRecord?.worker_fabric_heartbeat_ok;
+  const heartbeatReason = readStringValue(resultRecord?.worker_fabric_heartbeat_reason);
+  const heartbeatDetail = readStringValue(resultRecord?.worker_fabric_heartbeat_detail);
+  const hint =
+    heartbeatOk === false
+      ? {
+          code: heartbeatReason ?? "worker_fabric_heartbeat_failed",
+          detail:
+            heartbeatDetail ??
+            "Federation payload was accepted, but the receiving worker.fabric host record was not updated successfully.",
+        }
+      : null;
   sendJson(res, 202, {
     ok: true,
     accepted: true,
     host_id: networkGate.host_id ?? null,
     result,
+    ...(hint ? { hint } : {}),
   });
   return true;
 }

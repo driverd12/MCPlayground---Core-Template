@@ -13,6 +13,15 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 dotenv.config({ path: path.join(REPO_ROOT, ".env") });
 const SCHEMA_VERSION = "master-mold-federation-v1";
 
+function readRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function readString(value) {
+  const text = String(value ?? "").trim();
+  return text ? text : null;
+}
+
 function argValues(name) {
   const values = [];
   const longName = `--${name}`;
@@ -435,12 +444,37 @@ async function postPeer(peer, payload, options) {
   } catch {
     parsed = { raw: text.slice(0, 2_000) };
   }
+  const responseHealth = evaluatePeerIngestResponse(response, parsed);
   return {
     peer,
-    ok: response.ok,
+    ok: responseHealth.ok,
     status: response.status,
     response: parsed,
+    error: responseHealth.error,
+    http_ok: response.ok,
   };
+}
+
+export function evaluatePeerIngestResponse(response, parsed) {
+  const body = readRecord(parsed) ?? {};
+  const result = readRecord(body.result) ?? {};
+  if (!response?.ok) {
+    return {
+      ok: false,
+      error: readString(body.detail) ?? readString(body.error) ?? readString(body.raw) ?? `HTTP ${response?.status ?? 0}`,
+    };
+  }
+  if (result.worker_fabric_heartbeat_ok === false) {
+    return {
+      ok: false,
+      error:
+        readString(body.hint && body.hint.detail) ??
+        readString(result.worker_fabric_heartbeat_detail) ??
+        readString(result.worker_fabric_heartbeat_error) ??
+        "Federation ingest was accepted by the peer, but the peer did not update worker.fabric successfully.",
+    };
+  }
+  return { ok: true, error: null };
 }
 
 function parseOptions() {
@@ -577,7 +611,9 @@ async function main() {
   } while (true);
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}

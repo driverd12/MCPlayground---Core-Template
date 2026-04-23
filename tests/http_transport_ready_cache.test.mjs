@@ -610,6 +610,89 @@ test("/federation/ingest accepts a sidecar payload into the ingest callback", { 
   }
 });
 
+test("/federation/ingest returns a structured hint when ingest is accepted but worker fabric processing is degraded", { concurrency: false }, async () => {
+  const port = await reservePort();
+  const server = await startHttpTransport(
+    () =>
+      new Server(
+        {
+          name: "http-federation-ingest-hint-test",
+          version: "1.0.0",
+        },
+        {
+          capabilities: {
+            tools: {},
+          },
+        }
+      ),
+    {
+      host: "127.0.0.1",
+      port,
+      allowedOrigins: ["http://127.0.0.1"],
+      bearerToken: "federation-ingest-token",
+      federationIngest: async () => ({
+        ok: true,
+        host_id: "mesh-peer",
+        worker_fabric_heartbeat_ok: false,
+        worker_fabric_heartbeat_reason: "host_not_staged",
+        worker_fabric_heartbeat_detail:
+          "Verified peer mesh-peer is not staged in worker.fabric yet. Stage and approve the host before treating federation ingest as healthy.",
+      }),
+    }
+  );
+
+  try {
+    const response = await fetchHttpJsonResponse(port, "/federation/ingest", {
+      method: "POST",
+      headers: {
+        Origin: "http://127.0.0.1",
+        Authorization: "Bearer federation-ingest-token",
+        "Content-Type": "application/json",
+      },
+      body: {
+        schema_version: "master-mold-federation-v1",
+        stream_id: "mesh-peer:master-mold",
+        sequence: 7,
+        host: {
+          host_id: "mesh-peer",
+        },
+      },
+    });
+
+    assert.equal(response.statusCode, 202);
+    assert.equal(response.body.ok, true);
+    assert.equal(response.body.accepted, true);
+    assert.equal(response.body.result.worker_fabric_heartbeat_ok, false);
+    assert.equal(response.body.hint.code, "host_not_staged");
+    assert.match(String(response.body.hint.detail || ""), /not staged/i);
+
+    const oversized = await fetchHttpJsonResponse(port, "/federation/ingest", {
+      method: "POST",
+      headers: {
+        Origin: "http://127.0.0.1",
+        Authorization: "Bearer federation-ingest-token",
+        "Content-Type": "application/json",
+      },
+      rawBody: JSON.stringify({
+        schema_version: "master-mold-federation-v1",
+        payload: "x".repeat(520 * 1024),
+      }),
+    });
+    assert.equal(oversized.statusCode, 413);
+    assert.equal(oversized.body.error, "request_body_too_large");
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+});
+
 test("/office/api/hosts verifies an SSH host with a bounded liveness probe", { concurrency: false }, async () => {
   const previousPath = process.env.PATH;
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "mcp-office-host-verify-"));
@@ -1972,7 +2055,7 @@ function fetchHttpJsonResponse(port, requestPath, options = {}) {
   return new Promise((resolve, reject) => {
     const method = options.method || "GET";
     const headers = options.headers || {};
-    const body = options.body == null ? null : JSON.stringify(options.body);
+    const body = typeof options.rawBody === "string" ? options.rawBody : options.body == null ? null : JSON.stringify(options.body);
     const request = http.request(
       {
         hostname: "127.0.0.1",

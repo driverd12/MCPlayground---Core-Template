@@ -2149,3 +2149,79 @@ test("roster-only inactive agent is never ready or connected", () => {
   assert.notEqual(agent.state, "ready", "inactive roster-only agent must not be ready");
   assert.notEqual(agent.state, "connected", "inactive roster-only agent must not be connected");
 });
+
+test("office gui snapshot keeps current remote locator separate from approved locator metadata", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    {
+      roster: { active_agent_ids: [], agents: [] },
+      workboard: {},
+      tmux: {},
+      task_summary: { counts: {} },
+      task_running: {},
+      task_pending: {},
+      agent_sessions: { sessions: [] },
+      adapter: {},
+      bus_tail: {},
+      trichat_summary: {},
+      learning: {},
+      autopilot: {},
+      runtime_workers: { summary: {}, sessions: [] },
+      kernel: {
+        overview: {},
+        worker_fabric: {
+          hosts: [
+            {
+              host_id: "dans-mbp",
+              remote_display_name: "Dan's MacBook Pro",
+              transport: "ssh",
+              enabled: true,
+              worker_count: 1,
+              health_state: "healthy",
+              health_score: 1,
+              queue_depth: 0,
+              active_tasks: 0,
+              heartbeat_at: "2026-04-23T12:00:00.000Z",
+              ssh_destination: "dan.driver@Dans-MBP.local",
+              workspace_root: "/Users/dan.driver/Documents/Playground/Agentic Playground/MASTER-MOLD",
+              remote_access_status: "approved",
+              remote_hostname: "Dans-MBP.local",
+              remote_ip_address: "10.1.3.224",
+              remote_approved_ip_address: "10.1.3.224",
+              remote_current_address: "192.168.86.28",
+              remote_locator_observed_at: "2026-04-23T12:00:00.000Z",
+              remote_locator_matched_by: "approved_host_hostname",
+              remote_mac_address: "da:6b:f9:d7:ef:80",
+              remote_agent_runtime: "federation-sidecar",
+              remote_model_label: "federation-sidecar",
+              remote_permission_profile: "operator",
+              remote_allowed_addresses: ["10.1.3.224"],
+              remote_identity_public_key_configured: true,
+              remote_pairing_code: "",
+              remote_approved_at: "2026-04-22T20:00:00.000Z",
+              desktop_context: {},
+              tags: ["approved-host"],
+            },
+          ],
+        },
+        model_router: { backends: [] },
+        runtime_workers: {},
+        autonomy_maintain: {},
+        reaction_engine: {},
+        observability: {},
+        swarm: {},
+        workflow_exports: {},
+      },
+      autonomy_maintain: { state: {}, runtime: {}, due: {} },
+      provider_bridge: { diagnostics: { generated_at: "", cached: false, diagnostics: [] } },
+    },
+    { theme: "dark" }
+  );
+
+  const host = snapshot.summary.worker_fabric.hosts.find((entry) => entry.host_id === "dans-mbp");
+  assert.ok(host);
+  assert.equal(host.remote_ip_address, "10.1.3.224");
+  assert.equal(host.remote_approved_ip_address, "10.1.3.224");
+  assert.equal(host.remote_current_address, "192.168.86.28");
+  assert.equal(host.remote_locator_observed_at, "2026-04-23T12:00:00.000Z");
+  assert.equal(host.remote_locator_matched_by, "approved_host_hostname");
+});

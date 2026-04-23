@@ -1493,6 +1493,17 @@
     };
   }
 
+  function hostLocatorMatchLabel(host) {
+    var normalized = String(host && host.remote_locator_matched_by || "").trim().toLowerCase();
+    if (!normalized) return "";
+    if (normalized === "approved_host_hostname") return "matched by hostname";
+    if (normalized === "approved_host_mac") return "matched by MAC";
+    if (normalized === "approved_host_address") return "matched by approved address";
+    if (normalized === "loopback") return "matched by loopback";
+    if (normalized === "env_allowlist") return "matched by allowlist";
+    return "matched by " + normalized.replace(/_/g, " ");
+  }
+
   function remoteHostsFromSnapshot() {
     var fabric = state.snapshot && state.snapshot.summary ? state.snapshot.summary.worker_fabric || {} : {};
     var hosts = Array.isArray(fabric.hosts) ? fabric.hosts : [];
@@ -1575,9 +1586,11 @@
             var tone = hostTone(host);
             var status = host.remote_access_status || (host.enabled ? "enabled" : "disabled");
             var title = host.display_name || host.host_id || "host";
+            var currentAddress = String(host.remote_current_address || "").trim();
+            var approvedAddress = String(host.remote_approved_ip_address || host.remote_ip_address || "").trim();
             var detail = [
               host.remote_hostname || host.ssh_destination || host.transport,
-              host.remote_ip_address,
+              currentAddress ? "current " + currentAddress : "",
               host.remote_mac_address,
               host.remote_agent_runtime,
               host.remote_model_label,
@@ -1587,6 +1600,13 @@
             var allowed = Array.isArray(host.remote_allowed_addresses) && host.remote_allowed_addresses.length
               ? host.remote_allowed_addresses.join(", ")
               : "loopback/local only";
+            var audit = [
+              hostLocatorMatchLabel(host),
+              approvedAddress ? "approved at " + approvedAddress : "",
+              "allowed at approval: " + allowed,
+              host.remote_locator_observed_at ? "last seen " + relativeTime(host.remote_locator_observed_at) + " ago" : "",
+              "workspace: " + (host.workspace_root || "n/a"),
+            ].filter(Boolean).join(" · ");
             var context = hostContextSummary(host);
             return (
               '<article class="host-row host-row--' + escapeHtml(tone) + '">' +
@@ -1594,7 +1614,7 @@
               '<div class="host-row__eyebrow">' + escapeHtml(String(host.transport || "local").toUpperCase() + " · " + String(status).toUpperCase()) + "</div>" +
               '<strong>' + escapeHtml(title) + '</strong>' +
               '<span>' + escapeHtml(detail || "No remote identity metadata recorded.") + '</span>' +
-              '<small>' + escapeHtml("allowed: " + allowed + " · workspace: " + (host.workspace_root || "n/a")) + '</small>' +
+              '<small>' + escapeHtml(audit) + '</small>' +
               '</div>' +
               '<div class="host-row__metrics">' +
               '<div><span>Health</span><strong>' + escapeHtml(String(host.health_state || "n/a")) + '</strong></div>' +

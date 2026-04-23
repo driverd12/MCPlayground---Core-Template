@@ -169,6 +169,10 @@ type HostFabricSummary = {
     remote_display_name: string | null;
     remote_hostname: string | null;
     remote_ip_address: string | null;
+    remote_approved_ip_address: string | null;
+    remote_current_address: string | null;
+    remote_locator_observed_at: string | null;
+    remote_locator_matched_by: string | null;
     remote_mac_address: string | null;
     remote_agent_runtime: string | null;
     remote_model_label: string | null;
@@ -921,6 +925,50 @@ function readFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function readStringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((entry) => readString(entry)).filter((entry): entry is string => Boolean(entry)) : [];
+}
+
+function summarizeRemoteHostMetadata(host: WorkerFabricHostRecord) {
+  const metadata = isRecord(host.metadata) ? host.metadata : {};
+  const remoteAccess = isRecord(metadata.remote_access) ? metadata.remote_access : {};
+  const remoteLocator = isRecord(metadata.remote_locator) ? metadata.remote_locator : null;
+  const federation = isRecord(metadata.federation) ? metadata.federation : null;
+  const federationIdentity = federation && isRecord(federation.identity) ? federation.identity : null;
+  const approvalScope = federationIdentity && isRecord(federationIdentity.approval_scope) ? federationIdentity.approval_scope : null;
+  const allowedAddresses = readStringList(remoteAccess.allowed_addresses);
+  const approvedIpAddress =
+    readString(remoteLocator?.approved_ip_address) ?? readString(approvalScope?.approved_ip_address) ?? readString(remoteAccess.ip_address);
+  return {
+    desktop_context: isRecord(metadata.desktop_context) ? metadata.desktop_context : null,
+    remote_access_status: readString(remoteAccess.status),
+    remote_display_name: readString(remoteAccess.display_name),
+    remote_hostname: readString(remoteAccess.hostname) ?? readString(federationIdentity?.captured_hostname),
+    remote_ip_address: approvedIpAddress,
+    remote_approved_ip_address: approvedIpAddress,
+    remote_current_address:
+      readString(remoteLocator?.current_ip_address) ??
+      readString(approvalScope?.observed_remote_address) ??
+      readString(federationIdentity?.requesting_remote_address),
+    remote_locator_observed_at: readString(remoteLocator?.observed_at) ?? readString(federation?.last_ingest_at),
+    remote_locator_matched_by: readString(remoteLocator?.matched_by) ?? readString(approvalScope?.matched_by),
+    remote_mac_address:
+      readString(remoteAccess.mac_address) ?? readString(remoteAccess.hardware_address) ?? readString(approvalScope?.mac_address),
+    remote_agent_runtime: readString(remoteAccess.agent_runtime) ?? readString(federationIdentity?.captured_agent_runtime),
+    remote_model_label: readString(remoteAccess.model_label) ?? readString(federationIdentity?.captured_model_label),
+    remote_permission_profile: readString(remoteAccess.permission_profile) ?? readString(approvalScope?.permission_profile),
+    remote_allowed_addresses: allowedAddresses.length > 0 ? allowedAddresses : readStringList(approvalScope?.allowed_addresses),
+    remote_device_fingerprint: readString(remoteAccess.device_fingerprint) ?? readString(approvalScope?.device_fingerprint),
+    remote_public_key_fingerprint:
+      readString(remoteAccess.public_key_fingerprint) ??
+      readString(approvalScope?.public_key_fingerprint) ??
+      readString(approvalScope?.identity_public_key_fingerprint),
+    remote_identity_public_key_configured: Boolean(readString(remoteAccess.identity_public_key)),
+    remote_pairing_code: readString(remoteAccess.pairing_code),
+    remote_approved_at: readString(remoteAccess.approved_at) ?? readString(approvalScope?.approved_at),
+  };
+}
+
 function detectLinuxDistributionId(): string | null {
   if (process.platform !== "linux") {
     return null;
@@ -1264,8 +1312,7 @@ function summarizeWorkerFabric(storage: Storage, state?: WorkerFabricStateRecord
     health_counts: healthCounts,
     transport_counts: transportCounts,
     hosts: hosts.map((host) => {
-      const remoteAccess = isRecord(host.metadata.remote_access) ? host.metadata.remote_access : {};
-      const desktopContext = isRecord(host.metadata.desktop_context) ? host.metadata.desktop_context : null;
+      const remoteSummary = summarizeRemoteHostMetadata(host);
       return {
         ...resolveHostCapacityProfile(host),
         host_id: host.host_id,
@@ -1284,23 +1331,25 @@ function summarizeWorkerFabric(storage: Storage, state?: WorkerFabricStateRecord
         thermal_pressure: host.telemetry.thermal_pressure,
         ssh_destination: host.ssh_destination,
         workspace_root: host.workspace_root,
-        remote_access_status: readString(remoteAccess.status),
-        remote_display_name: readString(remoteAccess.display_name),
-        remote_hostname: readString(remoteAccess.hostname),
-        remote_ip_address: readString(remoteAccess.ip_address),
-        remote_mac_address: readString(remoteAccess.mac_address),
-        remote_agent_runtime: readString(remoteAccess.agent_runtime),
-        remote_model_label: readString(remoteAccess.model_label),
-        remote_permission_profile: readString(remoteAccess.permission_profile),
-        remote_allowed_addresses: Array.isArray(remoteAccess.allowed_addresses)
-          ? remoteAccess.allowed_addresses.map((entry) => String(entry ?? "").trim()).filter(Boolean)
-          : [],
-        remote_device_fingerprint: readString(remoteAccess.device_fingerprint),
-        remote_public_key_fingerprint: readString(remoteAccess.public_key_fingerprint),
-        remote_identity_public_key_configured: Boolean(readString(remoteAccess.identity_public_key)),
-        remote_pairing_code: readString(remoteAccess.pairing_code),
-        remote_approved_at: readString(remoteAccess.approved_at),
-        desktop_context: desktopContext,
+        remote_access_status: remoteSummary.remote_access_status,
+        remote_display_name: remoteSummary.remote_display_name,
+        remote_hostname: remoteSummary.remote_hostname,
+        remote_ip_address: remoteSummary.remote_ip_address,
+        remote_approved_ip_address: remoteSummary.remote_approved_ip_address,
+        remote_current_address: remoteSummary.remote_current_address,
+        remote_locator_observed_at: remoteSummary.remote_locator_observed_at,
+        remote_locator_matched_by: remoteSummary.remote_locator_matched_by,
+        remote_mac_address: remoteSummary.remote_mac_address,
+        remote_agent_runtime: remoteSummary.remote_agent_runtime,
+        remote_model_label: remoteSummary.remote_model_label,
+        remote_permission_profile: remoteSummary.remote_permission_profile,
+        remote_allowed_addresses: remoteSummary.remote_allowed_addresses,
+        remote_device_fingerprint: remoteSummary.remote_device_fingerprint,
+        remote_public_key_fingerprint: remoteSummary.remote_public_key_fingerprint,
+        remote_identity_public_key_configured: remoteSummary.remote_identity_public_key_configured,
+        remote_pairing_code: remoteSummary.remote_pairing_code,
+        remote_approved_at: remoteSummary.remote_approved_at,
+        desktop_context: remoteSummary.desktop_context,
         tags: host.tags,
       };
     }),

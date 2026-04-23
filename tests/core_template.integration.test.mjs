@@ -3738,9 +3738,48 @@ test("worker.fabric stages and approves a remote Mac host with durable identity 
     assert.equal(summaryHost.remote_access_status, "approved");
     assert.equal(summaryHost.remote_hostname, "Dans-MBP.local");
     assert.equal(summaryHost.remote_ip_address, "10.1.2.76");
+    assert.equal(summaryHost.remote_approved_ip_address, "10.1.2.76");
+    assert.equal(summaryHost.remote_current_address, null);
     assert.equal(summaryHost.remote_agent_runtime, "claude");
     assert.equal(summaryHost.remote_model_label, "Claude Opus");
     assert.ok(summaryHost.remote_allowed_addresses.includes("10.1.2.76"));
+
+    await callTool(client, "worker.fabric", {
+      action: "heartbeat",
+      mutation: nextMutation(testId, "worker.fabric.heartbeat.remote_locator", () => mutationCounter++),
+      host_id: "dans-mbp",
+      metadata: {
+        federation: {
+          identity: {
+            requesting_remote_address: "192.168.86.28",
+            captured_hostname: "Dans-MBP.local",
+            captured_agent_runtime: "claude",
+            captured_model_label: "Claude Opus",
+            approval_scope: {
+              matched_by: "approved_host_hostname",
+              observed_remote_address: "192.168.86.28",
+              approved_ip_address: "10.1.2.76",
+              allowed_addresses: ["10.1.2.76"],
+              hostname_resolved_addresses: ["192.168.86.28"],
+            },
+          },
+          last_ingest_at: "2026-04-23T12:00:00.000Z",
+        },
+      },
+      telemetry: {
+        heartbeat_at: "2026-04-23T12:00:00.000Z",
+        health_state: "healthy",
+      },
+    });
+
+    const refreshedSummary = await callTool(client, "kernel.summary", {});
+    const refreshedHost = refreshedSummary.worker_fabric.hosts.find((host) => host.host_id === "dans-mbp");
+    assert.ok(refreshedHost);
+    assert.equal(refreshedHost.remote_ip_address, "10.1.2.76");
+    assert.equal(refreshedHost.remote_approved_ip_address, "10.1.2.76");
+    assert.equal(refreshedHost.remote_current_address, "192.168.86.28");
+    assert.equal(refreshedHost.remote_locator_observed_at, "2026-04-23T12:00:00.000Z");
+    assert.equal(refreshedHost.remote_locator_matched_by, "approved_host_hostname");
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
