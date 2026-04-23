@@ -892,6 +892,88 @@ function buildKernelPayload(storage: Storage, summary: TaskSummaryPayload, sessi
   });
 }
 
+function safeHostId(value: unknown) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+}
+
+function knownWorkerFabricHostIds(kernel: Record<string, unknown>) {
+  return new Set(
+    asList(asRecord(asRecord(kernel).worker_fabric).hosts)
+      .map((entry) => safeHostId(asRecord(entry).host_id))
+      .filter(Boolean)
+  );
+}
+
+function buildFederationPayload(storage: Storage, kernel: Record<string, unknown>) {
+  const latestByHost = new Map<
+    string,
+    {
+      event_seq: number;
+      host_id: string;
+      seen_at: string | null;
+      age_seconds: number | null;
+      detail: string;
+      current_remote_address: string | null;
+      captured_hostname: string | null;
+      captured_agent_runtime: string | null;
+      captured_model_label: string | null;
+    }
+  >();
+  const knownHostIds = knownWorkerFabricHostIds(kernel);
+  const events = storage.listRuntimeEvents({
+    event_type: "federation.ingest.warning",
+    limit: 50,
+  });
+  for (const rawEvent of events) {
+    const event = asRecord(rawEvent);
+    const details = asRecord(event.details);
+    const hostId = safeHostId(event.entity_id);
+    if (!hostId || knownHostIds.has(hostId) || String(details.reason ?? "").trim() !== "host_not_staged") {
+      continue;
+    }
+    const currentEventSeq = Number.isFinite(Number(event.event_seq)) ? Math.trunc(Number(event.event_seq)) : 0;
+    const previous = latestByHost.get(hostId);
+    if (previous && previous.event_seq >= currentEventSeq) {
+      continue;
+    }
+    const seenAt = String(event.created_at ?? "").trim() || null;
+    latestByHost.set(hostId, {
+      event_seq: currentEventSeq,
+      host_id: hostId,
+      seen_at: seenAt,
+      age_seconds: Number.isFinite(Date.parse(String(seenAt || ""))) ? Math.max(0, (Date.now() - Date.parse(String(seenAt))) / 1000) : null,
+      detail:
+        String(details.detail ?? details.error ?? "Verified peer is not staged in worker.fabric yet.").trim() ||
+        "Verified peer is not staged in worker.fabric yet.",
+      current_remote_address: String(details.requesting_remote_address ?? "").trim() || null,
+      captured_hostname: String(details.captured_hostname ?? "").trim() || null,
+      captured_agent_runtime: String(details.captured_agent_runtime ?? "").trim() || null,
+      captured_model_label: String(details.captured_model_label ?? "").trim() || null,
+    });
+  }
+  const incomingPeers = [...latestByHost.values()]
+    .sort((left, right) => (left.age_seconds ?? Number.POSITIVE_INFINITY) - (right.age_seconds ?? Number.POSITIVE_INFINITY))
+    .map((entry) => ({
+      host_id: entry.host_id,
+      seen_at: entry.seen_at,
+      age_seconds: entry.age_seconds,
+      detail: entry.detail,
+      current_remote_address: entry.current_remote_address,
+      captured_hostname: entry.captured_hostname,
+      captured_agent_runtime: entry.captured_agent_runtime,
+      captured_model_label: entry.captured_model_label,
+    }));
+  return {
+    generated_at: new Date().toISOString(),
+    incoming_peer_count: incomingPeers.length,
+    incoming_peers: incomingPeers,
+  };
+}
+
 function buildRecentRouterSuppressionDecisions(storage: Storage, params?: { limit?: number; max_age_seconds?: number }) {
   const limit =
     typeof params?.limit === "number" && Number.isFinite(params.limit) ? Math.max(1, Math.min(12, Math.trunc(params.limit))) : 5;
@@ -1170,6 +1252,9 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
         buildKernelPayload(storage, taskSummaryPayload, agentSessions)
       )
     : {};
+  const federation = safe("federation", buildFederationPayload(storage, asRecord(kernel)), () =>
+    buildFederationPayload(storage, asRecord(kernel))
+  );
   const providerReadyAgentIds =
     selectedProviderBridgeDiagnostics.stale === true
       ? []
@@ -1246,6 +1331,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     patient_zero: patientZero,
     privileged_access: privilegedAccess,
     setup_diagnostics: setupDiagnostics,
+    federation,
     workbench,
     router_suppression_decisions: routerSuppressionDecisions,
     source: "office.snapshot",
@@ -1302,6 +1388,7 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
         }),
         latest_router_suppression: liveRouterSuppressionDecisions[0] ?? null,
       };
+      const liveFederation = buildFederationPayload(storage, cachedKernel);
       const liveRoster = reconcileRosterProviderBridgeReadiness(asRecord(cachedPayload.roster), cachedProviderBridgePayload);
       const liveSetupDiagnostics = buildOfficeSetupDiagnostics({
         kernel: cachedKernel,
@@ -1337,6 +1424,7 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
         patient_zero: livePatientZero,
         privileged_access: livePrivilegedAccess,
         setup_diagnostics: liveSetupDiagnostics,
+        federation: liveFederation,
         workbench: liveWorkbench,
         router_suppression_decisions: liveRouterSuppressionDecisions,
         cache: {
@@ -1389,6 +1477,7 @@ export function officeRealtimeSnapshot(storage: Storage, input: { thread_id?: st
           : {},
       latest_router_suppression: cachedProviderBridge.latest_router_suppression ?? null,
     };
+    const liveFederation = buildFederationPayload(storage, asRecord(cachedPayload.kernel));
     const liveRoster = reconcileRosterProviderBridgeReadiness(asRecord(cachedPayload.roster), liveProviderBridgePayload);
     return buildOfficeGuiSnapshot(
       {
@@ -1399,6 +1488,7 @@ export function officeRealtimeSnapshot(storage: Storage, input: { thread_id?: st
           ...(liveAutonomyMaintain as Record<string, unknown>),
         },
         provider_bridge: liveProviderBridgePayload,
+        federation: liveFederation,
         source: "office.realtime",
       },
       { theme: input.theme }

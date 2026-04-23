@@ -2225,3 +2225,58 @@ test("office gui snapshot keeps current remote locator separate from approved lo
   assert.equal(host.remote_locator_observed_at, "2026-04-23T12:00:00.000Z");
   assert.equal(host.remote_locator_matched_by, "approved_host_hostname");
 });
+
+test("office gui snapshot exposes verified incoming federation peers that are not staged yet", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    {
+      roster: { active_agent_ids: [], agents: [] },
+      workboard: {},
+      tmux: {},
+      task_summary: { counts: {} },
+      task_running: {},
+      task_pending: {},
+      agent_sessions: { sessions: [] },
+      adapter: {},
+      bus_tail: {},
+      trichat_summary: {},
+      learning: {},
+      autopilot: {},
+      federation: {
+        incoming_peer_count: 1,
+        incoming_peers: [
+          {
+            host_id: "mesh-mini-01",
+            captured_hostname: "Mesh-Mini-01.local",
+            current_remote_address: "192.168.86.77",
+            captured_agent_runtime: "claude",
+            captured_model_label: "Claude Opus",
+            seen_at: "2026-04-23T12:05:00.000Z",
+            age_seconds: 12,
+            detail: "Verified peer mesh-mini-01 is not staged in worker.fabric yet.",
+          },
+        ],
+      },
+      runtime_workers: { summary: {}, sessions: [] },
+      kernel: {
+        overview: {},
+        worker_fabric: { hosts: [] },
+        model_router: { backends: [] },
+        runtime_workers: {},
+        autonomy_maintain: {},
+        reaction_engine: {},
+        observability: {},
+        swarm: {},
+        workflow_exports: {},
+      },
+      autonomy_maintain: { state: {}, runtime: {}, due: {} },
+      provider_bridge: { diagnostics: { generated_at: "", cached: false, diagnostics: [] } },
+    },
+    { theme: "dark" }
+  );
+
+  assert.equal(snapshot.summary.worker_fabric.incoming_peer_count, 1);
+  assert.equal(snapshot.summary.worker_fabric.incoming_peers.length, 1);
+  assert.equal(snapshot.summary.worker_fabric.incoming_peers[0].host_id, "mesh-mini-01");
+  assert.equal(snapshot.summary.worker_fabric.incoming_peers[0].captured_hostname, "Mesh-Mini-01.local");
+  assert.equal(snapshot.summary.worker_fabric.incoming_peers[0].current_remote_address, "192.168.86.77");
+});

@@ -90,6 +90,7 @@ test("office.snapshot returns a storage-backed GUI payload without depending on 
     assert.equal(typeof snapshot.kernel.state, "string");
     assert.equal(snapshot.kernel.worker_fabric.host_count, fabric.state.hosts.length);
     assert.equal(snapshot.kernel.worker_fabric.enabled_host_count, fabric.hosts_summary.filter((entry) => entry.enabled).length);
+    assert.equal(snapshot.federation.incoming_peer_count, 0);
     assert.equal(snapshot.runtime_workers.summary.session_count, runtimeWorkers.summary.session_count);
     assert.equal(snapshot.runtime_workers.summary.active_count, runtimeWorkers.summary.active_count);
     assert.equal(snapshot.operator_brief.source, "operator.brief");
@@ -129,6 +130,53 @@ test("office.snapshot returns a storage-backed GUI payload without depending on 
       mutation: nextMutation("office-snapshot", "trichat.autopilot.stop", () => mutationCounter++),
     });
     assert.equal(Array.isArray(snapshot.errors), true);
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("office.snapshot surfaces verified incoming peers that are not staged in worker fabric", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-snapshot-incoming-peers-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+
+  const client = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+  });
+
+  try {
+    const storage = new Storage(dbPath);
+    storage.appendRuntimeEvent({
+      created_at: "2026-04-23T12:05:00.000Z",
+      event_type: "federation.ingest.warning",
+      entity_type: "worker_fabric_host",
+      entity_id: "mesh-mini-01",
+      status: "degraded",
+      summary: "federation ingest could not update worker fabric host mesh-mini-01",
+      details: {
+        reason: "host_not_staged",
+        detail: "Verified peer mesh-mini-01 is not staged in worker.fabric yet.",
+        requesting_remote_address: "192.168.86.77",
+        captured_hostname: "Mesh-Mini-01.local",
+        captured_agent_runtime: "claude",
+        captured_model_label: "Claude Opus",
+      },
+      source_client: "federation.sidecar",
+      source_agent: "claude",
+      source_model: "Claude Opus",
+    });
+
+    const snapshot = await callTool(client, "office.snapshot", {
+      thread_id: "ring-leader-main",
+      metadata: { source: "dashboard.direct" },
+    });
+
+    assert.equal(snapshot.federation.incoming_peer_count, 1);
+    assert.equal(snapshot.federation.incoming_peers.length, 1);
+    assert.equal(snapshot.federation.incoming_peers[0].host_id, "mesh-mini-01");
+    assert.equal(snapshot.federation.incoming_peers[0].captured_hostname, "Mesh-Mini-01.local");
+    assert.equal(snapshot.federation.incoming_peers[0].current_remote_address, "192.168.86.77");
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

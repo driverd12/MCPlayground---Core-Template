@@ -1,4 +1,22 @@
 (function () {
+  function defaultHostPairDraft() {
+    return {
+      host_id: "",
+      display_name: "",
+      hostname: "",
+      ip_address: "",
+      mac_address: "",
+      ssh_user: "",
+      worker_count: "1",
+      workspace_root: "",
+      agent_runtime: "",
+      model_label: "",
+      permission_profile: "task_worker",
+      desktop_context: true,
+      approve: false,
+    };
+  }
+
   var state = {
     activeTab: "office",
     bootstrap: null,
@@ -17,6 +35,7 @@
     intakeModeDirty: false,
     intakeTargetAgentIds: [],
     officeActions: {},
+    hostPairDraft: defaultHostPairDraft(),
   };
 
   var els = {
@@ -1522,7 +1541,63 @@
       return fetchSnapshot({ forceLive: true, explicitForceLive: true }).then(function () {
         return result;
       });
+      });
+  }
+
+  function incomingPeerDisplayName(peer) {
+    var hostname = peer && peer.captured_hostname ? String(peer.captured_hostname) : "";
+    if (hostname) return hostname.replace(/\.local$/i, "");
+    return peer && peer.host_id ? String(peer.host_id) : "";
+  }
+
+  function hostPairDraftValue(name, fallback) {
+    var value = state.hostPairDraft && state.hostPairDraft[name];
+    if (value == null || value === "") return fallback == null ? "" : String(fallback);
+    return String(value);
+  }
+
+  function syncHostPairDraftFromForm(form) {
+    if (!form) return;
+    var get = function (name) {
+      var node = form.querySelector('[name="' + name + '"]');
+      return node ? String(node.value || "") : "";
+    };
+    var desktopContextNode = form.querySelector('[name="desktop_context"]');
+    var approveNode = form.querySelector('[name="approve"]');
+    state.hostPairDraft = Object.assign({}, state.hostPairDraft || defaultHostPairDraft(), {
+      host_id: get("host_id"),
+      display_name: get("display_name"),
+      hostname: get("hostname"),
+      ip_address: get("ip_address"),
+      mac_address: get("mac_address"),
+      ssh_user: get("ssh_user"),
+      worker_count: get("worker_count") || "1",
+      workspace_root: get("workspace_root"),
+      agent_runtime: get("agent_runtime"),
+      model_label: get("model_label"),
+      permission_profile: get("permission_profile") || "task_worker",
+      desktop_context: desktopContextNode ? !!desktopContextNode.checked : true,
+      approve: approveNode ? !!approveNode.checked : false,
     });
+  }
+
+  function prefillHostPairingFormFromPeer(button) {
+    if (!button) return;
+    var current = state.hostPairDraft || defaultHostPairDraft();
+    state.hostPairDraft = Object.assign({}, current, {
+      host_id: current.host_id || String(button.getAttribute("data-peer-host-id") || ""),
+      display_name: current.display_name || String(button.getAttribute("data-peer-display-name") || ""),
+      hostname: current.hostname || String(button.getAttribute("data-peer-hostname") || ""),
+      ip_address: current.ip_address || String(button.getAttribute("data-peer-address") || ""),
+      agent_runtime: current.agent_runtime || String(button.getAttribute("data-peer-runtime") || ""),
+      model_label: current.model_label || String(button.getAttribute("data-peer-model-label") || ""),
+    });
+    renderHostsView();
+    setResultText(
+      "Prefilled host form from verified inbound peer " +
+        String(button.getAttribute("data-peer-host-id") || button.getAttribute("data-peer-hostname") || "peer") +
+        ". Confirm the workspace root and SSH user before staging."
+    );
   }
 
   function submitHostPairing(event) {
@@ -1559,6 +1634,12 @@
     postHostAction({
       action: "stage_remote_host",
       remote_host: remoteHost,
+    }).then(function (result) {
+      state.hostPairDraft = defaultHostPairDraft();
+      if (state.activeTab === "hosts") {
+        renderHostsView();
+      }
+      return result;
     }).catch(function (error) {
       setResultText(String(error));
     });
@@ -1572,7 +1653,9 @@
     if (!els.hostsView) return;
     var summary = state.snapshot.summary || {};
     var fabric = summary.worker_fabric || {};
+    var draft = state.hostPairDraft || defaultHostPairDraft();
     var hosts = Array.isArray(fabric.hosts) ? fabric.hosts : [];
+    var incomingPeers = Array.isArray(fabric.incoming_peers) ? fabric.incoming_peers : [];
     var remoteHosts = remoteHostsFromSnapshot();
     var pendingCount = remoteHosts.filter(function (host) {
       return String(host.remote_access_status || "").toLowerCase() === "pending";
@@ -1580,6 +1663,46 @@
     var approvedCount = remoteHosts.filter(function (host) {
       return String(host.remote_access_status || "").toLowerCase() === "approved";
     }).length;
+    var incomingPeerRows = incomingPeers.length
+      ? incomingPeers
+          .map(function (peer) {
+            var title = peer.captured_hostname || peer.host_id || "incoming peer";
+            var detail = [
+              peer.host_id ? "host " + peer.host_id : "",
+              peer.current_remote_address ? "current " + peer.current_remote_address : "",
+              peer.captured_agent_runtime || "",
+              peer.captured_model_label || "",
+            ].filter(Boolean).join(" · ");
+            return (
+              '<article class="host-row host-row--warn">' +
+              '<div class="host-row__main">' +
+              '<div class="host-row__eyebrow">FEDERATION · VERIFIED · NOT STAGED</div>' +
+              '<strong>' + escapeHtml(title) + '</strong>' +
+              '<span>' + escapeHtml(detail || "Verified peer awaiting staging.") + '</span>' +
+              '<small>' + escapeHtml(peer.detail || "This peer can sign federation ingest, but it is not staged in worker.fabric yet.") + '</small>' +
+              '</div>' +
+              '<div class="host-row__metrics">' +
+              '<div><span>Last Seen</span><strong>' + escapeHtml(peer.seen_at ? relativeTime(peer.seen_at) + " ago" : "n/a") + '</strong></div>' +
+              '<div><span>Address</span><strong>' + escapeHtml(peer.current_remote_address || "n/a") + '</strong></div>' +
+              '<div><span>Runtime</span><strong>' + escapeHtml(peer.captured_agent_runtime || "n/a") + '</strong></div>' +
+              '<div><span>Status</span><strong>stage required</strong></div>' +
+              '</div>' +
+              '<div class="host-row__actions">' +
+              '<button class="button button--primary" data-use-incoming-peer="1"' +
+              ' data-peer-host-id="' + escapeHtml(peer.host_id || "") + '"' +
+              ' data-peer-display-name="' + escapeHtml(incomingPeerDisplayName(peer)) + '"' +
+              ' data-peer-hostname="' + escapeHtml(peer.captured_hostname || "") + '"' +
+              ' data-peer-address="' + escapeHtml(peer.current_remote_address || "") + '"' +
+              ' data-peer-runtime="' + escapeHtml(peer.captured_agent_runtime || "") + '"' +
+              ' data-peer-model-label="' + escapeHtml(peer.captured_model_label || "") + '">' +
+              'Use Details</button>' +
+              '<span class="chip chip--warn">verified inbound</span>' +
+              '</div>' +
+              '</article>'
+            );
+          })
+          .join("")
+      : "";
     var hostRows = hosts.length
       ? hosts
           .map(function (host) {
@@ -1647,21 +1770,29 @@
       '<article><span>Total hosts</span><strong>' + String(fabric.host_count || hosts.length || 0) + '</strong></article>' +
       '<article><span>Approved remote</span><strong>' + String(approvedCount) + '</strong></article>' +
       '<article><span>Pending</span><strong>' + String(pendingCount) + '</strong></article>' +
+      '<article><span>Verified inbound</span><strong>' + String(fabric.incoming_peer_count || incomingPeers.length || 0) + '</strong></article>' +
       '<article><span>Strategy</span><strong>' + escapeHtml(fabric.strategy || "balanced") + '</strong></article>' +
       '</div>' +
       '</section>' +
+      (incomingPeers.length
+        ? '<section class="hosts-panel hosts-panel--wide">' +
+          '<div class="section-title">Verified Incoming Peers</div>' +
+          '<p class="host-pair-form__hint">These peers are signing federation ingest successfully, but they are not staged in <code>worker.fabric</code> yet. Review the identity details below and then stage or approve them from this host.</p>' +
+          '<div class="host-list">' + incomingPeerRows + '</div>' +
+          '</section>'
+        : '') +
       '<section class="hosts-panel hosts-panel--pair">' +
       '<div class="section-title">Add Remote Host</div>' +
       '<p class="host-pair-form__hint">Repeat this form, or run <code>node scripts/request_remote_access.mjs --server http://MAIN-MAC:8787</code> on any host that should request access.</p>' +
       '<form class="host-pair-form" id="host-pair-form">' +
-      '<div class="host-pair-form__row"><label>Host ID<input name="host_id" placeholder="e.g. dans-mbp, studio-m2, rack-mini-01" /></label><label>Display name<input name="display_name" placeholder="Operator-facing device name" /></label></div>' +
-      '<div class="host-pair-form__row"><label>Hostname<input name="hostname" placeholder="e.g. Dans-MBP.local" /></label><label>Current IP<input name="ip_address" placeholder="changes are OK; e.g. 10.1.3.224" /></label></div>' +
-      '<label>MAC address<input name="mac_address" placeholder="optional stable LAN hardware address" /></label>' +
-      '<div class="host-pair-form__row"><label>SSH user<input name="ssh_user" placeholder="e.g. dan.driver" /></label><label>Workers<input name="worker_count" value="1" inputmode="numeric" /></label></div>' +
-      '<label>Workspace root<input name="workspace_root" placeholder="/Users/you/Documents/Playground/MASTER-MOLD" /></label>' +
-      '<div class="host-pair-form__row"><label>Agent runtime<input name="agent_runtime" placeholder="e.g. claude, codex, cursor" /></label><label>Model label<input name="model_label" placeholder="e.g. Claude Opus, GPT-5.4" /></label></div>' +
-      '<div class="host-pair-form__row"><label>Permission<select name="permission_profile"><option value="task_worker" selected>task worker</option><option value="read_only">read only</option><option value="artifact_writer">artifact writer</option><option value="operator">operator</option></select></label><label class="host-pair-form__check"><input name="desktop_context" type="checkbox" checked /> Context capture</label></div>' +
-      '<label class="host-pair-form__check"><input name="approve" type="checkbox" /> Approve immediately</label>' +
+      '<div class="host-pair-form__row"><label>Host ID<input name="host_id" placeholder="e.g. dans-mbp, studio-m2, rack-mini-01" value="' + escapeHtml(hostPairDraftValue("host_id")) + '" /></label><label>Display name<input name="display_name" placeholder="Operator-facing device name" value="' + escapeHtml(hostPairDraftValue("display_name")) + '" /></label></div>' +
+      '<div class="host-pair-form__row"><label>Hostname<input name="hostname" placeholder="e.g. Dans-MBP.local" value="' + escapeHtml(hostPairDraftValue("hostname")) + '" /></label><label>Current IP<input name="ip_address" placeholder="changes are OK; e.g. 10.1.3.224" value="' + escapeHtml(hostPairDraftValue("ip_address")) + '" /></label></div>' +
+      '<label>MAC address<input name="mac_address" placeholder="optional stable LAN hardware address" value="' + escapeHtml(hostPairDraftValue("mac_address")) + '" /></label>' +
+      '<div class="host-pair-form__row"><label>SSH user<input name="ssh_user" placeholder="e.g. dan.driver" value="' + escapeHtml(hostPairDraftValue("ssh_user")) + '" /></label><label>Workers<input name="worker_count" value="' + escapeHtml(hostPairDraftValue("worker_count", "1")) + '" inputmode="numeric" /></label></div>' +
+      '<label>Workspace root<input name="workspace_root" placeholder="/Users/you/Documents/Playground/MASTER-MOLD" value="' + escapeHtml(hostPairDraftValue("workspace_root")) + '" /></label>' +
+      '<div class="host-pair-form__row"><label>Agent runtime<input name="agent_runtime" placeholder="e.g. claude, codex, cursor" value="' + escapeHtml(hostPairDraftValue("agent_runtime")) + '" /></label><label>Model label<input name="model_label" placeholder="e.g. Claude Opus, GPT-5.4" value="' + escapeHtml(hostPairDraftValue("model_label")) + '" /></label></div>' +
+      '<div class="host-pair-form__row"><label>Permission<select name="permission_profile"><option value="task_worker"' + (hostPairDraftValue("permission_profile", "task_worker") === "task_worker" ? " selected" : "") + '>task worker</option><option value="read_only"' + (hostPairDraftValue("permission_profile") === "read_only" ? " selected" : "") + '>read only</option><option value="artifact_writer"' + (hostPairDraftValue("permission_profile") === "artifact_writer" ? " selected" : "") + '>artifact writer</option><option value="operator"' + (hostPairDraftValue("permission_profile") === "operator" ? " selected" : "") + '>operator</option></select></label><label class="host-pair-form__check"><input name="desktop_context" type="checkbox"' + ((state.hostPairDraft && state.hostPairDraft.desktop_context !== false) ? " checked" : "") + ' /> Context capture</label></div>' +
+      '<label class="host-pair-form__check"><input name="approve" type="checkbox"' + ((state.hostPairDraft && state.hostPairDraft.approve) ? " checked" : "") + ' /> Approve immediately</label>' +
       '<button type="submit" class="button button--primary">Stage Host</button>' +
       '</form>' +
       '</section>' +
@@ -1683,7 +1814,20 @@
     var form = els.hostsView.querySelector("#host-pair-form");
     if (form) {
       form.addEventListener("submit", submitHostPairing);
+      Array.prototype.slice.call(form.querySelectorAll("input, select")).forEach(function (node) {
+        node.addEventListener("input", function () {
+          syncHostPairDraftFromForm(form);
+        });
+        node.addEventListener("change", function () {
+          syncHostPairDraftFromForm(form);
+        });
+      });
     }
+    Array.prototype.slice.call(els.hostsView.querySelectorAll("[data-use-incoming-peer]")).forEach(function (button) {
+      button.addEventListener("click", function () {
+        prefillHostPairingFormFromPeer(button);
+      });
+    });
     Array.prototype.slice.call(els.hostsView.querySelectorAll("[data-host-action]")).forEach(function (button) {
       button.addEventListener("click", function () {
         postHostAction({

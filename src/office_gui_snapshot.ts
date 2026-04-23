@@ -751,9 +751,11 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const maintainDue = asDict(maintain.due);
   const maintainSelfDrive = asDict(maintain.self_drive);
   const providerBridge = asDict(raw.provider_bridge);
+  const federation = asDict(raw.federation);
   const providerBridgeDiagnostics = asDict(providerBridge.diagnostics);
   const providerBridgeResourceGate = asDict(providerBridge.resource_gate);
   const providerEntries = asList(providerBridgeDiagnostics.diagnostics);
+  const federationIncomingPeers = asList(federation.incoming_peers).map((entry) => asDict(entry));
   const rawDesktopControl = asDict(raw.desktop_control);
   const desktopControlSummary = asDict(kernelDesktopControl.summary || rawDesktopControl.summary);
   const rawPatientZero = asDict(raw.patient_zero);
@@ -995,11 +997,22 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         strategy: String(kernelWorkerFabric.strategy ?? "n/a"),
         default_host_id: String(kernelWorkerFabric.default_host_id ?? "local"),
         host_count: parseAnyInt(kernelWorkerFabric.host_count),
+        incoming_peer_count: parseAnyInt(federation.incoming_peer_count || federationIncomingPeers.length),
         enabled_host_count: parseAnyInt(kernelWorkerFabric.enabled_host_count),
         worker_count: parseAnyInt(kernelWorkerFabric.worker_count),
         active_worker_count: parseAnyInt(kernelWorkerFabric.active_worker_count),
         health_counts: asDict(kernelWorkerFabric.health_counts),
         transport_counts: asDict(kernelWorkerFabric.transport_counts),
+        incoming_peers: federationIncomingPeers.map((entry) => ({
+          host_id: String(entry.host_id ?? ""),
+          captured_hostname: String(entry.captured_hostname ?? ""),
+          current_remote_address: String(entry.current_remote_address ?? ""),
+          captured_agent_runtime: String(entry.captured_agent_runtime ?? ""),
+          captured_model_label: String(entry.captured_model_label ?? ""),
+          seen_at: String(entry.seen_at ?? ""),
+          age_seconds: parseAnyFloat(entry.age_seconds),
+          detail: compactSingleLine(entry.detail, 240),
+        })),
         hosts: asList(kernelWorkerFabric.hosts).map((entry) => {
           const host = asDict(entry);
           return {
