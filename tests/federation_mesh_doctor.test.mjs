@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   parseLaunchctlDisabled,
   parseLaunchctlPrint,
+  summarizeUnstagedVerifiedPeers,
   summarizeIdentityKeys,
 } from "../scripts/federation_mesh_doctor.mjs";
 
@@ -61,4 +62,59 @@ disabled services = {
   assert.equal(parseLaunchctlDisabled(disabledSnapshot, "com.master-mold.federation.sidecar"), false);
   assert.equal(parseLaunchctlDisabled(disabledSnapshot, "com.master-mold.mlx.server"), true);
   assert.equal(parseLaunchctlDisabled(disabledSnapshot, "com.master-mold.mcp.server"), null);
+});
+
+test("summarizeUnstagedVerifiedPeers keeps only latest unstaged verified peers outside the current fabric", () => {
+  const peers = summarizeUnstagedVerifiedPeers(
+    [
+      {
+        event_id: "evt-1",
+        event_seq: 7,
+        entity_id: "mesh-a",
+        created_at: "2026-04-23T20:00:00.000Z",
+        details: {
+          reason: "host_not_staged",
+          detail: "Verified peer mesh-a is not staged in worker.fabric yet.",
+        },
+      },
+      {
+        event_id: "evt-2",
+        event_seq: 8,
+        entity_id: "mesh-a",
+        created_at: "2026-04-23T20:01:00.000Z",
+        details: {
+          reason: "host_not_staged",
+          detail: "Verified peer mesh-a is still not staged in worker.fabric yet.",
+        },
+      },
+      {
+        event_id: "evt-3",
+        event_seq: 9,
+        entity_id: "mesh-b",
+        created_at: "2026-04-23T20:02:00.000Z",
+        details: {
+          reason: "worker_fabric_heartbeat_failed",
+          detail: "generic heartbeat problem",
+        },
+      },
+      {
+        event_id: "evt-4",
+        event_seq: 10,
+        entity_id: "dans-mbp",
+        created_at: "2026-04-23T20:03:00.000Z",
+        details: {
+          reason: "host_not_staged",
+          detail: "old warning for a host that is now staged",
+        },
+      },
+    ],
+    {
+      knownHostIds: ["dans-mbp"],
+    }
+  );
+
+  assert.equal(peers.length, 1);
+  assert.equal(peers[0].host_id, "mesh-a");
+  assert.equal(peers[0].event_id, "evt-2");
+  assert.match(String(peers[0].detail || ""), /still not staged/i);
 });

@@ -654,6 +654,46 @@ function summarizeFindings(localFindings, hosts, localHostId) {
   };
 }
 
+export function summarizeUnstagedVerifiedPeers(events, options = {}) {
+  const knownHostIds = new Set((options.knownHostIds || []).map((entry) => safeId(entry, "")).filter(Boolean));
+  const requestedHostId = safeId(options.hostId || "", "");
+  const latestByHost = new Map();
+  for (const rawEvent of events || []) {
+    const event = readRecord(rawEvent);
+    const hostId = safeId(readString(event.entity_id) || "", "");
+    if (!hostId) {
+      continue;
+    }
+    if (requestedHostId && hostId !== requestedHostId) {
+      continue;
+    }
+    if (knownHostIds.has(hostId)) {
+      continue;
+    }
+    const details = readRecord(event.details);
+    if (readString(details.reason) !== "host_not_staged") {
+      continue;
+    }
+    const currentEventSeq = Number(event.event_seq || 0);
+    const previous = latestByHost.get(hostId);
+    const previousEventSeq = Number(previous?.event_seq || 0);
+    if (previous && previousEventSeq >= currentEventSeq) {
+      continue;
+    }
+    latestByHost.set(hostId, {
+      host_id: hostId,
+      created_at: readString(event.created_at),
+      age_seconds: ageSeconds(readString(event.created_at)),
+      reason: readString(details.reason),
+      detail: readString(details.detail) || readString(details.error) || "Verified peer is not staged in worker.fabric yet.",
+      error: readString(details.error),
+      event_id: readString(event.event_id),
+      event_seq: currentEventSeq,
+    });
+  }
+  return [...latestByHost.values()].sort((left, right) => Number((right?.event_seq ?? 0)) - Number((left?.event_seq ?? 0)));
+}
+
 function printText(report) {
   console.log("MASTER-MOLD federation mesh doctor");
   console.log(`generated_at: ${report.generated_at}`);
@@ -690,6 +730,13 @@ function printText(report) {
     console.log(`Fabric: unavailable (${report.fabric.error})`);
   } else {
     console.log(`Fabric: ${report.fabric.host_count} host(s), ${report.fabric.approved_remote_count} approved remote, ${report.fabric.signed_peer_count} signed peer(s)`);
+  }
+  if (Array.isArray(report.incoming_peers) && report.incoming_peers.length > 0) {
+    console.log("");
+    console.log("Incoming verified peers not yet staged");
+    for (const peer of report.incoming_peers) {
+      console.log(`  [warn] ${peer.host_id} age=${formatAge(peer.age_seconds)} ${peer.detail}`);
+    }
   }
   for (const host of report.hosts) {
     const verdict = host.ok ? "ok" : "warn";
@@ -734,6 +781,17 @@ async function main() {
   const fabricResponse = await loadFabricState();
   const workerFabric = readRecord(fabricResponse.state);
   const rawHosts = Array.isArray(workerFabric.hosts) ? workerFabric.hosts.map(readRecord) : [];
+  const knownHostIds = rawHosts.map((host) => readString(host.host_id)).filter(Boolean);
+  const unstagedVerifiedPeers = summarizeUnstagedVerifiedPeers(
+    fabricResponse.storage?.listRuntimeEvents({
+      event_type: "federation.ingest.warning",
+      limit: 50,
+    }) || [],
+    {
+      knownHostIds,
+      hostId: options.hostId,
+    }
+  );
   const filteredHosts = options.hostId ? rawHosts.filter((host) => readString(host.host_id) === options.hostId) : rawHosts;
   const hosts = [];
   for (const host of filteredHosts) {
@@ -742,6 +800,16 @@ async function main() {
     hosts.push(await inspectHost(host, options, latestFederationEvent, sidecarState));
   }
   const summary = summarizeFindings(localFindings, hosts, localHostId);
+  summary.warn_count += unstagedVerifiedPeers.length;
+  summary.findings.push(
+    ...unstagedVerifiedPeers.map((peer) => ({
+      scope: "incoming",
+      host_id: peer.host_id,
+      severity: "warn",
+      code: "verified_peer_not_staged",
+      detail: peer.detail,
+    }))
+  );
   const report = {
     ok: fabricResponse.ok && summary.warn_count === 0 && bearerToken.present,
     generated_at: new Date().toISOString(),
@@ -769,6 +837,7 @@ async function main() {
       }).length,
     },
     hosts,
+    incoming_peers: unstagedVerifiedPeers,
     summary,
   };
   if (options.json) {
