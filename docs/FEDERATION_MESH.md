@@ -119,7 +119,9 @@ npm run federation:doctor -- --ssh-probe
 npm run federation:doctor -- --json
 ```
 
-The doctor checks local bearer-token/key presence, 1Password CLI availability, approved `worker.fabric` hosts, signed identity coverage, latest federation ingest freshness, current DNS/locator state, desktop-context freshness, and optional SSH liveness. It intentionally reports the current socket/DNS address separately from the approved-time IP because addresses move; durable trust should come from hostname, device fingerprint, MAC-style hardware evidence, and the signed Ed25519 host identity.
+The doctor checks local bearer-token/key presence, local host-ID drift versus available Ed25519 keys, sidecar launchd install/load state, 1Password CLI availability, approved `worker.fabric` hosts, signed identity coverage, latest federation ingest freshness, current DNS/locator state, desktop-context freshness, the local sidecar send ledger, and optional SSH liveness. It intentionally reports the current socket/DNS address separately from the approved-time IP because addresses move; durable trust should come from hostname, device fingerprint, MAC-style hardware evidence, and the signed Ed25519 host identity.
+
+Each sidecar run now records a bounded per-peer send ledger in `data/federation/<host-id>-sidecar-state.json`, including the last attempt time, last successful publish, HTTP status, and consecutive failures for each peer. `federation:doctor` reads that file so stale ingest can be separated into "the sidecar never ran here", "publishes are failing", and "publishes are succeeding but the peer freshness is still old".
 
 Each accepted federation ingest event records a first-class identity envelope: `requesting_host_id`, `requesting_remote_address`, `captured_from_host_id`, `captured_hostname`, `captured_agent_runtime`, `captured_model_label`, `signed_at`, `received_at`, `signature_verification_result`, and the approved whitelist scope. The receiver derives that envelope from the approved network gate and verified host signature, not from caller-provided `source_*` fields.
 

@@ -137,6 +137,8 @@ npm run federation:sidecar -- --once
 
 Run the same bootstrap and sidecar on any approved peer and change `MASTER_MOLD_FEDERATION_PEERS` to the other approved MASTER-MOLD HTTP endpoints. This is a mesh/tendril stream: each host captures locally, signs `POST /federation/ingest`, and each receiving peer stores the compact context/event payload in its own runtime events. See [Federation Mesh](./FEDERATION_MESH.md) for the wire diagram and team bootstrap sequence.
 
+Each local sidecar run also writes a bounded per-peer send ledger into `data/federation/<host-id>-sidecar-state.json`, which `npm run federation:doctor` uses to distinguish stale peer freshness from local publish failures or a sidecar that has not run yet. The doctor also reports local host-ID/key drift and whether the federation sidecar launchd agent is installed and loaded on macOS.
+
 The federation bootstrap prefers 1Password CLI for recovery storage, but it can still bootstrap locally when `op` is not installed or not unlocked. In that fallback, it prints `one_password.status="unavailable"` and keeps the bearer token in `data/imprint/http_bearer_token` plus the Ed25519 identity under `~/.master-mold/identity`; use `--require-1password` if a team rollout should fail closed instead.
 
 On macOS, install the same sidecar as a launchd agent after `MASTER_MOLD_FEDERATION_PEERS`, `MASTER_MOLD_HOST_ID`, and `MASTER_MOLD_IDENTITY_KEY_PATH` are set:

@@ -6,8 +6,11 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { randomUUID, sign as signData } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
+import { defaultSidecarStatePath, nextSidecarSequence, recordSidecarCycle, safeId } from "./federation_sidecar_state.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+dotenv.config({ path: path.join(REPO_ROOT, ".env") });
 const SCHEMA_VERSION = "master-mold-federation-v1";
 
 function argValues(name) {
@@ -69,16 +72,6 @@ function expandHome(filePath) {
     return path.join(os.homedir(), text.slice(2));
   }
   return text;
-}
-
-function safeId(value, fallback = "host") {
-  return (
-    String(value || fallback)
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9._-]+/g, "-")
-      .replace(/^[-.]+|[-.]+$/g, "") || fallback
-  );
 }
 
 function defaultIdentityKeyPath(hostId) {
@@ -189,39 +182,12 @@ function sanitizeValue(value, depth = 0) {
   );
 }
 
-function readJsonFile(filePath, fallback) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch {
-    return fallback;
-  }
-}
-
 function readLocalBearerTokenFile() {
   try {
     return fs.readFileSync(path.join(REPO_ROOT, "data", "imprint", "http_bearer_token"), "utf8").trim();
   } catch {
     return "";
   }
-}
-
-function writeJsonFile(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
-}
-
-function nextSequence(options) {
-  const state = readJsonFile(options.statePath, {});
-  const previous = Number(state.sequence || 0);
-  const sequence = Number.isFinite(previous) ? Math.max(0, Math.floor(previous)) + 1 : 1;
-  writeJsonFile(options.statePath, {
-    schema_version: SCHEMA_VERSION,
-    host_id: options.hostId,
-    stream_id: options.streamId,
-    sequence,
-    updated_at: new Date().toISOString(),
-  });
-  return sequence;
 }
 
 function runJsonCommand(command, args, options = {}) {
@@ -423,7 +389,10 @@ function hostSummary(options) {
 
 function buildPayload(options) {
   const generatedAt = new Date().toISOString();
-  const sequence = nextSequence(options);
+  const sequence = nextSidecarSequence(options.statePath, {
+    hostId: options.hostId,
+    streamId: options.streamId,
+  });
   return {
     schema_version: SCHEMA_VERSION,
     stream_id: options.streamId,
@@ -523,8 +492,7 @@ function parseOptions() {
     expandHome(
       argValue(
         "state-path",
-        process.env.MASTER_MOLD_FEDERATION_STATE_PATH ||
-          path.join(REPO_ROOT, "data", "federation", `${safeId(options.hostId, "host")}-sidecar-state.json`)
+        process.env.MASTER_MOLD_FEDERATION_STATE_PATH || defaultSidecarStatePath(REPO_ROOT, options.hostId)
       )
     )
   );
@@ -552,6 +520,7 @@ This is a peer mesh sidecar. Each host captures locally, publishes a bounded sig
 
 async function runCycle(options) {
   const payload = buildPayload(options);
+  const attemptAt = new Date().toISOString();
   const sends = [];
   for (const peer of options.peers) {
     try {
@@ -565,6 +534,15 @@ async function runCycle(options) {
       });
     }
   }
+  recordSidecarCycle(options.statePath, {
+    hostId: options.hostId,
+    streamId: payload.stream_id,
+    sequence: payload.sequence,
+    intervalSeconds: options.intervalSeconds,
+    generatedAt: payload.generated_at,
+    attemptAt,
+    sends,
+  });
   return {
     ok: sends.every((entry) => entry.ok),
     schema_version: SCHEMA_VERSION,
