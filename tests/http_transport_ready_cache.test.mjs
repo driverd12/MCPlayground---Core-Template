@@ -1271,6 +1271,126 @@ test("/office/api/snapshot does not serve a stale GUI cache when a direct node r
   }
 });
 
+test("/office/api/snapshot serves stale cache immediately while an inline raw refresh is deferred off the request path", { concurrency: false }, async () => {
+  const previousCacheDir = process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR;
+  const previousRefreshSeconds = process.env.TRICHAT_OFFICE_REFRESH_SECONDS;
+  const previousCacheMaxAge = process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_MAX_AGE_SECONDS;
+  const previousStaleMaxAge = process.env.TRICHAT_OFFICE_SNAPSHOT_STALE_MAX_AGE_SECONDS;
+  const previousRefreshMode = process.env.MCP_HTTP_OFFICE_SNAPSHOT_REFRESH_MODE;
+  const tempCacheDir = await mkdtemp(path.join(os.tmpdir(), "mcp-office-deferred-refresh-"));
+  process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR = tempCacheDir;
+  process.env.TRICHAT_OFFICE_REFRESH_SECONDS = "2";
+  process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_MAX_AGE_SECONDS = "2";
+  process.env.TRICHAT_OFFICE_SNAPSHOT_STALE_MAX_AGE_SECONDS = "120";
+  process.env.MCP_HTTP_OFFICE_SNAPSHOT_REFRESH_MODE = "inline";
+
+  await mkdir(path.join(tempCacheDir, "web"), { recursive: true });
+  const staleSnapshot = {
+    thread_id: "ring-leader-main",
+    theme: "night",
+    fetched_at: Date.now() / 1000 - 30,
+    agents: [{ agent: { agent_id: "stale-agent" }, state: "sleeping" }],
+    summary: {},
+    rooms: {},
+    errors: [],
+  };
+  for (const cacheFile of ["latest--theme-night.json", "thread-ring-leader-main--theme-night.json"]) {
+    await writeFile(officeHttpCachePath(tempCacheDir, cacheFile), JSON.stringify(staleSnapshot), "utf8");
+  }
+
+  let rawRefreshCalls = 0;
+  const port = await reservePort();
+  const server = await startHttpTransport(
+    () =>
+      new Server(
+        {
+          name: "http-office-deferred-refresh-test",
+          version: "1.0.0",
+        },
+        {
+          capabilities: {
+            tools: {},
+          },
+        }
+      ),
+    {
+      host: "127.0.0.1",
+      port,
+      allowedOrigins: ["http://127.0.0.1"],
+      bearerToken: "office-deferred-refresh-token",
+      officeSnapshot: async ({ threadId, theme }) => ({
+        thread_id: threadId,
+        theme,
+        fetched_at: Date.now() / 1000,
+        agents: [{ agent: { agent_id: "live-agent" }, state: "ready" }],
+        summary: {},
+        rooms: {},
+        errors: [],
+      }),
+      officeRawSnapshot: ({ threadId, theme }) => {
+        rawRefreshCalls += 1;
+        const deadline = Date.now() + 180;
+        while (Date.now() < deadline) {
+          // Simulate a synchronous raw snapshot builder on the main thread.
+        }
+        return {
+          thread_id: threadId,
+          theme,
+          fetched_at: Date.now() / 1000,
+          agents: [{ agent: { agent_id: "refreshed-agent" }, state: "ready" }],
+          summary: {},
+          rooms: {},
+          errors: [],
+        };
+      },
+    }
+  );
+
+  try {
+    const response = await fetchHttpJsonResponse(port, "/office/api/snapshot");
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers["x-office-snapshot-source"], "cache-refreshing-stale");
+
+    await waitFor(() => rawRefreshCalls === 1);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+    if (previousCacheDir === undefined) {
+      delete process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR;
+    } else {
+      process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR = previousCacheDir;
+    }
+    if (previousRefreshSeconds === undefined) {
+      delete process.env.TRICHAT_OFFICE_REFRESH_SECONDS;
+    } else {
+      process.env.TRICHAT_OFFICE_REFRESH_SECONDS = previousRefreshSeconds;
+    }
+    if (previousCacheMaxAge === undefined) {
+      delete process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_MAX_AGE_SECONDS;
+    } else {
+      process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_MAX_AGE_SECONDS = previousCacheMaxAge;
+    }
+    if (previousStaleMaxAge === undefined) {
+      delete process.env.TRICHAT_OFFICE_SNAPSHOT_STALE_MAX_AGE_SECONDS;
+    } else {
+      process.env.TRICHAT_OFFICE_SNAPSHOT_STALE_MAX_AGE_SECONDS = previousStaleMaxAge;
+    }
+    if (previousRefreshMode === undefined) {
+      delete process.env.MCP_HTTP_OFFICE_SNAPSHOT_REFRESH_MODE;
+    } else {
+      process.env.MCP_HTTP_OFFICE_SNAPSHOT_REFRESH_MODE = previousRefreshMode;
+    }
+    await rm(tempCacheDir, { recursive: true, force: true });
+  }
+});
+
 test("/office/api/snapshot serves an expired cache immediately when refresh cannot complete in time", { concurrency: false }, async () => {
   const previousCacheDir = process.env.TRICHAT_OFFICE_SNAPSHOT_CACHE_DIR;
   const previousRefreshSeconds = process.env.TRICHAT_OFFICE_REFRESH_SECONDS;
@@ -1821,6 +1941,7 @@ test(
     assert.equal(cachedFallback.statusCode, 200);
     assert.equal(cachedFallback.headers["x-office-snapshot-source"], "cache-refreshing-live");
     assert.equal(cachedFallback.headers["x-office-refresh-state"], "pending");
+    await waitFor(() => snapshotCalls === 2);
     assert.equal(snapshotCalls, 2);
 
     stallSnapshot = false;
@@ -1828,16 +1949,16 @@ test(
     assert.equal(recovered.statusCode, 200);
     assert.equal(recovered.headers["x-office-snapshot-source"], "cache-refreshing-live");
     assert.equal(recovered.headers["x-office-refresh-state"], "pending");
-    assert.equal(snapshotCalls, 2);
+    assert.ok(snapshotCalls >= 2);
 
     await new Promise((resolve) => setTimeout(resolve, 125));
     const retried = await fetchHttpJsonResponse(port, "/office/api/snapshot?live=force");
     assert.equal(retried.statusCode, 200);
     assert.equal(retried.headers["x-office-snapshot-source"], "cache-refreshing-live");
     assert.equal(retried.headers["x-office-refresh-state"], "pending");
-    assert.equal(snapshotCalls, 3);
+    assert.ok(snapshotCalls >= 2);
 
-    await waitFor(() => snapshotCalls === 3);
+    await waitFor(() => snapshotCalls >= 3, 1_000);
 
     const refreshed = await fetchHttpJsonResponse(port, "/office/api/snapshot");
     assert.equal(refreshed.statusCode, 200);

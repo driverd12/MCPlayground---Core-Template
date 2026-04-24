@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   captureLocalHostProfile,
+  captureLocalHostProfileCached,
   deriveLocalExecutionBudget,
   isLocalHostSafeForAutonomyEval,
+  resetLocalHostProfileCache,
   resolveLocalHostHealthState,
 } from "../dist/local_host_profile.js";
 
@@ -37,6 +39,69 @@ test("captureLocalHostProfile returns bounded real local recommendations", () =>
   assert.ok(budget.tmux_recommended_worker_count >= 1 && budget.tmux_recommended_worker_count <= 12);
   assert.ok(budget.tmux_min_worker_count >= 1 && budget.tmux_min_worker_count <= 12);
   assert.ok(budget.tmux_target_queue_per_worker >= 1 && budget.tmux_target_queue_per_worker <= 12);
+});
+
+test("captureLocalHostProfileCached reuses a recent profile per workspace and refreshes after ttl", () => {
+  resetLocalHostProfileCache();
+  let captureCalls = 0;
+  const capture = () => {
+    captureCalls += 1;
+    return {
+      generated_at: new Date(1710000000000 + captureCalls * 1000).toISOString(),
+      platform: "darwin",
+      arch: "arm64",
+      cpu_count: 16,
+      performance_cpu_count: 12,
+      efficiency_cpu_count: 4,
+      memory_total_gb: 48,
+      memory_available_gb: 32,
+      memory_free_percent: 66,
+      swap_used_gb: 0.4,
+      disk_free_gb: 200,
+      thermal_pressure: "nominal",
+      cpu_utilization: 0.33,
+      health_state: "healthy",
+      safe_worker_count: 8,
+      safe_max_queue_per_worker: 6,
+      max_local_model_concurrency: 3,
+      full_gpu_access: true,
+      accelerator_kind: "apple-metal",
+      gpu_vendor: "Apple",
+      gpu_model: "Apple M4 Max",
+      gpu_api: "metal",
+      gpu_family: "spdisplays_metal4",
+      gpu_core_count: 40,
+      gpu_memory_total_gb: 48,
+      gpu_memory_available_gb: 32,
+      gpu_utilization: null,
+      unified_memory: true,
+      mlx_python: "/opt/homebrew/bin/python3",
+      mlx_available: true,
+      mlx_lm_available: true,
+    };
+  };
+
+  const first = captureLocalHostProfileCached(
+    { workspace_root: "/tmp/work-a" },
+    { now: () => 1_000, capture }
+  );
+  const second = captureLocalHostProfileCached(
+    { workspace_root: "/tmp/work-a" },
+    { now: () => 5_000, capture }
+  );
+  const third = captureLocalHostProfileCached(
+    { workspace_root: "/tmp/work-a" },
+    { now: () => 7_000, capture }
+  );
+  const otherWorkspace = captureLocalHostProfileCached(
+    { workspace_root: "/tmp/work-b" },
+    { now: () => 7_500, capture }
+  );
+
+  assert.equal(captureCalls, 3);
+  assert.equal(first.generated_at, second.generated_at);
+  assert.notEqual(second.generated_at, third.generated_at);
+  assert.notEqual(third.generated_at, otherWorkspace.generated_at);
 });
 
 test("deriveLocalExecutionBudget pushes harder only when healthy headroom exists", () => {

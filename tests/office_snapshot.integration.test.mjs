@@ -679,6 +679,47 @@ test("office.snapshot direct reads demote warmed provider agents when bridge dia
   }
 });
 
+test("office.snapshot surfaces storage guard evidence as a visible workbench blocker", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-snapshot-storage-health-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+
+  const storage = new Storage(dbPath);
+  try {
+    storage.init();
+  } finally {
+    storage["db"]?.close?.();
+  }
+
+  const corruptDir = path.join(tempDir, "corrupt");
+  fs.mkdirSync(corruptDir, { recursive: true });
+  fs.writeFileSync(path.join(corruptDir, "hub.sqlite.2026-04-24T17-30-00-000Z.invalid-header"), "bad header\n", "utf8");
+
+  const recoveryDir = path.join(tempDir, "recovery-20260424-173000");
+  fs.mkdirSync(recoveryDir, { recursive: true });
+  fs.writeFileSync(path.join(recoveryDir, "hub.sqlite.corrupt"), "corrupt snapshot\n", "utf8");
+
+  const client = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+  });
+
+  try {
+    const snapshot = await callTool(client, "office.snapshot", {
+      thread_id: "ring-leader-main",
+    });
+
+    assert.equal(snapshot.kernel.storage.status, "evidence_present");
+    assert.equal(snapshot.kernel.storage.attention_required, true);
+    const blocker = snapshot.workbench.blockers.find((entry) => entry.kind === "storage_health");
+    assert.ok(blocker);
+    assert.match(blocker.title, /storage guard/i);
+    assert.equal(blocker.remediation?.action, "storage_health");
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function openClient(extraEnv) {
   const transport = new StdioClientTransport({
     command: "node",

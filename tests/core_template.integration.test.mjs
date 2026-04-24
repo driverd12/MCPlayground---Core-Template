@@ -3838,16 +3838,16 @@ test("worker.fabric stages and approves a remote Mac host with durable identity 
       metadata: {
         federation: {
           identity: {
-            requesting_remote_address: "192.168.86.28",
+            requesting_remote_address: "10.1.2.76",
             captured_hostname: "Dans-MBP.local",
             captured_agent_runtime: "claude",
             captured_model_label: "Claude Opus",
             approval_scope: {
               matched_by: "approved_host_hostname",
-              observed_remote_address: "192.168.86.28",
-              approved_ip_address: "10.1.2.76",
-              allowed_addresses: ["10.1.2.76"],
-              hostname_resolved_addresses: ["192.168.86.28"],
+              observed_remote_address: "10.1.2.76",
+              approved_ip_address: "10.1.3.224",
+              allowed_addresses: ["10.1.3.224"],
+              hostname_resolved_addresses: ["10.1.2.76"],
             },
           },
           last_ingest_at: "2026-04-23T12:00:00.000Z",
@@ -3862,9 +3862,9 @@ test("worker.fabric stages and approves a remote Mac host with durable identity 
     const refreshedSummary = await callTool(client, "kernel.summary", {});
     const refreshedHost = refreshedSummary.worker_fabric.hosts.find((host) => host.host_id === "dans-mbp");
     assert.ok(refreshedHost);
-    assert.equal(refreshedHost.remote_ip_address, "10.1.2.76");
-    assert.equal(refreshedHost.remote_approved_ip_address, "10.1.2.76");
-    assert.equal(refreshedHost.remote_current_address, "192.168.86.28");
+    assert.equal(refreshedHost.remote_ip_address, "10.1.3.224");
+    assert.equal(refreshedHost.remote_approved_ip_address, "10.1.3.224");
+    assert.equal(refreshedHost.remote_current_address, "10.1.2.76");
     assert.equal(refreshedHost.remote_locator_observed_at, "2026-04-23T12:00:00.000Z");
     assert.equal(refreshedHost.remote_locator_matched_by, "approved_host_hostname");
   } finally {

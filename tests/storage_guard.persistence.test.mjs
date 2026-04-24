@@ -21,12 +21,16 @@ test("storage guard quarantines non-sqlite file and allows fresh bootstrap when 
     ANAMNESIS_HUB_ALLOW_FRESH_DB_ON_CORRUPTION: "1",
     ANAMNESIS_HUB_STARTUP_BACKUP: "0",
   });
+  let health;
   try {
-    const health = await callTool(client, "health.storage", {});
+    health = await callTool(client, "health.storage", {});
     assert.equal(health.ok, true);
   } finally {
     await client.close().catch(() => {});
   }
+  assert.equal(health.guard.status, "recovered");
+  assert.ok(health.guard.current_boot_quarantined_paths.length >= 1);
+  assert.ok(health.guard.quarantine_artifact_count >= 1);
 
   const header = fs.readFileSync(dbPath).subarray(0, 16).toString("utf8");
   assert.equal(header, "SQLite format 3\u0000");

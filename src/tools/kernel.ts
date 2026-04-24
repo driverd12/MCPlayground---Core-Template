@@ -25,6 +25,7 @@ import {
   type PlanRecord,
   type PlanStepRecord,
   type ReactionEngineStateRecord,
+  type StorageGuardStatusRecord,
   type TaskRecord,
   type TaskSummaryRecord,
   type WorkerFabricHostRecord,
@@ -422,6 +423,14 @@ type SetupDiagnosticsSummary = {
     degraded: boolean;
     latest_router_suppression: RouterSuppressionSummary | null;
   };
+  storage: {
+    status: StorageGuardStatusRecord["status"];
+    attention_required: boolean;
+    current_boot_quarantine_count: number;
+    quarantine_artifact_count: number;
+    recovery_artifact_count: number;
+    restored_from_backup: string | null;
+  };
   desktop_lane: {
     enabled: boolean;
     stale: boolean;
@@ -439,6 +448,7 @@ type SetupDiagnosticsSummary = {
     browser_degraded: boolean;
     provider_bridge_degraded: boolean;
     desktop_degraded: boolean;
+    storage_degraded: boolean;
   };
   launchers: {
     office_gui: {
@@ -462,6 +472,28 @@ type SetupDiagnosticsSummary = {
     };
   };
   next_actions: string[];
+};
+
+type StorageHealthSummary = {
+  db_path: string;
+  db_exists: boolean;
+  db_size_bytes: number;
+  schema_version: number;
+  status: StorageGuardStatusRecord["status"];
+  attention_required: boolean;
+  current_boot_quarantine_count: number;
+  quarantine_artifact_count: number;
+  recovery_artifact_count: number;
+  latest_quarantine_at: string | null;
+  latest_recovery_at: string | null;
+  restored_from_backup: string | null;
+  backups: {
+    backup_dir: string;
+    artifact_count: number;
+    snapshot_count: number;
+    reclaimable_bytes: number;
+    total_bytes: number;
+  };
 };
 
 type RuntimeWorkerSummary = {
@@ -801,6 +833,34 @@ function summarizeWorkflowExports(storage: Storage): WorkflowExportSummary {
           latest_router_suppression: latestArgoSuppression,
         }
       : null,
+  };
+}
+
+function summarizeStorageHealth(storage: Storage): StorageHealthSummary {
+  const dbPath = storage.getDatabasePath();
+  const stats = dbPath !== ":memory:" && fs.existsSync(dbPath) ? fs.statSync(dbPath) : null;
+  const guard = storage.getStorageGuardStatus({ recent_limit: 6 });
+  const backups = storage.getStorageBackupStatus({ recent_limit: 6 });
+  return {
+    db_path: dbPath,
+    db_exists: dbPath === ":memory:" ? true : Boolean(stats),
+    db_size_bytes: stats ? stats.size : 0,
+    schema_version: storage.getSchemaVersion(),
+    status: guard.status,
+    attention_required: guard.attention_required,
+    current_boot_quarantine_count: guard.current_boot_quarantined_paths.length,
+    quarantine_artifact_count: guard.quarantine_artifact_count,
+    recovery_artifact_count: guard.recovery_artifact_count,
+    latest_quarantine_at: guard.latest_quarantine_at,
+    latest_recovery_at: guard.latest_recovery_at,
+    restored_from_backup: guard.restored_from_backup,
+    backups: {
+      backup_dir: backups.backup_dir,
+      artifact_count: backups.artifact_count,
+      snapshot_count: backups.snapshot_count,
+      reclaimable_bytes: backups.reclaimable_bytes,
+      total_bytes: backups.total_bytes,
+    },
   };
 }
 
@@ -1731,6 +1791,7 @@ function summarizeSetupDiagnostics(params: {
   autonomy_maintain: AutonomyMaintainSummary;
   worker_fabric: HostFabricSummary;
   model_router: ModelRouterSummary;
+  storage: StorageHealthSummary;
   provider_bridge_entries: Array<Record<string, unknown>>;
   provider_bridge_generated_at: string | null;
   provider_bridge_stale: boolean;
@@ -1778,12 +1839,14 @@ function summarizeSetupDiagnostics(params: {
       (params.desktop_control.observe_enabled && !params.desktop_control.observe_ready) ||
       (params.desktop_control.act_enabled && !params.desktop_control.act_ready) ||
       (params.desktop_control.listen_enabled && !params.desktop_control.listen_ready));
+  const storageDegraded = params.storage.status === "recovered";
   const browserDegraded = params.patient_zero.enabled && params.patient_zero.browser_ready !== true;
   const coreUsable =
     selfStartReady &&
     params.worker_fabric.enabled_host_count > 0 &&
     params.model_router.enabled_backend_count > 0 &&
-    params.autonomy_maintain.stale !== true;
+    params.autonomy_maintain.stale !== true &&
+    !storageDegraded;
   const officeGuiLauncher = summarizeLauncherReadiness({
     manifest: platformManifest,
     launcher_key: "office_gui",
@@ -1818,6 +1881,11 @@ function summarizeSetupDiagnostics(params: {
   if (desktopDegraded) {
     nextActions.push("Desktop control is degraded on this host; observation or actuation should stay bounded and explicit until the lane recovers.");
   }
+  if (params.storage.attention_required) {
+    nextActions.push(
+      "Run `node scripts/mcp_tool_call.mjs --tool health.storage --args '{}'` and review quarantine or recovery evidence before claiming the database layer is clean across threads."
+    );
+  }
   if (agenticSuiteLauncher.degraded) {
     nextActions.push("Run `npm run agentic:suite:status` to inspect the visible-suite fallback path before a demo or operator handoff.");
   }
@@ -1844,6 +1912,14 @@ function summarizeSetupDiagnostics(params: {
       degraded: providerBridgeDegraded,
       latest_router_suppression: params.latest_router_suppression,
     },
+    storage: {
+      status: params.storage.status,
+      attention_required: params.storage.attention_required,
+      current_boot_quarantine_count: params.storage.current_boot_quarantine_count,
+      quarantine_artifact_count: params.storage.quarantine_artifact_count,
+      recovery_artifact_count: params.storage.recovery_artifact_count,
+      restored_from_backup: params.storage.restored_from_backup,
+    },
     desktop_lane: {
       enabled: params.desktop_control.enabled,
       stale: params.desktop_control.stale,
@@ -1861,6 +1937,7 @@ function summarizeSetupDiagnostics(params: {
       browser_degraded: browserDegraded,
       provider_bridge_degraded: providerBridgeDegraded,
       desktop_degraded: desktopDegraded,
+      storage_degraded: storageDegraded,
     },
     launchers: {
       office_gui: {
@@ -2358,6 +2435,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   const modelRouterSummary = summarizeModelRouter(storage, {
     effective_worker_fabric: effectiveWorkerFabric,
   });
+  const storageHealth = summarizeStorageHealth(storage);
   const evalSummary = summarizeEvalSuites(storage);
   const observabilitySummary = summarizeObservability(storage);
   const orgProgramSummary = summarizeOrgPrograms(storage);
@@ -2406,6 +2484,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     autonomy_maintain: autonomyMaintainSummary,
     worker_fabric: workerFabricSummary,
     model_router: modelRouterSummary,
+    storage: storageHealth,
     provider_bridge_entries: providerBridgeEntries as Array<Record<string, unknown>>,
     provider_bridge_generated_at: providerBridgeDiagnostics.generated_at,
     provider_bridge_stale: providerBridgeStale,
@@ -2648,6 +2727,11 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   } else if (clusterTopologySummary.active_node_count === 0) {
     attention.push("Cluster topology exists, but no nodes are marked active.");
   }
+  if (storageHealth.status === "recovered") {
+    attention.push("Storage guard recovered the database on this boot; review quarantine and recovery evidence before treating thread state as clean.");
+  } else if (storageHealth.attention_required) {
+    attention.push("Storage guard evidence artifacts are present on disk; review or archive them so database health stays explicit across threads.");
+  }
   if (modelRouterSummary.backend_count === 0) {
     attention.push("No model router backends are configured yet.");
   } else if (modelRouterSummary.enabled_backend_count === 0) {
@@ -2860,6 +2944,13 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
         disconnected_count: providerBridgeDisconnectedCount,
         unavailable_count: providerBridgeEntries.filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "unavailable").length,
       },
+      storage: {
+        status: storageHealth.status,
+        attention_required: storageHealth.attention_required,
+        current_boot_quarantine_count: storageHealth.current_boot_quarantine_count,
+        quarantine_artifact_count: storageHealth.quarantine_artifact_count,
+        recovery_artifact_count: storageHealth.recovery_artifact_count,
+      },
       desktop_control: {
         enabled: desktopControlSummary.enabled,
         stale: desktopControlSummary.stale,
@@ -2958,6 +3049,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     reaction_engine: reactionEngineSummary,
     workflow_exports: workflowExportSummary,
     runtime_workers: runtimeWorkerSummary,
+    storage: storageHealth,
     desktop_control: {
       state: desktopControlState,
       summary: desktopControlSummary,

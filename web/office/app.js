@@ -246,17 +246,41 @@
     return null;
   }
 
-  function setTab(tab) {
-    state.activeTab = tab;
+  function applyActiveTab() {
     for (var i = 0; i < els.tabs.length; i += 1) {
       var button = els.tabs[i];
-      button.classList.toggle("is-active", button.getAttribute("data-tab") === tab);
+      button.classList.toggle("is-active", button.getAttribute("data-tab") === state.activeTab);
     }
     var panels = Array.prototype.slice.call(document.querySelectorAll(".tab-panel"));
     for (var j = 0; j < panels.length; j += 1) {
       var panel = panels[j];
-      panel.classList.toggle("is-active", panel.id === tab + "-view");
+      panel.classList.toggle("is-active", panel.id === state.activeTab + "-view");
     }
+  }
+
+  function renderActiveTabPanel() {
+    if (state.activeTab === "workbench") {
+      renderWorkbenchView();
+    } else if (state.activeTab === "briefing") {
+      renderBriefingView();
+    } else if (state.activeTab === "workers") {
+      renderWorkersView();
+    } else if (state.activeTab === "hosts") {
+      renderHostsView();
+    } else if (state.activeTab === "patient-zero") {
+      renderPatientZeroView();
+    } else if (state.activeTab === "events") {
+      renderEventsView();
+    } else {
+      renderOfficeView();
+    }
+    renderAgentDetail();
+    applyActiveTab();
+  }
+
+  function setTab(tab) {
+    state.activeTab = tab;
+    renderActiveTabPanel();
   }
 
   function setResultText(value) {
@@ -2054,7 +2078,7 @@
     renderPatientZeroView();
     renderEventsView();
     renderAgentDetail();
-    setTab(state.activeTab);
+    applyActiveTab();
   }
 
   function renderSubtitle() {
@@ -2337,11 +2361,19 @@
       .then(function (result) {
         var payload = result.payload || {};
         state.realtime = payload;
-        state.snapshot = overlayRealtimeSnapshot(state.snapshot || {});
-        if (!state.selectedAgentId && state.snapshot && state.snapshot.agents && state.snapshot.agents.length && state.snapshot.agents[0].agent) {
-          state.selectedAgentId = state.snapshot.agents[0].agent.agent_id || "";
+        var mergedSnapshot = overlayRealtimeSnapshot(state.snapshot || {});
+        var nextFingerprint = snapshotFingerprint(mergedSnapshot);
+        var shouldRenderActive = nextFingerprint !== state.snapshotFingerprint;
+        state.snapshot = mergedSnapshot;
+        state.snapshotFingerprint = nextFingerprint;
+        if (!state.selectedAgentId && mergedSnapshot && mergedSnapshot.agents && mergedSnapshot.agents.length && mergedSnapshot.agents[0].agent) {
+          state.selectedAgentId = mergedSnapshot.agents[0].agent.agent_id || "";
         }
-        renderAll();
+        renderSubtitle();
+        renderStatusStrip();
+        if (shouldRenderActive) {
+          renderActiveTabPanel();
+        }
         return payload;
       }, function (error) {
         state.realtimeRequest = false;

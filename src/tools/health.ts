@@ -19,6 +19,7 @@ export function healthStorage(storage: Storage) {
   const counts = storage.getTableCounts();
   const stats = fs.existsSync(dbPath) ? fs.statSync(dbPath) : null;
   const backups = storage.getStorageBackupStatus({ recent_limit: 6 });
+  const guard = storage.getStorageGuardStatus({ recent_limit: 6 });
   return {
     ok: true,
     db_path: dbPath,
@@ -27,6 +28,7 @@ export function healthStorage(storage: Storage) {
     schema_version: storage.getSchemaVersion(),
     table_counts: counts,
     backups,
+    guard,
   };
 }
 

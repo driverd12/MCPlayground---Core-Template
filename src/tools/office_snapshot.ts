@@ -345,6 +345,7 @@ function buildWorkbenchSummary(params: {
   const controlPlane = asRecord(operatorBriefRecord.control_plane_summary);
   const providerDiagnostics = params.providerBridge.diagnostics;
   const setupFallback = asRecord(params.setupDiagnostics.fallback);
+  const kernelStorage = asRecord(kernelRecord.storage);
   const goalSummary = asRecord(operatorBriefRecord.goal_summary);
   const planSummary = asRecord(operatorBriefRecord.plan_summary);
   const stepSummary = asRecord(operatorBriefRecord.step_summary);
@@ -379,6 +380,22 @@ function buildWorkbenchSummary(params: {
         payload: {
           task_ids: failedTasks.map((task) => task.task_id).filter(Boolean),
         },
+      },
+    });
+  }
+  if (Boolean(kernelStorage.attention_required)) {
+    const storageStatus = String(kernelStorage.status ?? "evidence_present").trim().toLowerCase();
+    const detail =
+      storageStatus === "recovered"
+        ? "The database layer was quarantined or restored on this boot. Review recovery evidence before treating thread state as clean."
+        : "Quarantine or recovery evidence is still present on disk. Review or archive it so database health stays explicit across threads.";
+    blockers.push({
+      kind: "storage_health",
+      title: storageStatus === "recovered" ? "Storage guard recovered database state" : "Storage guard evidence needs review",
+      detail,
+      remediation: {
+        label: "Check Storage Health",
+        action: "storage_health",
       },
     });
   }
@@ -1028,42 +1045,42 @@ function buildRecentRouterSuppressionDecisions(storage: Storage, params?: { limi
 export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof officeSnapshotSchema>) {
   const threadId = input.thread_id?.trim() || "ring-leader-main";
   const errors: string[] = [];
-  const safe = <T>(label: string, fallback: T, read: () => T) => {
+  const safe = <T>(label: string, fallback: () => T, read: () => T) => {
     try {
       return read();
     } catch (error) {
       errors.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
-      return fallback;
+      return fallback();
     }
   };
 
-  const workboard = safe<WorkboardPayload>("workboard", trichatWorkboard(storage, { thread_id: threadId, limit: 1 }), () =>
+  const workboard = safe<WorkboardPayload>("workboard", () => trichatWorkboard(storage, { thread_id: threadId, limit: 1 }), () =>
     trichatWorkboard(storage, { thread_id: threadId, limit: input.turn_limit })
   );
-  const taskSummaryPayload = safe<TaskSummaryPayload>("task_summary", taskSummary(storage, { running_limit: 8 }), () =>
+  const taskSummaryPayload = safe<TaskSummaryPayload>("task_summary", () => taskSummary(storage, { running_limit: 8 }), () =>
     taskSummary(storage, { running_limit: Math.max(4, Math.min(24, input.task_limit)) })
   );
-  const taskRunning = safe<TaskListPayload>("task_running", { status_filter: "running", count: 0, tasks: [] as TaskRecord[] }, () =>
+  const taskRunning = safe<TaskListPayload>("task_running", () => ({ status_filter: "running", count: 0, tasks: [] as TaskRecord[] }), () =>
     taskList(storage, { status: "running", limit: input.task_limit })
   );
-  const taskPending = safe<TaskListPayload>("task_pending", { status_filter: "pending", count: 0, tasks: [] as TaskRecord[] }, () =>
+  const taskPending = safe<TaskListPayload>("task_pending", () => ({ status_filter: "pending", count: 0, tasks: [] as TaskRecord[] }), () =>
     taskList(storage, { status: "pending", limit: input.task_limit })
   );
-  const taskFailed = safe<TaskListPayload>("task_failed", { status_filter: "failed", count: 0, tasks: [] as TaskRecord[] }, () =>
+  const taskFailed = safe<TaskListPayload>("task_failed", () => ({ status_filter: "failed", count: 0, tasks: [] as TaskRecord[] }), () =>
     taskList(storage, { status: "failed", limit: input.task_limit })
   );
-  const agentSessions = safe<AgentSessionListPayload>("agent_sessions", {
+  const agentSessions = safe<AgentSessionListPayload>("agent_sessions", () => ({
     status_filter: null,
     agent_id_filter: null,
     client_kind_filter: null,
     active_only_filter: null,
     count: 0,
     sessions: [] as AgentSessionRecord[],
-  }, () =>
+  }), () =>
     listAgentSessions(storage, { limit: input.session_limit })
   );
   const learning = input.include_learning
-    ? safe<LearningPayload>("learning", {
+    ? safe<LearningPayload>("learning", () => ({
         generated_at: new Date().toISOString(),
         filter: { agent_id: null },
         total_entries: 0,
@@ -1082,7 +1099,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
         },
         top_agents: [],
         recent_entries: [],
-      }, () =>
+      }), () =>
         summarizeAgentLearning(storage, {
           limit: input.learning_limit,
           top_agents_limit: 8,
@@ -1090,10 +1107,10 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
         })
       )
     : {};
-  const autopilot = safe<Record<string, unknown>>("autopilot", {}, () => ({
+  const autopilot = safe<Record<string, unknown>>("autopilot", () => ({}), () => ({
     state: getAutopilotStatus(storage),
   }));
-  const roster = safe("roster", {
+  const roster = safe("roster", () => ({
     default_agent_ids: getTriChatConfiguredDefaultAgentIds(),
     active_agent_ids: [] as string[],
     agents: getTriChatAgentCatalog().map((agent) => ({
@@ -1108,10 +1125,10 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
       enabled: agent.enabled !== false,
     })),
     source: "office.snapshot",
-  }, () =>
+  }), () =>
     buildRosterPayload(workboard, agentSessions, learning, autopilot)
   );
-  const tmuxState = safe("tmux", null, () => storage.getTriChatTmuxControllerState());
+  const tmuxState = safe("tmux", () => null, () => storage.getTriChatTmuxControllerState());
   const tmux = {
     generated_at: new Date().toISOString(),
     action: "status_cached",
@@ -1120,7 +1137,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     dashboard: summarizeTmuxDashboard(tmuxState),
   };
   const adapter = input.include_adapter
-    ? safe<AdapterPayload>("adapter", {
+    ? safe<AdapterPayload>("adapter", () => ({
         generated_at: new Date().toISOString(),
         agent_id: null,
         channel: null,
@@ -1140,12 +1157,12 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
         } satisfies TriChatAdapterTelemetrySummaryRecord,
         recent_events: [],
         last_open_events: [],
-      }, () =>
+      }), () =>
         trichatAdapterTelemetry(storage, { action: "status", include_events: true, event_limit: Math.min(12, input.event_limit) })
       )
     : {};
   const busTail = input.include_bus
-    ? safe("bus_tail", { count: 0, thread_id: threadId, events: [] as unknown[] }, () => {
+    ? safe("bus_tail", () => ({ count: 0, thread_id: threadId, events: [] as unknown[] }), () => {
         const events = storage.listTriChatBusEvents({ thread_id: threadId, limit: input.event_limit });
         return {
           count: events.length,
@@ -1154,7 +1171,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
         };
       })
     : {};
-  const trichatSummaryPayload = safe<TriChatSummaryPayload>("trichat_summary", {
+  const trichatSummaryPayload = safe<TriChatSummaryPayload>("trichat_summary", () => ({
     generated_at: new Date().toISOString(),
     thread_counts: {
       active: 0,
@@ -1165,11 +1182,11 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     oldest_message_at: null,
     newest_message_at: null,
     busiest_threads: [],
-  }, () =>
+  }), () =>
     trichatSummary(storage, { busiest_limit: 6 })
   );
   const runtimeWorkers = input.include_runtime_workers
-    ? safe<RuntimeWorkersPayload>("runtime_workers", {
+    ? safe<RuntimeWorkersPayload>("runtime_workers", () => ({
         count: 0,
         sessions: [] as RuntimeWorkerSessionRecord[],
         summary: {
@@ -1178,13 +1195,13 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
           counts: {},
           latest_session: null,
         },
-      } as RuntimeWorkersPayload, () =>
+      } as RuntimeWorkersPayload), () =>
         summarizeRuntimeWorkers(storage, input.runtime_worker_limit)
       )
     : {};
   const operatorBriefPayload = safe<OperatorBriefPayload>(
     "operator_brief",
-    {
+    () => ({
       generated_at: new Date().toISOString(),
       thread_id: threadId,
       current_objective: null,
@@ -1207,7 +1224,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
       kernel: null,
       brief_markdown: "# Operator Brief\n\nNo active operator brief available.",
       source: "operator.brief",
-    } as unknown as OperatorBriefPayload,
+    } as unknown as OperatorBriefPayload),
     () =>
       operatorBrief(storage, {
         thread_id: threadId,
@@ -1217,20 +1234,20 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
         compact: true,
       })
   );
-  const autonomyMaintain = safe("autonomy_maintain", summarizeAutonomyMaintainState(storage), () =>
+  const autonomyMaintain = safe("autonomy_maintain", () => summarizeAutonomyMaintainState(storage), () =>
     summarizeAutonomyMaintainState(storage)
   );
   const autonomyMaintainState = asRecord(autonomyMaintain.state);
   const selectedProviderBridgeDiagnostics = buildPersistedProviderBridgeDiagnostics(autonomyMaintainState);
   const providerBridge = safe<ProviderBridgePayload>(
     "provider_bridge",
-    {
+    () => ({
       snapshot: applyProviderBridgeDiagnosticsToSnapshot(
         resolveProviderBridgeSnapshot({ workspace_root: process.cwd() }),
         selectedProviderBridgeDiagnostics
       ),
       diagnostics: selectedProviderBridgeDiagnostics,
-    },
+    }),
     () => ({
       snapshot: applyProviderBridgeDiagnosticsToSnapshot(
         resolveProviderBridgeSnapshot({ workspace_root: process.cwd() }),
@@ -1248,11 +1265,11 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     diagnostics_stale: providerBridge.diagnostics.stale ?? false,
   });
   const kernel = input.include_kernel
-    ? safe("kernel", buildKernelPayload(storage, taskSummaryPayload, agentSessions), () =>
+    ? safe("kernel", () => buildKernelPayload(storage, taskSummaryPayload, agentSessions), () =>
         buildKernelPayload(storage, taskSummaryPayload, agentSessions)
       )
     : {};
-  const federation = safe("federation", buildFederationPayload(storage, asRecord(kernel)), () =>
+  const federation = safe("federation", () => buildFederationPayload(storage, asRecord(kernel)), () =>
     buildFederationPayload(storage, asRecord(kernel))
   );
   const providerReadyAgentIds =

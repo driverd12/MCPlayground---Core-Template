@@ -7,7 +7,7 @@ import {
   type WorkerFabricHostTelemetryRecord,
   type WorkerFabricStateRecord,
 } from "../storage.js";
-import { captureLocalHostProfile, deriveLocalExecutionBudget } from "../local_host_profile.js";
+import { captureLocalHostProfileCached, deriveLocalExecutionBudget } from "../local_host_profile.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import type { ExecutionIsolationMode } from "../execution_isolation.js";
 
@@ -582,7 +582,7 @@ function overlayEffectiveLocalHost(host: WorkerFabricHostRecord, localHostId: st
     return host;
   }
 
-  const liveProfile = captureLocalHostProfile({
+  const liveProfile = captureLocalHostProfileCached({
     workspace_root: host.workspace_root,
   });
   const liveBudget = deriveLocalExecutionBudget(liveProfile, {
@@ -740,6 +740,89 @@ export function resolveLocalBridgeResourceGate(input: {
         fallback_worker_count: input.fallback_worker_count,
         fallback_shell: input.fallback_shell,
       });
+  return resolveLocalBridgeResourceGateFromState(state);
+}
+
+export function buildWorkerFabricSlots(
+  storage: Storage,
+  input: {
+    fallback_workspace_root: string;
+    fallback_worker_count: number;
+    fallback_shell: string;
+  }
+): WorkerFabricSlot[] {
+  const state = resolveEffectiveWorkerFabric(storage, input);
+  const explicitFabric = Boolean(storage.getWorkerFabricState()?.enabled);
+  const singleImplicitLocal =
+    !explicitFabric &&
+    state.hosts.length === 1 &&
+    state.hosts[0]?.host_id === "local" &&
+    state.hosts[0]?.transport === "local";
+
+  return state.hosts.flatMap((host) =>
+    Array.from({ length: host.worker_count }, (_, index) => {
+      const laneId = `worker-${index + 1}`;
+      return {
+        worker_id: singleImplicitLocal ? laneId : `${host.host_id}--${laneId}`,
+        host_id: host.host_id,
+        transport: host.transport,
+        ssh_destination: host.ssh_destination,
+        workspace_root: host.workspace_root,
+        shell: host.shell,
+        tags: host.tags,
+        capabilities: host.capabilities,
+        telemetry: host.telemetry,
+        metadata: host.metadata,
+      } satisfies WorkerFabricSlot;
+    })
+  );
+}
+
+function buildWorkerFabricStatusPayload(
+  storage: Storage,
+  input: {
+    fallback_workspace_root: string;
+    fallback_worker_count: number;
+    fallback_shell: string;
+  }
+) {
+  const state = resolveEffectiveWorkerFabric(storage, input);
+  const explicitFabric = Boolean(storage.getWorkerFabricState()?.enabled);
+  const singleImplicitLocal =
+    !explicitFabric && state.hosts.length === 1 && state.hosts[0]?.host_id === "local" && state.hosts[0]?.transport === "local";
+  return {
+    state,
+    slots: state.hosts.flatMap((host) =>
+      Array.from({ length: host.worker_count }, (_, index) => {
+        const laneId = `worker-${index + 1}`;
+        return {
+          worker_id: singleImplicitLocal ? laneId : `${host.host_id}--${laneId}`,
+          host_id: host.host_id,
+          transport: host.transport,
+          ssh_destination: host.ssh_destination,
+          workspace_root: host.workspace_root,
+          shell: host.shell,
+          tags: host.tags,
+          capabilities: host.capabilities,
+          telemetry: host.telemetry,
+          metadata: host.metadata,
+        } satisfies WorkerFabricSlot;
+      })
+    ),
+    resource_gate: resolveLocalBridgeResourceGateFromState(state),
+    hosts_summary: state.hosts.map((host) => ({
+      ...resolveHostCapacityProfile(host),
+      host_id: host.host_id,
+      enabled: host.enabled,
+      transport: host.transport,
+      tags: host.tags,
+      telemetry: host.telemetry,
+      health_score: computeHostHealthScore(host.telemetry),
+    })),
+  };
+}
+
+function resolveLocalBridgeResourceGateFromState(state: WorkerFabricStateRecord): LocalBridgeResourceGate {
   const localHosts = state.hosts.filter((host) => host.enabled !== false && host.transport === "local");
   const localHost = localHosts.find((host) => host.host_id === state.default_host_id) ?? localHosts[0] ?? null;
   if (!localHost) {
@@ -900,41 +983,6 @@ export function resolveLocalBridgeResourceGate(input: {
   };
 }
 
-export function buildWorkerFabricSlots(
-  storage: Storage,
-  input: {
-    fallback_workspace_root: string;
-    fallback_worker_count: number;
-    fallback_shell: string;
-  }
-): WorkerFabricSlot[] {
-  const state = resolveEffectiveWorkerFabric(storage, input);
-  const explicitFabric = Boolean(storage.getWorkerFabricState()?.enabled);
-  const singleImplicitLocal =
-    !explicitFabric &&
-    state.hosts.length === 1 &&
-    state.hosts[0]?.host_id === "local" &&
-    state.hosts[0]?.transport === "local";
-
-  return state.hosts.flatMap((host) =>
-    Array.from({ length: host.worker_count }, (_, index) => {
-      const laneId = `worker-${index + 1}`;
-      return {
-        worker_id: singleImplicitLocal ? laneId : `${host.host_id}--${laneId}`,
-        host_id: host.host_id,
-        transport: host.transport,
-        ssh_destination: host.ssh_destination,
-        workspace_root: host.workspace_root,
-        shell: host.shell,
-        tags: host.tags,
-        capabilities: host.capabilities,
-        telemetry: host.telemetry,
-        metadata: host.metadata,
-      } satisfies WorkerFabricSlot;
-    })
-  );
-}
-
 export function resolveTaskExecutionRouting(metadata: Record<string, unknown> | null | undefined): TaskExecutionRouting {
   const execution = isRecord(metadata?.task_execution)
     ? metadata?.task_execution
@@ -1089,34 +1137,11 @@ export function workerFabric(storage: Storage, input: z.infer<typeof workerFabri
     const fallbackWorkspaceRoot = input.fallback_workspace_root ?? process.cwd();
     const fallbackWorkerCount = input.fallback_worker_count ?? 1;
     const fallbackShell = input.fallback_shell ?? "/bin/zsh";
-    const state = resolveEffectiveWorkerFabric(storage, {
+    return buildWorkerFabricStatusPayload(storage, {
       fallback_workspace_root: fallbackWorkspaceRoot,
       fallback_worker_count: fallbackWorkerCount,
       fallback_shell: fallbackShell,
     });
-    return {
-      state,
-      slots: buildWorkerFabricSlots(storage, {
-        fallback_workspace_root: fallbackWorkspaceRoot,
-        fallback_worker_count: fallbackWorkerCount,
-        fallback_shell: fallbackShell,
-      }),
-      resource_gate: resolveLocalBridgeResourceGate({
-        storage,
-        fallback_workspace_root: fallbackWorkspaceRoot,
-        fallback_worker_count: fallbackWorkerCount,
-        fallback_shell: fallbackShell,
-      }),
-      hosts_summary: state.hosts.map((host) => ({
-        ...resolveHostCapacityProfile(host),
-        host_id: host.host_id,
-        enabled: host.enabled,
-        transport: host.transport,
-        tags: host.tags,
-        telemetry: host.telemetry,
-        health_score: computeHostHealthScore(host.telemetry),
-      })),
-    };
   }
 
   return runIdempotentMutation({

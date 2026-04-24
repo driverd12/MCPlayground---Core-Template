@@ -852,6 +852,21 @@ function sendCachedOfficeSnapshot(
   res.end(snapshot.body);
 }
 
+function refreshOfficeSnapshotAfterResponse(
+  res: http.ServerResponse,
+  inflightKey: string,
+  options: HttpOptions,
+  input: { threadId: string; theme: string; forceLive: boolean }
+) {
+  res.once("finish", () => {
+    setTimeout(() => {
+      void startOfficeNodeSnapshotRefresh(inflightKey, options, input).catch(() => {
+        // Keep serving the last truthful cached snapshot; background refresh failures surface on the next direct attempt.
+      });
+    }, 0);
+  });
+}
+
 function startOfficeNodeSnapshotRefresh(
   inflightKey: string,
   options: HttpOptions,
@@ -859,22 +874,26 @@ function startOfficeNodeSnapshotRefresh(
 ) {
   let pendingDirectSnapshot = officeNodeSnapshotInflight.get(inflightKey);
   if (!pendingDirectSnapshot) {
-    pendingDirectSnapshot = withTimeout(
-      readOfficeSnapshotForRefresh(options, input),
-      officeSnapshotNodeTimeoutMs(),
-      "office snapshot"
-    )
-      .then((directPayload) => {
-        const body = JSON.stringify(directPayload);
-        const parsed = parseOfficeSnapshotPayload(body);
-        if (parsed && (!Array.isArray(parsed.errors) || parsed.errors.length === 0)) {
-          writeOfficeSnapshotCache(parsed);
-        }
-        return { body, parsed };
-      })
-      .finally(() => {
-        officeNodeSnapshotInflight.delete(inflightKey);
+    pendingDirectSnapshot = new Promise<{ body: string; parsed: Record<string, unknown> | null }>((resolve, reject) => {
+      setImmediate(() => {
+        withTimeout(
+          readOfficeSnapshotForRefresh(options, input),
+          officeSnapshotNodeTimeoutMs(),
+          "office snapshot"
+        )
+          .then((directPayload) => {
+            const body = JSON.stringify(directPayload);
+            const parsed = parseOfficeSnapshotPayload(body);
+            if (parsed && (!Array.isArray(parsed.errors) || parsed.errors.length === 0)) {
+              writeOfficeSnapshotCache(parsed);
+            }
+            resolve({ body, parsed });
+          })
+          .catch(reject);
       });
+    }).finally(() => {
+      officeNodeSnapshotInflight.delete(inflightKey);
+    });
     officeNodeSnapshotInflight.set(inflightKey, pendingDirectSnapshot);
   }
   return pendingDirectSnapshot;
@@ -902,6 +921,7 @@ async function readOfficeSnapshotForRefresh(
   options: HttpOptions,
   input: { threadId: string; theme: string; forceLive: boolean }
 ) {
+  const refreshMode = officeSnapshotRefreshMode();
   const readRawFallbackSnapshot = async () => {
     if (!options.officeRawSnapshot) {
       return null;
@@ -918,12 +938,12 @@ async function readOfficeSnapshotForRefresh(
     return null;
   };
 
-  if (officeSnapshotRefreshMode() === "stdio") {
+  if (refreshMode === "inline") {
     const rawPreferred = await readRawFallbackSnapshot();
     if (rawPreferred) {
       return rawPreferred;
     }
-    if (!options.officeRawSnapshot && options.officeSnapshot) {
+    if (options.officeSnapshot) {
       return options.officeSnapshot({
         threadId: input.threadId,
         theme: input.theme,
@@ -932,7 +952,15 @@ async function readOfficeSnapshotForRefresh(
     }
   }
 
-  if (officeSnapshotRefreshMode() === "stdio" && fs.existsSync(stdioServerEntry)) {
+  if (refreshMode === "stdio" && !options.officeRawSnapshot && options.officeSnapshot) {
+    return options.officeSnapshot({
+      threadId: input.threadId,
+      theme: input.theme,
+      forceLive: input.forceLive,
+    });
+  }
+
+  if (refreshMode === "stdio" && fs.existsSync(stdioServerEntry)) {
     const rawArgs = {
       thread_id: input.threadId,
       turn_limit: 12,
@@ -1006,6 +1034,10 @@ async function readOfficeSnapshotForRefresh(
       );
     }
     return buildOfficeGuiSnapshot(rawPayload as Record<string, unknown>, { theme: input.theme });
+  }
+  const rawFallback = await readRawFallbackSnapshot();
+  if (rawFallback) {
+    return rawFallback;
   }
   return options.officeSnapshot!({
     threadId: input.threadId,
@@ -2856,30 +2888,26 @@ async function maybeHandleOfficeRequest(
         return true;
       }
       if (cachedSnapshot && (cachedSnapshot.stale || explicitForceLive)) {
-        startOfficeNodeSnapshotRefresh(inflightKey, options, {
-          threadId: effectiveThreadId,
-          theme,
-          forceLive,
-        }).catch(() => {
-          // Keep serving the last truthful cached snapshot; background refresh failures surface on the next direct attempt.
-        });
         sendCachedOfficeSnapshot(
           res,
           explicitForceLive ? "cache-refreshing-live" : "cache-refreshing-stale",
           cachedSnapshot,
           "pending"
         );
-        return true;
-      }
-      if (expiredCachedSnapshot) {
-        startOfficeNodeSnapshotRefresh(inflightKey, options, {
+        refreshOfficeSnapshotAfterResponse(res, inflightKey, options, {
           threadId: effectiveThreadId,
           theme,
           forceLive,
-        }).catch(() => {
-          // Keep serving the last truthful expired snapshot until a fresher refresh succeeds.
         });
+        return true;
+      }
+      if (expiredCachedSnapshot) {
         sendCachedOfficeSnapshot(res, "cache-expired-refreshing", expiredCachedSnapshot, "pending");
+        refreshOfficeSnapshotAfterResponse(res, inflightKey, options, {
+          threadId: effectiveThreadId,
+          theme,
+          forceLive,
+        });
         return true;
       }
       try {
@@ -3038,6 +3066,47 @@ async function maybeHandleOfficeRequest(
         already_running: started.alreadyRunning,
         status: started.alreadyRunning ? "already_running" : "started",
         started_at: started.state.startedAt,
+      });
+      return true;
+    } else if (action === "storage_health") {
+      result = await runLocalCommand(
+        process.execPath,
+        [
+          mcpToolCallScript,
+          "--tool",
+          "health.storage",
+          "--args",
+          "{}",
+          "--transport",
+          "http",
+          "--url",
+          `${origin}/`,
+          "--origin",
+          normalizedOfficeOrigin(origin),
+          "--cwd",
+          repoRoot,
+        ],
+        {
+          cwd: repoRoot,
+          env: officeEnv(origin),
+          timeoutMs: 30000,
+        }
+      );
+      const parsed = parseJsonText(result.stdout.trim());
+      if (result.code !== 0) {
+        sendJson(res, 500, {
+          ok: false,
+          action,
+          result: parsed ?? null,
+          stdout: parsed ? "" : result.stdout.trim(),
+          stderr: result.stderr.trim(),
+        });
+        return true;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        action,
+        storage: parsed ?? null,
       });
       return true;
     } else if (action === "tmux_detach") {

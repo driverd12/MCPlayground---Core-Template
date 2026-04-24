@@ -2187,7 +2187,7 @@ test("office gui snapshot keeps current remote locator separate from approved lo
               remote_hostname: "Dans-MBP.local",
               remote_ip_address: "10.1.3.224",
               remote_approved_ip_address: "10.1.3.224",
-              remote_current_address: "192.168.86.28",
+              remote_current_address: "10.1.2.76",
               remote_locator_observed_at: "2026-04-23T12:00:00.000Z",
               remote_locator_matched_by: "approved_host_hostname",
               remote_mac_address: "da:6b:f9:d7:ef:80",
@@ -2221,7 +2221,7 @@ test("office gui snapshot keeps current remote locator separate from approved lo
   assert.ok(host);
   assert.equal(host.remote_ip_address, "10.1.3.224");
   assert.equal(host.remote_approved_ip_address, "10.1.3.224");
-  assert.equal(host.remote_current_address, "192.168.86.28");
+  assert.equal(host.remote_current_address, "10.1.2.76");
   assert.equal(host.remote_locator_observed_at, "2026-04-23T12:00:00.000Z");
   assert.equal(host.remote_locator_matched_by, "approved_host_hostname");
 });

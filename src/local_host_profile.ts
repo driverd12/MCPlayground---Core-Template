@@ -46,8 +46,33 @@ export type LocalExecutionBudget = {
   tmux_target_queue_per_worker: number;
 };
 
+type LocalHostProfileCacheEntry = {
+  captured_at_ms: number;
+  profile: LocalHostProfile;
+};
+
+const localHostProfileCache = new Map<string, LocalHostProfileCacheEntry>();
+
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function localHostProfileCacheTtlMs() {
+  const parsed = Number.parseInt(String(process.env.MASTER_MOLD_LOCAL_HOST_PROFILE_CACHE_MS || "5000"), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 5000;
+  }
+  return parsed;
+}
+
+function localHostProfileCacheKey(input?: {
+  workspace_root?: string;
+  degraded_signal?: boolean;
+}) {
+  return JSON.stringify({
+    workspace_root: input?.workspace_root ?? process.cwd(),
+    degraded_signal: input?.degraded_signal === true,
+  });
 }
 
 function readSysctlInt(name: string): number | null {
@@ -496,4 +521,36 @@ export function captureLocalHostProfile(input?: {
     mlx_available: accelerator.mlx_available,
     mlx_lm_available: accelerator.mlx_lm_available,
   };
+}
+
+export function resetLocalHostProfileCache() {
+  localHostProfileCache.clear();
+}
+
+export function captureLocalHostProfileCached(
+  input?: {
+    workspace_root?: string;
+    degraded_signal?: boolean;
+  },
+  deps?: {
+    now?: () => number;
+    capture?: (input?: { workspace_root?: string; degraded_signal?: boolean }) => LocalHostProfile;
+  }
+): LocalHostProfile {
+  const ttlMs = localHostProfileCacheTtlMs();
+  if (ttlMs <= 0) {
+    return (deps?.capture ?? captureLocalHostProfile)(input);
+  }
+  const now = deps?.now ? deps.now() : Date.now();
+  const cacheKey = localHostProfileCacheKey(input);
+  const cached = localHostProfileCache.get(cacheKey);
+  if (cached && now - cached.captured_at_ms <= ttlMs) {
+    return cached.profile;
+  }
+  const profile = (deps?.capture ?? captureLocalHostProfile)(input);
+  localHostProfileCache.set(cacheKey, {
+    captured_at_ms: now,
+    profile,
+  });
+  return profile;
 }

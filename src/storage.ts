@@ -61,6 +61,32 @@ type StorageBackupArtifactRecord = {
   mtime_iso: string | null;
 };
 
+export type StorageGuardArtifactRecord = {
+  path: string;
+  basename: string;
+  bucket: "quarantine" | "recovery";
+  size_bytes: number;
+  mtime_ms: number;
+  mtime_iso: string | null;
+  recovery_group: string | null;
+};
+
+export type StorageGuardStatusRecord = {
+  status: "healthy" | "evidence_present" | "recovered";
+  attention_required: boolean;
+  backup_dir: string;
+  quarantine_dir: string;
+  recovery_root: string;
+  current_boot_quarantined_paths: string[];
+  restored_from_backup: string | null;
+  quarantine_artifact_count: number;
+  recovery_artifact_count: number;
+  latest_quarantine_at: string | null;
+  latest_recovery_at: string | null;
+  recent_quarantine_artifacts: StorageGuardArtifactRecord[];
+  recent_recovery_artifacts: StorageGuardArtifactRecord[];
+};
+
 export type TrustTier = "raw" | "verified" | "policy-backed" | "deprecated";
 
 export type NoteRecord = {
@@ -1574,6 +1600,33 @@ export class Storage {
           size_bytes: entry.size_bytes,
           mtime_iso: entry.mtime_iso,
         })),
+    };
+  }
+
+  getStorageGuardStatus(params?: { recent_limit?: number }) {
+    const recentLimit = Math.max(1, Math.min(100, params?.recent_limit ?? 12));
+    const quarantineArtifacts = listStorageGuardQuarantineArtifacts(this.guardOptions.quarantine_dir);
+    const recoveryArtifacts = listStorageGuardRecoveryArtifacts(this.dbPath);
+    const status: StorageGuardStatusRecord["status"] =
+      this.guardOutcome.quarantined_paths.length > 0 || this.guardOutcome.restored_from_backup
+        ? "recovered"
+        : quarantineArtifacts.length > 0 || recoveryArtifacts.length > 0
+          ? "evidence_present"
+          : "healthy";
+    return {
+      status,
+      attention_required: status !== "healthy",
+      backup_dir: this.guardOptions.backup_dir,
+      quarantine_dir: this.guardOptions.quarantine_dir,
+      recovery_root: this.dbPath === ":memory:" ? "" : path.dirname(this.dbPath),
+      current_boot_quarantined_paths: [...this.guardOutcome.quarantined_paths],
+      restored_from_backup: this.guardOutcome.restored_from_backup,
+      quarantine_artifact_count: quarantineArtifacts.length,
+      recovery_artifact_count: recoveryArtifacts.length,
+      latest_quarantine_at: quarantineArtifacts[0]?.mtime_iso ?? null,
+      latest_recovery_at: recoveryArtifacts[0]?.mtime_iso ?? null,
+      recent_quarantine_artifacts: quarantineArtifacts.slice(0, recentLimit),
+      recent_recovery_artifacts: recoveryArtifacts.slice(0, recentLimit),
     };
   }
 
@@ -16698,6 +16751,63 @@ function listDatabaseBackupArtifacts(dbPath: string, options: StorageGuardOption
       } satisfies StorageBackupArtifactRecord;
     })
     .sort((left, right) => right.mtime_ms - left.mtime_ms);
+}
+
+function listStorageGuardQuarantineArtifacts(quarantineDir: string): StorageGuardArtifactRecord[] {
+  if (!fs.existsSync(quarantineDir)) {
+    return [];
+  }
+  return fs
+    .readdirSync(quarantineDir)
+    .map((entry) => path.join(quarantineDir, entry))
+    .filter((entryPath) => fs.existsSync(entryPath))
+    .map((entryPath) => {
+      const stats = fs.statSync(entryPath);
+      return {
+        path: entryPath,
+        basename: path.basename(entryPath),
+        bucket: "quarantine",
+        size_bytes: stats.size,
+        mtime_ms: stats.mtimeMs,
+        mtime_iso: Number.isFinite(stats.mtimeMs) ? new Date(stats.mtimeMs).toISOString() : null,
+        recovery_group: null,
+      } satisfies StorageGuardArtifactRecord;
+    })
+    .sort((left, right) => right.mtime_ms - left.mtime_ms);
+}
+
+function listStorageGuardRecoveryArtifacts(dbPath: string): StorageGuardArtifactRecord[] {
+  if (dbPath === ":memory:") {
+    return [];
+  }
+  const root = path.dirname(dbPath);
+  if (!fs.existsSync(root)) {
+    return [];
+  }
+  const records: StorageGuardArtifactRecord[] = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith("recovery-")) {
+      continue;
+    }
+    const recoveryDir = path.join(root, entry.name);
+    for (const child of fs.readdirSync(recoveryDir, { withFileTypes: true })) {
+      if (!child.isFile()) {
+        continue;
+      }
+      const entryPath = path.join(recoveryDir, child.name);
+      const stats = fs.statSync(entryPath);
+      records.push({
+        path: entryPath,
+        basename: child.name,
+        bucket: "recovery",
+        size_bytes: stats.size,
+        mtime_ms: stats.mtimeMs,
+        mtime_iso: Number.isFinite(stats.mtimeMs) ? new Date(stats.mtimeMs).toISOString() : null,
+        recovery_group: entry.name,
+      });
+    }
+  }
+  return records.sort((left, right) => right.mtime_ms - left.mtime_ms);
 }
 
 function withDatabaseBackupLock<T>(dbPath: string, options: StorageGuardOptions, callback: () => T): T {
