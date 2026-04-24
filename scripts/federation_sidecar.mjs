@@ -458,6 +458,177 @@ function collectDesktopContext(options) {
   return sanitizeValue(result);
 }
 
+function readWorkerFabricHosts(options) {
+  const dbPath = path.resolve(expandHome(process.env.ANAMNESIS_HUB_DB_PATH || path.join(REPO_ROOT, "data", "hub.sqlite")));
+  const sqliteConfig = runJsonCommand(
+    "sqlite3",
+    [
+      "-readonly",
+      dbPath,
+      "SELECT config_json FROM daemon_configs WHERE daemon_key = 'worker.fabric' LIMIT 1;",
+    ],
+    {
+      cwd: REPO_ROOT,
+      timeoutMs: Math.min(options.toolTimeoutMs, 3_000),
+      unavailableReason: "worker_fabric_sqlite_unavailable",
+    }
+  );
+  const directHosts = Array.isArray(sqliteConfig?.hosts) ? sqliteConfig.hosts : [];
+  const resolvedDirectHosts = directHosts.map((entry) => readRecord(entry)).filter(Boolean);
+  if (resolvedDirectHosts.length > 0) {
+    return resolvedDirectHosts;
+  }
+
+  const toolArgs = {
+    action: "status",
+    fallback_workspace_root: REPO_ROOT,
+    fallback_worker_count: 1,
+    fallback_shell: "/bin/zsh",
+  };
+  const primary = runMcpTool("worker.fabric", toolArgs, options);
+  const primaryHosts = Array.isArray(primary?.result?.state?.hosts) ? primary.result.state.hosts : [];
+  if (primaryHosts.length > 0) {
+    return primaryHosts.map((entry) => readRecord(entry)).filter(Boolean);
+  }
+  if (options.localTransport === "http") {
+    const fallback = runMcpTool("worker.fabric", toolArgs, {
+      ...options,
+      localTransport: "stdio",
+    });
+    const fallbackHosts = Array.isArray(fallback?.result?.state?.hosts) ? fallback.result.state.hosts : [];
+    return fallbackHosts.map((entry) => readRecord(entry)).filter(Boolean);
+  }
+  return [];
+}
+
+function peerMatchCandidates(host) {
+  const metadata = readRecord(host?.metadata) ?? {};
+  const remoteAccess = readRecord(metadata.remote_access) ?? {};
+  const federation = readRecord(metadata.federation) ?? {};
+  const identity = readRecord(federation.identity) ?? {};
+  const approvalScope = readRecord(identity.approval_scope) ?? {};
+  return [
+    readString(remoteAccess.hostname),
+    readString(remoteAccess.ip_address),
+    ...((Array.isArray(remoteAccess.allowed_addresses) ? remoteAccess.allowed_addresses : []).map((entry) => readString(entry))),
+    readString(approvalScope.observed_remote_address),
+    readString(identity.requesting_remote_address),
+    ...((Array.isArray(approvalScope.hostname_resolved_addresses) ? approvalScope.hostname_resolved_addresses : []).map((entry) =>
+      readString(entry)
+    )),
+  ]
+    .filter(Boolean)
+    .map((entry) => String(entry).trim().toLowerCase());
+}
+
+function readTimestampAgeSeconds(value) {
+  const parsed = Date.parse(String(value || "").trim());
+  return Number.isFinite(parsed) ? Math.max(0, Math.round((Date.now() - parsed) / 1000)) : null;
+}
+
+function resolveHostPeerLocator(host, maxLocatorAgeSeconds) {
+  const metadata = readRecord(host?.metadata) ?? {};
+  const federation = readRecord(metadata.federation) ?? {};
+  const identity = readRecord(federation.identity) ?? {};
+  const approvalScope = readRecord(identity.approval_scope) ?? {};
+  const locator =
+    readString(approvalScope.observed_remote_address) ??
+    readString(identity.requesting_remote_address) ??
+    readString(readRecord(metadata.remote_locator)?.current_ip_address) ??
+    null;
+  if (!locator) {
+    return null;
+  }
+  const observedAt =
+    readString(readRecord(metadata.remote_locator)?.observed_at) ??
+    readString(identity.received_at) ??
+    readString(federation.last_ingest_at) ??
+    readString(host?.updated_at);
+  const ageSeconds = readTimestampAgeSeconds(observedAt);
+  if (ageSeconds === null || ageSeconds > maxLocatorAgeSeconds) {
+    return null;
+  }
+  return locator;
+}
+
+export function resolvePeerPublishTargets(peers, hosts) {
+  const maxLocatorAgeSeconds = Math.max(
+    30,
+    Number(process.env.MASTER_MOLD_FEDERATION_PEER_LOCATOR_MAX_AGE_SECONDS || 900) || 900
+  );
+  return peers.map((peer) => {
+    const configuredPeer = String(peer || "").trim();
+    if (!configuredPeer) {
+      return {
+        peer: configuredPeer,
+        target_peer: configuredPeer,
+        matched_host_id: null,
+        matched_by: null,
+        locator_source: "configured",
+      };
+    }
+    try {
+      const configuredUrl = new URL(configuredPeer);
+      const configuredHost = String(configuredUrl.hostname || "").trim().toLowerCase();
+      const matchedHost =
+        hosts.find((host) => {
+          if (!host || host.enabled === false) {
+            return false;
+          }
+          const metadata = readRecord(host.metadata) ?? {};
+          const remoteAccess = readRecord(metadata.remote_access) ?? {};
+          return String(remoteAccess.status ?? "").trim() === "approved" && peerMatchCandidates(host).includes(configuredHost);
+        }) ?? null;
+      if (!matchedHost) {
+        return {
+          peer: configuredPeer,
+          target_peer: configuredPeer,
+          matched_host_id: null,
+          matched_by: null,
+          locator_source: "configured",
+        };
+      }
+
+      const metadata = readRecord(matchedHost.metadata) ?? {};
+      const remoteAccess = readRecord(metadata.remote_access) ?? {};
+      const configuredHostname = readString(remoteAccess.hostname)?.toLowerCase() ?? null;
+      const currentRemoteAddress = resolveHostPeerLocator(matchedHost, maxLocatorAgeSeconds);
+      const matchedBy =
+        configuredHost === configuredHostname
+          ? "hostname"
+          : configuredHost === String(currentRemoteAddress ?? "").trim().toLowerCase()
+            ? "current_remote_address"
+            : "approved_locator";
+      if (!currentRemoteAddress || String(currentRemoteAddress).trim().toLowerCase() === configuredHost) {
+        return {
+          peer: configuredPeer,
+          target_peer: configuredPeer,
+          matched_host_id: readString(matchedHost.host_id),
+          matched_by: matchedBy,
+          locator_source: "configured",
+        };
+      }
+      const targetUrl = new URL(configuredPeer);
+      targetUrl.hostname = currentRemoteAddress;
+      return {
+        peer: configuredPeer,
+        target_peer: targetUrl.toString().replace(/\/$/, ""),
+        matched_host_id: readString(matchedHost.host_id),
+        matched_by: matchedBy,
+        locator_source: "remote_current_address",
+      };
+    } catch {
+      return {
+        peer: configuredPeer,
+        target_peer: configuredPeer,
+        matched_host_id: null,
+        matched_by: null,
+        locator_source: "configured",
+      };
+    }
+  });
+}
+
 function hostSummary(options) {
   const userInfo = (() => {
     try {
@@ -508,8 +679,10 @@ function buildPayload(options) {
   };
 }
 
-async function postPeer(peer, payload, options) {
-  const url = new URL("/federation/ingest", peer);
+async function postPeer(peerTarget, payload, options) {
+  const targetPeer = String(peerTarget?.target_peer || peerTarget?.peer || "").trim();
+  const configuredPeer = String(peerTarget?.peer || targetPeer).trim();
+  const url = new URL("/federation/ingest", targetPeer);
   const body = JSON.stringify(payload);
   const headers = {
     "content-type": "application/json",
@@ -533,7 +706,11 @@ async function postPeer(peer, payload, options) {
   }
   const responseHealth = evaluatePeerIngestResponse(response, parsed);
   return {
-    peer,
+    peer: configuredPeer,
+    target_peer: targetPeer,
+    matched_host_id: peerTarget?.matched_host_id ?? null,
+    matched_by: peerTarget?.matched_by ?? null,
+    locator_source: peerTarget?.locator_source ?? "configured",
     ok: responseHealth.ok,
     status: response.status,
     response: parsed,
@@ -658,12 +835,17 @@ async function runCycle(options) {
   const payload = buildPayload(options);
   const attemptAt = new Date().toISOString();
   const sends = [];
-  for (const peer of options.peers) {
+  const peerTargets = resolvePeerPublishTargets(options.peers, readWorkerFabricHosts(options));
+  for (const peerTarget of peerTargets) {
     try {
-      sends.push(await postPeer(peer, payload, options));
+      sends.push(await postPeer(peerTarget, payload, options));
     } catch (error) {
       sends.push({
-        peer,
+        peer: peerTarget.peer,
+        target_peer: peerTarget.target_peer,
+        matched_host_id: peerTarget.matched_host_id ?? null,
+        matched_by: peerTarget.matched_by ?? null,
+        locator_source: peerTarget.locator_source ?? "configured",
         ok: false,
         status: 0,
         error: error instanceof Error ? error.message : String(error),

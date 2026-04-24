@@ -717,6 +717,8 @@ function ingestFederationPayload(storage: Storage, payload: Record<string, unkno
   let workerFabricHeartbeatError: string | null = null;
   let workerFabricHeartbeatReason: string | null = null;
   let workerFabricHeartbeatDetail: string | null = null;
+  const approvalScope = isRecord(identityEnvelope.approval_scope) ? identityEnvelope.approval_scope : {};
+  const remoteLocatorAddress = readString(identityEnvelope.requesting_remote_address);
   try {
     workerFabric(storage, {
       action: "heartbeat",
@@ -736,6 +738,17 @@ function ingestFederationPayload(storage: Storage, payload: Record<string, unkno
           last_sequence: roundedSequence,
           peer_signature_status: readString(networkGate.signature_status) ?? null,
         },
+        ...(remoteLocatorAddress
+          ? {
+              remote_locator: {
+                current_ip_address: remoteLocatorAddress,
+                observed_at: createdAt,
+                matched_by: readString(approvalScope.matched_by),
+                matched_hostname: readString(identityEnvelope.captured_hostname),
+                identity_basis: ["hostname", "signed_identity"],
+              },
+            }
+          : {}),
       },
       tags: ["federation-peer"],
       telemetry: {
