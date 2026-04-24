@@ -27,7 +27,7 @@ import { summarizeLiveRuntimeWorkers } from "./runtime_worker.js";
 import { taskList, taskSummary } from "./task.js";
 import { getAutopilotStatus, trichatAdapterTelemetry, trichatSummary, trichatWorkboard } from "./trichat.js";
 import { readWarmCacheEntry } from "../warm_cache_runtime.js";
-import { buildPatientZeroReport } from "./patient_zero.js";
+import { buildPatientZeroOfficeReport } from "./patient_zero.js";
 import { buildPrivilegedAccessStatus } from "./privileged_exec.js";
 
 const recordSchema = z.record(z.unknown());
@@ -43,6 +43,7 @@ type ProviderBridgePayload = {
   snapshot: ReturnType<typeof resolveProviderBridgeSnapshot>;
   diagnostics: ReturnType<typeof resolveProviderBridgeDiagnostics>;
 };
+type PatientZeroReportPayload = ReturnType<typeof buildPatientZeroOfficeReport>;
 type RuntimeWorkersPayload = {
   count: number;
   sessions: RuntimeWorkerSessionRecord[];
@@ -144,7 +145,7 @@ function dedupeText(values: unknown[]) {
 
 function resolvePatientZeroAuthoritySnapshot(patientZero: {
   summary: ReturnType<typeof summarizePatientZeroState>;
-  report: ReturnType<typeof buildPatientZeroReport>;
+  report: PatientZeroReportPayload;
 }) {
   const summary = asRecord(patientZero.summary);
   const report = asRecord(patientZero.report);
@@ -335,7 +336,7 @@ function buildWorkbenchSummary(params: {
   patientZero: {
     state: ReturnType<Storage["getPatientZeroState"]>;
     summary: ReturnType<typeof summarizePatientZeroState>;
-    report: ReturnType<typeof buildPatientZeroReport>;
+    report: PatientZeroReportPayload;
   };
   privilegedAccess: ReturnType<typeof buildPrivilegedAccessStatus>;
 }) {
@@ -706,7 +707,7 @@ function buildOfficeSetupDiagnostics(params: {
   patientZero: {
     state: ReturnType<Storage["getPatientZeroState"]>;
     summary: ReturnType<typeof summarizePatientZeroState>;
-    report: ReturnType<typeof buildPatientZeroReport>;
+    report: PatientZeroReportPayload;
   };
 }) {
   const kernelSetup = asRecord(params.kernel.setup_diagnostics);
@@ -1295,7 +1296,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
   const patientZero = {
     state: patientZeroState,
     summary: summarizePatientZeroState(patientZeroState, desktopControlState, privilegedAccess.summary as Record<string, unknown>),
-    report: buildPatientZeroReport(storage),
+    report: buildPatientZeroOfficeReport(storage),
   };
   const setupDiagnostics = buildOfficeSetupDiagnostics({
     kernel: asRecord(kernel),
@@ -1377,7 +1378,7 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
           liveDesktopControlState,
           livePrivilegedAccess.summary as Record<string, unknown>
         ),
-        report: buildPatientZeroReport(storage),
+        report: buildPatientZeroOfficeReport(storage),
       };
       const cachedPayload = cached.payload as Record<string, unknown>;
       const cachedKernel = asRecord(cachedPayload.kernel);

@@ -209,6 +209,21 @@ function readMacosAuthorityAudit() {
   return normalized;
 }
 
+function readMacosAuthorityAuditCachedOnly() {
+  const override = readMacosAuthorityAuditOverride();
+  if (override) {
+    return override;
+  }
+  if (process.platform !== "darwin") {
+    return normalizeMacosAuthorityAudit({ skipped: true, reason: "not_macos", platform: process.platform });
+  }
+  const now = Date.now();
+  if (macosAuthorityAuditCache && macosAuthorityAuditCache.expires_at_ms > now) {
+    return macosAuthorityAuditCache.value;
+  }
+  return buildMacosAuthorityAuditUnavailable("macOS authority audit not prefetched for this Office snapshot.");
+}
+
 const PATIENT_ZERO_TERMINAL_TOOLKIT = ["codex", "claude", "cursor", "gemini", "gh"] as const;
 const PATIENT_ZERO_TERMINAL_ALLOWLIST = PATIENT_ZERO_TERMINAL_TOOLKIT.map((entry) => `${entry}`);
 const PATIENT_ZERO_BRIDGE_AGENT_IDS = ["codex", "claude", "cursor", "gemini", "github-copilot"] as const;
@@ -675,7 +690,7 @@ async function syncAutonomyControl(
   return warnings;
 }
 
-export function buildPatientZeroReport(storage: Storage, macosAuthorityAudit = readMacosAuthorityAudit()) {
+function buildPatientZeroReportFromAudit(storage: Storage, macosAuthorityAudit: MacosAuthorityAuditSnapshot) {
   const state = storage.getPatientZeroState();
   const desktopState = storage.getDesktopControlState();
   const desktopSummary = summarizeDesktopControlState(desktopState);
@@ -766,6 +781,14 @@ export function buildPatientZeroReport(storage: Storage, macosAuthorityAudit = r
       created_at: event.created_at,
     })),
   };
+}
+
+export function buildPatientZeroReport(storage: Storage, macosAuthorityAudit = readMacosAuthorityAudit()) {
+  return buildPatientZeroReportFromAudit(storage, macosAuthorityAudit);
+}
+
+export function buildPatientZeroOfficeReport(storage: Storage, macosAuthorityAudit = readMacosAuthorityAuditCachedOnly()) {
+  return buildPatientZeroReportFromAudit(storage, macosAuthorityAudit);
 }
 
 function recordPatientZeroEvent(

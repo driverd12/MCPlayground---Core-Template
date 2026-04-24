@@ -899,9 +899,15 @@ function startOfficeNodeSnapshotRefresh(
   return pendingDirectSnapshot;
 }
 
-function officeSnapshotRefreshMode() {
+function officeSnapshotRefreshMode(options: HttpOptions) {
   const override = String(process.env.MCP_HTTP_OFFICE_SNAPSHOT_REFRESH_MODE || "").trim().toLowerCase();
   if (override === "inline") {
+    return "inline" as const;
+  }
+  if (override === "stdio") {
+    return "stdio" as const;
+  }
+  if (options.officeRawSnapshot || options.officeSnapshot) {
     return "inline" as const;
   }
   return "stdio" as const;
@@ -921,7 +927,7 @@ async function readOfficeSnapshotForRefresh(
   options: HttpOptions,
   input: { threadId: string; theme: string; forceLive: boolean }
 ) {
-  const refreshMode = officeSnapshotRefreshMode();
+  const refreshMode = officeSnapshotRefreshMode(options);
   const readRawFallbackSnapshot = async () => {
     if (!options.officeRawSnapshot) {
       return null;
