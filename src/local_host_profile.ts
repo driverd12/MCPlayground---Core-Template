@@ -141,14 +141,17 @@ function detectMemoryFreePercent(fallbackPercent: number) {
 }
 
 function detectCpuUtilization(cpuCount: number) {
-  const result = spawnSync("/bin/sh", ["-lc", "top -l 1 -n 0 2>/dev/null | head -n 5"], { encoding: "utf8" });
-  if (result.status === 0) {
-    const text = String(result.stdout || "");
-    const idleMatch = /CPU usage:\s*[\d.]+%\s*user,\s*[\d.]+%\s*sys,\s*([\d.]+)%\s*idle/i.exec(text);
-    if (idleMatch) {
-      const idlePercent = Number.parseFloat(idleMatch[1]);
-      if (Number.isFinite(idlePercent)) {
-        return Number(clamp(1 - idlePercent / 100, 0, 1).toFixed(4));
+  const probeMode = String(process.env.MASTER_MOLD_LOCAL_HOST_CPU_PROBE || "loadavg").trim().toLowerCase();
+  if (probeMode === "top") {
+    const result = spawnSync("/bin/sh", ["-lc", "top -l 1 -n 0 2>/dev/null | head -n 5"], { encoding: "utf8" });
+    if (result.status === 0) {
+      const text = String(result.stdout || "");
+      const idleMatch = /CPU usage:\s*[\d.]+%\s*user,\s*[\d.]+%\s*sys,\s*([\d.]+)%\s*idle/i.exec(text);
+      if (idleMatch) {
+        const idlePercent = Number.parseFloat(idleMatch[1]);
+        if (Number.isFinite(idlePercent)) {
+          return Number(clamp(1 - idlePercent / 100, 0, 1).toFixed(4));
+        }
       }
     }
   }
