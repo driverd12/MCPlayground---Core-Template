@@ -580,6 +580,19 @@ export type BudgetLedgerSummaryRecord = {
   recent_entries: BudgetLedgerEntryRecord[];
 };
 
+export type BudgetLedgerOverviewRecord = {
+  total_entries: number;
+  projection_count: number;
+  actual_count: number;
+  adjustment_count: number;
+  projected_cost_usd: number;
+  actual_cost_usd: number;
+  tokens_input: number;
+  tokens_output: number;
+  tokens_total: number;
+  latest_entry_at: string | null;
+};
+
 export type TaskLeaseRecord = {
   task_id: string;
   owner_id: string;
@@ -12055,24 +12068,8 @@ export class Storage {
     since?: string;
     recent_limit?: number;
   }): BudgetLedgerSummaryRecord {
+    const totals = this.summarizeBudgetLedgerOverview(params);
     const { whereSql, values } = buildBudgetLedgerWhereClause(params);
-    const totalsRow = this.db
-      .prepare(
-        `SELECT COUNT(*) AS total_entries,
-                SUM(CASE WHEN ledger_kind = 'projection' THEN 1 ELSE 0 END) AS projection_count,
-                SUM(CASE WHEN ledger_kind = 'actual' THEN 1 ELSE 0 END) AS actual_count,
-                SUM(CASE WHEN ledger_kind = 'adjustment' THEN 1 ELSE 0 END) AS adjustment_count,
-                SUM(COALESCE(projected_cost_usd, 0)) AS projected_cost_usd,
-                SUM(COALESCE(actual_cost_usd, 0)) AS actual_cost_usd,
-                SUM(COALESCE(tokens_input, 0)) AS tokens_input,
-                SUM(COALESCE(tokens_output, 0)) AS tokens_output,
-                SUM(COALESCE(tokens_total, 0)) AS tokens_total,
-                MAX(created_at) AS latest_entry_at
-         FROM budget_ledger_entries
-         ${whereSql}`
-      )
-      .get(...values) as Record<string, unknown>;
-
     const providerRows = this.db
       .prepare(
         `SELECT provider,
@@ -12118,15 +12115,7 @@ export class Storage {
     });
 
     return {
-      total_entries: Number(totalsRow.total_entries ?? 0),
-      projection_count: Number(totalsRow.projection_count ?? 0),
-      actual_count: Number(totalsRow.actual_count ?? 0),
-      adjustment_count: Number(totalsRow.adjustment_count ?? 0),
-      projected_cost_usd: Number(Number(totalsRow.projected_cost_usd ?? 0).toFixed(6)),
-      actual_cost_usd: Number(Number(totalsRow.actual_cost_usd ?? 0).toFixed(6)),
-      tokens_input: Number(totalsRow.tokens_input ?? 0),
-      tokens_output: Number(totalsRow.tokens_output ?? 0),
-      tokens_total: Number(totalsRow.tokens_total ?? 0),
+      ...totals,
       provider_counts: providerRows.map((row) => ({
         provider: asNullableString(row.provider),
         count: Number(row.count ?? 0),
@@ -12143,8 +12132,49 @@ export class Storage {
         entity_type: asNullableString(row.entity_type),
         count: Number(row.count ?? 0),
       })),
-      latest_entry_at: asNullableString(totalsRow.latest_entry_at),
       recent_entries: recentEntries,
+    };
+  }
+
+  summarizeBudgetLedgerOverview(params: {
+    ledger_kind?: "projection" | "actual" | "adjustment";
+    run_id?: string;
+    task_id?: string;
+    provider?: string;
+    model_id?: string;
+    entity_type?: string;
+    entity_id?: string;
+    since?: string;
+  }): BudgetLedgerOverviewRecord {
+    const { whereSql, values } = buildBudgetLedgerWhereClause(params);
+    const totalsRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS total_entries,
+                SUM(CASE WHEN ledger_kind = 'projection' THEN 1 ELSE 0 END) AS projection_count,
+                SUM(CASE WHEN ledger_kind = 'actual' THEN 1 ELSE 0 END) AS actual_count,
+                SUM(CASE WHEN ledger_kind = 'adjustment' THEN 1 ELSE 0 END) AS adjustment_count,
+                SUM(COALESCE(projected_cost_usd, 0)) AS projected_cost_usd,
+                SUM(COALESCE(actual_cost_usd, 0)) AS actual_cost_usd,
+                SUM(COALESCE(tokens_input, 0)) AS tokens_input,
+                SUM(COALESCE(tokens_output, 0)) AS tokens_output,
+                SUM(COALESCE(tokens_total, 0)) AS tokens_total,
+                MAX(created_at) AS latest_entry_at
+         FROM budget_ledger_entries
+         ${whereSql}`
+      )
+      .get(...values) as Record<string, unknown>;
+
+    return {
+      total_entries: Number(totalsRow.total_entries ?? 0),
+      projection_count: Number(totalsRow.projection_count ?? 0),
+      actual_count: Number(totalsRow.actual_count ?? 0),
+      adjustment_count: Number(totalsRow.adjustment_count ?? 0),
+      projected_cost_usd: Number(Number(totalsRow.projected_cost_usd ?? 0).toFixed(6)),
+      actual_cost_usd: Number(Number(totalsRow.actual_cost_usd ?? 0).toFixed(6)),
+      tokens_input: Number(totalsRow.tokens_input ?? 0),
+      tokens_output: Number(totalsRow.tokens_output ?? 0),
+      tokens_total: Number(totalsRow.tokens_total ?? 0),
+      latest_entry_at: asNullableString(totalsRow.latest_entry_at),
     };
   }
 

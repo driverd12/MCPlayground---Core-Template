@@ -2400,7 +2400,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   const runningTasksForProfiles = taskSummary.running
     .map((task) => storage.getTaskById(task.task_id))
     .filter((task): task is TaskRecord => task !== null);
-  const budgetLedgerSummary = storage.summarizeBudgetLedger({ recent_limit: 12 });
+  const budgetLedgerSummary = storage.summarizeBudgetLedgerOverview({});
   const effectiveDefaultPermissionProfile = resolveEffectiveDefaultPermissionProfileId(storage, permissionProfilesState);
   const permissionProfilesSummary = summarizePermissionProfiles({
     state: permissionProfilesState,
