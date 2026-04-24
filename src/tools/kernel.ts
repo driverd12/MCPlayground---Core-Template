@@ -44,7 +44,7 @@ import { buildEvalHealth, computeEvalDependencyFingerprint, getAutonomyMaintainR
 import { getAutoSnapshotRuntimeStatus } from "./imprint.js";
 import { isBenignObservabilityDocument } from "./observability.js";
 import { buildPrivilegedAccessStatus } from "./privileged_exec.js";
-import { resolveProviderBridgeDiagnostics } from "./provider_bridge.js";
+import { resolveProviderBridgeDiagnosticsCached } from "./provider_bridge.js";
 import { getReactionEngineRuntimeStatus } from "./reaction_engine.js";
 import { summarizeLiveRuntimeWorkers } from "./runtime_worker.js";
 import { getAutoSquishRuntimeStatus } from "./transcript.js";
@@ -2454,10 +2454,16 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
           cached: true,
           diagnostics: autonomyMaintainState?.provider_bridge_diagnostics ?? [],
         }
-      : resolveProviderBridgeDiagnostics({
-          workspace_root: process.cwd(),
-          probe_timeout_ms: 1500,
-        });
+      : (() => {
+          const cachedDiagnostics = resolveProviderBridgeDiagnosticsCached({
+            workspace_root: process.cwd(),
+            probe_timeout_ms: 1500,
+          });
+          return {
+            ...cachedDiagnostics,
+            stale: cachedDiagnostics.cached ? cachedDiagnostics.stale : true,
+          };
+        })();
   const providerBridgeEntries = Array.isArray(providerBridgeDiagnostics.diagnostics)
     ? providerBridgeDiagnostics.diagnostics
     : [];
