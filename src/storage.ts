@@ -5324,6 +5324,73 @@ export class Storage {
     return rows.map((row) => mapGoalRow(row));
   }
 
+  listGoalsByStatuses(params: {
+    statuses: GoalStatus[];
+    limit: number;
+  }): GoalRecord[] {
+    const statuses = [...new Set(params.statuses.map((status) => normalizeGoalStatus(status)))];
+    const limit = Math.max(1, Math.min(500, params.limit));
+    if (statuses.length === 0) {
+      return [];
+    }
+    const placeholders = statuses.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `SELECT goal_id, created_at, updated_at, title, objective, status, priority, risk_tier, autonomy_mode,
+                target_entity_type, target_entity_id, acceptance_criteria_json, constraints_json, assumptions_json,
+                budget_json, owner_json, tags_json, metadata_json, active_plan_id, result_summary, result_json,
+                source_client, source_model, source_agent
+         FROM goals
+         WHERE status IN (${placeholders})
+         ORDER BY updated_at DESC
+         LIMIT ?`
+      )
+      .all(...statuses, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => mapGoalRow(row));
+  }
+
+  countGoalsByStatus(params?: {
+    target_entity_type?: string;
+    target_entity_id?: string;
+  }): Record<GoalStatus, number> {
+    const counts = {
+      draft: 0,
+      active: 0,
+      blocked: 0,
+      waiting: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+      archived: 0,
+    } satisfies Record<GoalStatus, number>;
+    const whereClauses: string[] = [];
+    const values: unknown[] = [];
+    const targetEntityType = params?.target_entity_type?.trim();
+    const targetEntityId = params?.target_entity_id?.trim();
+    if (targetEntityType) {
+      whereClauses.push("target_entity_type = ?");
+      values.push(targetEntityType);
+    }
+    if (targetEntityId) {
+      whereClauses.push("target_entity_id = ?");
+      values.push(targetEntityId);
+    }
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(
+        `SELECT status, COUNT(*) AS count
+         FROM goals
+         ${whereSql}
+         GROUP BY status`
+      )
+      .all(...values) as Array<Record<string, unknown>>;
+    for (const row of rows) {
+      const status = normalizeGoalStatus(String(row.status ?? ""));
+      counts[status] = Number(row.count ?? 0);
+    }
+    return counts;
+  }
+
   createPlan(params: {
     plan_id?: string;
     goal_id: string;
@@ -6899,6 +6966,47 @@ export class Storage {
       )
       .all(...values, limit) as Array<Record<string, unknown>>;
     return rows.map((row) => mapExperimentRow(row));
+  }
+
+  countExperimentsByStatus(params?: {
+    goal_id?: string;
+    plan_id?: string;
+    step_id?: string;
+  }): Record<ExperimentStatus, number> {
+    const counts = {
+      draft: 0,
+      active: 0,
+      paused: 0,
+      completed: 0,
+      archived: 0,
+    } satisfies Record<ExperimentStatus, number>;
+    const whereClauses: string[] = [];
+    const values: unknown[] = [];
+    for (const [field, value] of [
+      ["goal_id", params?.goal_id],
+      ["plan_id", params?.plan_id],
+      ["step_id", params?.step_id],
+    ] as Array<[string, string | undefined]>) {
+      const normalized = value?.trim();
+      if (normalized) {
+        whereClauses.push(`${field} = ?`);
+        values.push(normalized);
+      }
+    }
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(
+        `SELECT status, COUNT(*) AS count
+         FROM experiments
+         ${whereSql}
+         GROUP BY status`
+      )
+      .all(...values) as Array<Record<string, unknown>>;
+    for (const row of rows) {
+      const status = normalizeExperimentStatus(String(row.status ?? ""));
+      counts[status] = Number(row.count ?? 0);
+    }
+    return counts;
   }
 
   updateExperiment(params: {
@@ -11002,6 +11110,8 @@ export class Storage {
     event_type?: string;
     event_types?: string[];
     since?: string;
+    top_count_limit?: number;
+    include_entity_type_counts?: boolean;
   }) {
     const whereClauses: string[] = [];
     const values: Array<string | number> = [];
@@ -11048,24 +11158,33 @@ export class Storage {
          ${whereSql}`
       )
       .get(...values) as Record<string, unknown> | undefined;
+    const topCountLimit = Number.isFinite(Number(params?.top_count_limit))
+      ? Math.max(1, Math.min(100, Math.trunc(Number(params?.top_count_limit))))
+      : 0;
+    const topCountSql = topCountLimit > 0 ? "LIMIT ?" : "";
     const eventTypeRows = this.db
       .prepare(
         `SELECT event_type, COUNT(*) AS count
          FROM runtime_events
          ${whereSql}
          GROUP BY event_type
-         ORDER BY count DESC, event_type ASC`
+         ORDER BY count DESC, event_type ASC
+         ${topCountSql}`
       )
-      .all(...values) as Array<Record<string, unknown>>;
-    const entityTypeRows = this.db
-      .prepare(
-        `SELECT entity_type, COUNT(*) AS count
-         FROM runtime_events
-         ${whereSql}
-         GROUP BY entity_type
-         ORDER BY count DESC, entity_type ASC`
-      )
-      .all(...values) as Array<Record<string, unknown>>;
+      .all(...values, ...(topCountLimit > 0 ? [topCountLimit] : [])) as Array<Record<string, unknown>>;
+    const entityTypeRows =
+      params?.include_entity_type_counts === false
+        ? []
+        : (this.db
+            .prepare(
+              `SELECT entity_type, COUNT(*) AS count
+               FROM runtime_events
+               ${whereSql}
+               GROUP BY entity_type
+               ORDER BY count DESC, entity_type ASC
+               ${topCountSql}`
+            )
+            .all(...values, ...(topCountLimit > 0 ? [topCountLimit] : [])) as Array<Record<string, unknown>>);
 
     return {
       count: Number(countRow?.count ?? 0),
@@ -11323,6 +11442,9 @@ export class Storage {
     levels?: string[];
     event_types?: string[];
     since?: string;
+    top_count_limit?: number;
+    include_level_counts?: boolean;
+    include_event_type_counts?: boolean;
   }) {
     const whereClauses: string[] = [];
     const values: Array<string | number> = [];
@@ -11373,6 +11495,10 @@ export class Storage {
          ${whereSql}`
       )
       .get(...values) as Record<string, unknown> | undefined;
+    const topCountLimit = Number.isFinite(Number(params?.top_count_limit))
+      ? Math.max(1, Math.min(100, Math.trunc(Number(params?.top_count_limit))))
+      : 0;
+    const topCountSql = topCountLimit > 0 ? "LIMIT ?" : "";
     const buildCounts = (column: string, alias: string) =>
       this.db
         .prepare(
@@ -11380,15 +11506,16 @@ export class Storage {
            FROM observability_documents
            ${whereSql}
            GROUP BY ${column}
-           ORDER BY count DESC, ${column} ASC`
+           ORDER BY count DESC, ${column} ASC
+           ${topCountSql}`
         )
-        .all(...values) as Array<Record<string, unknown>>;
+        .all(...values, ...(topCountLimit > 0 ? [topCountLimit] : [])) as Array<Record<string, unknown>>;
     const indexRows = buildCounts("index_name", "index_name");
     const sourceRows = buildCounts("source_kind", "source_kind");
-    const levelRows = buildCounts("level", "level");
     const serviceRows = buildCounts("service", "service");
     const hostRows = buildCounts("host_id", "host_id");
-    const eventTypeRows = buildCounts("event_type", "event_type");
+    const levelRows = params?.include_level_counts === false ? [] : buildCounts("level", "level");
+    const eventTypeRows = params?.include_event_type_counts === false ? [] : buildCounts("event_type", "event_type");
     return {
       count: Number(countRow?.count ?? 0),
       latest_created_at: asNullableString(countRow?.latest_created_at),

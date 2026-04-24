@@ -626,13 +626,6 @@ type SwarmCoordinationSummary = {
   }>;
 };
 
-function countByStatus<T extends { status: string }>(records: T[]) {
-  return records.reduce<Record<string, number>>((acc, record) => {
-    acc[record.status] = (acc[record.status] ?? 0) + 1;
-    return acc;
-  }, {});
-}
-
 function ageSeconds(value: string | null) {
   if (!value) {
     return null;
@@ -1257,21 +1250,7 @@ function summarizePlanAdaptiveRouting(steps: PlanStepRecord[]): GoalAdaptiveRout
 
 function listOpenGoals(storage: Storage, limit: number) {
   const statuses: Array<z.infer<typeof goalStatusSchema>> = ["active", "waiting", "blocked", "draft", "failed"];
-  const seen = new Set<string>();
-  const goals: GoalRecord[] = [];
-
-  for (const status of statuses) {
-    for (const goal of storage.listGoals({ status, limit })) {
-      if (seen.has(goal.goal_id)) {
-        continue;
-      }
-      seen.add(goal.goal_id);
-      goals.push(goal);
-    }
-  }
-
-  goals.sort((left, right) => right.updated_at.localeCompare(left.updated_at));
-  return goals.slice(0, limit);
+  return storage.listGoalsByStatuses({ statuses, limit });
 }
 
 function summarizeAdaptiveSession(session: AgentSessionRecord): AdaptiveSessionSnapshot {
@@ -1594,20 +1573,20 @@ function summarizeEvalSuites(storage: Storage): EvalSummary {
 }
 
 function summarizeObservability(storage: Storage): ObservabilitySummary {
-  const summary = storage.summarizeObservabilityDocuments({});
+  const summary = storage.summarizeObservabilityDocuments({
+    top_count_limit: 6,
+    include_level_counts: false,
+    include_event_type_counts: false,
+  });
   const recentWindow = new Date(Date.now() - 15 * 60_000).toISOString();
-  const recentCritical = storage.listObservabilityDocuments({
+  const recentAlerts = storage.listObservabilityDocuments({
     since: recentWindow,
-    levels: ["critical"],
-    limit: 10,
+    levels: ["critical", "error"],
+    limit: 24,
   });
-  const recentErrors = storage.listObservabilityDocuments({
-    since: recentWindow,
-    levels: ["error"],
-    limit: 20,
-  });
-  const actionableRecentCritical = recentCritical.filter((entry) => !isBenignObservabilityDocument(entry));
-  const actionableRecentErrors = recentErrors.filter((entry) => !isBenignObservabilityDocument(entry));
+  const actionableRecentAlerts = recentAlerts.filter((entry) => !isBenignObservabilityDocument(entry));
+  const actionableRecentCritical = actionableRecentAlerts.filter((entry) => entry.level === "critical");
+  const actionableRecentErrors = actionableRecentAlerts.filter((entry) => entry.level === "error");
   return {
     document_count: summary.count,
     latest_document_at: summary.latest_created_at,
@@ -2381,11 +2360,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   const eventLimit = input.event_limit ?? 20;
 
   const openGoals = listOpenGoals(storage, goalLimit);
-  const goalCounts = countByStatus(
-    ["draft", "active", "waiting", "blocked", "completed", "failed", "cancelled", "archived"].flatMap((status) =>
-      storage.listGoals({ status: status as z.infer<typeof goalStatusSchema>, limit: 500 })
-    )
-  );
+  const goalCounts = storage.countGoalsByStatus();
   const taskSummary = storage.getTaskSummary({
     running_limit: input.task_running_limit ?? 10,
   });
@@ -2421,7 +2396,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   const experiments = storage.listExperiments({
     limit: experimentLimit,
   });
-  const experimentCounts = countByStatus(storage.listExperiments({ limit: 500 }));
+  const experimentCounts = storage.countExperimentsByStatus();
   const recentArtifacts = storage.listArtifacts({
     limit: artifactLimit,
   });
@@ -2586,7 +2561,7 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   const state = deriveKernelState({
     failed_goal_count: goalCounts.failed ?? 0,
     failed_task_count: staleTaskFailures ? 0 : taskSummary.counts.failed ?? 0,
-    failed_experiment_count: experimentCounts.failed ?? 0,
+    failed_experiment_count: 0,
     blocked_approval_count: totals.blocked_approval_count,
     blocked_human_count: totals.blocked_human_count,
     methodology_entry_hold_count: totals.methodology_entry_hold_count,
@@ -2626,6 +2601,8 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   });
   const eventSummary = storage.summarizeRuntimeEvents({
     since: input.event_since,
+    top_count_limit: 12,
+    include_entity_type_counts: false,
   });
   const activeLearningAgents = new Set(activeLearningEntries.map((entry) => entry.agent_id));
   const activeSessionAgentIds = [...new Set(activeSessions.map((session) => session.agent_id))];
