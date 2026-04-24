@@ -38,6 +38,10 @@ export const memoryGetSchema = z.object({
   touch: z.boolean().optional(),
 });
 
+export const memoryRecentSchema = z.object({
+  limit: z.number().int().min(1).max(50).optional(),
+});
+
 const reflectionEvidenceSchema = z
   .object({
     kind: z.enum(["tool_result", "artifact", "incident", "run", "benchmark", "eval", "notebook", "other"]).default("other"),
@@ -111,6 +115,14 @@ export function getMemory(storage: Storage, input: z.infer<typeof memoryGetSchem
   return {
     found: true,
     memory,
+  };
+}
+
+export function recentMemory(storage: Storage, input: z.infer<typeof memoryRecentSchema>) {
+  const memories = storage.listRecentMemories(input.limit ?? 10);
+  return {
+    count: memories.length,
+    memories,
   };
 }
 

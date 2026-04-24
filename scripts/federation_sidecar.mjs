@@ -305,6 +305,91 @@ function compactEventSummary(summary) {
   });
 }
 
+function compactText(value, maxLength = 240) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return null;
+  }
+  return text.length > maxLength ? `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…` : text;
+}
+
+function collectSharedMemories(options) {
+  if (options.sharedMemoryLimit <= 0) {
+    return [];
+  }
+  const response = runMcpTool("memory.recent", { limit: options.sharedMemoryLimit }, options);
+  const memories = Array.isArray(response?.result?.memories) ? response.result.memories : [];
+  return memories.slice(0, options.sharedMemoryLimit).map((memory) =>
+    sanitizeValue({
+      memory_id: memory.id ?? null,
+      created_at: memory.created_at ?? null,
+      last_accessed_at: memory.last_accessed_at ?? null,
+      keywords: Array.isArray(memory.keywords) ? memory.keywords.slice(0, 12) : [],
+      preview: compactText(memory.content, 320),
+    })
+  );
+}
+
+function collectSharedGoals(options) {
+  if (options.sharedGoalLimit <= 0) {
+    return [];
+  }
+  const response = runMcpTool("goal.list", { limit: Math.max(options.sharedGoalLimit * 3, options.sharedGoalLimit) }, options);
+  const goals = Array.isArray(response?.result?.goals) ? response.result.goals : [];
+  return goals
+    .filter((goal) => !["completed", "cancelled", "archived"].includes(String(goal?.status || "").trim().toLowerCase()))
+    .slice(0, options.sharedGoalLimit)
+    .map((goal) =>
+      sanitizeValue({
+        goal_id: goal.goal_id ?? null,
+        updated_at: goal.updated_at ?? null,
+        status: goal.status ?? null,
+        priority: goal.priority ?? null,
+        title: compactText(goal.title, 160),
+        objective: compactText(goal.objective, 260),
+        autonomy_mode: goal.autonomy_mode ?? null,
+        tags: Array.isArray(goal.tags) ? goal.tags.slice(0, 12) : [],
+      })
+    );
+}
+
+function collectSharedTasks(options) {
+  if (options.sharedTaskLimit <= 0) {
+    return [];
+  }
+  const response = runMcpTool("task.list", { limit: Math.max(options.sharedTaskLimit * 4, options.sharedTaskLimit) }, options);
+  const tasks = Array.isArray(response?.result?.tasks) ? response.result.tasks : [];
+  return tasks
+    .filter((task) => !["completed", "cancelled"].includes(String(task?.status || "").trim().toLowerCase()))
+    .slice(0, options.sharedTaskLimit)
+    .map((task) =>
+      sanitizeValue({
+        task_id: task.task_id ?? null,
+        updated_at: task.updated_at ?? null,
+        status: task.status ?? null,
+        priority: task.priority ?? null,
+        objective: compactText(task.objective, 260),
+        source_agent: task.source_agent ?? null,
+        last_error: compactText(task.last_error, 180),
+      })
+    );
+}
+
+function collectSharedSummaries(options) {
+  return {
+    status: "available",
+    source: "mcp_tool_call",
+    limits: {
+      memories: options.sharedMemoryLimit,
+      goals: options.sharedGoalLimit,
+      tasks: options.sharedTaskLimit,
+    },
+    memories: collectSharedMemories(options),
+    goals: collectSharedGoals(options),
+    tasks: collectSharedTasks(options),
+  };
+}
+
 function collectLocalMcp(options) {
   const summary = runMcpTool("event.summary", {}, options);
   if (!summary.ok || !summary.result || typeof summary.result !== "object" || Array.isArray(summary.result)) {
@@ -413,10 +498,12 @@ function buildPayload(options) {
       signed_event_stream: true,
       local_mcp: true,
       desktop_context: options.includeDesktopContext,
+      shared_summaries: true,
       peer_mesh: true,
     },
     local_mcp: collectLocalMcp(options),
     desktop_context: collectDesktopContext(options),
+    shared_summaries: collectSharedSummaries(options),
     recent_events: collectRecentEvents(options),
   };
 }
@@ -497,6 +584,18 @@ function parseOptions() {
     once: boolArg("once", false),
     intervalSeconds: Math.max(5, numberArg("interval-seconds", Number(process.env.MASTER_MOLD_FEDERATION_INTERVAL_SECONDS || 30))),
     eventLimit: Math.min(100, Math.max(0, numberArg("event-limit", Number(process.env.MASTER_MOLD_FEDERATION_EVENT_LIMIT || 25)))),
+    sharedMemoryLimit: Math.min(
+      20,
+      Math.max(0, numberArg("shared-memory-limit", Number(process.env.MASTER_MOLD_FEDERATION_SHARED_MEMORY_LIMIT || 6)))
+    ),
+    sharedGoalLimit: Math.min(
+      20,
+      Math.max(0, numberArg("shared-goal-limit", Number(process.env.MASTER_MOLD_FEDERATION_SHARED_GOAL_LIMIT || 6)))
+    ),
+    sharedTaskLimit: Math.min(
+      20,
+      Math.max(0, numberArg("shared-task-limit", Number(process.env.MASTER_MOLD_FEDERATION_SHARED_TASK_LIMIT || 8)))
+    ),
     toolTimeoutMs: Math.max(1_000, numberArg("tool-timeout-ms", Number(process.env.MASTER_MOLD_FEDERATION_TOOL_TIMEOUT_MS || 12_000))),
     includeDesktopContext: boolArg("desktop-context", process.env.MASTER_MOLD_FEDERATION_DESKTOP_CONTEXT !== "0"),
     desktopMaxFreshnessSeconds: Math.max(
@@ -548,6 +647,9 @@ Options:
   --local-transport http|stdio         How to read local MCP context. Default: http.
   --desktop-context true|false         Include local Chronicle/desktop-context metadata. Default: true.
   --event-limit <n>                    Recent local runtime events to include. Default: 25.
+  --shared-memory-limit <n>            Recent memory summaries to include. Default: 6.
+  --shared-goal-limit <n>              Active/blocked goal summaries to include. Default: 6.
+  --shared-task-limit <n>              Active task summaries to include. Default: 8.
 
 This is a peer mesh sidecar. Each host captures locally, publishes a bounded signed payload to configured peers, and each peer ingests into its own MASTER-MOLD event log.`);
 }

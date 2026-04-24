@@ -10,6 +10,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import {
   approvedHostNetworkMatch,
   buildHostIdentitySignaturePayload,
+  evaluateApprovedRemoteHostGate,
   parseJsonText,
   remoteToolAllowedForPermission,
   resetHostIdentityReplayCache,
@@ -69,6 +70,123 @@ test("approved host network matching treats IP as a locator and hostname/MAC as 
   });
   assert.equal(macMatch.reason, "approved_host_mac");
   assert.deepEqual(macMatch.hostnameAddresses, []);
+});
+
+test("approved remote host gate accepts a verified signed peer when the locator drifted", async () => {
+  resetHostIdentityReplayCache();
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
+  const timestamp = "2026-04-24T16:00:00.000Z";
+  const nonce = "roaming-peer-1";
+  const agentId = "federation-sidecar";
+  const payload = buildHostIdentitySignaturePayload({
+    method: "POST",
+    path: "/federation/ingest",
+    host_id: "dans-macbook-pro",
+    agent_id: agentId,
+    timestamp,
+    nonce,
+  });
+  const headers = {
+    "x-master-mold-host-id": "dans-macbook-pro",
+    "x-master-mold-agent-id": agentId,
+    "x-master-mold-timestamp": timestamp,
+    "x-master-mold-nonce": nonce,
+    "x-master-mold-signature": `ed25519:${sign(null, Buffer.from(payload), privateKey).toString("base64url")}`,
+  };
+  const gate = await evaluateApprovedRemoteHostGate({
+    remoteAddress: "10.1.2.54",
+    method: "POST",
+    path: "/federation/ingest",
+    headers,
+    requireSignedRemote: true,
+    receivedAt: "2026-04-24T16:00:02.000Z",
+    hosts: [
+      {
+        host_id: "dans-macbook-pro",
+        enabled: true,
+        metadata: {
+          remote_access: {
+            status: "approved",
+            hostname: "Dans-MacBook-Pro.local",
+            ip_address: "10.1.3.224",
+            allowed_addresses: ["10.1.3.224"],
+            identity_public_key: publicKeyPem,
+            permission_profile: "task_worker",
+          },
+        },
+      },
+    ],
+    deps: {
+      resolveHostnameAddresses: async () => ["10.1.3.224"],
+      lookupLanMacAddress: () => null,
+    },
+  });
+
+  assert.equal(gate?.allowed, true);
+  assert.equal(gate?.reason, "approved_host_identity");
+  assert.equal(gate?.host_id, "dans-macbook-pro");
+  assert.equal(gate?.signature_status, "verified");
+  assert.equal(gate?.approval_scope?.matched_by, "approved_host_identity");
+  assert.equal(gate?.approval_scope?.observed_remote_address, "10.1.2.54");
+});
+
+test("approved remote host gate fails closed on invalid signed identity even when the host is approved", async () => {
+  resetHostIdentityReplayCache();
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
+  const { privateKey: wrongPrivateKey } = generateKeyPairSync("ed25519");
+  const timestamp = "2026-04-24T16:05:00.000Z";
+  const nonce = "roaming-peer-invalid-1";
+  const agentId = "federation-sidecar";
+  const payload = buildHostIdentitySignaturePayload({
+    method: "POST",
+    path: "/federation/ingest",
+    host_id: "dans-macbook-pro",
+    agent_id: agentId,
+    timestamp,
+    nonce,
+  });
+  const headers = {
+    "x-master-mold-host-id": "dans-macbook-pro",
+    "x-master-mold-agent-id": agentId,
+    "x-master-mold-timestamp": timestamp,
+    "x-master-mold-nonce": nonce,
+    "x-master-mold-signature": `ed25519:${sign(null, Buffer.from(payload), wrongPrivateKey).toString("base64url")}`,
+  };
+  const gate = await evaluateApprovedRemoteHostGate({
+    remoteAddress: "10.1.2.54",
+    method: "POST",
+    path: "/federation/ingest",
+    headers,
+    requireSignedRemote: true,
+    receivedAt: "2026-04-24T16:05:02.000Z",
+    hosts: [
+      {
+        host_id: "dans-macbook-pro",
+        enabled: true,
+        metadata: {
+          remote_access: {
+            status: "approved",
+            hostname: "Dans-MacBook-Pro.local",
+            ip_address: "10.1.3.224",
+            allowed_addresses: ["10.1.3.224"],
+            identity_public_key: publicKeyPem,
+            permission_profile: "task_worker",
+          },
+        },
+      },
+    ],
+    deps: {
+      resolveHostnameAddresses: async () => ["10.1.3.224"],
+      lookupLanMacAddress: () => null,
+    },
+  });
+
+  assert.equal(gate?.allowed, false);
+  assert.equal(gate?.reason, "signed_identity_invalid");
+  assert.equal(gate?.host_id, "dans-macbook-pro");
+  assert.equal(gate?.signature_status, "invalid");
 });
 
 test("signed host identity verifies Ed25519 proof and permission scopes deny high-risk tools", () => {

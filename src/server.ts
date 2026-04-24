@@ -62,8 +62,10 @@ import {
   getMemory,
   memoryAppendSchema,
   memoryGetSchema,
+  memoryRecentSchema,
   memoryReflectionCaptureSchema,
   memorySearchSchema,
+  recentMemory,
   searchMemory,
 } from "./tools/memory.js";
 import {
@@ -595,6 +597,7 @@ function federationPayloadSummary(payload: Record<string, unknown>) {
   const host = isRecord(payload.host) ? payload.host : {};
   const desktopContext = isRecord(payload.desktop_context) ? payload.desktop_context : {};
   const localMcp = isRecord(payload.local_mcp) ? payload.local_mcp : {};
+  const sharedSummaries = isRecord(payload.shared_summaries) ? payload.shared_summaries : {};
   const recentEvents = Array.isArray(payload.recent_events) ? payload.recent_events : [];
   return {
     schema_version: readString(payload.schema_version) ?? "unknown",
@@ -605,6 +608,7 @@ function federationPayloadSummary(payload: Record<string, unknown>) {
     capabilities: sanitizeFederationValue(payload.capabilities ?? {}),
     desktop_context: sanitizeFederationValue(desktopContext),
     local_mcp: sanitizeFederationValue(localMcp),
+    shared_summaries: sanitizeFederationValue(sharedSummaries),
     recent_event_count: recentEvents.length,
     recent_events: sanitizeFederationValue(recentEvents.slice(0, 25)),
   };
@@ -2312,6 +2316,10 @@ registerTool("memory.get", "Fetch a memory by id for deterministic debugging.", 
   getMemory(storage, input)
 );
 
+registerTool("memory.recent", "List recent long-term memories in compact chronological order.", memoryRecentSchema, (input) =>
+  recentMemory(storage, input)
+);
+
 registerTool("agent.session_open", "Open or refresh a durable agent session record.", agentSessionOpenSchema, (input) =>
   openAgentSession(storage, input)
 );
@@ -2751,14 +2759,14 @@ registerTool(
   "who_knows",
   "Search local notes and transcripts in the shared MCP knowledge base.",
   whoKnowsSchema,
-  (input) => whoKnows(storage, input)
+  (input) => whoKnows(storage, { ...input, include_federated: input.include_federated ?? false })
 );
 
 registerTool(
   "knowledge.query",
-  "Query local notes and transcripts in the shared MCP knowledge base.",
+  "Query the shared MCP knowledge base, including signed federated memory/task/goal summaries when available.",
   whoKnowsSchema,
-  (input) => whoKnows(storage, input)
+  (input) => whoKnows(storage, { ...input, include_federated: input.include_federated ?? true })
 );
 
 registerTool(

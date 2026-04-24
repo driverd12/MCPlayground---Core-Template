@@ -1349,6 +1349,165 @@ export async function approvedHostNetworkMatch(
   return null;
 }
 
+export async function evaluateApprovedRemoteHostGate(input: {
+  remoteAddress: string | null;
+  method: string;
+  path: string;
+  headers: Record<string, unknown>;
+  hosts: unknown[];
+  requireSignedRemote?: boolean;
+  receivedAt?: string;
+  deps?: {
+    resolveHostnameAddresses?: (hostname: string | null) => Promise<string[]>;
+    lookupLanMacAddress?: (remoteAddress: string | null) => string | null;
+  };
+}): Promise<NetworkGateResult | null> {
+  const requestedHostId = headerValue(input.headers, "x-master-mold-host-id");
+  const receivedAt = input.receivedAt ?? new Date().toISOString();
+  const parsedReceivedAt = Date.parse(receivedAt);
+  const verificationNowMs = Number.isFinite(parsedReceivedAt) ? parsedReceivedAt : Date.now();
+  let signatureFailure: NetworkGateResult | null = null;
+
+  for (const rawHost of input.hosts) {
+    const host = readRecord(rawHost);
+    if (!host || host.enabled === false) {
+      continue;
+    }
+    const metadata = readRecord(host.metadata) ?? {};
+    const remoteAccess = readRecord(metadata.remote_access) ?? {};
+    if (String(remoteAccess.status ?? "").trim() !== "approved") {
+      continue;
+    }
+
+    const hostId = String(host.host_id ?? "").trim() || null;
+    const signatureCandidate = Boolean(requestedHostId && hostId && requestedHostId === hostId);
+    const match = await approvedHostNetworkMatch(input.remoteAddress, host, input.deps ?? {});
+    if (!match && !signatureCandidate) {
+      continue;
+    }
+
+    const permissionProfile = readRemotePermissionProfile(remoteAccess.permission_profile) ?? "task_worker";
+    const signature = verifyHostIdentitySignature({
+      method: input.method,
+      path: input.path,
+      headers: input.headers,
+      host,
+      enforceReplayProtection: true,
+      nowMs: verificationNowMs,
+    });
+    const signatureVerification = signatureVerificationResult({
+      status: signature.status,
+      signed_at: signature.signed_at,
+      signed_agent_id: signature.agent_id,
+      identity_public_key_fingerprint: signature.fingerprint,
+    });
+    const approvalScope = buildApprovalScope({
+      status: "approved",
+      matched_by: match?.reason ?? "approved_host_identity",
+      permission_profile: permissionProfile,
+      remoteAccess,
+      hostname: match?.hostname ?? readStringValue(remoteAccess.hostname),
+      mac_address: match?.observedMac ?? normalizeMacAddress(remoteAccess.mac_address),
+      observed_remote_address: input.remoteAddress,
+      hostname_resolved_addresses: match?.hostnameAddresses ?? [],
+      identity_public_key_fingerprint: signature.fingerprint,
+    });
+
+    if (match) {
+      if (!signature.ok || (input.requireSignedRemote && signature.status === "not_configured")) {
+        return {
+          allowed: false,
+          remote_address: input.remoteAddress,
+          reason: `signed_identity_${signature.status}`,
+          host_id: hostId,
+          host_hostname: match.hostname,
+          host_mac_address: match.observedMac ?? normalizeMacAddress(remoteAccess.mac_address),
+          display_name: String(remoteAccess.display_name ?? "").trim() || null,
+          agent_runtime: String(remoteAccess.agent_runtime ?? "").trim() || null,
+          model_label: String(remoteAccess.model_label ?? "").trim() || null,
+          permission_profile: permissionProfile,
+          signature_status: signature.status,
+          signed_at: signature.signed_at,
+          received_at: receivedAt,
+          signature_verification: signatureVerification,
+          approval_scope: approvalScope,
+          whitelist_scope: approvalScope,
+          signed_agent_id: signature.agent_id,
+          identity_public_key_fingerprint: signature.fingerprint,
+        };
+      }
+      return {
+        allowed: true,
+        remote_address: input.remoteAddress,
+        reason: match.reason,
+        host_id: hostId,
+        host_hostname: match.hostname,
+        host_mac_address: match.observedMac ?? normalizeMacAddress(remoteAccess.mac_address),
+        display_name: String(remoteAccess.display_name ?? "").trim() || null,
+        agent_runtime: String(remoteAccess.agent_runtime ?? "").trim() || null,
+        model_label: String(remoteAccess.model_label ?? "").trim() || null,
+        permission_profile: permissionProfile,
+        signature_status: signature.status,
+        signed_at: signature.signed_at,
+        received_at: receivedAt,
+        signature_verification: signatureVerification,
+        approval_scope: approvalScope,
+        whitelist_scope: approvalScope,
+        signed_agent_id: signature.agent_id,
+        identity_public_key_fingerprint: signature.fingerprint,
+      };
+    }
+
+    if (signature.ok && signature.status === "verified") {
+      return {
+        allowed: true,
+        remote_address: input.remoteAddress,
+        reason: "approved_host_identity",
+        host_id: hostId,
+        host_hostname: readStringValue(remoteAccess.hostname),
+        host_mac_address: normalizeMacAddress(remoteAccess.mac_address),
+        display_name: String(remoteAccess.display_name ?? "").trim() || null,
+        agent_runtime: String(remoteAccess.agent_runtime ?? "").trim() || null,
+        model_label: String(remoteAccess.model_label ?? "").trim() || null,
+        permission_profile: permissionProfile,
+        signature_status: signature.status,
+        signed_at: signature.signed_at,
+        received_at: receivedAt,
+        signature_verification: signatureVerification,
+        approval_scope: approvalScope,
+        whitelist_scope: approvalScope,
+        signed_agent_id: signature.agent_id,
+        identity_public_key_fingerprint: signature.fingerprint,
+      };
+    }
+
+    if (signatureCandidate && signature.status !== "not_configured" && signature.status !== "host_mismatch") {
+      signatureFailure = {
+        allowed: false,
+        remote_address: input.remoteAddress,
+        reason: `signed_identity_${signature.status}`,
+        host_id: hostId,
+        host_hostname: readStringValue(remoteAccess.hostname),
+        host_mac_address: normalizeMacAddress(remoteAccess.mac_address),
+        display_name: String(remoteAccess.display_name ?? "").trim() || null,
+        agent_runtime: String(remoteAccess.agent_runtime ?? "").trim() || null,
+        model_label: String(remoteAccess.model_label ?? "").trim() || null,
+        permission_profile: permissionProfile,
+        signature_status: signature.status,
+        signed_at: signature.signed_at,
+        received_at: receivedAt,
+        signature_verification: signatureVerification,
+        approval_scope: approvalScope,
+        whitelist_scope: approvalScope,
+        signed_agent_id: signature.agent_id,
+        identity_public_key_fingerprint: signature.fingerprint,
+      };
+    }
+  }
+
+  return signatureFailure;
+}
+
 function signatureVerificationResult(input: {
   status: NetworkGateResult["signature_status"];
   signed_at?: string | null;
@@ -1591,82 +1750,17 @@ async function validateNetworkClient(req: http.IncomingMessage, options: HttpOpt
   }
 
   const hosts = options.trustedRemoteHosts ? await Promise.resolve(options.trustedRemoteHosts()) : [];
-  for (const rawHost of hosts) {
-    const host = readRecord(rawHost);
-    if (!host || host.enabled === false) {
-      continue;
-    }
-    const match = await approvedHostNetworkMatch(remoteAddress, host);
-    if (match) {
-      const requireSignedRemote = process.env.MCP_HTTP_REQUIRE_SIGNED_REMOTE === "1";
-      const permissionProfile = readRemotePermissionProfile(match.remoteAccess.permission_profile) ?? "task_worker";
-      const signature = verifyHostIdentitySignature({
-        method: String(req.method ?? "GET").toUpperCase(),
-        path: req.url ?? "/",
-        headers: req.headers as Record<string, unknown>,
-        host,
-        enforceReplayProtection: true,
-      });
-      const signatureVerification = signatureVerificationResult({
-        status: signature.status,
-        signed_at: signature.signed_at,
-        signed_agent_id: signature.agent_id,
-        identity_public_key_fingerprint: signature.fingerprint,
-      });
-      const approvalScope = buildApprovalScope({
-        status: "approved",
-        matched_by: match.reason,
-        permission_profile: permissionProfile,
-        remoteAccess: match.remoteAccess,
-        hostname: match.hostname,
-        mac_address: match.observedMac ?? normalizeMacAddress(match.remoteAccess.mac_address),
-        observed_remote_address: remoteAddress,
-        hostname_resolved_addresses: match.hostnameAddresses,
-        identity_public_key_fingerprint: signature.fingerprint,
-      });
-      if (!signature.ok || (requireSignedRemote && signature.status === "not_configured")) {
-        return {
-          allowed: false,
-          remote_address: remoteAddress,
-          reason: `signed_identity_${signature.status}`,
-          host_id: String(host.host_id ?? "").trim() || null,
-          host_hostname: match.hostname,
-          host_mac_address: match.observedMac ?? normalizeMacAddress(match.remoteAccess.mac_address),
-          display_name: String(match.remoteAccess.display_name ?? "").trim() || null,
-          agent_runtime: String(match.remoteAccess.agent_runtime ?? "").trim() || null,
-          model_label: String(match.remoteAccess.model_label ?? "").trim() || null,
-          permission_profile: permissionProfile,
-          signature_status: signature.status,
-          signed_at: signature.signed_at,
-          received_at: receivedAt,
-          signature_verification: signatureVerification,
-          approval_scope: approvalScope,
-          whitelist_scope: approvalScope,
-          signed_agent_id: signature.agent_id,
-          identity_public_key_fingerprint: signature.fingerprint,
-        };
-      }
-      return {
-        allowed: true,
-        remote_address: remoteAddress,
-        reason: match.reason,
-        host_id: String(host.host_id ?? "").trim() || null,
-        host_hostname: match.hostname,
-        host_mac_address: match.observedMac ?? normalizeMacAddress(match.remoteAccess.mac_address),
-        display_name: String(match.remoteAccess.display_name ?? "").trim() || null,
-        agent_runtime: String(match.remoteAccess.agent_runtime ?? "").trim() || null,
-        model_label: String(match.remoteAccess.model_label ?? "").trim() || null,
-        permission_profile: permissionProfile,
-        signature_status: signature.status,
-        signed_at: signature.signed_at,
-        received_at: receivedAt,
-        signature_verification: signatureVerification,
-        approval_scope: approvalScope,
-        whitelist_scope: approvalScope,
-        signed_agent_id: signature.agent_id,
-        identity_public_key_fingerprint: signature.fingerprint,
-      };
-    }
+  const approvedHostGate = await evaluateApprovedRemoteHostGate({
+    remoteAddress,
+    method: String(req.method ?? "GET").toUpperCase(),
+    path: req.url ?? "/",
+    headers: req.headers as Record<string, unknown>,
+    hosts,
+    requireSignedRemote: process.env.MCP_HTTP_REQUIRE_SIGNED_REMOTE === "1",
+    receivedAt,
+  });
+  if (approvedHostGate) {
+    return approvedHostGate;
   }
 
   const envAllowed = parseTrustedClientEnv();
