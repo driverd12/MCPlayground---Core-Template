@@ -8013,6 +8013,74 @@ export class Storage {
     return fail();
   }
 
+  cancelTask(params: {
+    task_id: string;
+    reason?: string;
+  }): { cancelled: boolean; reason: string; task?: TaskRecord } {
+    const taskId = params.task_id.trim();
+    if (!taskId) {
+      throw new Error("task_id is required");
+    }
+    const now = new Date().toISOString();
+    const summary = params.reason?.trim() || "Task cancelled by operator.";
+
+    const cancel = this.db.transaction(() => {
+      const existing = this.db
+        .prepare(`SELECT status, finished_at FROM tasks WHERE task_id = ?`)
+        .get(taskId) as Record<string, unknown> | undefined;
+      if (!existing) {
+        return {
+          cancelled: false,
+          reason: "not-found",
+        };
+      }
+      const status = normalizeTaskStatus(existing.status);
+      if (status === "cancelled") {
+        return {
+          cancelled: false,
+          reason: "already-cancelled",
+          task: this.getTaskById(taskId) ?? undefined,
+        };
+      }
+      if (status !== "pending" && status !== "failed") {
+        return {
+          cancelled: false,
+          reason: `not-cancellable:${status}`,
+          task: this.getTaskById(taskId) ?? undefined,
+        };
+      }
+
+      this.db
+        .prepare(
+          `UPDATE tasks
+           SET status = 'cancelled',
+               updated_at = ?,
+               finished_at = ?
+           WHERE task_id = ?`
+        )
+        .run(now, now, taskId);
+      this.db.prepare(`DELETE FROM task_leases WHERE task_id = ?`).run(taskId);
+      this.appendTaskEvent({
+        task_id: taskId,
+        event_type: "cancelled",
+        from_status: status,
+        to_status: "cancelled",
+        summary,
+        details: {
+          cancelled_at: now,
+          prior_finished_at: existing.finished_at ?? null,
+        },
+      });
+      const task = this.getTaskById(taskId);
+      return {
+        cancelled: true,
+        reason: "cancelled",
+        task: task ?? undefined,
+      };
+    });
+    return cancel();
+  }
+
   retryTask(params: {
     task_id: string;
     delay_seconds: number;

@@ -1975,6 +1975,93 @@ test("task.recover_expired requeues abandoned running tasks whose leases have ex
   }
 });
 
+test("task.cancel quarantines failed tasks so they stop counting as active failures", async () => {
+  const testId = `${Date.now()}-task-cancel`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-task-cancel-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const { client } = await openClient(dbPath, {});
+  try {
+    const createdTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create", () => mutationCounter++),
+      objective: "Quarantine this failed task.",
+      project_dir: tempDir,
+      priority: 55,
+    });
+
+    const claimedTask = await callTool(client, "task.claim", {
+      mutation: nextMutation(testId, "task.claim", () => mutationCounter++),
+      worker_id: "worker-1",
+      task_id: createdTask.task.task_id,
+      lease_seconds: 30,
+    });
+    assert.equal(claimedTask.claimed, true);
+
+    const failedTask = await callTool(client, "task.fail", {
+      mutation: nextMutation(testId, "task.fail", () => mutationCounter++),
+      task_id: createdTask.task.task_id,
+      worker_id: "worker-1",
+      error: "confidence below threshold",
+      summary: "Failed during autopilot fallback.",
+    });
+    assert.equal(failedTask.failed, true);
+
+    const cancelled = await callTool(client, "task.cancel", {
+      mutation: nextMutation(testId, "task.cancel", () => mutationCounter++),
+      task_id: createdTask.task.task_id,
+      reason: "Operator quarantined stale autopilot failure.",
+    });
+    assert.equal(cancelled.cancelled, true);
+    assert.equal(cancelled.task.status, "cancelled");
+
+    const cancelledAgain = await callTool(client, "task.cancel", {
+      mutation: nextMutation(testId, "task.cancel.again", () => mutationCounter++),
+      task_id: createdTask.task.task_id,
+      reason: "Repeated operator quarantine should be idempotent.",
+    });
+    assert.equal(cancelledAgain.cancelled, false);
+    assert.equal(cancelledAgain.reason, "already-cancelled");
+
+    const pendingTask = await callTool(client, "task.create", {
+      mutation: nextMutation(testId, "task.create.pending", () => mutationCounter++),
+      objective: "Cancel this pending task before it starts.",
+      project_dir: tempDir,
+      priority: 20,
+    });
+
+    const pendingCancelled = await callTool(client, "task.cancel", {
+      mutation: nextMutation(testId, "task.cancel.pending", () => mutationCounter++),
+      task_id: pendingTask.task.task_id,
+      reason: "Operator cancelled pending task.",
+    });
+    assert.equal(pendingCancelled.cancelled, true);
+    assert.equal(pendingCancelled.task.status, "cancelled");
+
+    const summary = await callTool(client, "task.summary", {
+      running_limit: 10,
+    });
+    assert.equal(summary.counts.failed, 0);
+    assert.equal(summary.counts.cancelled, 2);
+
+    const cancelledTasks = await callTool(client, "task.list", {
+      status: "cancelled",
+      limit: 20,
+    });
+    assert.ok(cancelledTasks.tasks.some((task) => task.task_id === createdTask.task.task_id));
+    assert.ok(cancelledTasks.tasks.some((task) => task.task_id === pendingTask.task.task_id));
+
+    const timeline = await callTool(client, "task.timeline", {
+      task_id: createdTask.task.task_id,
+      limit: 20,
+    });
+    assert.ok(timeline.events.some((event) => event.event_type === "cancelled"));
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("kernel.summary reports operator-facing state across goals, tasks, sessions, and events", async () => {
   const testId = `${Date.now()}-kernel-summary`;
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-core-template-kernel-summary-test-"));

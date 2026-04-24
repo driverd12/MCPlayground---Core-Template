@@ -180,6 +180,12 @@ export const taskFailSchema = z.object({
   usage: budgetUsageSchema.optional(),
 });
 
+export const taskCancelSchema = z.object({
+  mutation: mutationSchema,
+  task_id: z.string().min(1),
+  reason: z.string().optional(),
+});
+
 export const taskRetrySchema = z.object({
   mutation: mutationSchema,
   task_id: z.string().min(1),
@@ -1056,6 +1062,20 @@ export async function taskFail(storage: Storage, input: z.infer<typeof taskFailS
       });
       return failed;
     },
+  });
+}
+
+export async function taskCancel(storage: Storage, input: z.infer<typeof taskCancelSchema>) {
+  return runIdempotentMutation({
+    storage,
+    tool_name: "task.cancel",
+    mutation: input.mutation,
+    payload: input,
+    execute: () =>
+      storage.cancelTask({
+        task_id: input.task_id,
+        reason: input.reason,
+      }),
   });
 }
 

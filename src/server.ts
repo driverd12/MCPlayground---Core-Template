@@ -221,6 +221,8 @@ import {
   taskCreate,
   taskCreateSchema,
   taskExecutionSchema,
+  taskCancel,
+  taskCancelSchema,
   taskFail,
   taskFailSchema,
   taskHeartbeat,
@@ -2815,6 +2817,10 @@ registerTool("task.heartbeat", "Renew a leased task claim during long-running ex
 
 registerTool("task.complete", "Mark a running task as completed and release its lease.", taskCompleteSchema, (input) =>
   taskComplete(storage, input)
+);
+
+registerTool("task.cancel", "Cancel a pending or failed task so it no longer pages operators as active failed work.", taskCancelSchema, (input) =>
+  taskCancel(storage, input)
 );
 
 registerTool("task.fail", "Mark a running task as failed and release its lease.", taskFailSchema, (input) =>

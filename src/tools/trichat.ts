@@ -790,7 +790,10 @@ type TriChatAutopilotTickResult = {
   reason: string | null;
 };
 
+const REQUIRED_AUTOPILOT_SAFE_COMMAND_ALLOWLIST = ["rg "];
+
 const DEFAULT_AUTOPILOT_COMMAND_ALLOWLIST = [
+  ...REQUIRED_AUTOPILOT_SAFE_COMMAND_ALLOWLIST,
   "npm ",
   "npx ",
   "pnpm ",
@@ -7714,7 +7717,10 @@ function resolveAutopilotConfig(
   const allowlistRaw = Array.isArray((input as { command_allowlist?: string[] } | null)?.command_allowlist)
     ? (input as { command_allowlist?: string[] }).command_allowlist ?? []
     : fallback.command_allowlist;
-  const allowlist = dedupeNonEmptyCommands(allowlistRaw);
+  const allowlistSeed = dedupeNonEmptyCommands(allowlistRaw);
+  const allowlist = mergeAutopilotCommandAllowlist(
+    allowlistSeed.length > 0 ? allowlistSeed : fallback.command_allowlist
+  );
   const executeBackendRaw = String(
     (input as { execute_backend?: string } | null)?.execute_backend ?? fallback.execute_backend
   )
@@ -7770,7 +7776,7 @@ function resolveAutopilotConfig(
     ),
     bridge_dry_run: Boolean((input as { bridge_dry_run?: boolean } | null)?.bridge_dry_run ?? fallback.bridge_dry_run),
     execute_enabled: Boolean((input as { execute_enabled?: boolean } | null)?.execute_enabled ?? fallback.execute_enabled),
-    command_allowlist: allowlist.length > 0 ? allowlist : [...DEFAULT_AUTOPILOT_COMMAND_ALLOWLIST],
+    command_allowlist: allowlist.length > 0 ? allowlist : mergeAutopilotCommandAllowlist(DEFAULT_AUTOPILOT_COMMAND_ALLOWLIST),
     execute_backend: executeBackend,
     tmux_session_name:
       String((input as { tmux_session_name?: string } | null)?.tmux_session_name ?? fallback.tmux_session_name).trim() ||
@@ -8283,6 +8289,13 @@ function dedupeNonEmptyCommands(values: string[]): string[] {
     }
   }
   return [...deduped];
+}
+
+function mergeAutopilotCommandAllowlist(values: string[] | null | undefined): string[] {
+  return dedupeNonEmptyCommands([
+    ...REQUIRED_AUTOPILOT_SAFE_COMMAND_ALLOWLIST,
+    ...(Array.isArray(values) ? values : []),
+  ]);
 }
 
 function normalizeStringArray(value: unknown): string[] {

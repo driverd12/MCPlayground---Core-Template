@@ -412,6 +412,7 @@ test("patient.zero arms and disarms explicit elevated local control with an oper
       action: "status",
     });
     assert.equal(autopilot.config.execute_enabled, true);
+    assert.ok(autopilot.config.command_allowlist.includes("rg"));
     assert.ok(autopilot.config.command_allowlist.includes("codex"));
     assert.ok(autopilot.config.command_allowlist.includes("claude"));
     assert.ok(autopilot.config.command_allowlist.includes("cursor"));
