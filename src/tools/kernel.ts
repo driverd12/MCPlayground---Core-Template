@@ -17,6 +17,7 @@ import {
   type EvalSuiteRecord,
   type EvalSuitesStateRecord,
   type GoalRecord,
+  type KernelSignalOverviewRecord,
   type ModelRouterBackendRecord,
   type ModelRouterStateRecord,
   type ObservabilityDocumentRecord,
@@ -25,6 +26,7 @@ import {
   type PlanRecord,
   type PlanStepRecord,
   type ReactionEngineStateRecord,
+  type RuntimeEventRecord,
   type StorageGuardStatusRecord,
   type TaskRecord,
   type TaskSummaryRecord,
@@ -1572,19 +1574,9 @@ function summarizeEvalSuites(storage: Storage): EvalSummary {
   };
 }
 
-function summarizeObservability(storage: Storage): ObservabilitySummary {
-  const summary = storage.summarizeObservabilityDocuments({
-    top_count_limit: 6,
-    include_level_counts: false,
-    include_event_type_counts: false,
-  });
-  const recentWindow = new Date(Date.now() - 15 * 60_000).toISOString();
-  const recentAlerts = storage.listObservabilityDocuments({
-    since: recentWindow,
-    levels: ["critical", "error"],
-    limit: 24,
-  });
-  const actionableRecentAlerts = recentAlerts.filter((entry) => !isBenignObservabilityDocument(entry));
+function summarizeObservabilitySignals(signalOverview: KernelSignalOverviewRecord): ObservabilitySummary {
+  const summary = signalOverview.observability_overview;
+  const actionableRecentAlerts = signalOverview.recent_observability_alerts.filter((entry) => !isBenignObservabilityDocument(entry));
   const actionableRecentCritical = actionableRecentAlerts.filter((entry) => entry.level === "critical");
   const actionableRecentErrors = actionableRecentAlerts.filter((entry) => entry.level === "error");
   return {
@@ -1596,10 +1588,7 @@ function summarizeObservability(storage: Storage): ObservabilitySummary {
     source_kind_counts: summary.source_kind_counts.slice(0, 6),
     service_counts: summary.service_counts.slice(0, 6),
     host_counts: summary.host_counts.slice(0, 6),
-    recent_documents: storage.listObservabilityDocuments({
-      since: recentWindow,
-      limit: 6,
-    }),
+    recent_documents: signalOverview.recent_observability_documents,
   };
 }
 
@@ -1943,7 +1932,10 @@ function summarizeSetupDiagnostics(params: {
   };
 }
 
-function buildRecentRouterSuppressionDecisions(storage: Storage, params?: { limit?: number; max_age_seconds?: number }) {
+function buildRecentRouterSuppressionDecisions(
+  events: RuntimeEventRecord[],
+  params?: { limit?: number; max_age_seconds?: number }
+) {
   const limit =
     typeof params?.limit === "number" && Number.isFinite(params.limit) ? Math.max(1, Math.min(8, Math.trunc(params.limit))) : 5;
   const maxAgeSeconds =
@@ -1951,10 +1943,6 @@ function buildRecentRouterSuppressionDecisions(storage: Storage, params?: { limi
       ? Math.max(300, Math.trunc(params.max_age_seconds))
       : 21600;
   const now = Date.now();
-  const events = storage.listRuntimeEvents({
-    event_type: "autonomy.command",
-    limit: Math.max(40, limit * 10),
-  });
   const entries: RouterSuppressionSummary[] = [];
   for (let index = events.length - 1; index >= 0 && entries.length < limit; index -= 1) {
     const event = events[index];
@@ -2410,9 +2398,20 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
   const modelRouterSummary = summarizeModelRouter(storage, {
     effective_worker_fabric: effectiveWorkerFabric,
   });
+  const recentObservabilityWindow = new Date(Date.now() - 15 * 60_000).toISOString();
+  const signalOverview = storage.getKernelSignalOverview({
+    event_since: input.event_since,
+    event_limit: eventLimit,
+    event_top_count_limit: 12,
+    router_suppression_limit: 40,
+    observability_since: recentObservabilityWindow,
+    observability_recent_limit: 6,
+    observability_alert_limit: 24,
+    observability_top_count_limit: 6,
+  });
   const storageHealth = summarizeStorageHealth(storage);
   const evalSummary = summarizeEvalSuites(storage);
-  const observabilitySummary = summarizeObservability(storage);
+  const observabilitySummary = summarizeObservabilitySignals(signalOverview);
   const orgProgramSummary = summarizeOrgPrograms(storage);
   const selfImprovementSummary = summarizeSelfImprovement(storage);
   const autonomyMaintainState = storage.getAutonomyMaintainState();
@@ -2451,7 +2450,8 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
       : false) ||
     ((providerBridgeAgeSeconds ?? Number.POSITIVE_INFINITY) >
       Math.max((autonomyMaintainState?.interval_seconds ?? 120) * 3, 300));
-  const latestRouterSuppression = buildRecentRouterSuppressionDecisions(storage, { limit: 1 })[0] ?? null;
+  const latestRouterSuppression =
+    buildRecentRouterSuppressionDecisions(signalOverview.recent_router_suppression_events, { limit: 1 })[0] ?? null;
   const desktopControlState = storage.getDesktopControlState();
   const desktopControlSummary = summarizeDesktopControlState(desktopControlState);
   const patientZeroState = storage.getPatientZeroState();
@@ -2595,15 +2595,8 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     status: "active",
     limit: 250,
   });
-  const recentEvents = storage.listRuntimeEvents({
-    limit: eventLimit,
-    since: input.event_since,
-  });
-  const eventSummary = storage.summarizeRuntimeEvents({
-    since: input.event_since,
-    top_count_limit: 12,
-    include_entity_type_counts: false,
-  });
+  const recentEvents = signalOverview.recent_runtime_events;
+  const eventSummary = signalOverview.runtime_event_summary;
   const activeLearningAgents = new Set(activeLearningEntries.map((entry) => entry.agent_id));
   const activeSessionAgentIds = [...new Set(activeSessions.map((session) => session.agent_id))];
   const uncoveredActiveSessionAgents = activeSessionAgentIds

@@ -958,6 +958,30 @@ export type ObservabilitySearchHit = {
   document: ObservabilityDocumentRecord;
 };
 
+export type KernelSignalOverviewRecord = {
+  recent_runtime_events: RuntimeEventRecord[];
+  runtime_event_summary: {
+    count: number;
+    max_event_seq: number;
+    latest_created_at: string | null;
+    event_type_counts: Array<{ event_type: string; count: number }>;
+    entity_type_counts: Array<{ entity_type: string | null; count: number }>;
+  };
+  recent_router_suppression_events: RuntimeEventRecord[];
+  observability_overview: {
+    count: number;
+    latest_created_at: string | null;
+    index_name_counts: Array<{ index_name: string; count: number }>;
+    source_kind_counts: Array<{ source_kind: string; count: number }>;
+    level_counts: Array<{ level: string | null; count: number }>;
+    service_counts: Array<{ service: string | null; count: number }>;
+    host_counts: Array<{ host_id: string | null; count: number }>;
+    event_type_counts: Array<{ event_type: string | null; count: number }>;
+  };
+  recent_observability_documents: ObservabilityDocumentRecord[];
+  recent_observability_alerts: ObservabilityDocumentRecord[];
+};
+
 export type TranscriptAutoSquishStateRecord = {
   enabled: boolean;
   interval_seconds: number;
@@ -11543,6 +11567,54 @@ export class Storage {
         event_type: asNullableString(row.event_type),
         count: Number(row.count ?? 0),
       })),
+    };
+  }
+
+  getKernelSignalOverview(params?: {
+    event_since?: string;
+    event_limit?: number;
+    event_top_count_limit?: number;
+    router_suppression_limit?: number;
+    observability_since?: string;
+    observability_recent_limit?: number;
+    observability_alert_limit?: number;
+    observability_top_count_limit?: number;
+  }): KernelSignalOverviewRecord {
+    const eventLimit = parseBoundedInt(params?.event_limit, 20, 1, 200);
+    const eventTopCountLimit = parseBoundedInt(params?.event_top_count_limit, 12, 1, 100);
+    const routerSuppressionLimit = parseBoundedInt(params?.router_suppression_limit, 40, 1, 200);
+    const observabilityRecentLimit = parseBoundedInt(params?.observability_recent_limit, 6, 1, 200);
+    const observabilityAlertLimit = parseBoundedInt(params?.observability_alert_limit, 24, 1, 200);
+    const observabilityTopCountLimit = parseBoundedInt(params?.observability_top_count_limit, 6, 1, 100);
+
+    return {
+      recent_runtime_events: this.listRuntimeEvents({
+        limit: eventLimit,
+        since: params?.event_since,
+      }),
+      runtime_event_summary: this.summarizeRuntimeEvents({
+        since: params?.event_since,
+        top_count_limit: eventTopCountLimit,
+        include_entity_type_counts: false,
+      }),
+      recent_router_suppression_events: this.listRuntimeEvents({
+        event_type: "autonomy.command",
+        limit: routerSuppressionLimit,
+      }),
+      observability_overview: this.summarizeObservabilityDocuments({
+        top_count_limit: observabilityTopCountLimit,
+        include_level_counts: false,
+        include_event_type_counts: false,
+      }),
+      recent_observability_documents: this.listObservabilityDocuments({
+        since: params?.observability_since,
+        limit: observabilityRecentLimit,
+      }),
+      recent_observability_alerts: this.listObservabilityDocuments({
+        since: params?.observability_since,
+        levels: ["critical", "error"],
+        limit: observabilityAlertLimit,
+      }),
     };
   }
 
