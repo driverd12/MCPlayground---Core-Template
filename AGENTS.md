@@ -56,6 +56,13 @@ Do not invent a second ingress path for shell, office, or external clients.
 - `trichat.autopilot` `{"action":"status"}`, `trichat.tmux_controller` `{"action":"status"}`
 - `pack.hooks.list`, `trichat.summary`
 
+**Desktop-control fallback:**
+- MASTER MOLD exposes a local macOS host-control lane through `desktop.control`, `desktop.observe`, `desktop.act`, and `desktop.listen`.
+- Use it when a normal shell channel is stale, pointed at a missing path, or when an agent must interact with the real Terminal/Cursor/Codex desktop session.
+- Prefer clipboard-paste Terminal commands that redirect output to `/tmp/...` and copy results back with `pbcopy`; do not rely on long `type_text` input.
+- Desktop actions are operator-visible and non-canonical. Record durable evidence back through MCP artifacts, run ledgers, task results, memories, or decisions.
+- Follow the full protocol in `docs/DESKTOP_CONTROL_AGENT_PROTOCOL.md`.
+
 ---
 
 ## Non-Negotiables

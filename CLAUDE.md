@@ -47,6 +47,12 @@ Do not invent a second ingress path for shell, office, or external clients.
 - `health.tools`, `health.storage`, `migration.status`
 - `trichat.autopilot` `{"action":"status"}`, `trichat.tmux_controller` `{"action":"status"}`
 
+**Desktop-control fallback:**
+- MASTER MOLD exposes a macOS host-control lane through `desktop.control`, `desktop.observe`, `desktop.act`, and `desktop.listen`.
+- Use it when shell execution is stale, stuck in a missing path, or when visible Terminal/Cursor/Codex interaction is required.
+- Prefer clipboard-paste Terminal commands that redirect output to `/tmp/...` and copy results back with `pbcopy`; keep durable truth in MCP artifacts, tasks, run ledgers, memories, and decisions.
+- Follow `docs/DESKTOP_CONTROL_AGENT_PROTOCOL.md` before using desktop actions.
+
 **Visible Claude sidecar:**
 - `autonomy.ide_ingress` remains the durable source of truth for operator and IDE work.
 - On macOS, when `TRICHAT_VISIBLE_CLAUDE_MIRROR_ON_INGRESS=1`, explicit Claude-targeted ingress may mirror the already-persisted objective into the visible Claude terminal.

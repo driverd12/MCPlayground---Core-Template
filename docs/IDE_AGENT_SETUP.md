@@ -117,6 +117,23 @@ Use this starter instruction set for local agents:
 5. Persist summaries and decisions (`memory.append`, `decision.link`, `adr.create`).
 6. Run `preflight.check` and `postflight.verify` around risky changes.
 
+## Desktop-Control Fallback
+
+MASTER MOLD can control the local macOS desktop through MCP tools when a client shell is stale or when visible app interaction is required.
+
+Primary tools:
+
+- `desktop.control` - enable and heartbeat host-control capability.
+- `desktop.observe` - inspect frontmost app, clipboard, or screenshots.
+- `desktop.act` - open apps, set clipboard, paste, type, and press keys.
+- `desktop.listen` - optional microphone lane, disabled unless explicitly allowed.
+
+Use this lane as a fallback, not as the default command runner. The reliable pattern is to paste commands into real Terminal, redirect output to `/tmp/...`, then `pbcopy` the result so the agent can read it with `desktop.observe`.
+
+Reference:
+
+- [Desktop Control Agent Protocol](./DESKTOP_CONTROL_AGENT_PROTOCOL.md)
+
 ## Setup Validation Checklist
 
 Run these checks from your client:

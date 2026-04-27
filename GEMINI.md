@@ -33,6 +33,12 @@ npm run production:doctor      # Full production readiness check
     - Local Ollama/MLX is the default first-pass lane; escalate to hosted bridges only when explicit or when local evidence is insufficient.
 4.  **Execute**: Use GSD-style work packets via `task.compile` or `autonomy.command`.
 
+## Desktop-Control Fallback
+
+MASTER MOLD can operate the local macOS desktop through `desktop.control`, `desktop.observe`, `desktop.act`, and `desktop.listen`.
+
+Use this lane when the normal shell is stale, pointed at a missing path, or when a visible Terminal/Cursor/Codex interaction is required. Prefer clipboard-paste Terminal commands that redirect output to `/tmp/...` and copy results back with `pbcopy`; record meaningful outcomes back into MCP artifacts, tasks, run ledgers, memories, or decisions. See `docs/DESKTOP_CONTROL_AGENT_PROTOCOL.md` for the full protocol.
+
 ## Execution Rules (Non-Negotiables)
 
 - **Work Packets**: Must have one owner, bounded objective, explicit success criteria, explicit evidence requirements, explicit rollback notes, and an explicit stop condition.

@@ -82,6 +82,13 @@ Run these tools:
 6. `trichat.tmux_controller` with `{"action":"status"}`
 7. `pack.hooks.list`
 
+Also confirm the desktop bridge is discoverable on macOS:
+
+1. `desktop.control` with `{"action":"heartbeat"}`
+2. `desktop.observe` with `{"action":"frontmost_app"}`
+
+If a Codex/Cursor shell channel is stale or pointed at a missing path, use the desktop-control fallback instead of getting stuck. See [Desktop Control Agent Protocol](./DESKTOP_CONTROL_AGENT_PROTOCOL.md).
+
 ## 7) First Runtime Smoke Checks
 
 From the repo root:

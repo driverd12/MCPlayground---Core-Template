@@ -13,7 +13,6 @@ This is the centralized human-facing docs hub for MASTER MOLD.
 ## Architecture and Diagrams
 
 - [System Interconnects](./SYSTEM_INTERCONNECTS.md)
-- [Federation Mesh](./FEDERATION_MESH.md)
 - [Architecture Pitch](./ARCHITECTURE_PITCH.md)
 - [Provider Bridge Matrix](./PROVIDER_BRIDGE_MATRIX.md)
 - [Ring Leader MCP Ops](./RING_LEADER_MCP_OPS.md)
@@ -22,6 +21,7 @@ This is the centralized human-facing docs hub for MASTER MOLD.
 
 - [Presentation Runbook](./PRESENTATION_RUNBOOK.md)
 - [Security](./SECURITY.md)
+- [Desktop Control Agent Protocol](./DESKTOP_CONTROL_AGENT_PROTOCOL.md)
 - [Coworker Quickstart (Cursor + Codex)](./COWORKER_QUICKSTART_CURSOR_CODEX.md)
 - [IDE + Agent Setup Guide](./IDE_AGENT_SETUP.md)
 - [Transport Connection Guide](./CONNECT.md)
