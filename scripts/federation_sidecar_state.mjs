@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
-export const SIDECAR_STATE_SCHEMA_VERSION = "master-mold-federation-sidecar-state-v2";
+export const SIDECAR_STATE_SCHEMA_VERSION = "master-mold-federation-sidecar-state-v3";
 
 export function safeId(value, fallback = "host") {
   return (
@@ -76,9 +77,15 @@ export function loadSidecarState(filePath) {
   const peerResults = state.peer_results && typeof state.peer_results === "object" && !Array.isArray(state.peer_results)
     ? state.peer_results
     : {};
+  const outbox = Array.isArray(state.outbox) ? state.outbox.filter((entry) => entry && typeof entry === "object") : [];
+  const retryLedger = Array.isArray(state.retry_ledger)
+    ? state.retry_ledger.filter((entry) => entry && typeof entry === "object").slice(-100)
+    : [];
   return {
     ...state,
     peer_results: peerResults,
+    outbox,
+    retry_ledger: retryLedger,
   };
 }
 
@@ -103,6 +110,23 @@ function normalizedPeerResult(send, attemptAt, generatedAt, sequence, previous) 
   const previousSuccessCount = Number(previous.success_count || 0);
   const previousFailureCount = Number(previous.failure_count || 0);
   const previousConsecutiveFailures = Number(previous.consecutive_failures || 0);
+  const result = send?.response && typeof send.response === "object" && !Array.isArray(send.response)
+    ? send.response.result && typeof send.response.result === "object" && !Array.isArray(send.response.result)
+      ? send.response.result
+      : send.response
+    : {};
+  const responseSequence = Number.isFinite(Number(result.sequence)) ? Math.trunc(Number(result.sequence)) : sequence ?? null;
+  const persisted = Boolean(result.event_id || result.event_seq);
+  const processed = ok && result.worker_fabric_heartbeat_ok !== false;
+  const consecutiveFailures = ok ? 0 : previousConsecutiveFailures + 1;
+  const nextRetryMs = !ok ? Date.parse(attemptAt) + Math.min(3600, Math.max(30, 2 ** Math.min(consecutiveFailures, 6) * 15)) * 1000 : Number.NaN;
+  const previousResendWindow = Array.isArray(previous.resend_window_sequences)
+    ? previous.resend_window_sequences.map((entry) => Number(entry)).filter((entry) => Number.isFinite(entry))
+    : [];
+  const resendWindow = ok || persisted
+    ? previousResendWindow.filter((entry) => entry !== responseSequence)
+    : [...new Set([...previousResendWindow, responseSequence].filter((entry) => Number.isFinite(Number(entry))))].slice(-10);
+  const errorText = ok ? null : compactSidecarText(send.error || send.response?.error || send.response?.raw || "", 500);
   return {
     peer,
     last_attempt_at: attemptAt,
@@ -110,14 +134,103 @@ function normalizedPeerResult(send, attemptAt, generatedAt, sequence, previous) 
     last_sequence: sequence ?? previous.last_sequence ?? null,
     last_ok: ok,
     last_http_status: Number.isFinite(Number(send.status)) ? Number(send.status) : null,
-    last_error: ok ? null : compactSidecarText(send.error || send.response?.error || send.response?.raw || "", 500),
+    last_error: errorText,
     last_response: compactSidecarValue(send.response ?? null),
     last_ok_at: ok ? attemptAt : previous.last_ok_at ?? null,
     last_error_at: ok ? previous.last_error_at ?? null : attemptAt,
     success_count: ok ? previousSuccessCount + 1 : previousSuccessCount,
     failure_count: ok ? previousFailureCount : previousFailureCount + 1,
-    consecutive_failures: ok ? 0 : previousConsecutiveFailures + 1,
+    consecutive_failures: consecutiveFailures,
+    ack_persisted_sequence: persisted ? responseSequence : previous.ack_persisted_sequence ?? null,
+    ack_event_id: persisted ? String(result.event_id || "") || (previous.ack_event_id ?? null) : previous.ack_event_id ?? null,
+    ack_event_seq: persisted && Number.isFinite(Number(result.event_seq)) ? Number(result.event_seq) : previous.ack_event_seq ?? null,
+    ack_persisted_at: persisted ? attemptAt : previous.ack_persisted_at ?? null,
+    ack_processed_sequence: processed ? responseSequence : previous.ack_processed_sequence ?? null,
+    ack_processed_at: processed ? attemptAt : previous.ack_processed_at ?? null,
+    last_processing_error: persisted && !processed ? errorText : ok ? null : previous.last_processing_error ?? null,
+    last_processing_error_at: persisted && !processed ? attemptAt : ok ? previous.last_processing_error_at ?? null : previous.last_processing_error_at ?? null,
+    retry_count: consecutiveFailures,
+    next_retry_at: Number.isFinite(nextRetryMs) ? new Date(nextRetryMs).toISOString() : null,
+    resend_window_sequences: resendWindow,
   };
+}
+
+function payloadDigest(payload) {
+  if (payload === undefined) {
+    return null;
+  }
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+function payloadBytes(payload) {
+  if (payload === undefined) {
+    return 0;
+  }
+  return Buffer.byteLength(JSON.stringify(payload));
+}
+
+function updateOutbox(previousOutbox, input, peerResults) {
+  const sequence = Number.isFinite(Number(input.sequence)) ? Number(input.sequence) : null;
+  if (sequence === null) {
+    return Array.isArray(previousOutbox) ? previousOutbox.slice(-25) : [];
+  }
+  const sends = input.sends || [];
+  const peerKeys = sends.map((send) => normalizePeerUrl(send.peer)).filter(Boolean);
+  const pendingPeers = peerKeys.filter((peer) => {
+    const result = peerResults[peer];
+    return !result || (result.ack_persisted_sequence !== sequence && result.ack_processed_sequence !== sequence);
+  });
+  const acknowledgedPeers = peerKeys.filter((peer) => Number(peerResults[peer]?.ack_persisted_sequence) === sequence);
+  const processedPeers = peerKeys.filter((peer) => Number(peerResults[peer]?.ack_processed_sequence) === sequence);
+  const existing = (previousOutbox || []).filter((entry) => Number(entry.sequence) !== sequence);
+  const generatedAt = input.generatedAt ?? null;
+  const expiresAt = generatedAt ? new Date(Date.parse(generatedAt) + 24 * 60 * 60 * 1000).toISOString() : null;
+  const message = {
+    message_id: `${input.streamId ?? "stream"}:${sequence}`,
+    local_host_id: input.hostId ?? null,
+    stream_id: input.streamId ?? null,
+    sequence,
+    generated_at: generatedAt,
+    expires_at: expiresAt,
+    payload_sha256: payloadDigest(input.payload),
+    payload_bytes: payloadBytes(input.payload),
+    peer_count: peerKeys.length,
+    acknowledged_peer_count: acknowledgedPeers.length,
+    processed_peer_count: processedPeers.length,
+    failing_peer_count: peerKeys.length - processedPeers.length,
+    pending_peers: pendingPeers,
+    closed_at: pendingPeers.length === 0 ? input.attemptAt || null : null,
+  };
+  const nowMs = Date.parse(input.attemptAt || new Date().toISOString());
+  return [...existing, message]
+    .filter((entry) => {
+      const expiresMs = Date.parse(entry.expires_at || "");
+      return !Number.isFinite(expiresMs) || !Number.isFinite(nowMs) || expiresMs >= nowMs || !entry.closed_at;
+    })
+    .sort((left, right) => Number(left.sequence || 0) - Number(right.sequence || 0))
+    .slice(-25);
+}
+
+function buildRetryLedgerEntries(input, peerResults) {
+  return (input.sends || []).map((send) => {
+    const peer = normalizePeerUrl(send.peer);
+    const result = peerResults[peer] || {};
+    return {
+      attempt_id: `${input.streamId ?? "stream"}:${input.sequence ?? "unknown"}:${peer}:${input.attemptAt}`,
+      peer_key: peer,
+      message_id: `${input.streamId ?? "stream"}:${input.sequence ?? "unknown"}`,
+      sequence: input.sequence ?? null,
+      attempted_at: input.attemptAt || null,
+      target_peer_url: send.target_peer ?? send.peer ?? null,
+      http_status: Number.isFinite(Number(send.status)) ? Number(send.status) : null,
+      ok: send.ok === true,
+      error_text: send.ok === true ? null : compactSidecarText(send.error || send.response?.error || send.response?.raw || "", 500),
+      response_json: compactSidecarValue(send.response ?? null),
+      next_retry_at: result.next_retry_at ?? null,
+      locator_source: send.locator_source ?? null,
+      matched_host_id: send.matched_host_id ?? null,
+    };
+  });
 }
 
 export function recordSidecarCycle(filePath, input) {
@@ -137,6 +250,8 @@ export function recordSidecarCycle(filePath, input) {
       peerResults[peer] && typeof peerResults[peer] === "object" ? peerResults[peer] : {}
     );
   }
+  const outbox = updateOutbox(state.outbox, input, peerResults);
+  const retryLedger = [...(state.retry_ledger || []), ...buildRetryLedgerEntries(input, peerResults)].slice(-100);
   const nextState = {
     ...state,
     schema_version: SIDECAR_STATE_SCHEMA_VERSION,
@@ -149,6 +264,8 @@ export function recordSidecarCycle(filePath, input) {
     last_cycle_generated_at: input.generatedAt ?? null,
     last_cycle_ok: (input.sends || []).every((entry) => entry.ok === true),
     peer_results: peerResults,
+    outbox,
+    retry_ledger: retryLedger,
   };
   writeJsonFile(filePath, nextState);
   return nextState;
@@ -214,7 +331,13 @@ export function matchSidecarPeerResultToHost(peerResults, host) {
 
 export function summarizeSidecarState(filePath, state) {
   const peerResults = Object.values(state?.peer_results || {}).filter((entry) => entry && typeof entry === "object");
+  const outbox = Array.isArray(state?.outbox) ? state.outbox.filter((entry) => entry && typeof entry === "object") : [];
+  const pendingOutbox = outbox.filter((entry) => !entry.closed_at && Array.isArray(entry.pending_peers) && entry.pending_peers.length > 0);
   const lastCycleAt = state?.last_cycle_at ? String(state.last_cycle_at) : null;
+  const oldestPendingAt = pendingOutbox
+    .map((entry) => Date.parse(String(entry.generated_at || "")))
+    .filter((entry) => Number.isFinite(entry))
+    .sort((left, right) => left - right)[0];
   return {
     present: fs.existsSync(filePath),
     path: filePath,
@@ -225,5 +348,16 @@ export function summarizeSidecarState(filePath, state) {
     peer_count: peerResults.length,
     ok_peer_count: peerResults.filter((entry) => entry.last_ok === true).length,
     failing_peer_count: peerResults.filter((entry) => entry.last_ok !== true).length,
+    outbox_depth: pendingOutbox.length,
+    oldest_pending_age_seconds: Number.isFinite(oldestPendingAt) ? Math.max(0, Math.round((Date.now() - oldestPendingAt) / 1000)) : null,
+    ack_cursor_min_sequence:
+      peerResults.length > 0
+        ? Math.min(...peerResults.map((entry) => Number(entry.ack_persisted_sequence || 0)).filter((entry) => Number.isFinite(entry)))
+        : null,
+    processed_cursor_min_sequence:
+      peerResults.length > 0
+        ? Math.min(...peerResults.map((entry) => Number(entry.ack_processed_sequence || 0)).filter((entry) => Number.isFinite(entry)))
+        : null,
+    retry_ledger_count: Array.isArray(state?.retry_ledger) ? state.retry_ledger.length : 0,
   };
 }

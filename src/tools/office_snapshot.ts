@@ -4,6 +4,8 @@ import { summarizePatientZeroState } from "../patient_zero_plane.js";
 import { buildOfficeGuiSnapshot } from "../office_gui_snapshot.js";
 import {
   type AgentSessionRecord,
+  type KernelSignalOverviewRecord,
+  type RuntimeEventRecord,
   type RuntimeWorkerSessionRecord,
   type TaskRecord,
   type TriChatAdapterTelemetrySummaryRecord,
@@ -902,12 +904,84 @@ function buildRosterPayload(
   };
 }
 
-function buildKernelPayload(storage: Storage, summary: TaskSummaryPayload, sessions: AgentSessionListPayload) {
-  return kernelSummary(storage, {
-    session_limit: Math.max(8, sessions.count || 8),
-    event_limit: 12,
-    task_running_limit: Math.max(8, summary.running.length || 8),
+function emptyKernelSignalOverview(): KernelSignalOverviewRecord {
+  return {
+    recent_runtime_events: [],
+    runtime_event_summary: {
+      count: 0,
+      max_event_seq: 0,
+      latest_created_at: null,
+      event_type_counts: [],
+      entity_type_counts: [],
+    },
+    recent_router_suppression_events: [],
+    recent_federation_ingest_warning_events: [],
+    incoming_federation_peers: [],
+    observability_overview: {
+      count: 0,
+      latest_created_at: null,
+      index_name_counts: [],
+      source_kind_counts: [],
+      level_counts: [],
+      service_counts: [],
+      host_counts: [],
+      event_type_counts: [],
+    },
+    recent_observability_documents: [],
+    recent_observability_alerts: [],
+  };
+}
+
+function readOfficeSignalOverview(
+  storage: Storage,
+  params?: {
+    include_kernel?: boolean;
+    kernel_event_limit?: number;
+    router_suppression_limit?: number;
+    federation_warning_limit?: number;
+  }
+) {
+  const kernelEventLimit =
+    typeof params?.kernel_event_limit === "number" && Number.isFinite(params.kernel_event_limit)
+      ? Math.max(0, Math.min(80, Math.trunc(params.kernel_event_limit)))
+      : 12;
+  const routerSuppressionLimit =
+    typeof params?.router_suppression_limit === "number" && Number.isFinite(params.router_suppression_limit)
+      ? Math.max(0, Math.min(200, Math.trunc(params.router_suppression_limit)))
+      : 40;
+  const federationWarningLimit =
+    typeof params?.federation_warning_limit === "number" && Number.isFinite(params.federation_warning_limit)
+      ? Math.max(0, Math.min(200, Math.trunc(params.federation_warning_limit)))
+      : 50;
+  const includeKernel = params?.include_kernel === true;
+  const recentObservabilityWindow = new Date(Date.now() - 15 * 60_000).toISOString();
+  return storage.getKernelSignalOverview({
+    event_limit: includeKernel ? kernelEventLimit : 0,
+    event_top_count_limit: includeKernel ? 12 : 0,
+    router_suppression_limit: routerSuppressionLimit,
+    federation_warning_limit: federationWarningLimit,
+    observability_since: includeKernel ? recentObservabilityWindow : undefined,
+    observability_recent_limit: includeKernel ? 6 : 0,
+    observability_alert_limit: includeKernel ? 24 : 0,
+    observability_top_count_limit: includeKernel ? 6 : 0,
   });
+}
+
+function buildKernelPayload(
+  storage: Storage,
+  summary: TaskSummaryPayload,
+  sessions: AgentSessionListPayload,
+  signalOverview?: KernelSignalOverviewRecord
+) {
+  return kernelSummary(
+    storage,
+    {
+      session_limit: Math.max(8, sessions.count || 8),
+      event_limit: 12,
+      task_running_limit: Math.max(8, summary.running.length || 8),
+    },
+    signalOverview ? { signal_overview: signalOverview } : undefined
+  );
 }
 
 function safeHostId(value: unknown) {
@@ -926,64 +1000,23 @@ function knownWorkerFabricHostIds(kernel: Record<string, unknown>) {
   );
 }
 
-function buildFederationPayload(storage: Storage, kernel: Record<string, unknown>) {
-  const latestByHost = new Map<
-    string,
-    {
-      event_seq: number;
-      host_id: string;
-      seen_at: string | null;
-      age_seconds: number | null;
-      detail: string;
-      current_remote_address: string | null;
-      captured_hostname: string | null;
-      captured_agent_runtime: string | null;
-      captured_model_label: string | null;
-    }
-  >();
+function buildFederationPayload(signalOverview: KernelSignalOverviewRecord, kernel: Record<string, unknown>) {
   const knownHostIds = knownWorkerFabricHostIds(kernel);
-  const events = storage.listRuntimeEvents({
-    event_type: "federation.ingest.warning",
-    limit: 50,
-  });
-  for (const rawEvent of events) {
-    const event = asRecord(rawEvent);
-    const details = asRecord(event.details);
-    const hostId = safeHostId(event.entity_id);
-    if (!hostId || knownHostIds.has(hostId) || String(details.reason ?? "").trim() !== "host_not_staged") {
-      continue;
-    }
-    const currentEventSeq = Number.isFinite(Number(event.event_seq)) ? Math.trunc(Number(event.event_seq)) : 0;
-    const previous = latestByHost.get(hostId);
-    if (previous && previous.event_seq >= currentEventSeq) {
-      continue;
-    }
-    const seenAt = String(event.created_at ?? "").trim() || null;
-    latestByHost.set(hostId, {
-      event_seq: currentEventSeq,
-      host_id: hostId,
-      seen_at: seenAt,
-      age_seconds: Number.isFinite(Date.parse(String(seenAt || ""))) ? Math.max(0, (Date.now() - Date.parse(String(seenAt))) / 1000) : null,
-      detail:
-        String(details.detail ?? details.error ?? "Verified peer is not staged in worker.fabric yet.").trim() ||
-        "Verified peer is not staged in worker.fabric yet.",
-      current_remote_address: String(details.requesting_remote_address ?? "").trim() || null,
-      captured_hostname: String(details.captured_hostname ?? "").trim() || null,
-      captured_agent_runtime: String(details.captured_agent_runtime ?? "").trim() || null,
-      captured_model_label: String(details.captured_model_label ?? "").trim() || null,
-    });
-  }
-  const incomingPeers = [...latestByHost.values()]
-    .sort((left, right) => (left.age_seconds ?? Number.POSITIVE_INFINITY) - (right.age_seconds ?? Number.POSITIVE_INFINITY))
-    .map((entry) => ({
-      host_id: entry.host_id,
-      seen_at: entry.seen_at,
-      age_seconds: entry.age_seconds,
-      detail: entry.detail,
-      current_remote_address: entry.current_remote_address,
-      captured_hostname: entry.captured_hostname,
-      captured_agent_runtime: entry.captured_agent_runtime,
-      captured_model_label: entry.captured_model_label,
+  const incomingPeers = (signalOverview.incoming_federation_peers ?? [])
+    .filter((peer) => {
+      const hostId = safeHostId(peer.host_id);
+      return Boolean(hostId) && !knownHostIds.has(hostId) && String(peer.reason ?? "").trim() === "host_not_staged";
+    })
+    .sort((left, right) => Number(right.event_seq ?? 0) - Number(left.event_seq ?? 0))
+    .map((peer) => ({
+      host_id: safeHostId(peer.host_id),
+      seen_at: peer.seen_at,
+      age_seconds: peer.age_seconds,
+      detail: peer.detail ?? "Verified peer is not staged in worker.fabric yet.",
+      current_remote_address: peer.current_remote_address,
+      captured_hostname: peer.captured_hostname,
+      captured_agent_runtime: peer.captured_agent_runtime,
+      captured_model_label: peer.captured_model_label,
     }));
   return {
     generated_at: new Date().toISOString(),
@@ -992,7 +1025,7 @@ function buildFederationPayload(storage: Storage, kernel: Record<string, unknown
   };
 }
 
-function buildRecentRouterSuppressionDecisions(storage: Storage, params?: { limit?: number; max_age_seconds?: number }) {
+function buildRecentRouterSuppressionDecisions(events: RuntimeEventRecord[], params?: { limit?: number; max_age_seconds?: number }) {
   const limit =
     typeof params?.limit === "number" && Number.isFinite(params.limit) ? Math.max(1, Math.min(12, Math.trunc(params.limit))) : 5;
   const maxAgeSeconds =
@@ -1000,10 +1033,6 @@ function buildRecentRouterSuppressionDecisions(storage: Storage, params?: { limi
       ? Math.max(300, Math.trunc(params.max_age_seconds))
       : 21600;
   const now = Date.now();
-  const events = storage.listRuntimeEvents({
-    event_type: "autonomy.command",
-    limit: Math.max(40, limit * 10),
-  });
   const entries: Array<Record<string, unknown>> = [];
   for (let index = events.length - 1; index >= 0 && entries.length < limit; index -= 1) {
     const event = events[index];
@@ -1200,6 +1229,17 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
         summarizeRuntimeWorkers(storage, input.runtime_worker_limit)
       )
     : {};
+  const signalOverview = safe<KernelSignalOverviewRecord>(
+    "signal_overview",
+    () => emptyKernelSignalOverview(),
+    () =>
+      readOfficeSignalOverview(storage, {
+        include_kernel: input.include_kernel,
+        kernel_event_limit: 12,
+        router_suppression_limit: 40,
+        federation_warning_limit: 50,
+      })
+  );
   const operatorBriefPayload = safe<OperatorBriefPayload>(
     "operator_brief",
     () => ({
@@ -1233,7 +1273,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
         include_runtime_brief: false,
         include_compile_brief: true,
         compact: true,
-      })
+      }, { signal_overview: signalOverview })
   );
   const autonomyMaintain = safe("autonomy_maintain", () => summarizeAutonomyMaintainState(storage), () =>
     summarizeAutonomyMaintainState(storage)
@@ -1257,7 +1297,7 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
       diagnostics: selectedProviderBridgeDiagnostics,
     })
   );
-  const routerSuppressionDecisions = buildRecentRouterSuppressionDecisions(storage);
+  const routerSuppressionDecisions = buildRecentRouterSuppressionDecisions(signalOverview.recent_router_suppression_events);
   const providerBridgeOnboarding = buildProviderBridgeOnboardingSummary({
     clients: providerBridge.snapshot.clients,
     diagnostics: providerBridge.diagnostics.diagnostics,
@@ -1266,12 +1306,12 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     diagnostics_stale: providerBridge.diagnostics.stale ?? false,
   });
   const kernel = input.include_kernel
-    ? safe("kernel", () => buildKernelPayload(storage, taskSummaryPayload, agentSessions), () =>
-        buildKernelPayload(storage, taskSummaryPayload, agentSessions)
+    ? safe("kernel", () => buildKernelPayload(storage, taskSummaryPayload, agentSessions, signalOverview), () =>
+        buildKernelPayload(storage, taskSummaryPayload, agentSessions, signalOverview)
       )
     : {};
-  const federation = safe("federation", () => buildFederationPayload(storage, asRecord(kernel)), () =>
-    buildFederationPayload(storage, asRecord(kernel))
+  const federation = safe("federation", () => buildFederationPayload(signalOverview, asRecord(kernel)), () =>
+    buildFederationPayload(signalOverview, asRecord(kernel))
   );
   const providerReadyAgentIds =
     selectedProviderBridgeDiagnostics.stale === true
@@ -1385,7 +1425,14 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
       const cachedProviderBridge = asRecord(cachedPayload.provider_bridge);
       const cachedProviderBridgeSnapshot = asRecord(cachedProviderBridge.snapshot);
       const liveProviderBridgeDiagnostics = buildPersistedProviderBridgeDiagnostics(liveAutonomyMaintainState);
-      const liveRouterSuppressionDecisions = buildRecentRouterSuppressionDecisions(storage);
+      const liveSignalOverview = readOfficeSignalOverview(storage, {
+        include_kernel: false,
+        router_suppression_limit: 40,
+        federation_warning_limit: 50,
+      });
+      const liveRouterSuppressionDecisions = buildRecentRouterSuppressionDecisions(
+        liveSignalOverview.recent_router_suppression_events
+      );
       const liveProviderBridgeSnapshot = applyProviderBridgeDiagnosticsToSnapshot(
         {
           ...cachedProviderBridgeSnapshot,
@@ -1406,7 +1453,7 @@ export function officeSnapshot(storage: Storage, input: z.infer<typeof officeSna
         }),
         latest_router_suppression: liveRouterSuppressionDecisions[0] ?? null,
       };
-      const liveFederation = buildFederationPayload(storage, cachedKernel);
+      const liveFederation = buildFederationPayload(liveSignalOverview, cachedKernel);
       const liveRoster = reconcileRosterProviderBridgeReadiness(asRecord(cachedPayload.roster), cachedProviderBridgePayload);
       const liveSetupDiagnostics = buildOfficeSetupDiagnostics({
         kernel: cachedKernel,
@@ -1477,6 +1524,15 @@ export function officeRealtimeSnapshot(storage: Storage, input: { thread_id?: st
     const cachedProviderBridge = asRecord(cachedPayload.provider_bridge);
     const cachedProviderBridgeSnapshot = asRecord(cachedProviderBridge.snapshot);
     const liveProviderBridgeDiagnostics = buildPersistedProviderBridgeDiagnostics(liveAutonomyMaintainState);
+    const liveSignalOverview = readOfficeSignalOverview(storage, {
+      include_kernel: false,
+      router_suppression_limit: 40,
+      federation_warning_limit: 50,
+    });
+    const liveRouterSuppressionDecisions = buildRecentRouterSuppressionDecisions(
+      liveSignalOverview.recent_router_suppression_events,
+      { limit: 1 }
+    );
     const liveProviderBridgeSnapshot = applyProviderBridgeDiagnosticsToSnapshot(
       {
         ...cachedProviderBridgeSnapshot,
@@ -1493,9 +1549,9 @@ export function officeRealtimeSnapshot(storage: Storage, input: { thread_id?: st
         cachedProviderBridge.onboarding && typeof cachedProviderBridge.onboarding === "object"
           ? cachedProviderBridge.onboarding
           : {},
-      latest_router_suppression: cachedProviderBridge.latest_router_suppression ?? null,
+      latest_router_suppression: liveRouterSuppressionDecisions[0] ?? cachedProviderBridge.latest_router_suppression ?? null,
     };
-    const liveFederation = buildFederationPayload(storage, asRecord(cachedPayload.kernel));
+    const liveFederation = buildFederationPayload(liveSignalOverview, asRecord(cachedPayload.kernel));
     const liveRoster = reconcileRosterProviderBridgeReadiness(asRecord(cachedPayload.roster), liveProviderBridgePayload);
     return buildOfficeGuiSnapshot(
       {

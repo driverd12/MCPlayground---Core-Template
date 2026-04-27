@@ -48,6 +48,12 @@ test("sidecar state tracks sequence and per-peer send outcomes durably", () => {
       generatedAt: "2026-04-23T10:00:00.000Z",
       attemptAt: "2026-04-23T10:00:05.000Z",
       intervalSeconds: 30,
+      payload: {
+        stream_id: "mac.lan:master-mold",
+        sequence,
+        generated_at: "2026-04-23T10:00:00.000Z",
+        host: { host_id: "mac.lan" },
+      },
       sends: [
         {
           peer: "http://peer-a.local:8787",
@@ -63,6 +69,12 @@ test("sidecar state tracks sequence and per-peer send outcomes durably", () => {
             ok: true,
             accepted: true,
             event_id: "evt-fed-1",
+            result: {
+              sequence,
+              event_id: "evt-fed-1",
+              event_seq: 42,
+              worker_fabric_heartbeat_ok: true,
+            },
           },
         },
       ],
@@ -79,14 +91,23 @@ test("sidecar state tracks sequence and per-peer send outcomes durably", () => {
     assert.equal(reloaded.peer_results["http://peer-a.local:8787/"].failure_count, 1);
     assert.equal(reloaded.peer_results["http://peer-a.local:8787/"].consecutive_failures, 1);
     assert.equal(reloaded.peer_results["http://peer-a.local:8787/"].last_ok_at, "2026-04-23T00:00:00.000Z");
+    assert.deepEqual(reloaded.peer_results["http://peer-a.local:8787/"].resend_window_sequences, [3]);
     assert.equal(reloaded.peer_results["http://peer-b.local:8787/"].success_count, 1);
     assert.equal(reloaded.peer_results["http://peer-b.local:8787/"].last_http_status, 202);
+    assert.equal(reloaded.peer_results["http://peer-b.local:8787/"].ack_persisted_sequence, 3);
+    assert.equal(reloaded.peer_results["http://peer-b.local:8787/"].ack_processed_sequence, 3);
+    assert.equal(reloaded.outbox.length, 1);
+    assert.equal(reloaded.outbox[0].pending_peers.length, 1);
+    assert.equal(reloaded.outbox[0].pending_peers[0], "http://peer-a.local:8787/");
+    assert.equal(reloaded.retry_ledger.length, 2);
 
     const summary = summarizeSidecarState(statePath, reloaded);
     assert.equal(summary.present, true);
     assert.equal(summary.peer_count, 2);
     assert.equal(summary.ok_peer_count, 1);
     assert.equal(summary.failing_peer_count, 1);
+    assert.equal(summary.outbox_depth, 1);
+    assert.equal(summary.retry_ledger_count, 2);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

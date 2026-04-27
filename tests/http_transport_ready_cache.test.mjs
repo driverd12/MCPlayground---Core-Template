@@ -117,6 +117,7 @@ test("approved remote host gate accepts a verified signed peer when the locator 
         },
       },
     ],
+    replayStorePath: null,
     deps: {
       resolveHostnameAddresses: async () => ["10.1.3.224"],
       lookupLanMacAddress: () => null,
@@ -177,6 +178,7 @@ test("approved remote host gate fails closed on invalid signed identity even whe
         },
       },
     ],
+    replayStorePath: null,
     deps: {
       resolveHostnameAddresses: async () => ["10.1.3.224"],
       lookupLanMacAddress: () => null,
@@ -326,6 +328,71 @@ test("signed host identity replay protection rejects reused nonces inside the fr
   });
   assert.equal(wrongPath.ok, false);
   assert.equal(wrongPath.status, "invalid");
+});
+
+test("signed host identity replay protection survives process memory reset when a replay store is configured", async () => {
+  resetHostIdentityReplayCache();
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "master-mold-replay-store-"));
+  const replayStorePath = path.join(tempDir, "nonces.json");
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
+  const timestamp = "2026-04-21T18:06:00.000Z";
+  const nonce = "nonce-persisted-replay-1";
+  const agentId = "codex";
+  const payload = buildHostIdentitySignaturePayload({
+    method: "POST",
+    path: "/?transport=streamable",
+    host_id: "many-host",
+    agent_id: agentId,
+    timestamp,
+    nonce,
+  });
+  const headers = {
+    "x-master-mold-host-id": "many-host",
+    "x-master-mold-agent-id": agentId,
+    "x-master-mold-timestamp": timestamp,
+    "x-master-mold-nonce": nonce,
+    "x-master-mold-signature": `ed25519:${sign(null, Buffer.from(payload), privateKey).toString("base64url")}`,
+  };
+  const host = {
+    host_id: "many-host",
+    metadata: {
+      remote_access: {
+        status: "approved",
+        identity_public_key: publicKeyPem,
+      },
+    },
+  };
+
+  try {
+    const first = verifyHostIdentitySignature({
+      method: "POST",
+      path: "/?transport=streamable",
+      host,
+      headers,
+      nowMs: Date.parse(timestamp),
+      enforceReplayProtection: true,
+      replayStorePath,
+    });
+    assert.equal(first.ok, true);
+    assert.equal(first.status, "verified");
+
+    resetHostIdentityReplayCache();
+    const replayed = verifyHostIdentitySignature({
+      method: "POST",
+      path: "/?transport=streamable",
+      host,
+      headers,
+      nowMs: Date.parse(timestamp) + 1000,
+      enforceReplayProtection: true,
+      replayStorePath,
+    });
+    assert.equal(replayed.ok, false);
+    assert.equal(replayed.status, "replayed");
+  } finally {
+    resetHostIdentityReplayCache();
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("signed host identity proofs bind federation ingest to the request path", () => {

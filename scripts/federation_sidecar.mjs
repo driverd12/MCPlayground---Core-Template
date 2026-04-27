@@ -859,6 +859,7 @@ async function runCycle(options) {
     intervalSeconds: options.intervalSeconds,
     generatedAt: payload.generated_at,
     attemptAt,
+    payload,
     sends,
   });
   return {

@@ -933,6 +933,22 @@ export type RuntimeEventRecord = {
   source_agent: string | null;
 };
 
+export type FederationIncomingPeerSummaryRecord = {
+  host_id: string;
+  seen_at: string | null;
+  age_seconds: number | null;
+  reason: string | null;
+  detail: string | null;
+  error: string | null;
+  event_id: string | null;
+  event_seq: number;
+  requesting_host_id: string | null;
+  current_remote_address: string | null;
+  captured_hostname: string | null;
+  captured_agent_runtime: string | null;
+  captured_model_label: string | null;
+};
+
 export type ObservabilityLevel = "trace" | "debug" | "info" | "warn" | "error" | "critical";
 
 export type ObservabilityDocumentRecord = {
@@ -968,6 +984,8 @@ export type KernelSignalOverviewRecord = {
     entity_type_counts: Array<{ entity_type: string | null; count: number }>;
   };
   recent_router_suppression_events: RuntimeEventRecord[];
+  recent_federation_ingest_warning_events: RuntimeEventRecord[];
+  incoming_federation_peers: FederationIncomingPeerSummaryRecord[];
   observability_overview: {
     count: number;
     latest_created_at: string | null;
@@ -11575,47 +11593,361 @@ export class Storage {
     event_limit?: number;
     event_top_count_limit?: number;
     router_suppression_limit?: number;
+    federation_warning_limit?: number;
+    known_federation_host_ids?: string[];
+    federation_host_id?: string;
     observability_since?: string;
     observability_recent_limit?: number;
     observability_alert_limit?: number;
     observability_top_count_limit?: number;
   }): KernelSignalOverviewRecord {
-    const eventLimit = parseBoundedInt(params?.event_limit, 20, 1, 200);
-    const eventTopCountLimit = parseBoundedInt(params?.event_top_count_limit, 12, 1, 100);
-    const routerSuppressionLimit = parseBoundedInt(params?.router_suppression_limit, 40, 1, 200);
-    const observabilityRecentLimit = parseBoundedInt(params?.observability_recent_limit, 6, 1, 200);
-    const observabilityAlertLimit = parseBoundedInt(params?.observability_alert_limit, 24, 1, 200);
-    const observabilityTopCountLimit = parseBoundedInt(params?.observability_top_count_limit, 6, 1, 100);
+    const eventLimit = parseBoundedInt(params?.event_limit, 20, 0, 200);
+    const eventTopCountLimit = parseBoundedInt(params?.event_top_count_limit, 12, 0, 100);
+    const routerSuppressionLimit = parseBoundedInt(params?.router_suppression_limit, 40, 0, 200);
+    const federationWarningLimit = parseBoundedInt(params?.federation_warning_limit, 0, 0, 200);
+    const observabilityRecentLimit = parseBoundedInt(params?.observability_recent_limit, 6, 0, 200);
+    const observabilityAlertLimit = parseBoundedInt(params?.observability_alert_limit, 24, 0, 200);
+    const observabilityTopCountLimit = parseBoundedInt(params?.observability_top_count_limit, 6, 0, 100);
+    const eventSince = params?.event_since?.trim() ? normalizeIsoTimestamp(params.event_since, params.event_since) : null;
+    const observabilitySince =
+      params?.observability_since?.trim() ? normalizeIsoTimestamp(params.observability_since, params.observability_since) : null;
+
+    const runtimeWhereSql = eventSince ? "WHERE created_at > ?" : "";
+    const runtimeValues = eventSince ? [eventSince] : [];
+    const recentRuntimeEvents =
+      eventLimit > 0
+        ? (
+            this.db
+              .prepare(
+                `SELECT event_seq, event_id, created_at, event_type, entity_type, entity_id, status, summary, content, details_json,
+                        source_client, source_model, source_agent
+                 FROM runtime_events
+                 ${runtimeWhereSql}
+                 ORDER BY event_seq DESC
+                 LIMIT ?`
+              )
+              .all(...runtimeValues, eventLimit) as Array<Record<string, unknown>>
+          )
+            .reverse()
+            .map((row) => mapRuntimeEventRow(row))
+        : [];
+
+    const runtimeEventSummary =
+      eventTopCountLimit > 0
+        ? (() => {
+            const countRow = this.db
+              .prepare(
+                `SELECT COUNT(*) AS count, MAX(event_seq) AS max_seq, MAX(created_at) AS latest_created_at
+                 FROM runtime_events
+                 ${runtimeWhereSql}`
+              )
+              .get(...runtimeValues) as Record<string, unknown> | undefined;
+            const eventTypeRows = this.db
+              .prepare(
+                `SELECT event_type, COUNT(*) AS count
+                 FROM runtime_events
+                 ${runtimeWhereSql}
+                 GROUP BY event_type
+                 ORDER BY count DESC, event_type ASC
+                 LIMIT ?`
+              )
+              .all(...runtimeValues, eventTopCountLimit) as Array<Record<string, unknown>>;
+            return {
+              count: Number(countRow?.count ?? 0),
+              max_event_seq: Number(countRow?.max_seq ?? 0),
+              latest_created_at: asNullableString(countRow?.latest_created_at),
+              event_type_counts: eventTypeRows.map((row) => ({
+                event_type: String(row.event_type ?? ""),
+                count: Number(row.count ?? 0),
+              })),
+              entity_type_counts: [] as Array<{ entity_type: string | null; count: number }>,
+            };
+          })()
+        : {
+            count: 0,
+            max_event_seq: 0,
+            latest_created_at: null,
+            event_type_counts: [] as Array<{ event_type: string; count: number }>,
+            entity_type_counts: [] as Array<{ entity_type: string | null; count: number }>,
+          };
+
+    const recentRouterSuppressionEvents =
+      routerSuppressionLimit > 0
+        ? (
+            this.db
+              .prepare(
+                `SELECT event_seq, event_id, created_at, event_type, entity_type, entity_id, status, summary, content, details_json,
+                        source_client, source_model, source_agent
+                 FROM runtime_events
+                 WHERE event_type = 'autonomy.command'
+                   AND (
+                     details_json LIKE '%"model_router_auto_bridge_suppressed_for_resource_gate":true%'
+                     OR details_json LIKE '%"model_router_auto_bridge_suppressed_for_missing_local_attempt_evidence":true%'
+                     OR details_json LIKE '%"model_router_auto_bridge_suppressed_for_local_first":true%'
+                   )
+                 ORDER BY event_seq DESC
+                 LIMIT ?`
+              )
+              .all(routerSuppressionLimit) as Array<Record<string, unknown>>
+          )
+            .reverse()
+            .map((row) => mapRuntimeEventRow(row))
+        : [];
+
+    const recentFederationIngestWarningEvents =
+      federationWarningLimit > 0
+        ? (
+            this.db
+              .prepare(
+                `SELECT event_seq, event_id, created_at, event_type, entity_type, entity_id, status, summary, content, details_json,
+                        source_client, source_model, source_agent
+                 FROM runtime_events
+                 WHERE event_type = 'federation.ingest.warning'
+                 ORDER BY event_seq DESC
+                 LIMIT ?`
+              )
+              .all(federationWarningLimit) as Array<Record<string, unknown>>
+          )
+            .reverse()
+            .map((row) => mapRuntimeEventRow(row))
+        : [];
+    const incomingFederationPeers =
+      federationWarningLimit > 0
+        ? this.listFederationIncomingPeerSummaries({
+            known_host_ids: params?.known_federation_host_ids,
+            host_id: params?.federation_host_id,
+            limit: federationWarningLimit,
+          })
+        : [];
+
+    const observabilityOverview =
+      observabilityTopCountLimit > 0
+        ? (() => {
+            const countRow = this.db
+              .prepare(
+                `SELECT COUNT(*) AS count, MAX(created_at) AS latest_created_at
+                 FROM observability_documents`
+              )
+              .get() as Record<string, unknown> | undefined;
+            const countRows = this.db
+              .prepare(
+                `WITH bucketed AS (
+                   SELECT 'index_name' AS bucket, index_name AS value, COUNT(*) AS count
+                   FROM observability_documents
+                   GROUP BY index_name
+                   UNION ALL
+                   SELECT 'source_kind' AS bucket, source_kind AS value, COUNT(*) AS count
+                   FROM observability_documents
+                   GROUP BY source_kind
+                   UNION ALL
+                   SELECT 'service' AS bucket, service AS value, COUNT(*) AS count
+                   FROM observability_documents
+                   GROUP BY service
+                   UNION ALL
+                   SELECT 'host_id' AS bucket, host_id AS value, COUNT(*) AS count
+                   FROM observability_documents
+                   GROUP BY host_id
+                 ),
+                 ranked AS (
+                   SELECT bucket,
+                          value,
+                          count,
+                          ROW_NUMBER() OVER (
+                            PARTITION BY bucket
+                            ORDER BY count DESC, value ASC
+                          ) AS rank_position
+                   FROM bucketed
+                 )
+                 SELECT bucket, value, count
+                 FROM ranked
+                 WHERE rank_position <= ?
+                 ORDER BY bucket ASC, count DESC, value ASC`
+              )
+              .all(observabilityTopCountLimit) as Array<Record<string, unknown>>;
+            const mapBucket = (bucket: string) =>
+              countRows.filter((row) => String(row.bucket ?? "") === bucket);
+            return {
+              count: Number(countRow?.count ?? 0),
+              latest_created_at: asNullableString(countRow?.latest_created_at),
+              index_name_counts: mapBucket("index_name").map((row) => ({
+                index_name: String(row.value ?? ""),
+                count: Number(row.count ?? 0),
+              })),
+              source_kind_counts: mapBucket("source_kind").map((row) => ({
+                source_kind: String(row.value ?? ""),
+                count: Number(row.count ?? 0),
+              })),
+              level_counts: [] as Array<{ level: string | null; count: number }>,
+              service_counts: mapBucket("service").map((row) => ({
+                service: asNullableString(row.value),
+                count: Number(row.count ?? 0),
+              })),
+              host_counts: mapBucket("host_id").map((row) => ({
+                host_id: asNullableString(row.value),
+                count: Number(row.count ?? 0),
+              })),
+              event_type_counts: [] as Array<{ event_type: string | null; count: number }>,
+            };
+          })()
+        : {
+            count: 0,
+            latest_created_at: null,
+            index_name_counts: [] as Array<{ index_name: string; count: number }>,
+            source_kind_counts: [] as Array<{ source_kind: string; count: number }>,
+            level_counts: [] as Array<{ level: string | null; count: number }>,
+            service_counts: [] as Array<{ service: string | null; count: number }>,
+            host_counts: [] as Array<{ host_id: string | null; count: number }>,
+            event_type_counts: [] as Array<{ event_type: string | null; count: number }>,
+          };
+
+    const recentObservabilityDocuments =
+      observabilityRecentLimit > 0
+        ? (
+            this.db
+              .prepare(
+                `SELECT document_id, created_at, updated_at, index_name, source_kind, source_ref, level, host_id, service,
+                        event_type, title, body_text, attributes_json, tags_json
+                 FROM observability_documents
+                 ${observabilitySince ? "WHERE created_at > ?" : ""}
+                 ORDER BY created_at DESC, document_id ASC
+                 LIMIT ?`
+              )
+              .all(...(observabilitySince ? [observabilitySince] : []), observabilityRecentLimit) as Array<Record<string, unknown>>
+          ).map((row) => mapObservabilityDocumentRow(row))
+        : [];
+
+    const recentObservabilityAlerts =
+      observabilityAlertLimit > 0
+        ? (
+            this.db
+              .prepare(
+                `SELECT document_id, created_at, updated_at, index_name, source_kind, source_ref, level, host_id, service,
+                        event_type, title, body_text, attributes_json, tags_json
+                 FROM observability_documents
+                 WHERE level IN ('critical', 'error')
+                   ${observabilitySince ? "AND created_at > ?" : ""}
+                 ORDER BY created_at DESC, document_id ASC
+                 LIMIT ?`
+              )
+              .all(...(observabilitySince ? [observabilitySince] : []), observabilityAlertLimit) as Array<Record<string, unknown>>
+          ).map((row) => mapObservabilityDocumentRow(row))
+        : [];
 
     return {
-      recent_runtime_events: this.listRuntimeEvents({
-        limit: eventLimit,
-        since: params?.event_since,
-      }),
-      runtime_event_summary: this.summarizeRuntimeEvents({
-        since: params?.event_since,
-        top_count_limit: eventTopCountLimit,
-        include_entity_type_counts: false,
-      }),
-      recent_router_suppression_events: this.listRuntimeEvents({
-        event_type: "autonomy.command",
-        limit: routerSuppressionLimit,
-      }),
-      observability_overview: this.summarizeObservabilityDocuments({
-        top_count_limit: observabilityTopCountLimit,
-        include_level_counts: false,
-        include_event_type_counts: false,
-      }),
-      recent_observability_documents: this.listObservabilityDocuments({
-        since: params?.observability_since,
-        limit: observabilityRecentLimit,
-      }),
-      recent_observability_alerts: this.listObservabilityDocuments({
-        since: params?.observability_since,
-        levels: ["critical", "error"],
-        limit: observabilityAlertLimit,
-      }),
+      recent_runtime_events: recentRuntimeEvents,
+      runtime_event_summary: runtimeEventSummary,
+      recent_router_suppression_events: recentRouterSuppressionEvents,
+      recent_federation_ingest_warning_events: recentFederationIngestWarningEvents,
+      incoming_federation_peers: incomingFederationPeers,
+      observability_overview: observabilityOverview,
+      recent_observability_documents: recentObservabilityDocuments,
+      recent_observability_alerts: recentObservabilityAlerts,
     };
+  }
+
+  listFederationIncomingPeerSummaries(params?: {
+    known_host_ids?: string[];
+    host_id?: string;
+    limit?: number;
+    now_ms?: number;
+  }): FederationIncomingPeerSummaryRecord[] {
+    const limit = parseBoundedInt(params?.limit, 50, 0, 500);
+    if (limit <= 0) {
+      return [];
+    }
+    const knownHostIds = [...new Set((params?.known_host_ids ?? []).map((entry) => entry.trim()).filter(Boolean))];
+    const requestedHostId = params?.host_id?.trim() || null;
+    const whereClauses = [
+      "event_type = 'federation.ingest.warning'",
+      "entity_type = 'worker_fabric_host'",
+      "entity_id IS NOT NULL",
+      "details_json LIKE '%\"reason\":\"host_not_staged\"%'",
+    ];
+    const values: Array<string | number> = [];
+    if (requestedHostId) {
+      whereClauses.push("entity_id = ?");
+      values.push(requestedHostId);
+    }
+    if (!requestedHostId && knownHostIds.length > 0) {
+      whereClauses.push(`entity_id NOT IN (${knownHostIds.map(() => "?").join(", ")})`);
+      values.push(...knownHostIds);
+    }
+    const rows = this.db
+      .prepare(
+        `WITH latest AS (
+           SELECT entity_id, MAX(event_seq) AS event_seq
+           FROM runtime_events
+           WHERE ${whereClauses.join(" AND ")}
+           GROUP BY entity_id
+           ORDER BY event_seq DESC
+           LIMIT ?
+         )
+         SELECT re.event_seq, re.event_id, re.created_at, re.event_type, re.entity_type, re.entity_id, re.status,
+                re.summary, re.content, re.details_json, re.source_client, re.source_model, re.source_agent
+         FROM runtime_events re
+         JOIN latest ON latest.event_seq = re.event_seq
+         ORDER BY re.event_seq DESC`
+      )
+      .all(...values, limit) as Array<Record<string, unknown>>;
+    const nowMs = Number.isFinite(Number(params?.now_ms)) ? Number(params?.now_ms) : Date.now();
+    return rows
+      .map((row) => mapRuntimeEventRow(row))
+      .map((event) => {
+        const details = event.details && typeof event.details === "object" ? event.details : {};
+        const seenAt = asNullableString(event.created_at);
+        const parsedSeenAt = seenAt ? Date.parse(seenAt) : Number.NaN;
+        return {
+          host_id: String(event.entity_id ?? "").trim(),
+          seen_at: seenAt,
+          age_seconds: Number.isFinite(parsedSeenAt) ? Math.max(0, Math.round((nowMs - parsedSeenAt) / 1000)) : null,
+          reason: asNullableString(details.reason),
+          detail: asNullableString(details.detail) ?? asNullableString(details.error) ?? "Verified peer is not staged in worker.fabric yet.",
+          error: asNullableString(details.error),
+          event_id: asNullableString(event.event_id),
+          event_seq: Number(event.event_seq ?? 0),
+          requesting_host_id: asNullableString(details.requesting_host_id),
+          current_remote_address: asNullableString(details.requesting_remote_address),
+          captured_hostname: asNullableString(details.captured_hostname),
+          captured_agent_runtime: asNullableString(details.captured_agent_runtime),
+          captured_model_label: asNullableString(details.captured_model_label),
+        };
+      });
+  }
+
+  listLatestFederationIngestEventsByHost(params?: { host_ids?: string[]; limit?: number }): RuntimeEventRecord[] {
+    const limit = parseBoundedInt(params?.limit, 200, 0, 1000);
+    if (limit <= 0) {
+      return [];
+    }
+    const hostIds = [...new Set((params?.host_ids ?? []).map((entry) => entry.trim()).filter(Boolean))];
+    const whereClauses = [
+      "event_type = 'federation.ingest'",
+      "entity_type = 'worker_fabric_host'",
+      "entity_id IS NOT NULL",
+    ];
+    const values: Array<string | number> = [];
+    if (hostIds.length > 0) {
+      whereClauses.push(`entity_id IN (${hostIds.map(() => "?").join(", ")})`);
+      values.push(...hostIds);
+    }
+    const rows = this.db
+      .prepare(
+        `WITH latest AS (
+           SELECT entity_id, MAX(event_seq) AS event_seq
+           FROM runtime_events
+           WHERE ${whereClauses.join(" AND ")}
+           GROUP BY entity_id
+           ORDER BY event_seq DESC
+           LIMIT ?
+         )
+         SELECT re.event_seq, re.event_id, re.created_at, re.event_type, re.entity_type, re.entity_id, re.status,
+                re.summary, re.content, re.details_json, re.source_client, re.source_model, re.source_agent
+         FROM runtime_events re
+         JOIN latest ON latest.event_seq = re.event_seq
+         ORDER BY re.event_seq DESC`
+      )
+      .all(...values, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => mapRuntimeEventRow(row));
   }
 
   getIncidentTimeline(incidentId: string, limit: number): {
@@ -13171,6 +13503,7 @@ export class Storage {
     this.ensureIndex("idx_runtime_events_seq", "runtime_events", "event_seq DESC");
     this.ensureIndex("idx_runtime_events_created", "runtime_events", "created_at DESC");
     this.ensureIndex("idx_runtime_events_type_seq", "runtime_events", "event_type, event_seq DESC");
+    this.ensureIndex("idx_runtime_events_type_entity_latest", "runtime_events", "event_type, entity_type, entity_id, event_seq DESC");
     this.ensureIndex("idx_runtime_events_entity_seq", "runtime_events", "entity_type, entity_id, event_seq DESC");
     this.ensureIndex("idx_runtime_events_agent_seq", "runtime_events", "source_agent, event_seq DESC");
     this.ensureIndex("idx_runtime_events_created_type", "runtime_events", "created_at DESC, event_type");

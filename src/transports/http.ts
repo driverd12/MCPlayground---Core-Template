@@ -118,6 +118,7 @@ const autonomyIngressScript = path.join(repoRoot, "scripts", "autonomy_ide_ingre
 const autonomyCtlScript = path.join(repoRoot, "scripts", "autonomy_ctl.sh");
 const officeTmuxScript = path.join(repoRoot, "scripts", "agent_office_tmux.sh");
 const officeTmuxOpenScript = path.join(repoRoot, "scripts", "agent_office_tmux_open.sh");
+const defaultHostIdentityReplayStorePath = path.join(repoRoot, "data", "federation", "host-identity-replay-nonces.json");
 const mcpToolCallScript = path.join(repoRoot, "scripts", "mcp_tool_call.mjs");
 const stdioServerEntry = path.join(repoRoot, "dist", "server.js");
 const officeSnapshotInflight = new Map<string, Promise<OfficeSnapshotCommandResult>>();
@@ -1183,6 +1184,100 @@ function purgeExpiredHostIdentityNonces(nowMs: number) {
   }
 }
 
+function loadPersistedHostIdentityNonces(filePath: string, nowMs: number) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const entries = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw.entries as unknown) : null;
+    if (!Array.isArray(entries)) {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        continue;
+      }
+      const key = String((entry as Record<string, unknown>).key ?? "");
+      const expiresAt = Number((entry as Record<string, unknown>).expires_at_ms ?? 0);
+      if (key && Number.isFinite(expiresAt) && expiresAt > nowMs) {
+        hostIdentityNonceCache.set(key, expiresAt);
+      }
+    }
+  } catch {
+    return;
+  }
+}
+
+function persistHostIdentityNonces(filePath: string, nowMs: number) {
+  try {
+    purgeExpiredHostIdentityNonces(nowMs);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const entries = [...hostIdentityNonceCache.entries()]
+      .filter(([, expiresAt]) => expiresAt > nowMs)
+      .sort((left, right) => left[1] - right[1])
+      .slice(-5000)
+      .map(([key, expiresAt]) => ({ key, expires_at_ms: expiresAt }));
+    fs.writeFileSync(
+      filePath,
+      `${JSON.stringify(
+        {
+          schema_version: "master-mold-host-identity-replay-nonces-v1",
+          updated_at: new Date(nowMs).toISOString(),
+          entries,
+        },
+        null,
+        2
+      )}\n`
+    );
+  } catch {
+    return;
+  }
+}
+
+function sleepSync(ms: number) {
+  const buffer = new SharedArrayBuffer(4);
+  const view = new Int32Array(buffer);
+  Atomics.wait(view, 0, 0, Math.max(1, ms));
+}
+
+function withHostIdentityReplayStoreLock<T>(filePath: string, callback: () => T): T | null {
+  const lockPath = `${filePath}.lock`;
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(lockPath, "wx", 0o600);
+      fs.writeFileSync(fd, `${process.pid}\n${new Date().toISOString()}\n`);
+      return callback();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        return null;
+      }
+      try {
+        const stat = fs.statSync(lockPath);
+        if (Date.now() - stat.mtimeMs > 30_000) {
+          fs.rmSync(lockPath, { force: true });
+        }
+      } catch {
+        // Retry; another process may have removed the lock.
+      }
+      sleepSync(10);
+    } finally {
+      if (fd !== null) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // Ignore close failures for best-effort lock cleanup.
+        }
+        try {
+          fs.rmSync(lockPath, { force: true });
+        } catch {
+          // Ignore cleanup failures; stale locks are aged out above.
+        }
+      }
+    }
+  }
+  return null;
+}
+
 function rememberHostIdentityNonce(input: {
   fingerprint: string | null;
   host_id: string;
@@ -1190,7 +1285,23 @@ function rememberHostIdentityNonce(input: {
   nowMs: number;
   parsedTimestamp: number;
   maxSkewMs: number;
+  replayStorePath?: string | null;
 }) {
+  if (input.replayStorePath) {
+    const remembered = withHostIdentityReplayStoreLock(input.replayStorePath, () => {
+      purgeExpiredHostIdentityNonces(input.nowMs);
+      loadPersistedHostIdentityNonces(input.replayStorePath as string, input.nowMs);
+      purgeExpiredHostIdentityNonces(input.nowMs);
+      const key = [input.fingerprint ?? "unknown-key", input.host_id, input.nonce].join("\0");
+      if (hostIdentityNonceCache.has(key)) {
+        return false;
+      }
+      hostIdentityNonceCache.set(key, Math.max(input.nowMs, input.parsedTimestamp) + input.maxSkewMs);
+      persistHostIdentityNonces(input.replayStorePath as string, input.nowMs);
+      return true;
+    });
+    return remembered === true;
+  }
   purgeExpiredHostIdentityNonces(input.nowMs);
   const key = [input.fingerprint ?? "unknown-key", input.host_id, input.nonce].join("\0");
   if (hostIdentityNonceCache.has(key)) {
@@ -1212,6 +1323,7 @@ export function verifyHostIdentitySignature(input: {
   nowMs?: number;
   maxSkewSeconds?: number;
   enforceReplayProtection?: boolean;
+  replayStorePath?: string | null;
 }) {
   const metadata = readRecord(input.host.metadata) ?? {};
   const remoteAccess = readRecord(metadata.remote_access) ?? {};
@@ -1290,6 +1402,7 @@ export function verifyHostIdentitySignature(input: {
               nowMs,
               parsedTimestamp,
               maxSkewMs,
+              replayStorePath: input.replayStorePath ?? null,
             })
           ) {
             return {
@@ -1395,6 +1508,7 @@ export async function evaluateApprovedRemoteHostGate(input: {
   hosts: unknown[];
   requireSignedRemote?: boolean;
   receivedAt?: string;
+  replayStorePath?: string | null;
   deps?: {
     resolveHostnameAddresses?: (hostname: string | null) => Promise<string[]>;
     lookupLanMacAddress?: (remoteAddress: string | null) => string | null;
@@ -1432,6 +1546,10 @@ export async function evaluateApprovedRemoteHostGate(input: {
       host,
       enforceReplayProtection: true,
       nowMs: verificationNowMs,
+      replayStorePath:
+        input.replayStorePath === undefined
+          ? process.env.MASTER_MOLD_HOST_IDENTITY_REPLAY_STORE_PATH || defaultHostIdentityReplayStorePath
+          : input.replayStorePath,
     });
     const signatureVerification = signatureVerificationResult({
       status: signature.status,

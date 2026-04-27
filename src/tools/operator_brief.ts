@@ -4,8 +4,10 @@ import {
   type AgentSessionRecord,
   type ArtifactRecord,
   type GoalRecord,
+  type KernelSignalOverviewRecord,
   type PlanRecord,
   type PlanStepRecord,
+  type RuntimeEventRecord,
   type RuntimeWorkerSessionRecord,
   type TaskRecord,
   Storage,
@@ -472,7 +474,7 @@ function summarizeControlPlane(
   };
 }
 
-function buildRecentRouterSuppressionDecisions(storage: Storage, params?: { limit?: number; max_age_seconds?: number }) {
+function buildRecentRouterSuppressionDecisionsFromEvents(events: RuntimeEventRecord[], params?: { limit?: number; max_age_seconds?: number }) {
   const limit =
     typeof params?.limit === "number" && Number.isFinite(params.limit) ? Math.max(1, Math.min(8, Math.trunc(params.limit))) : 5;
   const maxAgeSeconds =
@@ -480,10 +482,6 @@ function buildRecentRouterSuppressionDecisions(storage: Storage, params?: { limi
       ? Math.max(300, Math.trunc(params.max_age_seconds))
       : 21600;
   const now = Date.now();
-  const events = storage.listRuntimeEvents({
-    event_type: "autonomy.command",
-    limit: Math.max(40, limit * 10),
-  });
   const entries: Array<{
     decision_id: string | null;
     observed_at: string | null;
@@ -523,7 +521,23 @@ function buildRecentRouterSuppressionDecisions(storage: Storage, params?: { limi
   return entries;
 }
 
-export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBriefSchema>) {
+function buildRecentRouterSuppressionDecisions(storage: Storage, params?: { limit?: number; max_age_seconds?: number }) {
+  const limit =
+    typeof params?.limit === "number" && Number.isFinite(params.limit) ? Math.max(1, Math.min(8, Math.trunc(params.limit))) : 5;
+  return buildRecentRouterSuppressionDecisionsFromEvents(
+    storage.listRuntimeEvents({
+      event_type: "autonomy.command",
+      limit: Math.max(40, limit * 10),
+    }),
+    params
+  );
+}
+
+export function operatorBrief(
+  storage: Storage,
+  input: z.infer<typeof operatorBriefSchema>,
+  options?: { signal_overview?: KernelSignalOverviewRecord; router_suppression_events?: RuntimeEventRecord[] }
+) {
   const threadId = input.thread_id?.trim() || null;
   const sessions = storage.listAgentSessions({ limit: 50 });
   const ringLeaderSession = pickRingLeaderSession(sessions, threadId);
@@ -552,7 +566,11 @@ export function operatorBrief(storage: Storage, input: z.infer<typeof operatorBr
   const executionBacklog = readStringArray(ringLeaderSession?.metadata.last_execution_task_ids);
   const runningTasks = storage.listTasks({ status: "running", limit: 25 });
   const pendingTasks = storage.listTasks({ status: "pending", limit: 25 });
-  const routerSuppressionDecisions = buildRecentRouterSuppressionDecisions(storage);
+  const routerSuppressionDecisions = options?.router_suppression_events
+    ? buildRecentRouterSuppressionDecisionsFromEvents(options.router_suppression_events)
+    : options?.signal_overview
+      ? buildRecentRouterSuppressionDecisionsFromEvents(options.signal_overview.recent_router_suppression_events)
+      : buildRecentRouterSuppressionDecisions(storage);
   const latestRouterSuppression = routerSuppressionDecisions[0] ?? null;
   const controlPlaneSummary = summarizeControlPlane(storage, kernel, {
     goal,

@@ -36,6 +36,17 @@ test("storage kernel signal overview bundles recent runtime and observability si
       },
     });
     storage.appendRuntimeEvent({
+      created_at: recentAt,
+      event_type: "federation.ingest.warning",
+      entity_type: "worker_fabric_host",
+      entity_id: "mesh-mini-01",
+      summary: "federation ingest warning",
+      details: {
+        reason: "host_not_staged",
+        requesting_remote_address: "192.168.86.77",
+      },
+    });
+    storage.appendRuntimeEvent({
       created_at: oldAt,
       event_type: "autonomy.command",
       entity_type: "daemon",
@@ -77,6 +88,7 @@ test("storage kernel signal overview bundles recent runtime and observability si
       event_limit: 20,
       event_top_count_limit: 12,
       router_suppression_limit: 40,
+      federation_warning_limit: 50,
       observability_since: recentWindow,
       observability_recent_limit: 6,
       observability_alert_limit: 24,
@@ -90,6 +102,19 @@ test("storage kernel signal overview bundles recent runtime and observability si
       true
     );
     assert.equal(overview.recent_router_suppression_events.length >= 2, true);
+    assert.equal(overview.recent_federation_ingest_warning_events.length, 1);
+    assert.equal(overview.recent_federation_ingest_warning_events[0].entity_id, "mesh-mini-01");
+    assert.equal(overview.incoming_federation_peers.length, 1);
+    assert.equal(overview.incoming_federation_peers[0].host_id, "mesh-mini-01");
+    assert.equal(overview.incoming_federation_peers[0].current_remote_address, "192.168.86.77");
+    assert.equal(
+      storage.listFederationIncomingPeerSummaries({
+        known_host_ids: ["mesh-mini-01"],
+        host_id: "mesh-mini-01",
+        limit: 10,
+      }).length,
+      1
+    );
     assert.equal(overview.observability_overview.count, 2);
     assert.equal(overview.recent_observability_documents.length, 2);
     assert.equal(overview.recent_observability_alerts.length, 1);

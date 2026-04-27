@@ -183,6 +183,56 @@ test("office.snapshot surfaces verified incoming peers that are not staged in wo
   }
 });
 
+test("office.snapshot refreshes router suppression from the shared signal overview on cached reads", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-snapshot-router-suppression-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const client = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+  });
+
+  try {
+    await callTool(client, "warm.cache", {
+      action: "run_once",
+      thread_id: "ring-leader-main",
+      mutation: nextMutation("office-snapshot-router-suppression", "warm.cache.run_once", () => mutationCounter++),
+    });
+
+    const storage = new Storage(dbPath);
+    storage.appendRuntimeEvent({
+      created_at: new Date().toISOString(),
+      event_type: "autonomy.command",
+      entity_type: "daemon",
+      entity_id: "autonomy",
+      summary: "router suppression",
+      details: {
+        model_router_auto_bridge_suppressed_for_local_first: true,
+        model_router_suppression_decision_id: "decision-live-1",
+        model_router_backend_id: "claude-opus",
+        model_router_auto_bridge_suppressed_agent_ids: ["codex", "claude"],
+      },
+      source_client: "model.router",
+      source_agent: "codex",
+      source_model: "gpt-5.4",
+    });
+
+    const snapshot = await callTool(client, "office.snapshot", {
+      thread_id: "ring-leader-main",
+    });
+
+    assert.equal(snapshot.cache.hit, true);
+    assert.equal(snapshot.provider_bridge.latest_router_suppression.reason, "local_first_required");
+    assert.equal(snapshot.provider_bridge.latest_router_suppression.decision_id, "decision-live-1");
+    assert.deepEqual(snapshot.provider_bridge.latest_router_suppression.suppressed_agent_ids, ["codex", "claude"]);
+    assert.equal(snapshot.router_suppression_decisions[0].decision_id, "decision-live-1");
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("office.snapshot reuses the warm office cache for dashboard-style direct reads", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-snapshot-live-"));
   const dbPath = path.join(tempDir, "hub.sqlite");

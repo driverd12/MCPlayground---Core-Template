@@ -572,21 +572,6 @@ async function inspectHost(host, options, latestFederationEvent = null, sidecarS
   };
 }
 
-function latestFederationEventForHost(storage, hostId) {
-  if (!storage || !hostId) {
-    return null;
-  }
-  const events = storage.listRuntimeEvents({
-    event_type: "federation.ingest",
-    entity_type: "worker_fabric_host",
-    entity_id: hostId,
-    limit: 20,
-  });
-  return events
-    .slice()
-    .sort((left, right) => Number(right?.event_seq || 0) - Number(left?.event_seq || 0))[0] || null;
-}
-
 async function loadFabricState() {
   const storagePath = path.join(REPO_ROOT, "dist", "storage.js");
   const workerFabricPath = path.join(REPO_ROOT, "dist", "tools", "worker_fabric.js");
@@ -782,21 +767,25 @@ async function main() {
   const workerFabric = readRecord(fabricResponse.state);
   const rawHosts = Array.isArray(workerFabric.hosts) ? workerFabric.hosts.map(readRecord) : [];
   const knownHostIds = rawHosts.map((host) => readString(host.host_id)).filter(Boolean);
-  const unstagedVerifiedPeers = summarizeUnstagedVerifiedPeers(
-    fabricResponse.storage?.listRuntimeEvents({
-      event_type: "federation.ingest.warning",
+  const unstagedVerifiedPeers =
+    fabricResponse.storage?.listFederationIncomingPeerSummaries({
+      known_host_ids: knownHostIds,
+      host_id: options.hostId,
       limit: 50,
-    }) || [],
-    {
-      knownHostIds,
-      hostId: options.hostId,
-    }
+    }) || [];
+  const latestFederationEventByHost = new Map(
+    (
+      fabricResponse.storage?.listLatestFederationIngestEventsByHost({
+        host_ids: knownHostIds,
+        limit: Math.max(knownHostIds.length, 1),
+      }) || []
+    ).map((event) => [readString(event.entity_id), event])
   );
   const filteredHosts = options.hostId ? rawHosts.filter((host) => readString(host.host_id) === options.hostId) : rawHosts;
   const hosts = [];
   for (const host of filteredHosts) {
     const hostId = readString(host.host_id);
-    const latestFederationEvent = hostId ? latestFederationEventForHost(fabricResponse.storage, hostId) : null;
+    const latestFederationEvent = hostId ? latestFederationEventByHost.get(hostId) || null : null;
     hosts.push(await inspectHost(host, options, latestFederationEvent, sidecarState));
   }
   const summary = summarizeFindings(localFindings, hosts, localHostId);

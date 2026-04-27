@@ -176,6 +176,10 @@ type HostFabricSummary = {
     remote_current_address: string | null;
     remote_locator_observed_at: string | null;
     remote_locator_matched_by: string | null;
+    federation_last_ingest_at: string | null;
+    federation_last_sequence: number | null;
+    federation_signature_status: string | null;
+    federation_last_ingest_event_id: string | null;
     remote_mac_address: string | null;
     remote_agent_runtime: string | null;
     remote_model_label: string | null;
@@ -1007,6 +1011,12 @@ function summarizeRemoteHostMetadata(host: WorkerFabricHostRecord) {
       readString(federationIdentity?.requesting_remote_address),
     remote_locator_observed_at: readString(remoteLocator?.observed_at) ?? readString(federation?.last_ingest_at),
     remote_locator_matched_by: readString(remoteLocator?.matched_by) ?? readString(approvalScope?.matched_by),
+    federation_last_ingest_at: readString(federation?.last_ingest_at),
+    federation_last_sequence: readFiniteNumber(federation?.last_sequence),
+    federation_signature_status:
+      readString(federation?.peer_signature_status) ??
+      readString(isRecord(federationIdentity?.signature_verification_result) ? federationIdentity.signature_verification_result.status : null),
+    federation_last_ingest_event_id: readString(federation?.last_ingest_event_id),
     remote_mac_address:
       readString(remoteAccess.mac_address) ?? readString(remoteAccess.hardware_address) ?? readString(approvalScope?.mac_address),
     remote_agent_runtime: readString(remoteAccess.agent_runtime) ?? readString(federationIdentity?.captured_agent_runtime),
@@ -1380,6 +1390,10 @@ function summarizeWorkerFabric(storage: Storage, state?: WorkerFabricStateRecord
         remote_current_address: remoteSummary.remote_current_address,
         remote_locator_observed_at: remoteSummary.remote_locator_observed_at,
         remote_locator_matched_by: remoteSummary.remote_locator_matched_by,
+        federation_last_ingest_at: remoteSummary.federation_last_ingest_at,
+        federation_last_sequence: remoteSummary.federation_last_sequence,
+        federation_signature_status: remoteSummary.federation_signature_status,
+        federation_last_ingest_event_id: remoteSummary.federation_last_ingest_event_id,
         remote_mac_address: remoteSummary.remote_mac_address,
         remote_agent_runtime: remoteSummary.remote_agent_runtime,
         remote_model_label: remoteSummary.remote_model_label,
@@ -2340,7 +2354,11 @@ function taskFailuresRecoveredByActiveSessions(
   });
 }
 
-export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSummarySchema>) {
+export function kernelSummary(
+  storage: Storage,
+  input: z.infer<typeof kernelSummarySchema>,
+  options?: { signal_overview?: KernelSignalOverviewRecord }
+) {
   const goalLimit = input.goal_limit ?? 10;
   const sessionLimit = input.session_limit ?? 20;
   const experimentLimit = input.experiment_limit ?? 10;
@@ -2399,16 +2417,19 @@ export function kernelSummary(storage: Storage, input: z.infer<typeof kernelSumm
     effective_worker_fabric: effectiveWorkerFabric,
   });
   const recentObservabilityWindow = new Date(Date.now() - 15 * 60_000).toISOString();
-  const signalOverview = storage.getKernelSignalOverview({
-    event_since: input.event_since,
-    event_limit: eventLimit,
-    event_top_count_limit: 12,
-    router_suppression_limit: 40,
-    observability_since: recentObservabilityWindow,
-    observability_recent_limit: 6,
-    observability_alert_limit: 24,
-    observability_top_count_limit: 6,
-  });
+  const signalOverview =
+    options?.signal_overview ??
+    storage.getKernelSignalOverview({
+      event_since: input.event_since,
+      event_limit: eventLimit,
+      event_top_count_limit: 12,
+      router_suppression_limit: 40,
+      federation_warning_limit: 0,
+      observability_since: recentObservabilityWindow,
+      observability_recent_limit: 6,
+      observability_alert_limit: 24,
+      observability_top_count_limit: 6,
+    });
   const storageHealth = summarizeStorageHealth(storage);
   const evalSummary = summarizeEvalSuites(storage);
   const observabilitySummary = summarizeObservabilitySignals(signalOverview);

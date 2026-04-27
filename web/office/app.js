@@ -1512,9 +1512,12 @@
 
   function hostTone(host) {
     var status = String(host.remote_access_status || "").toLowerCase();
+    var health = String(host.health_state || "").toLowerCase();
+    if (health === "offline") return "bad";
+    if (health === "degraded") return "warn";
     if (status === "approved" && host.enabled) return "good";
     if (status === "pending") return "warn";
-    if (status === "rejected" || String(host.health_state || "").toLowerCase() === "offline") return "bad";
+    if (status === "rejected") return "bad";
     return "neutral";
   }
 
@@ -1620,7 +1623,7 @@
     setResultText(
       "Prefilled host form from verified inbound peer " +
         String(button.getAttribute("data-peer-host-id") || button.getAttribute("data-peer-hostname") || "peer") +
-        ". Confirm the workspace root and SSH user before staging."
+        ". Current IP is only a locator default. Confirm workspace root, SSH user, hostname/MAC or signed identity evidence, and keep approval off until reviewed."
     );
   }
 
@@ -1680,6 +1683,7 @@
     var draft = state.hostPairDraft || defaultHostPairDraft();
     var hosts = Array.isArray(fabric.hosts) ? fabric.hosts : [];
     var incomingPeers = Array.isArray(fabric.incoming_peers) ? fabric.incoming_peers : [];
+    var healthCounts = fabric.health_counts || {};
     var remoteHosts = remoteHostsFromSnapshot();
     var pendingCount = remoteHosts.filter(function (host) {
       return String(host.remote_access_status || "").toLowerCase() === "pending";
@@ -1719,7 +1723,7 @@
               ' data-peer-address="' + escapeHtml(peer.current_remote_address || "") + '"' +
               ' data-peer-runtime="' + escapeHtml(peer.captured_agent_runtime || "") + '"' +
               ' data-peer-model-label="' + escapeHtml(peer.captured_model_label || "") + '">' +
-              'Use Details</button>' +
+              'Prefill Staging</button>' +
               '<span class="chip chip--warn">verified inbound</span>' +
               '</div>' +
               '</article>'
@@ -1735,10 +1739,11 @@
             var title = host.display_name || host.host_id || "host";
             var currentAddress = String(host.remote_current_address || "").trim();
             var approvedAddress = String(host.remote_approved_ip_address || host.remote_ip_address || "").trim();
-            var detail = [
+            var identity = [
+              "host " + (host.host_id || "n/a"),
               host.remote_hostname || host.ssh_destination || host.transport,
-              currentAddress ? "current " + currentAddress : "",
               host.remote_mac_address,
+              host.remote_device_fingerprint,
               host.remote_agent_runtime,
               host.remote_model_label,
               host.remote_permission_profile ? "scope " + host.remote_permission_profile : "",
@@ -1747,26 +1752,37 @@
             var allowed = Array.isArray(host.remote_allowed_addresses) && host.remote_allowed_addresses.length
               ? host.remote_allowed_addresses.join(", ")
               : "loopback/local only";
-            var audit = [
+            var locatorChanged = currentAddress && approvedAddress && currentAddress !== approvedAddress;
+            var locator = [
+              currentAddress ? "current " + currentAddress : "current unknown",
+              approvedAddress ? "approved-time " + approvedAddress : "approved-time none",
               hostLocatorMatchLabel(host),
-              approvedAddress ? "approved at " + approvedAddress : "",
               "allowed at approval: " + allowed,
               host.remote_locator_observed_at ? "last seen " + relativeTime(host.remote_locator_observed_at) + " ago" : "",
+              locatorChanged ? "locator changed" : "",
+            ].filter(Boolean).join(" · ");
+            var audit = [
+              "Identity: " + (identity || "No durable remote identity metadata recorded."),
+              "Locator: " + locator,
               "workspace: " + (host.workspace_root || "n/a"),
             ].filter(Boolean).join(" · ");
             var context = hostContextSummary(host);
+            var ingestLabel = host.federation_last_ingest_at ? relativeTime(host.federation_last_ingest_at) + " ago" : "none";
+            var signatureLabel = host.federation_signature_status || (host.remote_identity_public_key_configured ? "configured" : "none");
             return (
               '<article class="host-row host-row--' + escapeHtml(tone) + '">' +
               '<div class="host-row__main">' +
               '<div class="host-row__eyebrow">' + escapeHtml(String(host.transport || "local").toUpperCase() + " · " + String(status).toUpperCase()) + "</div>" +
               '<strong>' + escapeHtml(title) + '</strong>' +
-              '<span>' + escapeHtml(detail || "No remote identity metadata recorded.") + '</span>' +
+              '<span>' + escapeHtml(identity || "No remote identity metadata recorded.") + '</span>' +
               '<small>' + escapeHtml(audit) + '</small>' +
               '</div>' +
               '<div class="host-row__metrics">' +
               '<div><span>Health</span><strong>' + escapeHtml(String(host.health_state || "n/a")) + '</strong></div>' +
               '<div><span>Workers</span><strong>' + String(host.worker_count || 0) + '</strong></div>' +
               '<div><span>Queue</span><strong>' + String(host.queue_depth || 0) + '</strong></div>' +
+              '<div><span>Ingest</span><strong>' + escapeHtml(ingestLabel) + '</strong></div>' +
+              '<div><span>Signature</span><strong>' + escapeHtml(signatureLabel) + '</strong></div>' +
               '<div><span>Context</span><strong class="chip chip--' + escapeHtml(context.tone) + '" title="' + escapeHtml(context.title) + '">' + escapeHtml(context.label) + '</strong></div>' +
               '</div>' +
               '<div class="host-row__actions">' +
@@ -1795,7 +1811,8 @@
       '<article><span>Approved remote</span><strong>' + String(approvedCount) + '</strong></article>' +
       '<article><span>Pending</span><strong>' + String(pendingCount) + '</strong></article>' +
       '<article><span>Verified inbound</span><strong>' + String(fabric.incoming_peer_count || incomingPeers.length || 0) + '</strong></article>' +
-      '<article><span>Strategy</span><strong>' + escapeHtml(fabric.strategy || "balanced") + '</strong></article>' +
+      '<article><span>Healthy</span><strong>' + String(healthCounts.healthy || 0) + '</strong></article>' +
+      '<article><span>Degraded</span><strong>' + String(healthCounts.degraded || 0) + '</strong></article>' +
       '</div>' +
       '</section>' +
       (incomingPeers.length
