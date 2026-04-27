@@ -42,8 +42,8 @@ flowchart LR
   BContext --> BSidecar
   BSecrets --> BSidecar
 
-  ASidecar -- "signed POST /federation/ingest<br/>compact context + event summary" --> BMcp
-  BSidecar -- "signed POST /federation/ingest<br/>compact context + event summary" --> AMcp
+  ASidecar -- "signed POST /federation/ingest<br/>compact context + shared summaries" --> BMcp
+  BSidecar -- "signed POST /federation/ingest<br/>compact context + shared summaries" --> AMcp
   ASidecar -- "optional peer tendril" --> CMcp
   CSidecar -- "optional peer tendril" --> AMcp
 
@@ -125,6 +125,21 @@ Each sidecar run now records a bounded per-peer send ledger in `data/federation/
 
 Each accepted federation ingest event records a first-class identity envelope: `requesting_host_id`, `requesting_remote_address`, `captured_from_host_id`, `captured_hostname`, `captured_agent_runtime`, `captured_model_label`, `signed_at`, `received_at`, `signature_verification_result`, and the approved whitelist scope. The receiver derives that envelope from the approved network gate and verified host signature, not from caller-provided `source_*` fields.
 
+## Shared Context Plane
+
+The federation sidecar exists to make agents on different hosts aware of useful local state without requiring the operator to manually brief every machine. It does this by publishing bounded, signed summaries from each host into the peers that have explicitly approved that host.
+
+The received summaries are queryable through `knowledge.query`. They are intentionally not merged into the local memory store as if they were native facts. `who_knows` stays local by default, while `knowledge.query` can include signed federated matches with the source host, hostname, runtime/model label, signature verification result, approval scope, receive time, and source event id.
+
+Every imported record must retain:
+
+- provenance: source host, hostname, runtime/model label, source event id, and receive time
+- trust: signature verification result and approval scope
+- scope: kind of summary (`memory`, `goal`, or `task`) and the bounded sidecar limits used
+- freshness: generated/updated timestamps from the origin host plus receive time on the ingesting peer
+
+Use this plane for awareness and routing: recent memories, active or blocked goals, non-terminal or recently updated tasks, blocker summaries, capability/freshness clues, and compact runtime-event headers. Do not use it for raw transcript replication, raw screenshots, full memory stores, broad filesystem content, secrets, or caller-declared identity.
+
 ## Payload Boundary
 
 The sidecar intentionally streams a compact subset by default:
@@ -132,6 +147,16 @@ The sidecar intentionally streams a compact subset by default:
 - `event.summary` counts and latest event sequence as the default local MCP liveness/context proof.
 - Recent runtime event headers and summaries, excluding federation echo events.
 - `desktop.context` freshness, source, frame paths, and stale/unavailable reasons.
+- `shared_summaries` for recent memory previews, active/non-terminal goal headers, and non-terminal task headers.
 - Host identity metadata such as host ID, hostname, agent runtime, and model label.
 
 It does not stream raw screenshots, raw transcripts, full memory stores, or broad filesystem content by default. Peers can use the received context as a routing and awareness signal, then request more authoritative information through explicit MCP tools when authorized.
+
+Before adding a coworker Mac, the already-approved side should be green on:
+
+```bash
+npm run federation:doctor -- --json --ssh-probe
+node --test tests/http_transport_ready_cache.test.mjs tests/federated_query.integration.test.mjs tests/federation_sidecar.test.mjs tests/federation_sidecar_state.test.mjs tests/federation_mesh_doctor.test.mjs
+```
+
+Those checks cover signed ingest, path-bound signatures, replay protection, body-size rejection, host-not-staged operator hints, sidecar ack/retry state, doctor truth, and signed federated summaries through `knowledge.query`.
