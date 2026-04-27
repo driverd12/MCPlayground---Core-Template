@@ -169,7 +169,7 @@ function buildItemPayload(options, identity, bearerToken) {
   const mcpHttpUrl = options.httpUrl || `http://${options.hostname}:8787`;
   return {
     title: itemTitle,
-    category: "API_CREDENTIAL",
+    category: "API Credential",
     fields: [
       { id: "credential", type: "CONCEALED", label: "credential", value: bearerToken },
       { id: "http_bearer_token", type: "CONCEALED", label: "MCP_HTTP_BEARER_TOKEN", value: bearerToken },
@@ -196,11 +196,28 @@ function buildItemPayload(options, identity, bearerToken) {
   };
 }
 
+function opItemCategory(category) {
+  const value = String(category || "API Credential").trim();
+  if (value === "API_CREDENTIAL") {
+    return "API Credential";
+  }
+  if (value === "SECURE_NOTE") {
+    return "Secure Note";
+  }
+  return value;
+}
+
+function opTemplateInput(payload) {
+  const { category: _category, ...body } = payload;
+  return `${JSON.stringify(body)}\n`;
+}
+
 function upsertOnePasswordItem(options, payload) {
   const items = listVaultItems(options);
   const existing = items.find((entry) => entry.title === payload.title);
   const tags = "master-mold,mcp,federation,host-identity";
-  const input = `${JSON.stringify(payload)}\n`;
+  const input = opTemplateInput(payload);
+  const category = opItemCategory(payload.category);
   if (options.dryRun) {
     return {
       action: existing ? "would_update" : "would_create",
@@ -210,11 +227,19 @@ function upsertOnePasswordItem(options, payload) {
     };
   }
   if (existing?.id) {
-    const output = runOp(options, ["item", "edit", existing.id, "--vault", options.vault, "--tags", tags, "--format", "json"], input);
+    const output = runOp(
+      options,
+      ["item", "edit", existing.id, "--vault", options.vault, "--title", payload.title, "--tags", tags, "--format", "json"],
+      input
+    );
     const parsed = JSON.parse(output);
     return { action: "updated", title: parsed.title ?? payload.title, vault: options.vault, item_id: parsed.id ?? existing.id };
   }
-  const output = runOp(options, ["item", "create", "--vault", options.vault, "--tags", tags, "--format", "json", "-"], input);
+  const output = runOp(
+    options,
+    ["item", "create", "--category", category, "--title", payload.title, "--vault", options.vault, "--tags", tags, "--format", "json", "-"],
+    input
+  );
   const parsed = JSON.parse(output);
   return { action: "created", title: parsed.title ?? payload.title, vault: options.vault, item_id: parsed.id ?? null };
 }
