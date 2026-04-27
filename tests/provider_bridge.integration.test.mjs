@@ -202,24 +202,24 @@ test("provider.bridge export_bundle and install create real client config artifa
     assert.ok(installed.installs.some((entry) => entry.client_id === "claude-cli"));
     assert.equal(fs.existsSync(path.join(homeDir, ".claude.json")), true);
     const claudeConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".claude.json"), "utf8"));
-    assert.equal(claudeConfig.mcpServers?.master-mold?.type, "http");
-    assert.equal(claudeConfig.mcpServers?.master-mold?.url, "http://127.0.0.1:8787/");
+    assert.equal(claudeConfig.mcpServers?.["master-mold"]?.type, "http");
+    assert.equal(claudeConfig.mcpServers?.["master-mold"]?.url, "http://127.0.0.1:8787/");
 
     const cursorConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".cursor", "mcp.json"), "utf8"));
-    assert.ok(cursorConfig.mcpServers?.master-mold?.url);
+    assert.ok(cursorConfig.mcpServers?.["master-mold"]?.url);
     const cursorWorkspaceConfig = JSON.parse(
       fs.readFileSync(path.join(workspaceRoot, ".cursor", "mcp.json"), "utf8")
     );
-    assert.ok(cursorWorkspaceConfig.mcpServers?.master-mold?.url);
+    assert.ok(cursorWorkspaceConfig.mcpServers?.["master-mold"]?.url);
 
     const geminiConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".gemini", "settings.json"), "utf8"));
-    assert.ok(geminiConfig.mcpServers?.master-mold?.url);
+    assert.ok(geminiConfig.mcpServers?.["master-mold"]?.url);
 
     const copilotConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".copilot", "mcp-config.json"), "utf8"));
-    assert.equal(copilotConfig.mcpServers?.master-mold?.type, "http");
+    assert.equal(copilotConfig.mcpServers?.["master-mold"]?.type, "http");
 
     const vscodeConfig = JSON.parse(fs.readFileSync(path.join(workspaceRoot, ".vscode", "mcp.json"), "utf8"));
-    assert.ok(vscodeConfig.servers?.master-mold?.url);
+    assert.ok(vscodeConfig.servers?.["master-mold"]?.url);
   } finally {
     await session.client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -255,14 +255,14 @@ test("provider.bridge installs Gemini CLI via stdio when transport is auto", { c
     assert.equal(installed.installs[0].transport_used, "stdio");
 
     const geminiConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".gemini", "settings.json"), "utf8"));
-    assert.equal(typeof geminiConfig.mcpServers?.master-mold?.command, "string");
-    assert.ok(Array.isArray(geminiConfig.mcpServers?.master-mold?.args));
-    assert.match(geminiConfig.mcpServers?.master-mold?.args?.[0] || "", /provider_stdio_bridge\.mjs$/);
-    assert.equal(geminiConfig.mcpServers?.master-mold?.type, "stdio");
-    assert.equal(geminiConfig.mcpServers?.master-mold?.cwd, workspaceRoot);
-    assert.equal(geminiConfig.mcpServers?.master-mold?.trust, true);
-    assert.equal(geminiConfig.mcpServers?.master-mold?.timeout, 600000);
-    assert.equal(typeof geminiConfig.mcpServers?.master-mold?.env?.MCP_PROXY_HTTP_URL, "string");
+    assert.equal(typeof geminiConfig.mcpServers?.["master-mold"]?.command, "string");
+    assert.ok(Array.isArray(geminiConfig.mcpServers?.["master-mold"]?.args));
+    assert.match(geminiConfig.mcpServers?.["master-mold"]?.args?.[0] || "", /provider_stdio_bridge\.mjs$/);
+    assert.equal(geminiConfig.mcpServers?.["master-mold"]?.type, "stdio");
+    assert.equal(geminiConfig.mcpServers?.["master-mold"]?.cwd, workspaceRoot);
+    assert.equal(geminiConfig.mcpServers?.["master-mold"]?.trust, true);
+    assert.equal(geminiConfig.mcpServers?.["master-mold"]?.timeout, 600000);
+    assert.equal(typeof geminiConfig.mcpServers?.["master-mold"]?.env?.MCP_PROXY_HTTP_URL, "string");
     assert.equal(installed.clients[0].preferred_transport, "stdio");
   } finally {
     await session.client.close().catch(() => {});
@@ -303,15 +303,15 @@ test("provider.bridge installs Claude CLI via stdio proxy when transport is auto
     assert.equal(installed.installs[0].transport_used, "stdio");
 
     const claudeConfig = JSON.parse(fs.readFileSync(path.join(homeDir, ".claude.json"), "utf8"));
-    assert.equal(claudeConfig.mcpServers?.master-mold?.type, "stdio");
-    assert.equal(typeof claudeConfig.mcpServers?.master-mold?.command, "string");
-    assert.ok(Array.isArray(claudeConfig.mcpServers?.master-mold?.args));
-    assert.match(String(claudeConfig.mcpServers?.master-mold?.args?.[0] ?? ""), /provider_stdio_bridge\.mjs$/);
-    assert.equal(claudeConfig.mcpServers?.master-mold?.cwd, workspaceRoot);
-    assert.equal(claudeConfig.mcpServers?.master-mold?.trust, true);
-    assert.equal(claudeConfig.mcpServers?.master-mold?.timeout, 600000);
-    assert.equal(claudeConfig.mcpServers?.master-mold?.env?.MCP_PROXY_HTTP_URL, "http://127.0.0.1:8787/");
-    assert.equal(typeof claudeConfig.mcpServers?.master-mold?.env?.MCP_PROXY_STDIO_COMMAND, "string");
+    assert.equal(claudeConfig.mcpServers?.["master-mold"]?.type, "stdio");
+    assert.equal(typeof claudeConfig.mcpServers?.["master-mold"]?.command, "string");
+    assert.ok(Array.isArray(claudeConfig.mcpServers?.["master-mold"]?.args));
+    assert.match(String(claudeConfig.mcpServers?.["master-mold"]?.args?.[0] ?? ""), /provider_stdio_bridge\.mjs$/);
+    assert.equal(claudeConfig.mcpServers?.["master-mold"]?.cwd, workspaceRoot);
+    assert.equal(claudeConfig.mcpServers?.["master-mold"]?.trust, true);
+    assert.equal(claudeConfig.mcpServers?.["master-mold"]?.timeout, 600000);
+    assert.equal(claudeConfig.mcpServers?.["master-mold"]?.env?.MCP_PROXY_HTTP_URL, "http://127.0.0.1:8787/");
+    assert.equal(typeof claudeConfig.mcpServers?.["master-mold"]?.env?.MCP_PROXY_STDIO_COMMAND, "string");
     assert.equal(installed.clients[0].preferred_transport, "stdio");
   } finally {
     await session.client.close().catch(() => {});
@@ -348,6 +348,15 @@ test("provider.bridge diagnose reports office agent mappings and truthful status
     const onboardingEntries = new Map(diagnose.onboarding.entries.map((entry) => [entry.client_id, entry]));
     assert.equal(typeof onboardingEntries.get("claude-cli")?.ready, "boolean");
     assert.equal(typeof onboardingEntries.get("codex")?.runtime_status, "string");
+    assert.equal(onboardingEntries.get("claude-cli")?.verify_command, "npm run providers:diagnose -- claude-cli");
+    assert.equal(onboardingEntries.get("codex")?.verify_command, "npm run providers:diagnose -- codex");
+    assert.equal(onboardingEntries.get("cursor")?.verify_command, "npm run providers:diagnose -- cursor");
+    assert.equal(onboardingEntries.get("github-copilot-vscode")?.failure_kind, "editor_merge_required");
+    assert.match(String(onboardingEntries.get("github-copilot-vscode")?.failure_detail || ""), /editor\/workspace merge/i);
+    assert.equal(onboardingEntries.get("github-copilot-vscode")?.verify_command, "npm run providers:diagnose -- github-copilot-vscode");
+    assert.equal(onboardingEntries.get("github-copilot-vscode")?.repair_command, "npm run providers:export");
+    assert.equal(onboardingEntries.get("chatgpt-developer-mode")?.failure_kind, "remote_endpoint_required");
+    assert.match(String(onboardingEntries.get("chatgpt-developer-mode")?.failure_detail || ""), /remote MCP endpoint/i);
     for (const entry of diagnose.diagnostics) {
       assert.ok(["connected", "disconnected", "configured", "unavailable"].includes(entry.status));
     }

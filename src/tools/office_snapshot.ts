@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { z } from "zod";
 import { summarizeDesktopControlState } from "../desktop_control_plane.js";
 import { summarizePatientZeroState } from "../patient_zero_plane.js";
@@ -1000,6 +1003,110 @@ function knownWorkerFabricHostIds(kernel: Record<string, unknown>) {
   );
 }
 
+function defaultSidecarStatePath(hostId: string) {
+  const statePath = String(process.env.MASTER_MOLD_FEDERATION_STATE_PATH ?? "").trim();
+  if (statePath) {
+    return path.resolve(statePath);
+  }
+  return path.join(process.cwd(), "data", "federation", `${safeHostId(hostId) || "host"}-sidecar-state.json`);
+}
+
+function localFederationHostId(kernel: Record<string, unknown>) {
+  const workerFabric = asRecord(asRecord(kernel).worker_fabric);
+  const fromKernel = String(workerFabric.default_host_id ?? "").trim();
+  const fromEnv = String(process.env.MASTER_MOLD_HOST_ID ?? "").trim();
+  return safeHostId(fromEnv || fromKernel || os.hostname() || "local-host") || "local-host";
+}
+
+function readSidecarStateRecord(filePath: string) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return asRecord(parsed);
+  } catch {
+    return {};
+  }
+}
+
+function finiteNumberOrNull(value: unknown) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function sidecarAgeSeconds(isoValue: unknown) {
+  const text = String(isoValue ?? "").trim();
+  if (!text) {
+    return null;
+  }
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? Math.max(0, Math.round((Date.now() - parsed) / 1000)) : null;
+}
+
+function summarizeFederationSidecar(kernel: Record<string, unknown>) {
+  const hostId = localFederationHostId(kernel);
+  const statePath = defaultSidecarStatePath(hostId);
+  const state = readSidecarStateRecord(statePath);
+  const peerResults = Object.values(asRecord(state.peer_results))
+    .map((entry) => asRecord(entry))
+    .filter((entry) => Object.keys(entry).length > 0);
+  const outbox = asList(state.outbox)
+    .map((entry) => asRecord(entry))
+    .filter((entry) => !String(entry.closed_at ?? "").trim());
+  const retryLedger = asList(state.retry_ledger).map((entry) => asRecord(entry));
+  const lastCycleAt = String(state.last_cycle_at ?? "").trim() || null;
+  const peers = peerResults.map((peer) => ({
+    peer: String(peer.peer ?? "").trim(),
+    last_attempt_at: String(peer.last_attempt_at ?? "").trim() || null,
+    last_attempt_age_seconds: sidecarAgeSeconds(peer.last_attempt_at),
+    last_publish_at: String(peer.last_ok_at ?? "").trim() || null,
+    last_publish_age_seconds: sidecarAgeSeconds(peer.last_ok_at),
+    last_ok: peer.last_ok === true,
+    last_http_status: finiteNumberOrNull(peer.last_http_status),
+    consecutive_failures: finiteNumberOrNull(peer.consecutive_failures) ?? 0,
+    outbox_pending: asList(peer.resend_window_sequences).length,
+    retry_count: finiteNumberOrNull(peer.retry_count) ?? 0,
+    next_retry_at: String(peer.next_retry_at ?? "").trim() || null,
+    last_error: String(peer.last_error ?? "").trim() || null,
+    ack_persisted_sequence: finiteNumberOrNull(peer.ack_persisted_sequence),
+    ack_processed_sequence: finiteNumberOrNull(peer.ack_processed_sequence),
+  }));
+  const failingPeers = peers.filter((peer) => peer.last_ok !== true);
+  const staleSeconds = 15 * 60;
+  const lastCycleAge = sidecarAgeSeconds(lastCycleAt);
+  const recencyState =
+    lastCycleAt && lastCycleAge !== null && lastCycleAge <= staleSeconds
+      ? "recent"
+      : lastCycleAt
+        ? "stale"
+        : "not_seen";
+  const runningState = failingPeers.length > 0 ? "failing" : recencyState;
+  let nextRepairAction = "npm run federation:onboard -- --peer <peer-url>";
+  if (lastCycleAt && failingPeers.length > 0) {
+    nextRepairAction = "npm run federation:repair -- --action sidecar-stale";
+  } else if (lastCycleAt && runningState === "stale") {
+    nextRepairAction = "npm run federation:repair -- --action sidecar-stale";
+  } else if (peers.length > 0 && failingPeers.length === 0) {
+    nextRepairAction = "npm run federation:doctor";
+  }
+  return {
+    host_id: hostId,
+    present: fs.existsSync(statePath),
+    state_path: statePath,
+    running_state: runningState,
+    last_cycle_at: lastCycleAt,
+    last_cycle_age_seconds: lastCycleAge,
+    last_cycle_ok: state.last_cycle_ok === true,
+    sequence: finiteNumberOrNull(state.sequence),
+    peer_count: peers.length,
+    ok_peer_count: peers.filter((peer) => peer.last_ok === true).length,
+    failing_peer_count: failingPeers.length,
+    outbox_depth: outbox.length,
+    retry_ledger_count: retryLedger.length,
+    last_error: failingPeers.map((peer) => peer.last_error).find(Boolean) ?? null,
+    next_repair_action: nextRepairAction,
+    peers,
+  };
+}
+
 function buildFederationPayload(signalOverview: KernelSignalOverviewRecord, kernel: Record<string, unknown>) {
   const knownHostIds = knownWorkerFabricHostIds(kernel);
   const incomingPeers = (signalOverview.incoming_federation_peers ?? [])
@@ -1022,6 +1129,7 @@ function buildFederationPayload(signalOverview: KernelSignalOverviewRecord, kern
     generated_at: new Date().toISOString(),
     incoming_peer_count: incomingPeers.length,
     incoming_peers: incomingPeers,
+    sidecar: summarizeFederationSidecar(kernel),
   };
 }
 

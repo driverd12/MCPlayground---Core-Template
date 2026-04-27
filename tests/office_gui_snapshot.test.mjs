@@ -30,6 +30,41 @@ test("office gui snapshot reflects provider heartbeat states and self-drive summ
       learning: {},
       autopilot: {},
       runtime_workers: { summary: {}, sessions: [] },
+      federation: {
+        sidecar: {
+          host_id: "office-host",
+          present: true,
+          state_path: "/tmp/office-host-sidecar-state.json",
+          running_state: "failing",
+          last_cycle_at: "2026-04-01T17:00:00.000Z",
+          last_cycle_age_seconds: 120,
+          last_cycle_ok: false,
+          sequence: 42,
+          peer_count: 2,
+          ok_peer_count: 1,
+          failing_peer_count: 1,
+          outbox_depth: 3,
+          retry_ledger_count: 1,
+          last_error: "peer returned 503",
+          next_repair_action: "Run npm run federation:repair -- --action sidecar-stale",
+          peers: [
+            {
+              peer: "http://peer-a.local:8787",
+              last_attempt_at: "2026-04-01T17:00:00.000Z",
+              last_attempt_age_seconds: 120,
+              last_publish_at: "2026-04-01T16:59:00.000Z",
+              last_publish_age_seconds: 180,
+              last_ok: true,
+              last_http_status: 200,
+              consecutive_failures: 0,
+              outbox_pending: 0,
+              retry_count: 0,
+              next_retry_at: "",
+              last_error: "",
+            },
+          ],
+        },
+      },
       kernel: {
         overview: {},
         worker_fabric: { hosts: [] },
@@ -127,6 +162,11 @@ test("office gui snapshot reflects provider heartbeat states and self-drive summ
   assert.equal(snapshot.workbench.quick_actions.retry_failed_tasks, true);
   assert.equal(snapshot.workbench.blockers[0].remediation.action, "retry_failed_tasks");
   assert.equal(snapshot.workbench.suggested_objectives[0].title, "Own the next queued task");
+  assert.equal(snapshot.summary.worker_fabric.federation_sidecar.host_id, "office-host");
+  assert.equal(snapshot.summary.worker_fabric.federation_sidecar.running_state, "failing");
+  assert.equal(snapshot.summary.worker_fabric.federation_sidecar.outbox_depth, 3);
+  assert.equal(snapshot.summary.worker_fabric.federation_sidecar.next_repair_action, "Run npm run federation:repair -- --action sidecar-stale");
+  assert.equal(snapshot.summary.worker_fabric.federation_sidecar.peers[0].peer, "http://peer-a.local:8787");
 });
 
 test("office gui snapshot retains roster metadata and exports explicit bridge targets", () => {

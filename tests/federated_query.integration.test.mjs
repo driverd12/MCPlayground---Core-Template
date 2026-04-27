@@ -89,6 +89,29 @@ test("knowledge.query includes signed federated summaries while who_knows stays 
               last_error: "Duo token expired during bootstrap.",
             },
           ],
+          capabilities: [
+            {
+              capability_id: "dans-mbp:capability-summary",
+              host_id: "dans-mbp",
+              hostname: "Dans-MBP.local",
+              worker_fabric: {
+                status: "enabled",
+                summary: "worker fabric backend accepts local and remote task delegation",
+              },
+              model_router: {
+                status: "available",
+                summary: "local model router can explain backend readiness",
+              },
+              provider_bridge: {
+                status: "partial",
+                summary: "Claude Codex Cursor provider bridge visibility is present",
+              },
+              desktop_control: {
+                status: "ready",
+                summary: "desktop observe freshness is available without screenshot payloads",
+              },
+            },
+          ],
         },
       },
       source_client: "federation.sidecar",
@@ -128,6 +151,32 @@ test("knowledge.query includes signed federated summaries while who_knows stays 
     assert.equal(goalOnly.federated_matches[0].type, "federated_goal");
     assert.equal(goalOnly.federated_matches[0].kind, "goal");
     assert.equal(goalOnly.federated_matches[0].host_id, "dans-mbp");
+
+    const blockerOnly = await callTool(client, "knowledge.query", {
+      query: "duo token expired bootstrap",
+      federated_focus: "blocker",
+      federated_host_ids: ["dans-mbp"],
+      federated_trust_statuses: ["verified"],
+      federated_provenance: "approved_host_identity",
+      limit: 5,
+    });
+    assert.equal(blockerOnly.counts.federated_matches, 1);
+    assert.equal(blockerOnly.federated_matches[0].type, "federated_task");
+    assert.equal(blockerOnly.federated_matches[0].kind, "task");
+    assert.equal(blockerOnly.federated_matches[0].summary.status, "failed");
+    assert.match(blockerOnly.federated_matches[0].text, /duo token expired/i);
+
+    const capabilityOnly = await callTool(client, "knowledge.query", {
+      query: "worker fabric provider bridge visibility",
+      federated_focus: "capability",
+      federated_trust_statuses: ["verified"],
+      federated_provenance: "approved_host_identity",
+      limit: 5,
+    });
+    assert.equal(capabilityOnly.counts.federated_matches, 1);
+    assert.equal(capabilityOnly.federated_matches[0].type, "federated_capability");
+    assert.equal(capabilityOnly.federated_matches[0].kind, "capability");
+    assert.equal(capabilityOnly.federated_matches[0].summary.capability_id, "dans-mbp:capability-summary");
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

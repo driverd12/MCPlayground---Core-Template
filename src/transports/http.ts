@@ -118,6 +118,8 @@ const autonomyIngressScript = path.join(repoRoot, "scripts", "autonomy_ide_ingre
 const autonomyCtlScript = path.join(repoRoot, "scripts", "autonomy_ctl.sh");
 const officeTmuxScript = path.join(repoRoot, "scripts", "agent_office_tmux.sh");
 const officeTmuxOpenScript = path.join(repoRoot, "scripts", "agent_office_tmux_open.sh");
+const federationRepairScript = path.join(repoRoot, "scripts", "federation_repair.mjs");
+const federationSidecarScript = path.join(repoRoot, "scripts", "federation_sidecar.mjs");
 const defaultHostIdentityReplayStorePath = path.join(repoRoot, "data", "federation", "host-identity-replay-nonces.json");
 const mcpToolCallScript = path.join(repoRoot, "scripts", "mcp_tool_call.mjs");
 const stdioServerEntry = path.join(repoRoot, "dist", "server.js");
@@ -310,7 +312,11 @@ function officeSnapshotLatestCachePath(theme: string) {
 }
 
 function officeSnapshotInflightKey(theme: string, requestedThreadId: string | null) {
-  return `${officeSnapshotCacheToken(theme, "night")}::${officeSnapshotCacheToken(requestedThreadId || "", "latest")}`;
+  return [
+    officeSnapshotCacheDir(),
+    officeSnapshotCacheToken(theme, "night"),
+    officeSnapshotCacheToken(requestedThreadId || "", "latest"),
+  ].join("::");
 }
 
 function officeSnapshotCacheMaxAgeSeconds() {
@@ -3373,6 +3379,46 @@ async function maybeHandleOfficeRequest(
           timeoutMs: 30000,
         }
       );
+    } else if (action === "federation_doctor_refresh") {
+      result = await runLocalCommand("npm", ["run", "--silent", "federation:doctor", "--", "--json"], {
+        cwd: repoRoot,
+        env: officeEnv(origin),
+        timeoutMs: 60000,
+      });
+    } else if (action === "federation_launchd_repair") {
+      result = await runLocalCommand("npm", ["run", "federation:launchd:install"], {
+        cwd: repoRoot,
+        env: officeEnv(origin),
+        timeoutMs: 90000,
+      });
+    } else if (action === "federation_sidecar_once") {
+      result = await runLocalCommand(process.execPath, [federationSidecarScript, "--once"], {
+        cwd: repoRoot,
+        env: officeEnv(origin),
+        timeoutMs: 90000,
+      });
+    } else if (
+      action === "repair_http" ||
+      action === "repair_build" ||
+      action === "repair_sidecar_stale" ||
+      action === "repair_office_cache" ||
+      action === "repair_providers"
+    ) {
+      const repairAction =
+        action === "repair_http"
+          ? "http"
+          : action === "repair_build"
+            ? "build"
+            : action === "repair_sidecar_stale"
+              ? "sidecar-stale"
+              : action === "repair_office_cache"
+                ? "office-cache"
+                : "providers";
+      result = await runLocalCommand(process.execPath, [federationRepairScript, "--action", repairAction, "--json"], {
+        cwd: repoRoot,
+        env: officeEnv(origin),
+        timeoutMs: 120000,
+      });
     } else {
       sendJson(res, 400, { ok: false, error: "unsupported_action" });
       return true;

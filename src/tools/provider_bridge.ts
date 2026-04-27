@@ -176,6 +176,10 @@ type ProviderBridgeOnboardingEntry = {
   install_command: string | null;
   diagnose_command: string | null;
   export_command: string | null;
+  verify_command: string | null;
+  repair_command: string | null;
+  failure_kind: string | null;
+  failure_detail: string | null;
   blockers: string[];
 };
 
@@ -730,10 +734,11 @@ export function buildProviderBridgeOnboardingSummary(params: {
   const entries = params.clients.map((status) => {
     const diagnostic = diagnosticsByClient.get(status.client_id);
     const installCommand = providerInstallCommand(status.client_id, serverName);
+    const verifyCommand = providerDiagnoseCommand(status.client_id);
     const diagnoseCommand =
       status.install_mode === "remote-only" || status.install_mode === "export-only"
         ? null
-        : providerDiagnoseCommand(status.client_id);
+        : verifyCommand;
     const exportCommand =
       status.install_mode === "export-only" || status.install_mode === "remote-only"
         ? providerExportCommand()
@@ -742,31 +747,45 @@ export function buildProviderBridgeOnboardingSummary(params: {
     let runtimeStatus: ProviderBridgeOnboardingEntry["runtime_status"];
     let nextAction = "";
     let nextCommand: string | null = null;
+    let failureKind: string | null = null;
+    let failureDetail: string | null = null;
     let ready = false;
 
     if (status.install_mode === "remote-only") {
       runtimeStatus = "remote_only";
       blockers.push("remote_endpoint_required");
+      failureKind = "remote_endpoint_required";
+      failureDetail = `${status.display_name} requires a reachable remote MCP endpoint; this repo cannot install it as a purely local client config.`;
       nextAction = "Export the remote manifest and expose an intentional remote MCP endpoint instead of pretending this is a local install.";
       nextCommand = exportCommand;
     } else if (status.install_mode === "export-only") {
       runtimeStatus = "export_only";
       blockers.push("editor_merge_required");
+      failureKind = "editor_merge_required";
+      failureDetail = `${status.display_name} requires an editor/workspace merge step; export the snippet and add it to the target config.`;
       nextAction = "Export the editor-facing MCP snippet and merge it into the target workspace/editor config.";
       nextCommand = exportCommand;
     } else if (!status.binary_present) {
       runtimeStatus = "unavailable";
       blockers.push("client_binary_missing");
+      failureKind = "client_binary_missing";
+      failureDetail = `${status.display_name} binary is not on PATH or in the supported app location for this host.`;
       nextAction = "Install the client app or CLI on this host first, then write the MCP bridge config.";
       nextCommand = installCommand;
     } else if (!status.installed) {
       runtimeStatus = "unavailable";
       blockers.push("bridge_config_missing");
+      failureKind = "bridge_config_missing";
+      failureDetail = status.config_path
+        ? `MASTER-MOLD is not present in ${status.config_path}.`
+        : "No local config path is available for this client.";
       nextAction = "Write the MCP bridge config from the one supported install path, then verify it.";
       nextCommand = installCommand;
     } else if (diagnostic && diagnosticsStale) {
       runtimeStatus = "runtime_check_stale";
       blockers.push("runtime_check_stale");
+      failureKind = "runtime_check_stale";
+      failureDetail = `Last bridge diagnostic sample is stale; rerun diagnostics for ${status.client_id}.`;
       nextAction = "Runtime bridge evidence is stale. Re-run bridge diagnostics before treating this client as live.";
       nextCommand = diagnoseCommand;
     } else if (diagnostic?.status === "connected") {
@@ -777,24 +796,39 @@ export function buildProviderBridgeOnboardingSummary(params: {
     } else if (diagnostic?.status === "configured") {
       runtimeStatus = "configured";
       blockers.push("runtime_not_confirmed");
+      failureKind = "runtime_not_confirmed";
+      failureDetail = diagnostic.detail || "Config exists, but the client has not accepted a runtime check.";
       nextAction = "The bridge config exists, but runtime connectivity is not confirmed. Open or authenticate the client, then re-run diagnostics.";
       nextCommand = diagnoseCommand;
     } else if (diagnostic?.status === "disconnected") {
       runtimeStatus = "disconnected";
       blockers.push("client_auth_or_runtime_missing");
+      failureKind = "client_auth_or_runtime_missing";
+      failureDetail = diagnostic.detail || "Client auth or runtime readiness is missing.";
       nextAction = diagnostic.detail || "The bridge is configured but the client is not currently authenticated or runtime-ready.";
       nextCommand = diagnoseCommand;
     } else if (diagnostic?.status === "unavailable") {
       runtimeStatus = "unavailable";
       blockers.push("runtime_unavailable");
+      failureKind = "runtime_unavailable";
+      failureDetail = diagnostic.detail || "Client runtime is unavailable.";
       nextAction = diagnostic.detail || "The client is not currently available on this host.";
       nextCommand = installCommand ?? diagnoseCommand;
     } else {
       runtimeStatus = "diagnose_required";
       blockers.push("runtime_check_missing");
+      failureKind = "runtime_check_missing";
+      failureDetail = "No runtime diagnostic result has been recorded for this client yet.";
       nextAction = "The bridge looks configured, but no runtime verification has been recorded yet. Run diagnostics before treating it as live.";
       nextCommand = diagnoseCommand;
     }
+
+    const repairCommand =
+      installCommand && (blockers.includes("bridge_config_missing") || blockers.includes("client_binary_missing"))
+        ? installCommand
+        : exportCommand && (status.install_mode === "export-only" || status.install_mode === "remote-only")
+          ? exportCommand
+          : diagnoseCommand;
 
     return {
       client_id: status.client_id,
@@ -811,6 +845,10 @@ export function buildProviderBridgeOnboardingSummary(params: {
       install_command: installCommand,
       diagnose_command: diagnoseCommand,
       export_command: exportCommand,
+      verify_command: verifyCommand,
+      repair_command: repairCommand,
+      failure_kind: failureKind,
+      failure_detail: failureDetail,
       blockers,
     } satisfies ProviderBridgeOnboardingEntry;
   });

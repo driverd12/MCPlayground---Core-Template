@@ -123,19 +123,13 @@ This script is cross-platform. It sets `MCP_HTTP=1` inside a Node wrapper so it 
 Peer federation sidecar:
 
 ```bash
-node scripts/federation_secret_bootstrap.mjs \
+npm run federation:onboard -- \
   --vault Employee \
   --host-id this-host \
-  --peers http://Dans-MBP.local:8787 \
-  --write-env
-
-MASTER_MOLD_FEDERATION_PEERS=http://Dans-MBP.local:8787 \
-MASTER_MOLD_HOST_ID=this-host \
-MASTER_MOLD_IDENTITY_KEY_PATH=~/.master-mold/identity/this-host-ed25519.pem \
-npm run federation:sidecar -- --once
+  --peer http://Dans-MBP.local:8787
 ```
 
-Run the same bootstrap and sidecar on any approved peer and change `MASTER_MOLD_FEDERATION_PEERS` to the other approved MASTER-MOLD HTTP endpoints. This is a mesh/tendril stream: each host captures locally, signs `POST /federation/ingest`, and each receiving peer stores the compact context/event payload in its own runtime events. See [Federation Mesh](./FEDERATION_MESH.md) for the wire diagram and team bootstrap sequence.
+`federation:onboard` checks prerequisites, creates or reuses host identity, stores recovery material in 1Password when available, writes non-secret `.env` federation settings, requests remote access from the peer, runs the sidecar once, runs the federation doctor, and prints the next step. Run the same onboarding command on any approved peer and change `--peer` to the other approved MASTER-MOLD HTTP endpoints. This is a mesh/tendril stream: each host captures locally, signs `POST /federation/ingest`, and each receiving peer stores the compact context/event payload in its own runtime events. See [Federation Mesh](./FEDERATION_MESH.md) for the wire diagram and team bootstrap sequence.
 
 Each local sidecar run also writes a bounded per-peer send ledger into `data/federation/<host-id>-sidecar-state.json`, which `npm run federation:doctor` uses to distinguish stale peer freshness from local publish failures or a sidecar that has not run yet. The doctor also reports local host-ID/key drift and whether the federation sidecar launchd agent is installed and loaded on macOS.
 
@@ -146,6 +140,16 @@ On macOS, install the same sidecar as a launchd agent after `MASTER_MOLD_FEDERAT
 ```bash
 npm run federation:launchd:install
 ```
+
+Useful operator follow-ups:
+
+```bash
+npm run federation:doctor -- --json
+npm run federation:soak -- --peer http://Dans-MBP.local:8787 --iterations 3 --json
+npm run federation:repair -- --action all --json
+```
+
+Agent Office also exposes Hosts/Federation controls for sidecar one-shot publish, launchd repair, doctor refresh, host approval retry, stale cache repair, missing build repair, HTTP repair, and provider config repair.
 
 ## 8. Smoke Check
 

@@ -752,6 +752,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const maintainSelfDrive = asDict(maintain.self_drive);
   const providerBridge = asDict(raw.provider_bridge);
   const federation = asDict(raw.federation);
+  const federationSidecar = asDict(federation.sidecar);
   const providerBridgeDiagnostics = asDict(providerBridge.diagnostics);
   const providerBridgeResourceGate = asDict(providerBridge.resource_gate);
   const providerEntries = asList(providerBridgeDiagnostics.diagnostics);
@@ -1013,6 +1014,42 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
           age_seconds: parseAnyFloat(entry.age_seconds),
           detail: compactSingleLine(entry.detail, 240),
         })),
+        federation_sidecar: {
+          host_id: String(federationSidecar.host_id ?? ""),
+          present: Boolean(federationSidecar.present),
+          state_path: String(federationSidecar.state_path ?? ""),
+          running_state: String(federationSidecar.running_state ?? "not_seen"),
+          last_cycle_at: String(federationSidecar.last_cycle_at ?? ""),
+          last_cycle_age_seconds: parseAnyFloat(federationSidecar.last_cycle_age_seconds),
+          last_cycle_ok: Boolean(federationSidecar.last_cycle_ok),
+          sequence: parseAnyFloat(federationSidecar.sequence),
+          peer_count: parseAnyInt(federationSidecar.peer_count),
+          ok_peer_count: parseAnyInt(federationSidecar.ok_peer_count),
+          failing_peer_count: parseAnyInt(federationSidecar.failing_peer_count),
+          outbox_depth: parseAnyInt(federationSidecar.outbox_depth),
+          retry_ledger_count: parseAnyInt(federationSidecar.retry_ledger_count),
+          last_error: compactSingleLine(federationSidecar.last_error, 240),
+          next_repair_action: String(federationSidecar.next_repair_action ?? ""),
+          peers: asList(federationSidecar.peers).map((entry) => {
+            const peer = asDict(entry);
+            return {
+              peer: String(peer.peer ?? ""),
+              last_attempt_at: String(peer.last_attempt_at ?? ""),
+              last_attempt_age_seconds: parseAnyFloat(peer.last_attempt_age_seconds),
+              last_publish_at: String(peer.last_publish_at ?? ""),
+              last_publish_age_seconds: parseAnyFloat(peer.last_publish_age_seconds),
+              last_ok: Boolean(peer.last_ok),
+              last_http_status: peer.last_http_status == null ? null : parseAnyInt(peer.last_http_status),
+              consecutive_failures: parseAnyInt(peer.consecutive_failures),
+              outbox_pending: parseAnyInt(peer.outbox_pending),
+              retry_count: parseAnyInt(peer.retry_count),
+              next_retry_at: String(peer.next_retry_at ?? ""),
+              last_error: compactSingleLine(peer.last_error, 240),
+              ack_persisted_sequence: peer.ack_persisted_sequence == null ? null : parseAnyFloat(peer.ack_persisted_sequence),
+              ack_processed_sequence: peer.ack_processed_sequence == null ? null : parseAnyFloat(peer.ack_processed_sequence),
+            };
+          }),
+        },
         hosts: asList(kernelWorkerFabric.hosts).map((entry) => {
           const host = asDict(entry);
           return {

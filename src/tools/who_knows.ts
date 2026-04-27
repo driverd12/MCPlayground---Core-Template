@@ -2,7 +2,7 @@ import { z } from "zod";
 import { Storage } from "../storage.js";
 
 const trustTierSchema = z.enum(["raw", "verified", "policy-backed", "deprecated"]);
-const federatedKindSchema = z.enum(["memory", "goal", "task"]);
+const federatedKindSchema = z.enum(["memory", "goal", "task", "capability"]);
 
 export const whoKnowsSchema = z.object({
   query: z.string().min(1),
@@ -17,6 +17,11 @@ export const whoKnowsSchema = z.object({
   include_federated: z.boolean().optional(),
   federated_host_ids: z.array(z.string().min(1)).max(100).optional(),
   federated_kinds: z.array(federatedKindSchema).max(10).optional(),
+  federated_freshness_seconds: z.number().int().min(1).max(30 * 24 * 60 * 60).optional(),
+  federated_statuses: z.array(z.string().min(1).max(80)).max(20).optional(),
+  federated_trust_statuses: z.array(z.string().min(1).max(80)).max(20).optional(),
+  federated_focus: z.enum(["goal", "task", "blocker", "capability"]).optional(),
+  federated_provenance: z.string().min(1).max(120).optional(),
   limit: z.number().int().min(1).max(50).optional(),
   consult: z.boolean().optional(),
 });
@@ -84,6 +89,17 @@ function buildFederatedSearchText(kind: z.infer<typeof federatedKindSchema>, sum
       ...asList(summary.tags).map((entry) => readString(entry)).filter(Boolean),
     ].join(" ");
   }
+  if (kind === "capability") {
+    return [
+      readString(summary.capability_id),
+      readString(summary.host_id),
+      readString(summary.hostname),
+      JSON.stringify(summary.worker_fabric ?? {}),
+      JSON.stringify(summary.model_router ?? {}),
+      JSON.stringify(summary.provider_bridge ?? {}),
+      JSON.stringify(summary.desktop_control ?? {}),
+    ].join(" ");
+  }
   return [
     readString(summary.objective),
     readString(summary.status),
@@ -92,25 +108,65 @@ function buildFederatedSearchText(kind: z.infer<typeof federatedKindSchema>, sum
   ].join(" ");
 }
 
+function normalizedSet(values: unknown[] | undefined) {
+  return new Set((values ?? []).map((entry) => String(entry ?? "").trim().toLowerCase()).filter(Boolean));
+}
+
+function federatedFocusKinds(input: z.infer<typeof whoKnowsSchema>) {
+  if (input.federated_focus === "goal") return new Set(["goal"]);
+  if (input.federated_focus === "task" || input.federated_focus === "blocker") return new Set(["task"]);
+  if (input.federated_focus === "capability") return new Set(["capability"]);
+  return null;
+}
+
+function statusMatches(kind: z.infer<typeof federatedKindSchema>, summary: Record<string, unknown>, input: z.infer<typeof whoKnowsSchema>) {
+  const statuses = normalizedSet(input.federated_statuses);
+  const status = String(summary.status ?? "").trim().toLowerCase();
+  if (input.federated_focus === "blocker") {
+    return kind === "task" && ["blocked", "failed", "pending", "running"].includes(status);
+  }
+  return statuses.size === 0 || statuses.has(status);
+}
+
+function provenanceMatches(identity: Record<string, unknown>, input: z.infer<typeof whoKnowsSchema>) {
+  const signature = asRecord(identity.signature_verification_result) ?? {};
+  const approval = asRecord(identity.approval_scope) ?? {};
+  const trustStatuses = normalizedSet(input.federated_trust_statuses);
+  const signatureStatus = String(signature.status ?? "").trim().toLowerCase();
+  const approvalStatus = String(approval.status ?? "").trim().toLowerCase();
+  if (trustStatuses.size > 0 && !trustStatuses.has(signatureStatus) && !trustStatuses.has(approvalStatus)) {
+    return false;
+  }
+  const provenance = String(input.federated_provenance ?? "").trim().toLowerCase();
+  if (!provenance) {
+    return true;
+  }
+  const haystack = [
+    signatureStatus,
+    approvalStatus,
+    String(approval.matched_by ?? ""),
+    String(approval.permission_profile ?? ""),
+    String(identity.captured_agent_runtime ?? ""),
+    String(identity.captured_model_label ?? ""),
+    String(identity.captured_hostname ?? ""),
+  ].join(" ").toLowerCase();
+  return haystack.includes(provenance);
+}
+
 function searchFederatedSummaries(storage: Storage, input: z.infer<typeof whoKnowsSchema>, limit: number) {
-  const hostFilter = new Set((input.federated_host_ids ?? []).map((entry) => String(entry ?? "").trim().toLowerCase()).filter(Boolean));
-  const kindFilter = new Set((input.federated_kinds ?? []).map((entry) => String(entry ?? "").trim().toLowerCase()).filter(Boolean));
-  const events = storage.listRuntimeEvents({
-    event_type: "federation.ingest",
+  const hostFilter = normalizedSet(input.federated_host_ids);
+  const explicitKindFilter = normalizedSet(input.federated_kinds);
+  const focusKindFilter = federatedFocusKinds(input);
+  const kindFilter = focusKindFilter ?? explicitKindFilter;
+  const maxFreshnessSeconds = input.federated_freshness_seconds ?? null;
+  const events = storage.listLatestFederationIngestEventsByHost({
+    host_ids: [...hostFilter],
     limit: Math.max(40, limit * 20),
   });
-  const latestByHost = new Map<
-    string,
-    {
-      event_id: string;
-      created_at: string;
-      identity: Record<string, unknown>;
-      shared: Record<string, unknown>;
-    }
-  >();
+  const nowMs = Date.now();
+  const latestByHost = new Map<string, { event_id: string; created_at: string; identity: Record<string, unknown>; shared: Record<string, unknown> }>();
 
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
+  for (const event of events) {
     const details = asRecord(event.details) ?? {};
     const identity =
       asRecord(details.federation_identity) ??
@@ -131,12 +187,22 @@ function searchFederatedSummaries(storage: Storage, input: z.infer<typeof whoKno
     const hostId =
       readString(identity.captured_from_host_id) ??
       readString(identity.requesting_host_id) ??
-      readString(details.entity_id);
+      readString(event.entity_id);
     if (!hostId) {
       continue;
     }
     const normalizedHostId = hostId.toLowerCase();
     if (hostFilter.size > 0 && !hostFilter.has(normalizedHostId)) {
+      continue;
+    }
+    if (maxFreshnessSeconds !== null) {
+      const receivedAt = readString(identity.received_at) ?? event.created_at;
+      const receivedMs = Date.parse(receivedAt);
+      if (Number.isFinite(receivedMs) && nowMs - receivedMs > maxFreshnessSeconds * 1000) {
+        continue;
+      }
+    }
+    if (!provenanceMatches(identity, input)) {
       continue;
     }
     if (!latestByHost.has(normalizedHostId)) {
@@ -155,6 +221,7 @@ function searchFederatedSummaries(storage: Storage, input: z.infer<typeof whoKno
       ["memory", asList(snapshot.shared.memories)],
       ["goal", asList(snapshot.shared.goals)],
       ["task", asList(snapshot.shared.tasks)],
+      ["capability", asList(snapshot.shared.capabilities)],
     ];
     for (const [kind, entries] of sharedKinds) {
       if (kindFilter.size > 0 && !kindFilter.has(kind)) {
@@ -163,6 +230,9 @@ function searchFederatedSummaries(storage: Storage, input: z.infer<typeof whoKno
       for (const rawEntry of entries) {
         const summary = asRecord(rawEntry);
         if (!summary) {
+          continue;
+        }
+        if (!statusMatches(kind, summary, input)) {
           continue;
         }
         const text = buildFederatedSearchText(kind, summary);
@@ -174,6 +244,7 @@ function searchFederatedSummaries(storage: Storage, input: z.infer<typeof whoKno
           type: `federated_${kind}`,
           id:
             readString(summary[`${kind}_id`]) ??
+            readString(summary.capability_id) ??
             readString(summary.goal_id) ??
             readString(summary.task_id) ??
             readString(summary.memory_id) ??

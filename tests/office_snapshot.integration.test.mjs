@@ -91,6 +91,11 @@ test("office.snapshot returns a storage-backed GUI payload without depending on 
     assert.equal(snapshot.kernel.worker_fabric.host_count, fabric.state.hosts.length);
     assert.equal(snapshot.kernel.worker_fabric.enabled_host_count, fabric.hosts_summary.filter((entry) => entry.enabled).length);
     assert.equal(snapshot.federation.incoming_peer_count, 0);
+    assert.equal(typeof snapshot.federation.sidecar.host_id, "string");
+    assert.equal(typeof snapshot.federation.sidecar.state_path, "string");
+    assert.ok(["recent", "stale", "failing", "not_seen"].includes(snapshot.federation.sidecar.running_state));
+    assert.equal(Array.isArray(snapshot.federation.sidecar.peers), true);
+    assert.equal(typeof snapshot.federation.sidecar.next_repair_action, "string");
     assert.equal(snapshot.runtime_workers.summary.session_count, runtimeWorkers.summary.session_count);
     assert.equal(snapshot.runtime_workers.summary.active_count, runtimeWorkers.summary.active_count);
     assert.equal(snapshot.operator_brief.source, "operator.brief");

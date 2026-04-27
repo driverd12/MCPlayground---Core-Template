@@ -375,6 +375,65 @@ function collectSharedTasks(options) {
     );
 }
 
+function collectSharedCapabilities(options) {
+  const response = runMcpTool("kernel.summary", {}, options);
+  const summary = response?.result && typeof response.result === "object" && !Array.isArray(response.result) ? response.result : {};
+  const overview = summary.overview && typeof summary.overview === "object" && !Array.isArray(summary.overview) ? summary.overview : {};
+  const workerFabric = summary.worker_fabric && typeof summary.worker_fabric === "object" && !Array.isArray(summary.worker_fabric)
+    ? summary.worker_fabric
+    : overview.worker_fabric && typeof overview.worker_fabric === "object" && !Array.isArray(overview.worker_fabric)
+      ? overview.worker_fabric
+      : {};
+  const modelRouter = summary.model_router && typeof summary.model_router === "object" && !Array.isArray(summary.model_router)
+    ? summary.model_router
+    : overview.model_router && typeof overview.model_router === "object" && !Array.isArray(overview.model_router)
+      ? overview.model_router
+      : {};
+  const providerBridge = summary.provider_bridge && typeof summary.provider_bridge === "object" && !Array.isArray(summary.provider_bridge)
+    ? summary.provider_bridge
+    : overview.provider_bridge && typeof overview.provider_bridge === "object" && !Array.isArray(overview.provider_bridge)
+      ? overview.provider_bridge
+      : {};
+  const desktopControl = summary.desktop_control && typeof summary.desktop_control === "object" && !Array.isArray(summary.desktop_control)
+    ? summary.desktop_control
+    : overview.desktop_control && typeof overview.desktop_control === "object" && !Array.isArray(overview.desktop_control)
+      ? overview.desktop_control
+      : {};
+  return [
+    sanitizeValue({
+      capability_id: `${options.hostId}:capability-summary`,
+      generated_at: summary.generated_at ?? new Date().toISOString(),
+      host_id: options.hostId,
+      hostname: os.hostname(),
+      worker_fabric: {
+        host_count: workerFabric.host_count ?? null,
+        worker_count: workerFabric.worker_count ?? null,
+        active_worker_count: workerFabric.active_worker_count ?? null,
+        healthy_host_count: workerFabric.healthy_host_count ?? null,
+        degraded_host_count: workerFabric.degraded_host_count ?? null,
+      },
+      model_router: {
+        backend_count: modelRouter.backend_count ?? null,
+        enabled_backend_count: modelRouter.enabled_backend_count ?? null,
+        default_backend_id: modelRouter.default_backend_id ?? null,
+        strategy: modelRouter.strategy ?? null,
+      },
+      provider_bridge: {
+        connected_count: providerBridge.connected_count ?? null,
+        disconnected_count: providerBridge.disconnected_count ?? null,
+        unavailable_count: providerBridge.unavailable_count ?? null,
+        stale: providerBridge.stale ?? null,
+      },
+      desktop_control: {
+        enabled: desktopControl.enabled ?? null,
+        observe_ready: desktopControl.observe_ready ?? null,
+        act_ready: desktopControl.act_ready ?? null,
+        listen_ready: desktopControl.listen_ready ?? null,
+      },
+    }),
+  ];
+}
+
 function collectSharedSummaries(options) {
   return {
     status: "available",
@@ -383,10 +442,12 @@ function collectSharedSummaries(options) {
       memories: options.sharedMemoryLimit,
       goals: options.sharedGoalLimit,
       tasks: options.sharedTaskLimit,
+      capabilities: 1,
     },
     memories: collectSharedMemories(options),
     goals: collectSharedGoals(options),
     tasks: collectSharedTasks(options),
+    capabilities: collectSharedCapabilities(options),
   };
 }
 

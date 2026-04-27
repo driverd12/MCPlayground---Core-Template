@@ -1683,6 +1683,8 @@
     var draft = state.hostPairDraft || defaultHostPairDraft();
     var hosts = Array.isArray(fabric.hosts) ? fabric.hosts : [];
     var incomingPeers = Array.isArray(fabric.incoming_peers) ? fabric.incoming_peers : [];
+    var sidecar = fabric.federation_sidecar || {};
+    var sidecarPeers = Array.isArray(sidecar.peers) ? sidecar.peers : [];
     var healthCounts = fabric.health_counts || {};
     var remoteHosts = remoteHostsFromSnapshot();
     var pendingCount = remoteHosts.filter(function (host) {
@@ -1731,6 +1733,39 @@
           })
           .join("")
       : "";
+    var sidecarTone = sidecar.running_state === "recent" && !sidecar.failing_peer_count ? "good" : sidecar.running_state === "stale" || sidecar.failing_peer_count ? "warn" : "neutral";
+    var sidecarPeerRows = sidecarPeers.length
+      ? sidecarPeers
+          .map(function (peer) {
+            var peerTone = peer.last_ok ? "good" : "warn";
+            return (
+              '<article class="host-row host-row--' + escapeHtml(peerTone) + '">' +
+              '<div class="host-row__main">' +
+              '<div class="host-row__eyebrow">SIDECAR · PUBLISH PEER</div>' +
+              '<strong>' + escapeHtml(peer.peer || "peer") + '</strong>' +
+              '<span>' +
+              escapeHtml(
+                [
+                  peer.last_publish_at ? "last publish " + relativeTime(peer.last_publish_at) + " ago" : "no successful publish",
+                  peer.last_attempt_at ? "last attempt " + relativeTime(peer.last_attempt_at) + " ago" : "no attempt",
+                  peer.last_http_status != null ? "HTTP " + String(peer.last_http_status) : "",
+                  peer.consecutive_failures ? String(peer.consecutive_failures) + " failures" : "",
+                ].filter(Boolean).join(" · ")
+              ) +
+              '</span>' +
+              '<small>' + escapeHtml(peer.last_error || "No sidecar peer error recorded.") + '</small>' +
+              '</div>' +
+              '<div class="host-row__metrics">' +
+              '<div><span>Status</span><strong>' + escapeHtml(peer.last_ok ? "ok" : "retry") + '</strong></div>' +
+              '<div><span>Outbox</span><strong>' + String(peer.outbox_pending || 0) + '</strong></div>' +
+              '<div><span>Retry</span><strong>' + String(peer.retry_count || 0) + '</strong></div>' +
+              '<div><span>Next</span><strong>' + escapeHtml(peer.next_retry_at ? relativeTime(peer.next_retry_at) : "n/a") + '</strong></div>' +
+              '</div>' +
+              '</article>'
+            );
+          })
+          .join("")
+      : '<article class="host-row"><div class="host-row__main"><strong>No sidecar peers in the durable ledger</strong><span>Run the sidecar once after configuring peers.</span></div></article>';
     var hostRows = hosts.length
       ? hosts
           .map(function (host) {
@@ -1811,8 +1846,56 @@
       '<article><span>Approved remote</span><strong>' + String(approvedCount) + '</strong></article>' +
       '<article><span>Pending</span><strong>' + String(pendingCount) + '</strong></article>' +
       '<article><span>Verified inbound</span><strong>' + String(fabric.incoming_peer_count || incomingPeers.length || 0) + '</strong></article>' +
+      '<article><span>Sidecar</span><strong>' + escapeHtml(String(sidecar.running_state || "not_seen")) + '</strong></article>' +
       '<article><span>Healthy</span><strong>' + String(healthCounts.healthy || 0) + '</strong></article>' +
       '<article><span>Degraded</span><strong>' + String(healthCounts.degraded || 0) + '</strong></article>' +
+      '</div>' +
+      '</section>' +
+      '<section class="hosts-panel hosts-panel--wide">' +
+      '<div class="section-title">Federation Controls</div>' +
+      '<div class="host-list">' +
+      '<article class="host-row host-row--' + escapeHtml(sidecarTone) + '">' +
+      '<div class="host-row__main">' +
+      '<div class="host-row__eyebrow">LOCAL SIDECAR · ' + escapeHtml(String(sidecar.running_state || "not_seen").toUpperCase()) + '</div>' +
+      '<strong>' + escapeHtml(sidecar.host_id || "local host") + '</strong>' +
+      '<span>' +
+      escapeHtml(
+        [
+          sidecar.last_cycle_at ? "last cycle " + relativeTime(sidecar.last_cycle_at) + " ago" : "no cycle recorded",
+          "peers " + String(sidecar.ok_peer_count || 0) + "/" + String(sidecar.peer_count || 0),
+          "outbox " + String(sidecar.outbox_depth || 0),
+          "retry ledger " + String(sidecar.retry_ledger_count || 0),
+        ].join(" · ")
+      ) +
+      '</span>' +
+      '<small>' + escapeHtml(sidecar.last_error || sidecar.next_repair_action || "No local sidecar error recorded.") + '</small>' +
+      '</div>' +
+      '<div class="host-row__metrics">' +
+      '<div><span>Running</span><strong>' + escapeHtml(sidecar.running_state === "recent" ? "recent" : sidecar.running_state || "not_seen") + '</strong></div>' +
+      '<div><span>Last publish</span><strong>' + escapeHtml(sidecar.last_cycle_at ? relativeTime(sidecar.last_cycle_at) + " ago" : "none") + '</strong></div>' +
+      '<div><span>Failures</span><strong>' + String(sidecar.failing_peer_count || 0) + '</strong></div>' +
+      '<div><span>State file</span><strong>' + escapeHtml(sidecar.present ? "present" : "missing") + '</strong></div>' +
+      '</div>' +
+      '<div class="host-row__actions">' +
+      '<button class="button button--primary" data-federation-action="federation_sidecar_once">Run Sidecar Once</button>' +
+      '<button class="button" data-federation-action="federation_launchd_repair">Repair Launchd</button>' +
+      '<button class="button" data-federation-action="federation_doctor_refresh">Refresh Doctor</button>' +
+      '<button class="button" data-federation-action="repair_office_cache">Clear Office Cache</button>' +
+      '</div>' +
+      '</article>' +
+      sidecarPeerRows +
+      '</div>' +
+      '</section>' +
+      '<section class="hosts-panel hosts-panel--wide">' +
+      '<div class="section-title">Recovery Actions</div>' +
+      '<div class="host-row">' +
+      '<div class="host-row__main"><strong>One-command repairs</strong><span>HTTP, build, provider config, stale sidecar, and Office cache repair run through the same MCP HTTP action lane.</span></div>' +
+      '<div class="host-row__actions">' +
+      '<button class="button" data-federation-action="repair_http">HTTP Server</button>' +
+      '<button class="button" data-federation-action="repair_build">Build Artifacts</button>' +
+      '<button class="button" data-federation-action="repair_sidecar_stale">Stale Sidecar</button>' +
+      '<button class="button" data-federation-action="repair_providers">Provider Config</button>' +
+      '</div>' +
       '</div>' +
       '</section>' +
       (incomingPeers.length
@@ -1875,6 +1958,13 @@
           action: button.getAttribute("data-host-action") || "",
           host_id: button.getAttribute("data-host-id") || "",
         }).catch(function (error) {
+          setResultText(String(error));
+        });
+      });
+    });
+    Array.prototype.slice.call(els.hostsView.querySelectorAll("[data-federation-action]")).forEach(function (button) {
+      button.addEventListener("click", function () {
+        postAction(button.getAttribute("data-federation-action") || "").catch(function (error) {
           setResultText(String(error));
         });
       });
