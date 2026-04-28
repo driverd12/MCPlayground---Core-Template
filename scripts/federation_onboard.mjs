@@ -5,6 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolveFederationHostIdentity } from "./federation_host_identity.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -45,16 +46,6 @@ function boolArg(name, fallback = false) {
   if (["1", "true", "yes", "on"].includes(value)) return true;
   if (["0", "false", "no", "off"].includes(value)) return false;
   return fallback;
-}
-
-function safeId(value, fallback = "host") {
-  return (
-    String(value || fallback)
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9._-]+/g, "-")
-      .replace(/^[-.]+|[-.]+$/g, "") || fallback
-  );
 }
 
 function parsePeers() {
@@ -150,9 +141,15 @@ async function main() {
     return;
   }
 
-  const hostId = safeId(argValue("host-id", process.env.MASTER_MOLD_HOST_ID || os.hostname()), "local-host");
+  const identity = resolveFederationHostIdentity({
+    hostId: argValue("host-id", ""),
+    envHostId: process.env.MASTER_MOLD_HOST_ID || "",
+    hostname: os.hostname(),
+    identityKeyPath: process.env.MASTER_MOLD_IDENTITY_KEY_PATH || "",
+  });
+  const hostId = identity.hostId;
   const peers = parsePeers();
-  const identityKeyPath = path.join(os.homedir(), ".master-mold", "identity", `${hostId}-ed25519.pem`);
+  const identityKeyPath = identity.identityKeyPath;
   const jsonOnly = boolArg("json", false);
   const requireOnePassword = boolArg("require-1password", false);
   const skipRequest = boolArg("skip-request", false);
@@ -166,6 +163,7 @@ async function main() {
     completed_at: null,
     repo_root: REPO_ROOT,
     host_id: hostId,
+    host_id_source: identity.source,
     hostname: os.hostname(),
     peers,
     prerequisites: {

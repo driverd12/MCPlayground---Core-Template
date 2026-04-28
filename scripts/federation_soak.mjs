@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolveFederationHostIdentity } from "./federation_host_identity.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -49,16 +50,6 @@ function boolArg(name, fallback = false) {
 function numberArg(name, fallback) {
   const parsed = Number(argValue(name, ""));
   return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function safeId(value, fallback = "host") {
-  return (
-    String(value || fallback)
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9._-]+/g, "-")
-      .replace(/^[-.]+|[-.]+$/g, "") || fallback
-  );
 }
 
 function parsePeers() {
@@ -110,6 +101,35 @@ function compact(value, limit = 1000) {
   return text.length > limit ? `${text.slice(0, limit)}...<truncated:${text.length - limit}>` : text;
 }
 
+export function normalizePeerUrl(value) {
+  try {
+    return new URL(String(value || "").trim()).toString().toLowerCase();
+  } catch {
+    return String(value || "").trim().toLowerCase();
+  }
+}
+
+export function sidecarStepAcceptedAllPeers(step, peers) {
+  const sends = Array.isArray(step?.json?.sends) ? step.json.sends : [];
+  if (!peers.length || sends.length < peers.length) {
+    return false;
+  }
+  const sendsByPeer = new Map(
+    sends.map((send) => [
+      normalizePeerUrl(send.target_peer || send.peer),
+      send,
+    ])
+  );
+  return peers.every((peer) => {
+    const send = sendsByPeer.get(normalizePeerUrl(peer));
+    return (
+      send?.ok === true &&
+      send?.status === 202 &&
+      send?.response?.accepted === true
+    );
+  });
+}
+
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
 }
@@ -142,10 +162,14 @@ async function main() {
   const apply = boolArg("apply", false);
   const jsonOnly = boolArg("json", false);
   const offlineSimulation = boolArg("offline-simulation", true);
-  const hostId = safeId(argValue("host-id", process.env.MASTER_MOLD_HOST_ID || os.hostname()), "local-host");
-  const identityKeyPath = String(
-    argValue("identity-key-path", process.env.MASTER_MOLD_IDENTITY_KEY_PATH || path.join(os.homedir(), ".master-mold", "identity", `${hostId}-ed25519.pem`))
-  );
+  const identity = resolveFederationHostIdentity({
+    hostId: argValue("host-id", ""),
+    envHostId: process.env.MASTER_MOLD_HOST_ID || "",
+    hostname: os.hostname(),
+    identityKeyPath: argValue("identity-key-path", process.env.MASTER_MOLD_IDENTITY_KEY_PATH || ""),
+  });
+  const hostId = identity.hostId;
+  const identityKeyPath = identity.identityKeyPath;
   const steps = [];
 
   const add = (kind, detail) => {
@@ -192,7 +216,7 @@ async function main() {
         "--state-path",
         statePath,
       ],
-      { timeoutMs: 30_000 }
+      { timeoutMs: 30_000, env: { ...process.env, MASTER_MOLD_FEDERATION_PEERS: "" } }
     );
     add(
       "peer_offline_simulation",
@@ -227,6 +251,11 @@ async function main() {
   add("doctor_after", run("npm", ["run", "--silent", "federation:doctor", "--", "--json"], { timeoutMs: 60_000 }));
 
   const failed = steps.filter((step) => step.ok === false && step.skipped !== true);
+  const sidecarSteps = steps.filter((step) => step.kind === "sidecar_once");
+  const liveRemoteValidationClaimed =
+    peers.length > 0 &&
+    sidecarSteps.length === iterations &&
+    sidecarSteps.every((step) => sidecarStepAcceptedAllPeers(step, peers));
   const output = {
     ok: failed.length === 0,
     generated_at: new Date().toISOString(),
@@ -235,7 +264,7 @@ async function main() {
     peers,
     iterations,
     applied_restarts: apply,
-    live_remote_validation_claimed: false,
+    live_remote_validation_claimed: liveRemoteValidationClaimed,
     note: "This soak only claims local/script execution unless the peer endpoints returned successful signed ingest responses in the step JSON.",
     steps,
     summary: {
@@ -265,7 +294,10 @@ async function main() {
   process.exitCode = output.ok ? 0 : 1;
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+const entryHref = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;
+if (entryHref === import.meta.url) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}

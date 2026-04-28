@@ -6,6 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolveFederationHostIdentity } from "./federation_host_identity.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_PORT = Number(process.env.MCP_HTTP_PORT || process.env.ANAMNESIS_MCP_HTTP_PORT || "8787");
@@ -31,16 +32,6 @@ function boolArg(name, fallback = false) {
   if (["1", "true", "yes", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "off"].includes(normalized)) return false;
   return fallback;
-}
-
-function safeId(value, fallback = "host") {
-  return (
-    String(value || fallback)
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9._-]+/g, "-")
-      .replace(/^[-.]+|[-.]+$/g, "") || fallback
-  );
 }
 
 function run(command, args, options = {}) {
@@ -153,10 +144,14 @@ async function main() {
   const actions = action === "all"
     ? ["build", "http", "sidecar-launchd", "sidecar-stale", "office-cache", "providers"]
     : [action];
-  const hostId = safeId(argValue("host-id", process.env.MASTER_MOLD_HOST_ID || os.hostname()), "local-host");
-  const identityKeyPath = String(
-    argValue("identity-key-path", process.env.MASTER_MOLD_IDENTITY_KEY_PATH || path.join(os.homedir(), ".master-mold", "identity", `${hostId}-ed25519.pem`))
-  );
+  const identity = resolveFederationHostIdentity({
+    hostId: argValue("host-id", ""),
+    envHostId: process.env.MASTER_MOLD_HOST_ID || "",
+    hostname: os.hostname(),
+    identityKeyPath: argValue("identity-key-path", process.env.MASTER_MOLD_IDENTITY_KEY_PATH || ""),
+  });
+  const hostId = identity.hostId;
+  const identityKeyPath = identity.identityKeyPath;
   const peers = [
     ...String(argValue("peer", "")).split(","),
     ...String(process.env.MASTER_MOLD_FEDERATION_PEERS || "").split(","),
