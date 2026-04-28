@@ -1041,16 +1041,54 @@ function sidecarAgeSeconds(isoValue: unknown) {
   return Number.isFinite(parsed) ? Math.max(0, Math.round((Date.now() - parsed) / 1000)) : null;
 }
 
+function normalizeSidecarPeerUrl(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+  try {
+    return new URL(raw).toString();
+  } catch {
+    return raw;
+  }
+}
+
 function summarizeFederationSidecar(kernel: Record<string, unknown>) {
   const hostId = localFederationHostId(kernel);
   const statePath = defaultSidecarStatePath(hostId);
   const state = readSidecarStateRecord(statePath);
-  const peerResults = Object.values(asRecord(state.peer_results))
+  const configuredPeers = new Set(asList(state.configured_peers).map(normalizeSidecarPeerUrl).filter(Boolean));
+  const allPeerResults = Object.values(asRecord(state.peer_results))
     .map((entry) => asRecord(entry))
     .filter((entry) => Object.keys(entry).length > 0);
+  const peerResults =
+    configuredPeers.size > 0
+      ? allPeerResults.filter((peer) => configuredPeers.has(normalizeSidecarPeerUrl(peer.peer)))
+      : allPeerResults;
   const outbox = asList(state.outbox)
     .map((entry) => asRecord(entry))
-    .filter((entry) => !String(entry.closed_at ?? "").trim());
+    .filter((entry) => {
+      if (String(entry.closed_at ?? "").trim()) {
+        return false;
+      }
+      if (configuredPeers.size <= 0) {
+        return true;
+      }
+      return asList(entry.pending_peers).some((peer) => configuredPeers.has(normalizeSidecarPeerUrl(peer)));
+    });
+  const pendingOutboxByPeer = new Map<string, number>();
+  for (const entry of outbox) {
+    for (const pendingPeer of asList(entry.pending_peers)) {
+      const peerKey = normalizeSidecarPeerUrl(pendingPeer);
+      if (!peerKey) {
+        continue;
+      }
+      if (configuredPeers.size > 0 && !configuredPeers.has(peerKey)) {
+        continue;
+      }
+      pendingOutboxByPeer.set(peerKey, (pendingOutboxByPeer.get(peerKey) ?? 0) + 1);
+    }
+  }
   const retryLedger = asList(state.retry_ledger).map((entry) => asRecord(entry));
   const lastCycleAt = String(state.last_cycle_at ?? "").trim() || null;
   const peers = peerResults.map((peer) => ({
@@ -1062,7 +1100,8 @@ function summarizeFederationSidecar(kernel: Record<string, unknown>) {
     last_ok: peer.last_ok === true,
     last_http_status: finiteNumberOrNull(peer.last_http_status),
     consecutive_failures: finiteNumberOrNull(peer.consecutive_failures) ?? 0,
-    outbox_pending: asList(peer.resend_window_sequences).length,
+    outbox_pending: pendingOutboxByPeer.get(normalizeSidecarPeerUrl(peer.peer)) ?? 0,
+    resend_window_count: asList(peer.resend_window_sequences).length,
     retry_count: finiteNumberOrNull(peer.retry_count) ?? 0,
     next_retry_at: String(peer.next_retry_at ?? "").trim() || null,
     last_error: String(peer.last_error ?? "").trim() || null,
@@ -1097,6 +1136,8 @@ function summarizeFederationSidecar(kernel: Record<string, unknown>) {
     last_cycle_ok: state.last_cycle_ok === true,
     sequence: finiteNumberOrNull(state.sequence),
     peer_count: peers.length,
+    configured_peer_count: configuredPeers.size || peers.length,
+    historical_peer_count: allPeerResults.length,
     ok_peer_count: peers.filter((peer) => peer.last_ok === true).length,
     failing_peer_count: failingPeers.length,
     outbox_depth: outbox.length,

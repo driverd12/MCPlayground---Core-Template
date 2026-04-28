@@ -77,12 +77,16 @@ export function loadSidecarState(filePath) {
   const peerResults = state.peer_results && typeof state.peer_results === "object" && !Array.isArray(state.peer_results)
     ? state.peer_results
     : {};
+  const configuredPeers = Array.isArray(state.configured_peers)
+    ? [...new Set(state.configured_peers.map(normalizePeerUrl).filter(Boolean))]
+    : [];
   const outbox = Array.isArray(state.outbox) ? state.outbox.filter((entry) => entry && typeof entry === "object") : [];
   const retryLedger = Array.isArray(state.retry_ledger)
     ? state.retry_ledger.filter((entry) => entry && typeof entry === "object").slice(-100)
     : [];
   return {
     ...state,
+    configured_peers: configuredPeers,
     peer_results: peerResults,
     outbox,
     retry_ledger: retryLedger,
@@ -123,9 +127,24 @@ function normalizedPeerResult(send, attemptAt, generatedAt, sequence, previous) 
   const previousResendWindow = Array.isArray(previous.resend_window_sequences)
     ? previous.resend_window_sequences.map((entry) => Number(entry)).filter((entry) => Number.isFinite(entry))
     : [];
+  const previousAckSequence = Math.max(
+    Number(previous.ack_processed_sequence || 0),
+    Number(previous.ack_persisted_sequence || 0)
+  );
+  const pendingResendWindow = previousResendWindow.filter((entry) => {
+    if (!Number.isFinite(previousAckSequence) || previousAckSequence <= 0) {
+      return true;
+    }
+    return Number(entry) > previousAckSequence;
+  });
   const resendWindow = ok || persisted
-    ? previousResendWindow.filter((entry) => entry !== responseSequence)
-    : [...new Set([...previousResendWindow, responseSequence].filter((entry) => Number.isFinite(Number(entry))))].slice(-10);
+    ? pendingResendWindow.filter((entry) => {
+        if (!Number.isFinite(Number(responseSequence))) {
+          return true;
+        }
+        return Number(entry) > Number(responseSequence);
+      })
+    : [...new Set([...pendingResendWindow, responseSequence].filter((entry) => Number.isFinite(Number(entry))))].slice(-10);
   const errorText = ok ? null : compactSidecarText(send.error || send.response?.error || send.response?.raw || "", 500);
   return {
     peer,
@@ -176,6 +195,27 @@ function updateOutbox(previousOutbox, input, peerResults) {
   }
   const sends = input.sends || [];
   const peerKeys = sends.map((send) => normalizePeerUrl(send.peer)).filter(Boolean);
+  const refreshPendingPeers = (entry) => {
+    const entrySequence = Number.isFinite(Number(entry.sequence)) ? Number(entry.sequence) : null;
+    const previousPendingPeers = Array.isArray(entry.pending_peers)
+      ? entry.pending_peers.map((peer) => normalizePeerUrl(peer)).filter(Boolean)
+      : [];
+    if (entrySequence === null || previousPendingPeers.length <= 0) {
+      return { ...entry, pending_peers: previousPendingPeers };
+    }
+    const pendingPeers = previousPendingPeers.filter((peer) => {
+      const result = peerResults[peer];
+      return !result || (Number(result.ack_persisted_sequence || 0) < entrySequence && Number(result.ack_processed_sequence || 0) < entrySequence);
+    });
+    return {
+      ...entry,
+      pending_peers: pendingPeers,
+      acknowledged_peer_count: Number(entry.peer_count || previousPendingPeers.length) - pendingPeers.length,
+      processed_peer_count: Number(entry.peer_count || previousPendingPeers.length) - pendingPeers.length,
+      failing_peer_count: pendingPeers.length,
+      closed_at: pendingPeers.length === 0 ? input.attemptAt || entry.closed_at || null : null,
+    };
+  };
   const pendingPeers = peerKeys.filter((peer) => {
     const result = peerResults[peer];
     return !result || (result.ack_persisted_sequence !== sequence && result.ack_processed_sequence !== sequence);
@@ -202,10 +242,11 @@ function updateOutbox(previousOutbox, input, peerResults) {
     closed_at: pendingPeers.length === 0 ? input.attemptAt || null : null,
   };
   const nowMs = Date.parse(input.attemptAt || new Date().toISOString());
-  return [...existing, message]
+  return [...existing.map(refreshPendingPeers), message]
     .filter((entry) => {
       const expiresMs = Date.parse(entry.expires_at || "");
-      return !Number.isFinite(expiresMs) || !Number.isFinite(nowMs) || expiresMs >= nowMs || !entry.closed_at;
+      const hasPendingPeers = Array.isArray(entry.pending_peers) && entry.pending_peers.length > 0;
+      return hasPendingPeers && (!Number.isFinite(expiresMs) || !Number.isFinite(nowMs) || expiresMs >= nowMs || !entry.closed_at);
     })
     .sort((left, right) => Number(left.sequence || 0) - Number(right.sequence || 0))
     .slice(-25);
@@ -236,6 +277,7 @@ function buildRetryLedgerEntries(input, peerResults) {
 export function recordSidecarCycle(filePath, input) {
   const state = loadSidecarState(filePath);
   const attemptAt = input.attemptAt || new Date().toISOString();
+  const configuredPeers = [...new Set((input.sends || []).map((send) => normalizePeerUrl(send.peer)).filter(Boolean))];
   const peerResults = { ...state.peer_results };
   for (const send of input.sends || []) {
     const peer = normalizePeerUrl(send.peer);
@@ -263,6 +305,7 @@ export function recordSidecarCycle(filePath, input) {
     last_cycle_at: attemptAt,
     last_cycle_generated_at: input.generatedAt ?? null,
     last_cycle_ok: (input.sends || []).every((entry) => entry.ok === true),
+    configured_peers: configuredPeers,
     peer_results: peerResults,
     outbox,
     retry_ledger: retryLedger,
@@ -330,9 +373,22 @@ export function matchSidecarPeerResultToHost(peerResults, host) {
 }
 
 export function summarizeSidecarState(filePath, state) {
-  const peerResults = Object.values(state?.peer_results || {}).filter((entry) => entry && typeof entry === "object");
+  const configuredPeers = Array.isArray(state?.configured_peers)
+    ? new Set(state.configured_peers.map(normalizePeerUrl).filter(Boolean))
+    : new Set();
+  const allPeerResults = Object.values(state?.peer_results || {}).filter((entry) => entry && typeof entry === "object");
+  const peerResults =
+    configuredPeers.size > 0 ? allPeerResults.filter((entry) => configuredPeers.has(normalizePeerUrl(entry.peer))) : allPeerResults;
   const outbox = Array.isArray(state?.outbox) ? state.outbox.filter((entry) => entry && typeof entry === "object") : [];
-  const pendingOutbox = outbox.filter((entry) => !entry.closed_at && Array.isArray(entry.pending_peers) && entry.pending_peers.length > 0);
+  const pendingOutbox = outbox.filter((entry) => {
+    if (entry.closed_at || !Array.isArray(entry.pending_peers) || entry.pending_peers.length <= 0) {
+      return false;
+    }
+    if (configuredPeers.size <= 0) {
+      return true;
+    }
+    return entry.pending_peers.some((peer) => configuredPeers.has(normalizePeerUrl(peer)));
+  });
   const lastCycleAt = state?.last_cycle_at ? String(state.last_cycle_at) : null;
   const oldestPendingAt = pendingOutbox
     .map((entry) => Date.parse(String(entry.generated_at || "")))

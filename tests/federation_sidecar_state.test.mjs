@@ -88,6 +88,7 @@ test("sidecar state tracks sequence and per-peer send outcomes durably", () => {
     assert.equal(reloaded.host_id, "mac.lan");
     assert.equal(reloaded.stream_id, "mac.lan:master-mold");
     assert.equal(reloaded.sequence, 3);
+    assert.deepEqual(reloaded.configured_peers, ["http://peer-a.local:8787/", "http://peer-b.local:8787/"]);
     assert.equal(reloaded.peer_results["http://peer-a.local:8787/"].failure_count, 1);
     assert.equal(reloaded.peer_results["http://peer-a.local:8787/"].consecutive_failures, 1);
     assert.equal(reloaded.peer_results["http://peer-a.local:8787/"].last_ok_at, "2026-04-23T00:00:00.000Z");
@@ -108,6 +109,96 @@ test("sidecar state tracks sequence and per-peer send outcomes durably", () => {
     assert.equal(summary.failing_peer_count, 1);
     assert.equal(summary.outbox_depth, 1);
     assert.equal(summary.retry_ledger_count, 2);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("sidecar state summaries count active configured peers without losing historical locator records", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "master-mold-federation-sidecar-state-"));
+  const statePath = path.join(tempDir, "mac-lan-sidecar-state.json");
+  try {
+    fs.writeFileSync(
+      statePath,
+      JSON.stringify(
+        {
+          configured_peers: ["http://peer-a.local:8787/"],
+          last_cycle_ok: true,
+          peer_results: {
+            "http://peer-a.local:8787/": {
+              peer: "http://peer-a.local:8787/",
+              last_ok: true,
+            },
+            "http://10.1.2.76:8787/": {
+              peer: "http://10.1.2.76:8787/",
+              last_ok: false,
+            },
+          },
+          outbox: [
+            {
+              sequence: 7,
+              generated_at: "2026-04-23T10:00:00.000Z",
+              pending_peers: ["http://10.1.2.76:8787/"],
+            },
+          ],
+        },
+        null,
+        2
+      )
+    );
+
+    const reloaded = loadSidecarState(statePath);
+    assert.equal(Object.keys(reloaded.peer_results).length, 2);
+    const summary = summarizeSidecarState(statePath, reloaded);
+    assert.equal(summary.peer_count, 1);
+    assert.equal(summary.ok_peer_count, 1);
+    assert.equal(summary.failing_peer_count, 0);
+    assert.equal(summary.outbox_depth, 0);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("sidecar state drops resend-window entries already covered by acknowledged peer cursors", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "master-mold-federation-sidecar-state-"));
+  const statePath = path.join(tempDir, "mac-lan-sidecar-state.json");
+  try {
+    fs.writeFileSync(
+      statePath,
+      JSON.stringify(
+        {
+          peer_results: {
+            "http://peer-a.local:8787/": {
+              peer: "http://peer-a.local:8787/",
+              ack_processed_sequence: 5,
+              resend_window_sequences: [1, 2, 5],
+            },
+          },
+        },
+        null,
+        2
+      )
+    );
+
+    const updated = recordSidecarCycle(statePath, {
+      hostId: "mac.lan",
+      streamId: "mac.lan:master-mold",
+      sequence: 6,
+      generatedAt: "2026-04-23T10:01:00.000Z",
+      attemptAt: "2026-04-23T10:01:01.000Z",
+      intervalSeconds: 30,
+      payload: { sequence: 6 },
+      sends: [
+        {
+          peer: "http://peer-a.local:8787",
+          ok: false,
+          status: 0,
+          error: "peer_publish_timeout",
+        },
+      ],
+    });
+
+    assert.deepEqual(updated.peer_results["http://peer-a.local:8787/"].resend_window_sequences, [6]);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -137,4 +228,64 @@ test("sidecar peer matching prefers durable hostname identity over locator drift
   assert.ok(match);
   assert.equal(match.matched_by, "hostname");
   assert.equal(match.result.peer, "http://Dans-MBP.local:8787/");
+});
+
+test("sidecar state closes older outbox entries once a newer sequence is accepted by the peer", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "master-mold-federation-sidecar-state-"));
+  const statePath = path.join(tempDir, "mac-lan-sidecar-state.json");
+  try {
+    recordSidecarCycle(statePath, {
+      hostId: "mac.lan",
+      streamId: "mac.lan:master-mold",
+      sequence: 1,
+      generatedAt: "2026-04-23T10:00:00.000Z",
+      attemptAt: "2026-04-23T10:00:01.000Z",
+      intervalSeconds: 30,
+      payload: { sequence: 1 },
+      sends: [
+        {
+          peer: "http://peer-a.local:8787",
+          ok: false,
+          status: 0,
+          error: "peer_publish_timeout",
+        },
+      ],
+    });
+
+    assert.equal(summarizeSidecarState(statePath, loadSidecarState(statePath)).outbox_depth, 1);
+
+    recordSidecarCycle(statePath, {
+      hostId: "mac.lan",
+      streamId: "mac.lan:master-mold",
+      sequence: 2,
+      generatedAt: "2026-04-23T10:00:30.000Z",
+      attemptAt: "2026-04-23T10:00:31.000Z",
+      intervalSeconds: 30,
+      payload: { sequence: 2 },
+      sends: [
+        {
+          peer: "http://peer-a.local:8787",
+          ok: true,
+          status: 202,
+          response: {
+            ok: true,
+            accepted: true,
+            result: {
+              sequence: 2,
+              event_id: "evt-fed-2",
+              event_seq: 43,
+              worker_fabric_heartbeat_ok: true,
+            },
+          },
+        },
+      ],
+    });
+
+    const reloaded = loadSidecarState(statePath);
+    assert.equal(summarizeSidecarState(statePath, reloaded).outbox_depth, 0);
+    assert.deepEqual(reloaded.peer_results["http://peer-a.local:8787/"].resend_window_sequences, []);
+    assert.deepEqual(reloaded.outbox.filter((entry) => !entry.closed_at && entry.pending_peers?.length > 0), []);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });

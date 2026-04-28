@@ -20,6 +20,7 @@ dotenv.config({ path: path.join(REPO_ROOT, ".env") });
 const DEFAULT_TIMEOUT_MS = 45_000;
 const FEDERATION_STALE_SECONDS = 60 * 60;
 const DESKTOP_STALE_SECONDS = 5 * 60;
+const SIDECAR_OUTBOX_WARN_SECONDS = 180;
 const DEFAULT_SIDECAR_LAUNCHD_LABEL = "com.master-mold.federation.sidecar";
 
 function parseArgs(argv) {
@@ -307,7 +308,7 @@ function opStatus() {
   };
 }
 
-function buildLocalFindings(localHostId, defaultIdentityKey, identityInventory, sidecarLaunchd) {
+export function buildLocalFindings(localHostId, defaultIdentityKey, identityInventory, sidecarLaunchd, sidecarStateSummary = {}) {
   const findings = [];
   if (!defaultIdentityKey.present && identityInventory.drift) {
     findings.push({
@@ -362,6 +363,28 @@ function buildLocalFindings(localHostId, defaultIdentityKey, identityInventory, 
         severity: "warn",
         code: "sidecar_launchd_identity_key_missing",
         detail: `launchd agent identity key path is missing: ${sidecarLaunchd.configured_identity_key_path}`,
+      });
+    }
+  }
+  const sidecarState = readRecord(sidecarStateSummary);
+  if (sidecarState.present === true) {
+    const peerCount = Number(sidecarState.peer_count || 0);
+    const okPeerCount = Number(sidecarState.ok_peer_count || 0);
+    const failingPeerCount = Number(sidecarState.failing_peer_count || 0);
+    const outboxDepth = Number(sidecarState.outbox_depth || 0);
+    if (peerCount > 0 && sidecarState.last_cycle_ok === false) {
+      findings.push({
+        severity: "warn",
+        code: "sidecar_last_cycle_failed",
+        detail: `local federation sidecar last cycle failed; peers ok=${okPeerCount}/${peerCount}, failing=${failingPeerCount}, outbox=${outboxDepth}`,
+      });
+    }
+    const oldestPendingAgeSeconds = Number(sidecarState.oldest_pending_age_seconds);
+    if (outboxDepth > 0 && Number.isFinite(oldestPendingAgeSeconds) && oldestPendingAgeSeconds >= SIDECAR_OUTBOX_WARN_SECONDS) {
+      findings.push({
+        severity: "warn",
+        code: "sidecar_outbox_pending",
+        detail: `sidecar outbox has ${outboxDepth} pending publish item(s); oldest pending publish is ${formatAge(oldestPendingAgeSeconds)} old`,
       });
     }
   }
@@ -762,7 +785,7 @@ async function main() {
   const sidecarState = loadSidecarState(sidecarStatePath);
   const sidecarStateSummary = summarizeSidecarState(sidecarStatePath, sidecarState);
   const sidecarLaunchd = sidecarLaunchdStatus(localHostId);
-  const localFindings = buildLocalFindings(localHostId, defaultIdentityKey, identityInventory, sidecarLaunchd);
+  const localFindings = buildLocalFindings(localHostId, defaultIdentityKey, identityInventory, sidecarLaunchd, sidecarStateSummary);
   const fabricResponse = await loadFabricState();
   const workerFabric = readRecord(fabricResponse.state);
   const rawHosts = Array.isArray(workerFabric.hosts) ? workerFabric.hosts.map(readRecord) : [];

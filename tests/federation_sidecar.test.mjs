@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluatePeerIngestResponse, resolvePeerPublishTargets } from "../scripts/federation_sidecar.mjs";
+import {
+  evaluatePeerIngestResponse,
+  parseOptionalNonNegativeNumber,
+  postPeer,
+  resolvePeerTransportTarget,
+  resolvePeerPublishTargets,
+} from "../scripts/federation_sidecar.mjs";
 
 test("sidecar treats accepted-but-unprocessed federation ingest as a failed publish", () => {
   const evaluation = evaluatePeerIngestResponse(
@@ -46,6 +52,68 @@ test("sidecar accepts federation ingest only when peer processed it cleanly", ()
   );
 
   assert.deepEqual(evaluation, { ok: true, error: null });
+});
+
+test("sidecar publish aborts a slow peer with structured failure output", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  globalThis.fetch = async (_url, init = {}) =>
+    new Promise((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => {
+        reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+      });
+    });
+
+  const started = Date.now();
+  const result = await postPeer(
+    { peer: "http://peer.example:8787", target_peer: "http://peer.example:8787" },
+    { ok: true },
+    {
+      hostId: "local-host",
+      agentRuntime: "federation-sidecar",
+      bearerToken: "test-token",
+      privateKey:
+        "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINenNmz+ywU92k5y98Ks+c3za+y4f8BRN34r32aWynFB\n-----END PRIVATE KEY-----\n",
+      publishTimeoutMs: 25,
+    }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 0);
+  assert.equal(result.error, "peer_publish_timeout");
+  assert.match(result.detail, /timed out after 25ms/);
+  assert.ok(Date.now() - started < 1000);
+});
+
+test("sidecar numeric options preserve fallback when the flag is missing", () => {
+  assert.equal(parseOptionalNonNegativeNumber("", 12_000), 12_000);
+  assert.equal(parseOptionalNonNegativeNumber(undefined, 12_000), 12_000);
+  assert.equal(parseOptionalNonNegativeNumber("8000", 12_000), 8_000);
+  assert.equal(parseOptionalNonNegativeNumber("-1", 12_000), 12_000);
+});
+
+test("sidecar resolves .local peer hostnames as transport locators without changing peer identity", async () => {
+  const resolved = await resolvePeerTransportTarget(
+    {
+      peer: "http://Dans-MBP.local:8787",
+      target_peer: "http://Dans-MBP.local:8787",
+      locator_source: "configured",
+    },
+    {
+      resolvePeerHostnames: true,
+      peerResolveTimeoutMs: 25,
+      dnsLookup: async () => ({ address: "10.1.2.76" }),
+    }
+  );
+
+  assert.equal(resolved.peer, "http://Dans-MBP.local:8787");
+  assert.equal(resolved.target_peer, "http://10.1.2.76:8787");
+  assert.equal(resolved.locator_source, "dns_lookup");
+  assert.equal(resolved.resolved_hostname, "dans-mbp.local");
+  assert.equal(resolved.resolved_address, "10.1.2.76");
 });
 
 test("sidecar prefers the current observed locator for publish transport while preserving hostname identity", () => {

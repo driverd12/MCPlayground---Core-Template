@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { randomUUID, sign as signData } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import { defaultSidecarStatePath, nextSidecarSequence, recordSidecarCycle, safeId } from "./federation_sidecar_state.mjs";
@@ -49,11 +51,18 @@ function argValue(name, fallback = "") {
   return values.length > 0 ? values[values.length - 1] : fallback;
 }
 
-function numberArg(name, fallback) {
-  const parsed = Number(String(argValue(name, "")).trim());
+export function parseOptionalNonNegativeNumber(value, fallback) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return fallback;
+  }
+  const parsed = Number(text);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+function numberArg(name, fallback) {
+  return parseOptionalNonNegativeNumber(argValue(name, ""), fallback);
+}
 function boolArg(name, fallback = false) {
   const values = argValues(name);
   if (values.length <= 0) {
@@ -740,11 +749,84 @@ function buildPayload(options) {
   };
 }
 
-async function postPeer(peerTarget, payload, options) {
+function peerPublishTimeoutError(timeoutMs) {
+  return `Peer publish timed out after ${timeoutMs}ms`;
+}
+
+async function withTimeout(promise, timeoutMs, fallback = null) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(fallback), Math.max(1, timeoutMs));
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function shouldResolvePeerHostname(hostname, options = {}) {
+  const normalized = String(hostname || "").trim().toLowerCase();
+  if (!normalized || normalized === "localhost" || net.isIP(normalized)) {
+    return false;
+  }
+  return options.resolveAllPeerHostnames === true || normalized.endsWith(".local");
+}
+
+export async function resolvePeerTransportTarget(peerTarget, options = {}) {
   const targetPeer = String(peerTarget?.target_peer || peerTarget?.peer || "").trim();
   const configuredPeer = String(peerTarget?.peer || targetPeer).trim();
+  const base = {
+    ...peerTarget,
+    peer: configuredPeer,
+    target_peer: targetPeer,
+  };
+  if (options.resolvePeerHostnames === false) {
+    return base;
+  }
+  let url = null;
+  try {
+    url = new URL(targetPeer);
+  } catch {
+    return base;
+  }
+  const hostname = String(url.hostname || "").trim().toLowerCase();
+  if (!shouldResolvePeerHostname(hostname, options)) {
+    return base;
+  }
+  const lookupFn = typeof options.dnsLookup === "function" ? options.dnsLookup : dnsLookup;
+  const resolved = await withTimeout(
+    Promise.resolve(lookupFn(hostname, { all: false })).catch(() => null),
+    Math.max(1, Number(options.peerResolveTimeoutMs || 0) || 1_000),
+    null
+  );
+  const address = String(resolved?.address || resolved || "").trim();
+  if (!address || address.toLowerCase() === hostname) {
+    return base;
+  }
+  url.hostname = address;
+  return {
+    ...base,
+    target_peer: url.toString().replace(/\/$/, ""),
+    locator_source: base.locator_source === "configured" ? "dns_lookup" : `${base.locator_source || "configured"}+dns_lookup`,
+    resolved_hostname: hostname,
+    resolved_address: address,
+  };
+}
+
+export async function postPeer(peerTarget, payload, options) {
+  const transportTarget = await resolvePeerTransportTarget(peerTarget, options);
+  const targetPeer = String(transportTarget?.target_peer || transportTarget?.peer || "").trim();
+  const configuredPeer = String(transportTarget?.peer || targetPeer).trim();
   const url = new URL("/federation/ingest", targetPeer);
   const body = JSON.stringify(payload);
+  const publishTimeoutMs = Math.max(1, Number(options.publishTimeoutMs || 0) || 10_000);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(peerPublishTimeoutError(publishTimeoutMs)), publishTimeoutMs);
   const headers = {
     "content-type": "application/json",
     authorization: `Bearer ${options.bearerToken}`,
@@ -753,31 +835,56 @@ async function postPeer(peerTarget, payload, options) {
   if (options.origin) {
     headers.origin = options.origin;
   }
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body,
-  });
-  const text = await response.text();
-  let parsed = null;
   try {
-    parsed = JSON.parse(text);
-  } catch {
-    parsed = { raw: text.slice(0, 2_000) };
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body,
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = { raw: text.slice(0, 2_000) };
+    }
+    const responseHealth = evaluatePeerIngestResponse(response, parsed);
+    return {
+      peer: configuredPeer,
+      target_peer: targetPeer,
+      matched_host_id: transportTarget?.matched_host_id ?? null,
+      matched_by: transportTarget?.matched_by ?? null,
+      locator_source: transportTarget?.locator_source ?? "configured",
+      resolved_hostname: transportTarget?.resolved_hostname ?? null,
+      resolved_address: transportTarget?.resolved_address ?? null,
+      ok: responseHealth.ok,
+      status: response.status,
+      response: parsed,
+      error: responseHealth.error,
+      http_ok: response.ok,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const isAbort = error?.name === "AbortError" || controller.signal.aborted;
+    return {
+      peer: configuredPeer,
+      target_peer: targetPeer,
+      matched_host_id: transportTarget?.matched_host_id ?? null,
+      matched_by: transportTarget?.matched_by ?? null,
+      locator_source: transportTarget?.locator_source ?? "configured",
+      resolved_hostname: transportTarget?.resolved_hostname ?? null,
+      resolved_address: transportTarget?.resolved_address ?? null,
+      ok: false,
+      status: 0,
+      response: null,
+      error: isAbort ? "peer_publish_timeout" : "peer_publish_failed",
+      detail: isAbort ? peerPublishTimeoutError(publishTimeoutMs) : message,
+      http_ok: false,
+    };
+  } finally {
+    clearTimeout(timer);
   }
-  const responseHealth = evaluatePeerIngestResponse(response, parsed);
-  return {
-    peer: configuredPeer,
-    target_peer: targetPeer,
-    matched_host_id: peerTarget?.matched_host_id ?? null,
-    matched_by: peerTarget?.matched_by ?? null,
-    locator_source: peerTarget?.locator_source ?? "configured",
-    ok: responseHealth.ok,
-    status: response.status,
-    response: parsed,
-    error: responseHealth.error,
-    http_ok: response.ok,
-  };
 }
 
 export function evaluatePeerIngestResponse(response, parsed) {
@@ -808,6 +915,7 @@ function parseOptions() {
     throw new Error("--host-id or MASTER_MOLD_HOST_ID is required");
   }
   const identityKeyPath = expandHome(argValue("identity-key-path", process.env.MASTER_MOLD_IDENTITY_KEY_PATH || defaultIdentityKeyPath(hostId)));
+  const toolTimeoutMs = Math.max(1_000, numberArg("tool-timeout-ms", Number(process.env.MASTER_MOLD_FEDERATION_TOOL_TIMEOUT_MS || 12_000)));
   const options = {
     hostId,
     identityKey: process.env.MASTER_MOLD_HOST_IDENTITY_KEY || "",
@@ -834,7 +942,17 @@ function parseOptions() {
       20,
       Math.max(0, numberArg("shared-task-limit", Number(process.env.MASTER_MOLD_FEDERATION_SHARED_TASK_LIMIT || 8)))
     ),
-    toolTimeoutMs: Math.max(1_000, numberArg("tool-timeout-ms", Number(process.env.MASTER_MOLD_FEDERATION_TOOL_TIMEOUT_MS || 12_000))),
+    toolTimeoutMs,
+    publishTimeoutMs: Math.max(
+      1_000,
+      numberArg("publish-timeout-ms", Number(process.env.MASTER_MOLD_FEDERATION_PUBLISH_TIMEOUT_MS || toolTimeoutMs))
+    ),
+    resolvePeerHostnames: boolArg("resolve-peer-hostnames", process.env.MASTER_MOLD_FEDERATION_RESOLVE_PEER_HOSTNAMES !== "0"),
+    resolveAllPeerHostnames: boolArg("resolve-all-peer-hostnames", process.env.MASTER_MOLD_FEDERATION_RESOLVE_ALL_PEER_HOSTNAMES === "1"),
+    peerResolveTimeoutMs: Math.max(
+      100,
+      numberArg("peer-resolve-timeout-ms", Number(process.env.MASTER_MOLD_FEDERATION_PEER_RESOLVE_TIMEOUT_MS || 1_000))
+    ),
     includeDesktopContext: boolArg("desktop-context", process.env.MASTER_MOLD_FEDERATION_DESKTOP_CONTEXT !== "0"),
     desktopMaxFreshnessSeconds: Math.max(
       1,
@@ -888,6 +1006,8 @@ Options:
   --shared-memory-limit <n>            Recent memory summaries to include. Default: 6.
   --shared-goal-limit <n>              Active/blocked goal summaries to include. Default: 6.
   --shared-task-limit <n>              Active task summaries to include. Default: 8.
+  --publish-timeout-ms <n>             Per-peer signed publish timeout. Default: tool timeout.
+  --resolve-peer-hostnames true|false  Resolve .local peer hostnames to current transport locators. Default: true.
 
 This is a peer mesh sidecar. Each host captures locally, publishes a bounded signed payload to configured peers, and each peer ingests into its own MASTER-MOLD event log.`);
 }
