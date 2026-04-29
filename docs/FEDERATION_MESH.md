@@ -146,10 +146,13 @@ npm run federation:soak -- --peer http://peer-a.local:8787 --peer http://peer-b.
 npm run federation:soak -- --peer http://peer-a.local:8787 --apply
 npm run federation:repair -- --action all --json
 npm run federation:repair -- --action sidecar-stale --peer http://peer-a.local:8787
+npm run federation:stage-peer -- --ssh dan.driver@Dans-MBP.local --host-id dans-mbp --remote-peer http://Dans-MBP.local:8787 --local-peer http://Dans-MacBook-Pro.local:8787 --json
 npm run federation:benchmark -- --hosts 3 --events-per-host 80 --json
 ```
 
 The soak command runs sidecar one-shot loops, an isolated offline-peer simulation, doctor before/after checks, and either local restart guidance or bounded restart actions when `--apply` is set. Sleep/wake and network-change checks remain operator-mediated because automatically toggling a coworker's network or sleep state is unsafe. The benchmark command uses a temporary database with simulated multi-peer ingest history and times `office.snapshot`, `kernel.summary`, `knowledge.query`, and `federation:doctor`; it does not claim live remote validation.
+
+Use `federation:stage-peer` when a second Mac is in use and you need to prepare the next operator pass without interrupting it. The command does not SSH or mutate either host. It prints read-only remote checks separately from idle-required actions such as restarting Codex/Chronicle, restarting remote launchd jobs, and running a peer-side `federation:soak --apply`.
 
 Each accepted federation ingest event records a first-class identity envelope: `requesting_host_id`, `requesting_remote_address`, `captured_from_host_id`, `captured_hostname`, `captured_agent_runtime`, `captured_model_label`, `signed_at`, `received_at`, `signature_verification_result`, and the approved whitelist scope. The receiver derives that envelope from the approved network gate and verified host signature, not from caller-provided `source_*` fields.
 

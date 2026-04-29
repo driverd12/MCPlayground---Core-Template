@@ -13,6 +13,7 @@ data/*.sqlite-wal
 data/*.sqlite-journal
 data/backups/
 data/corrupt/
+data/storage-evidence-archive/
 data/recovery-*/
 data/hub.from_wal.*
 data/trichat.bus.sock
