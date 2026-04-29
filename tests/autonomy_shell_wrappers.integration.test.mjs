@@ -64,6 +64,7 @@ test("autonomy shell wrapper ensure converges the control plane through the real
   try {
     const baseEnv = inheritedEnv({
       ANAMNESIS_HUB_DB_PATH: dbPath,
+      DOTENV_CONFIG_PATH: path.join(tempDir, "missing.env"),
       TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
       TRICHAT_OLLAMA_URL: ollama.url,
       TRICHAT_PROVIDER_BRIDGE_ROUTER_ENABLED: "0",
@@ -151,6 +152,7 @@ test("ring leader start proactively uses autonomy bootstrap on a cold control pl
   try {
     const baseEnv = inheritedEnv({
       ANAMNESIS_HUB_DB_PATH: dbPath,
+      DOTENV_CONFIG_PATH: path.join(tempDir, "missing.env"),
       TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
       TRICHAT_OLLAMA_URL: ollama.url,
       TRICHAT_PROVIDER_BRIDGE_ROUTER_ENABLED: "0",
@@ -223,6 +225,7 @@ test("autonomy keepalive runner exits tempfail when http is still down during re
     await execFileAsync(process.execPath, ["./scripts/autonomy_keepalive_runner.mjs"], {
       cwd: REPO_ROOT,
       env: inheritedEnv({
+        DOTENV_CONFIG_PATH: path.join(os.tmpdir(), "master-mold-missing-autonomy-keepalive.env"),
         AUTONOMY_BOOTSTRAP_TRANSPORT: "http",
         AUTONOMY_KEEPALIVE_HTTP_READY_TIMEOUT_MS: "1000",
         TRICHAT_MCP_URL: "http://127.0.0.1:9/",
@@ -315,11 +318,11 @@ test("agents_switch on repairs disabled launchd services across a simulated rest
   const stateDir = path.join(tempDir, "launchctl-state");
   const launchctlLog = path.join(tempDir, "launchctl.log");
   const labels = [
-    "com.mcplayground.mcp.server",
-    "com.mcplayground.imprint.autosnapshot",
-    "com.mcplayground.imprint.inboxworker",
-    "com.mcplayground.autonomy.keepalive",
-    "com.mcplayground.local-adapter.watchdog",
+    "com.master-mold.mcp.server",
+    "com.master-mold.imprint.autosnapshot",
+    "com.master-mold.imprint.inboxworker",
+    "com.master-mold.autonomy.keepalive",
+    "com.master-mold.local-adapter.watchdog",
   ];
 
   fs.mkdirSync(fakeBin, { recursive: true });
@@ -425,6 +428,7 @@ esac
   const env = inheritedEnv({
     HOME: fakeHome,
     PATH: `${fakeBin}:${process.env.PATH || ""}`,
+    DOTENV_CONFIG_PATH: path.join(tempDir, "missing.env"),
     MCP_HTTP_BEARER_TOKEN: "test-agents-switch-repair-token",
     TRICHAT_MCP_URL: "http://127.0.0.1:8787/",
     TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
@@ -465,22 +469,22 @@ esac
 
     const launchLog = fs.readFileSync(launchctlLog, "utf8");
     const keepaliveEnableIndex = launchLog.indexOf(
-      `launchctl enable gui/${process.getuid()}/com.mcplayground.autonomy.keepalive`
+      `launchctl enable gui/${process.getuid()}/com.master-mold.autonomy.keepalive`
     );
     const keepaliveServiceBootoutIndex = launchLog.indexOf(
-      `launchctl bootout gui/${process.getuid()}/com.mcplayground.autonomy.keepalive`
+      `launchctl bootout gui/${process.getuid()}/com.master-mold.autonomy.keepalive`
     );
     const keepaliveBootstrapIndex = launchLog.indexOf(
-      `launchctl bootstrap gui/${process.getuid()} ${path.join(launchDir, "com.mcplayground.autonomy.keepalive.plist")}`
+      `launchctl bootstrap gui/${process.getuid()} ${path.join(launchDir, "com.master-mold.autonomy.keepalive.plist")}`
     );
     const watchdogEnableIndex = launchLog.indexOf(
-      `launchctl enable gui/${process.getuid()}/com.mcplayground.local-adapter.watchdog`
+      `launchctl enable gui/${process.getuid()}/com.master-mold.local-adapter.watchdog`
     );
     const watchdogServiceBootoutIndex = launchLog.indexOf(
-      `launchctl bootout gui/${process.getuid()}/com.mcplayground.local-adapter.watchdog`
+      `launchctl bootout gui/${process.getuid()}/com.master-mold.local-adapter.watchdog`
     );
     const watchdogBootstrapIndex = launchLog.indexOf(
-      `launchctl bootstrap gui/${process.getuid()} ${path.join(launchDir, "com.mcplayground.local-adapter.watchdog.plist")}`
+      `launchctl bootstrap gui/${process.getuid()} ${path.join(launchDir, "com.master-mold.local-adapter.watchdog.plist")}`
     );
     assert.notEqual(keepaliveEnableIndex, -1);
     assert.notEqual(keepaliveServiceBootoutIndex, -1);
@@ -601,6 +605,8 @@ printf '{"ok":true,"ready":true}\\n'
   const env = inheritedEnv({
     HOME: fakeHome,
     PATH: `${fakeBin}:${process.env.PATH || ""}`,
+    DOTENV_CONFIG_PATH: path.join(tempDir, "missing.env"),
+    MCP_HTTP_ALLOW_LAN: "1",
     TRICHAT_RING_LEADER_TRANSPORT: "stdio",
     MCP_HTTP_BEARER_TOKEN: "",
   });
@@ -670,6 +676,8 @@ printf '{"ok":true,"ready":true}\\n'
   assert.match(mcpPlist, /<key>MCP_AUTONOMY_BOOTSTRAP_ON_START<\/key>\s*<string>0<\/string>/);
   assert.match(mcpPlist, /<key>MCP_AUTONOMY_MAINTAIN_ON_START<\/key>\s*<string>0<\/string>/);
   assert.match(mcpPlist, /<key>MCP_AUTONOMY_MAINTAIN_RUN_IMMEDIATELY_ON_START<\/key>\s*<string>0<\/string>/);
+  assert.match(mcpPlist, /<key>MCP_HTTP_HOST<\/key>\s*<string>0\.0\.0\.0<\/string>/);
+  assert.match(mcpPlist, /<key>MCP_HTTP_ALLOW_LAN<\/key>\s*<string>1<\/string>/);
 
   const launchLog = fs.readFileSync(launchctlLog, "utf8");
   const mcpKickstartIndex = launchLog.indexOf(`launchctl kickstart -k gui/${process.getuid()}/com.master-mold.mcp.server`);
@@ -779,11 +787,11 @@ test("agents_switch status marks stale repo-bound plists as non-operational", as
   const launchDir = path.join(fakeHome, "Library", "LaunchAgents");
   const staleRoot = path.join(tempDir, "old-workspace");
   const labels = [
-    "com.mcplayground.mcp.server",
-    "com.mcplayground.imprint.autosnapshot",
-    "com.mcplayground.imprint.inboxworker",
-    "com.mcplayground.autonomy.keepalive",
-    "com.mcplayground.local-adapter.watchdog",
+    "com.master-mold.mcp.server",
+    "com.master-mold.imprint.autosnapshot",
+    "com.master-mold.imprint.inboxworker",
+    "com.master-mold.autonomy.keepalive",
+    "com.master-mold.local-adapter.watchdog",
   ];
 
   fs.mkdirSync(fakeBin, { recursive: true });
@@ -863,12 +871,20 @@ test("agents_switch on rewrites stale repo-bound plists before restart repair", 
   const launchDir = path.join(fakeHome, "Library", "LaunchAgents");
   const launchctlLog = path.join(tempDir, "launchctl.log");
   const staleRoot = path.join(tempDir, "old-workspace");
+  const supportRunnerPath = path.join(
+    fakeHome,
+    "Library",
+    "Application Support",
+    "master-mold",
+    "bin",
+    "run_from_repo.sh"
+  );
   const labels = [
-    "com.mcplayground.mcp.server",
-    "com.mcplayground.imprint.autosnapshot",
-    "com.mcplayground.imprint.inboxworker",
-    "com.mcplayground.autonomy.keepalive",
-    "com.mcplayground.local-adapter.watchdog",
+    "com.master-mold.mcp.server",
+    "com.master-mold.imprint.autosnapshot",
+    "com.master-mold.imprint.inboxworker",
+    "com.master-mold.autonomy.keepalive",
+    "com.master-mold.local-adapter.watchdog",
   ];
 
   fs.mkdirSync(fakeBin, { recursive: true });
@@ -919,6 +935,7 @@ exit 0
   const env = inheritedEnv({
     HOME: fakeHome,
     PATH: `${fakeBin}:${process.env.PATH || ""}`,
+    DOTENV_CONFIG_PATH: path.join(tempDir, "missing.env"),
     MCP_HTTP_BEARER_TOKEN: "",
     TRICHAT_RING_LEADER_TRANSPORT: "stdio",
     TRICHAT_MCP_URL: "http://127.0.0.1:8787/",
@@ -937,23 +954,23 @@ exit 0
     assert.equal(repaired.switches.local_adapter_watchdog, true);
 
     const keepalivePlist = fs.readFileSync(
-      path.join(launchDir, "com.mcplayground.autonomy.keepalive.plist"),
+      path.join(launchDir, "com.master-mold.autonomy.keepalive.plist"),
       "utf8"
     );
-    assert.match(keepalivePlist, new RegExp(escapeRegExp(REPO_ROOT)));
+    assert.match(keepalivePlist, new RegExp(escapeRegExp(supportRunnerPath)));
     assert.doesNotMatch(keepalivePlist, new RegExp(escapeRegExp(staleRoot)));
 
     const launchLog = fs.readFileSync(launchctlLog, "utf8");
     assert.match(
       launchLog,
       new RegExp(
-        `launchctl bootstrap gui/${process.getuid()} ${escapeRegExp(path.join(launchDir, "com.mcplayground.mcp.server.plist"))}`
+        `launchctl bootstrap gui/${process.getuid()} ${escapeRegExp(path.join(launchDir, "com.master-mold.mcp.server.plist"))}`
       )
     );
     assert.match(
       launchLog,
       new RegExp(
-        `launchctl bootstrap gui/${process.getuid()} ${escapeRegExp(path.join(launchDir, "com.mcplayground.autonomy.keepalive.plist"))}`
+        `launchctl bootstrap gui/${process.getuid()} ${escapeRegExp(path.join(launchDir, "com.master-mold.autonomy.keepalive.plist"))}`
       )
     );
   } finally {

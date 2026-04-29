@@ -136,6 +136,8 @@ function writeNonSecretEnv(options, identity) {
   content = setEnvValue(content, "MASTER_MOLD_FEDERATION_LOCAL_TRANSPORT", options.localTransport);
   if (options.peers.length > 0) {
     content = setEnvValue(content, "MASTER_MOLD_FEDERATION_PEERS", options.peers.join(","));
+    content = setEnvValue(content, "MCP_HTTP_HOST", "0.0.0.0");
+    content = setEnvValue(content, "MCP_HTTP_ALLOW_LAN", "1");
   }
   fs.writeFileSync(envPath, content, { mode: 0o600 });
 }
