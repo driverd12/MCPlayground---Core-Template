@@ -343,6 +343,7 @@ function chronicleRecorderPidPaths() {
   return uniquePaths([
     readString(process.env.CHRONICLE_PID_PATH),
     path.join(root, "codex_chronicle", "chronicle-started.pid"),
+    path.join(root, "codex_chronicle", "codex_chronicle.lock"),
     path.join(root, "codex_tape_recorder", "chronicle-started.pid"),
   ]);
 }
