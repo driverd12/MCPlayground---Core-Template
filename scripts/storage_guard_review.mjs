@@ -14,7 +14,8 @@ function argValue(name, fallback = "") {
   const inline = process.argv.find((entry) => entry.startsWith(prefix));
   if (inline) return inline.slice(prefix.length);
   const index = process.argv.indexOf(token);
-  return index >= 0 && process.argv[index + 1] ? process.argv[index + 1] : fallback;
+  const next = process.argv[index + 1];
+  return index >= 0 && next && !next.startsWith("--") ? next : fallback;
 }
 
 function boolArg(name, fallback = false) {

@@ -65,6 +65,25 @@ test("storage guard review is read-only and prepares archive/delete plans", () =
   }
 });
 
+test("storage guard review open scan flag is not swallowed by following flags", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-storage-review-open-scan-"));
+  try {
+    const corruptDir = path.join(tempDir, "data", "corrupt");
+    fs.mkdirSync(corruptDir, { recursive: true });
+    fs.writeFileSync(path.join(corruptDir, "hub.sqlite.older.large-db-startup-probe"), "corrupt-db");
+
+    const output = execFileSync("node", ["scripts/storage_guard_review.mjs", "--repo-root", tempDir, "--open-scan", "--json"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    });
+    const parsed = JSON.parse(output);
+    assert.notEqual(parsed.open_files.evidence.skipped, true);
+    assert.equal(Array.isArray(parsed.open_files.evidence.entries), true);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("federation peer staging prints checks without executing remote actions", () => {
   const output = execFileSync(
     "node",
