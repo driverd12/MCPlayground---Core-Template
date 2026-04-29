@@ -45,6 +45,24 @@ const WATCH_INTERVAL_MS = (() => {
   return Number.isFinite(configuredIntervalMs) && configuredIntervalMs > 0 ? configuredIntervalMs : 10000;
 })();
 
+export function describeHttpTokenFile(repoRoot = REPO_ROOT, env = process.env) {
+  const tokenFile = path.join(repoRoot, "data", "imprint", "http_bearer_token");
+  const envToken = String(env.MCP_HTTP_BEARER_TOKEN || "").trim();
+  let fileToken = "";
+  try {
+    fileToken = fs.readFileSync(tokenFile, "utf8").trim();
+  } catch {
+    fileToken = "";
+  }
+  const filePresent = fileToken.length > 0;
+  return {
+    path: tokenFile,
+    present: filePresent,
+    configured: envToken.length > 0,
+    matches_env: filePresent && envToken.length > 0 ? fileToken === envToken : null,
+  };
+}
+
 function isLocalHostTarget() {
   return ["127.0.0.1", "localhost", "::1"].includes(String(MCP_HOST).toLowerCase());
 }
@@ -347,6 +365,7 @@ async function detectMode({ health, listener, ready, officeReady }) {
 async function printStatus() {
   const { health, listener, ready, officeReady, launchable } = await collectOfficeStatus();
   const mode = await detectMode({ health, listener, ready, officeReady });
+  const tokenFile = describeHttpTokenFile(REPO_ROOT, process.env);
   process.stdout.write(
     `${JSON.stringify(
       {
@@ -360,6 +379,7 @@ async function printStatus() {
         url: GUI_URL,
         platform: process.platform,
         runner_pid: clearRunnerPidIfStale(),
+        http_token_file: tokenFile,
       },
       null,
       2

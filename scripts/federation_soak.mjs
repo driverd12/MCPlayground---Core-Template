@@ -9,14 +9,14 @@ import { resolveFederationHostIdentity } from "./federation_host_identity.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-function argValues(name) {
+function argValues(name, argv = process.argv) {
   const values = [];
   const longName = `--${name}`;
   const prefix = `${longName}=`;
-  for (let index = 2; index < process.argv.length; index += 1) {
-    const token = process.argv[index];
-    if (token === longName && process.argv[index + 1] && !process.argv[index + 1].startsWith("--")) {
-      values.push(process.argv[index + 1]);
+  for (let index = 2; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === longName && argv[index + 1] && !argv[index + 1].startsWith("--")) {
+      values.push(argv[index + 1]);
       index += 1;
     } else if (token.startsWith(prefix)) {
       values.push(token.slice(prefix.length));
@@ -25,21 +25,21 @@ function argValues(name) {
   return values;
 }
 
-function argValue(name, fallback = "") {
-  const values = argValues(name);
+function argValue(name, fallback = "", argv = process.argv) {
+  const values = argValues(name, argv);
   return values.length ? values[values.length - 1] : fallback;
 }
 
-function hasArg(name) {
+function hasArg(name, argv = process.argv) {
   const token = `--${name}`;
   const prefix = `${token}=`;
-  return process.argv.some((entry) => entry === token || entry.startsWith(prefix));
+  return argv.some((entry) => entry === token || entry.startsWith(prefix));
 }
 
-function boolArg(name, fallback = false) {
-  const values = argValues(name);
+function boolArg(name, fallback = false, argv = process.argv) {
+  const values = argValues(name, argv);
   if (!values.length) {
-    return hasArg(name) ? true : fallback;
+    return hasArg(name, argv) ? true : fallback;
   }
   const normalized = String(values[values.length - 1]).trim().toLowerCase();
   if (["1", "true", "yes", "on"].includes(normalized)) return true;
@@ -47,18 +47,31 @@ function boolArg(name, fallback = false) {
   return fallback;
 }
 
-function numberArg(name, fallback) {
-  const parsed = Number(argValue(name, ""));
+function numberArg(name, fallback, argv = process.argv) {
+  const parsed = Number(argValue(name, "", argv));
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function parsePeers() {
-  const raw = [
-    ...argValues("peer"),
-    ...argValues("host"),
-    String(argValue("peers", process.env.MASTER_MOLD_FEDERATION_PEERS || "")),
+export function parseSoakPeers(argv = process.argv, env = process.env) {
+  const explicitRaw = [
+    ...argValues("peer", argv),
+    ...argValues("host", argv),
+    String(argValue("peers", "", argv)),
   ].join(",");
+  const raw = explicitRaw.trim() ? explicitRaw : String(env.MASTER_MOLD_FEDERATION_PEERS || "");
   return [...new Set(raw.split(",").map((entry) => entry.trim()).filter(Boolean))].slice(0, 3);
+}
+
+function parsePeers() {
+  return parseSoakPeers(process.argv, process.env);
+}
+
+export function buildSidecarRunEnv(env = process.env) {
+  return {
+    ...env,
+    MASTER_MOLD_FEDERATION_PEERS: "",
+    MASTER_MOLD_MAIN_URL: "",
+  };
 }
 
 function run(command, args, options = {}) {
@@ -186,7 +199,10 @@ async function main() {
       args.push("--peer", peer);
     }
     if (peers.length > 0) {
-      add("sidecar_once", { iteration: index + 1, ...run(process.execPath, args, { timeoutMs: 60_000 }) });
+      add("sidecar_once", {
+        iteration: index + 1,
+        ...run(process.execPath, args, { timeoutMs: 60_000, env: buildSidecarRunEnv(process.env) }),
+      });
     } else {
       add("sidecar_once", {
         iteration: index + 1,
@@ -216,7 +232,7 @@ async function main() {
         "--state-path",
         statePath,
       ],
-      { timeoutMs: 30_000, env: { ...process.env, MASTER_MOLD_FEDERATION_PEERS: "" } }
+      { timeoutMs: 30_000, env: buildSidecarRunEnv(process.env) }
     );
     add(
       "peer_offline_simulation",

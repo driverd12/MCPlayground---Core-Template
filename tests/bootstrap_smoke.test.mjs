@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { resolveOfficeGuiProbeBase } from "../scripts/agent_office_gui.mjs";
+import { describeHttpTokenFile, resolveOfficeGuiProbeBase } from "../scripts/agent_office_gui.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST_PATH = path.join(REPO_ROOT, "scripts", "platform_manifest.json");
@@ -319,6 +319,8 @@ test("agent_office_gui.mjs status emits machine-readable status without crashing
   assert.equal(typeof parsed.url, "string");
   assert.equal(parsed.platform, process.platform);
   assert.equal(typeof parsed.launchable, "boolean");
+  assert.equal(typeof parsed.http_token_file, "object");
+  assert.equal(typeof parsed.http_token_file.matches_env === "boolean" || parsed.http_token_file.matches_env === null, true);
 });
 
 test("agent_office_gui.mjs normalizes probe paths when TRICHAT_MCP_URL includes a path", () => {
@@ -329,6 +331,30 @@ test("agent_office_gui.mjs normalizes probe paths when TRICHAT_MCP_URL includes 
   assert.equal(new URL("health", probeBase).toString(), "http://127.0.0.1:4321/health");
   assert.equal(new URL("ready", probeBase).toString(), "http://127.0.0.1:4321/ready");
   assert.equal(new URL("office/", probeBase).toString(), "http://127.0.0.1:4321/office/");
+});
+
+test("agent_office_gui.mjs reports token file mismatch without exposing the token", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "master-mold-token-status-"));
+  try {
+    const tokenDir = path.join(tmp, "data", "imprint");
+    fs.mkdirSync(tokenDir, { recursive: true });
+    fs.writeFileSync(path.join(tokenDir, "http_bearer_token"), "file-token\n", "utf8");
+
+    assert.deepEqual(describeHttpTokenFile(tmp, { MCP_HTTP_BEARER_TOKEN: "file-token" }), {
+      path: path.join(tokenDir, "http_bearer_token"),
+      present: true,
+      configured: true,
+      matches_env: true,
+    });
+    assert.deepEqual(describeHttpTokenFile(tmp, { MCP_HTTP_BEARER_TOKEN: "env-token" }), {
+      path: path.join(tokenDir, "http_bearer_token"),
+      present: true,
+      configured: true,
+      matches_env: false,
+    });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("agentic_suite_launch.mjs status emits machine-readable status without crashing", { timeout: 30_000 }, () => {
