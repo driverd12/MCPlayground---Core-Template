@@ -489,6 +489,7 @@ type StorageHealthSummary = {
   schema_version: number;
   status: StorageGuardStatusRecord["status"];
   attention_required: boolean;
+  current_boot_clean: boolean;
   current_boot_quarantine_count: number;
   quarantine_artifact_count: number;
   quarantine_total_bytes: number;
@@ -851,6 +852,7 @@ function summarizeStorageHealth(storage: Storage): StorageHealthSummary {
     schema_version: storage.getSchemaVersion(),
     status: guard.status,
     attention_required: guard.attention_required,
+    current_boot_clean: guard.current_boot_clean,
     current_boot_quarantine_count: guard.current_boot_quarantined_paths.length,
     quarantine_artifact_count: guard.quarantine_artifact_count,
     quarantine_total_bytes: guard.quarantine_total_bytes,
@@ -2642,11 +2644,19 @@ export function kernelSummary(
   const recentEvents = signalOverview.recent_runtime_events;
   const eventSummary = signalOverview.runtime_event_summary;
   const activeLearningAgents = new Set(activeLearningEntries.map((entry) => entry.agent_id));
+  const infrastructureClientKinds = new Set(["imprint", "imprint-worker", "worker", "inbox-worker", "keepalive", "watchdog", "gui-watcher", "auto-snapshot"]);
+  const taskCapableSessionAgentIds = [
+    ...new Set(
+      activeSessions
+        .filter((session) => !infrastructureClientKinds.has(String(session.client_kind ?? "").trim().toLowerCase()))
+        .map((session) => session.agent_id)
+    ),
+  ];
   const activeSessionAgentIds = [...new Set(activeSessions.map((session) => session.agent_id))];
-  const uncoveredActiveSessionAgents = activeSessionAgentIds
+  const uncoveredActiveSessionAgents = taskCapableSessionAgentIds
     .filter((agentId) => !activeLearningAgents.has(agentId))
     .sort((left, right) => left.localeCompare(right));
-  const activeSessionLearningCoverageCount = activeSessionAgentIds.length - uncoveredActiveSessionAgents.length;
+  const activeSessionLearningCoverageCount = taskCapableSessionAgentIds.length - uncoveredActiveSessionAgents.length;
   if ((taskSummary.counts.failed ?? 0) > 0 && taskSummary.last_failed && !staleTaskFailures) {
     attention.push(`Failed task detected: ${taskSummary.last_failed.task_id}`);
   }

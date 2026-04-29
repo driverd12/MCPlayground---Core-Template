@@ -181,6 +181,67 @@ echo "[production] repo: ${REPO_ROOT}"
 echo "[production] node: $(node -v)"
 echo "[production] python: $(python3 --version 2>&1)"
 echo "[production] mcp url: ${TRICHAT_HTTP_URL}"
+
+CURRENT_NODE_VERSION="$(node -v 2>/dev/null || true)"
+CURRENT_NODE_MAJOR="$(echo "${CURRENT_NODE_VERSION}" | sed 's/^v//' | cut -d. -f1)"
+REQUIRED_NODE_MAJOR="22"
+if [[ -n "${CURRENT_NODE_MAJOR}" && "${CURRENT_NODE_MAJOR}" != "${REQUIRED_NODE_MAJOR}" ]]; then
+  echo "[production] WARNING: Node ${CURRENT_NODE_VERSION} detected but Node v${REQUIRED_NODE_MAJOR}.x is required" >&2
+  echo "[production] WARNING: native better-sqlite3 module may have ABI mismatch" >&2
+fi
+
+LAUNCHD_MCP_PLIST="${HOME}/Library/LaunchAgents/com.master-mold.mcp.server.plist"
+if [[ -f "${LAUNCHD_MCP_PLIST}" ]]; then
+  PLIST_PATH="$(python3 -c "
+import plistlib, sys, pathlib
+try:
+    p = plistlib.loads(pathlib.Path(sys.argv[1]).read_bytes())
+    env = p.get('EnvironmentVariables', {})
+    path_val = env.get('PATH', '')
+    print(path_val)
+except Exception:
+    print('')
+" "${LAUNCHD_MCP_PLIST}" 2>/dev/null || true)"
+  if [[ -n "${PLIST_PATH}" ]]; then
+    PLIST_NODE="$(PATH="${PLIST_PATH}" command -v node 2>/dev/null || true)"
+    if [[ -n "${PLIST_NODE}" ]]; then
+      PLIST_NODE_VERSION="$("${PLIST_NODE}" -v 2>/dev/null || true)"
+      PLIST_NODE_MAJOR="$(echo "${PLIST_NODE_VERSION}" | sed 's/^v//' | cut -d. -f1)"
+      if [[ "${PLIST_NODE_MAJOR}" != "${CURRENT_NODE_MAJOR}" ]]; then
+        echo "[production] WARNING: launchd plist resolves Node ${PLIST_NODE_VERSION} (${PLIST_NODE}) but shell has ${CURRENT_NODE_VERSION}" >&2
+        echo "[production] WARNING: PATH mismatch between launchd and current shell — run launchd:install to fix" >&2
+      else
+        echo "[production] launchd node: ${PLIST_NODE_VERSION} (matches shell)"
+      fi
+    else
+      echo "[production] WARNING: launchd plist PATH does not resolve to a node binary" >&2
+    fi
+  fi
+  PLIST_REPO="$(python3 -c "
+import plistlib, sys, pathlib
+try:
+    p = plistlib.loads(pathlib.Path(sys.argv[1]).read_bytes())
+    env = p.get('EnvironmentVariables', {})
+    print(env.get('MASTER_MOLD_REPO_ROOT', ''))
+except Exception:
+    print('')
+" "${LAUNCHD_MCP_PLIST}" 2>/dev/null || true)"
+  if [[ -n "${PLIST_REPO}" && "${PLIST_REPO}" != "${REPO_ROOT}" ]]; then
+    echo "[production] WARNING: launchd plist MASTER_MOLD_REPO_ROOT=${PLIST_REPO} differs from current repo ${REPO_ROOT}" >&2
+  fi
+fi
+
+NATIVE_MODULE="${REPO_ROOT}/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+if [[ -f "${NATIVE_MODULE}" ]]; then
+  NATIVE_ABI="$(node -e "try{require('${NATIVE_MODULE}');console.log('ok')}catch(e){console.log('abi_mismatch: '+e.message.substring(0,120))}" 2>/dev/null || echo "probe_failed")"
+  if [[ "${NATIVE_ABI}" == "ok" ]]; then
+    echo "[production] native module: better-sqlite3 ABI compatible"
+  else
+    echo "[production] WARNING: better-sqlite3 native module ABI mismatch: ${NATIVE_ABI}" >&2
+    echo "[production] WARNING: run 'npm rebuild better-sqlite3' or 'npm ci' to fix" >&2
+  fi
+fi
+
 echo "[production] health: $(curl_json '/health' | python3 -c "import json,sys; print(json.load(sys.stdin).get('status','n/a'))")"
 
 curl_json '/ready' 1 > "${TMP_DIR}/ready.json"

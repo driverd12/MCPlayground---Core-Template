@@ -226,6 +226,7 @@ export type LocalBridgeResourceGate = {
     suppress_outbound_bridges: boolean;
     pause_visible_sidecars: boolean;
   };
+  all_triggers?: Array<{ severity: string; reason: string }>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -942,8 +943,9 @@ function resolveLocalBridgeResourceGateFromState(state: WorkerFabricStateRecord)
   }
 
   const primaryTrigger = triggers[0] ?? null;
+  const hasHighSeverity = triggers.some((entry) => entry.severity === "high");
   const severity = primaryTrigger
-    ? triggers.some((entry) => entry.severity === "high")
+    ? hasHighSeverity
       ? "high"
       : "moderate"
     : "none";
@@ -977,9 +979,10 @@ function resolveLocalBridgeResourceGateFromState(state: WorkerFabricStateRecord)
       queue_depth_max: queueDepthMax,
     },
     recommendations: {
-      suppress_outbound_bridges: active,
+      suppress_outbound_bridges: hasHighSeverity,
       pause_visible_sidecars: active,
     },
+    all_triggers: triggers.map((entry) => ({ severity: entry.severity, reason: entry.reason })),
   };
 }
 

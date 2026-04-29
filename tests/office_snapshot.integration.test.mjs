@@ -799,7 +799,7 @@ test("office.snapshot direct reads demote warmed provider agents when bridge dia
   }
 });
 
-test("office.snapshot surfaces storage guard evidence as a visible workbench blocker", async () => {
+test("office.snapshot does not create a workbench blocker for historical storage guard evidence when current boot is clean", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-snapshot-storage-health-"));
   const dbPath = path.join(tempDir, "hub.sqlite");
 
@@ -829,11 +829,10 @@ test("office.snapshot surfaces storage guard evidence as a visible workbench blo
     });
 
     assert.equal(snapshot.kernel.storage.status, "evidence_present");
-    assert.equal(snapshot.kernel.storage.attention_required, true);
+    assert.equal(snapshot.kernel.storage.attention_required, false);
+    assert.equal(snapshot.kernel.storage.current_boot_clean, true);
     const blocker = snapshot.workbench.blockers.find((entry) => entry.kind === "storage_health");
-    assert.ok(blocker);
-    assert.match(blocker.title, /storage guard/i);
-    assert.equal(blocker.remediation?.action, "storage_health");
+    assert.equal(blocker, undefined, "historical evidence should not create a workbench blocker when current boot is clean");
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });

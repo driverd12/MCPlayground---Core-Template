@@ -20,6 +20,7 @@ export function healthStorage(storage: Storage) {
   const stats = fs.existsSync(dbPath) ? fs.statSync(dbPath) : null;
   const backups = storage.getStorageBackupStatus({ recent_limit: 6 });
   const guard = storage.getStorageGuardStatus({ recent_limit: 6 });
+  const sqliteErrors = storage.getSqliteErrorState();
   return {
     ok: true,
     db_path: dbPath,
@@ -29,6 +30,7 @@ export function healthStorage(storage: Storage) {
     table_counts: counts,
     backups,
     guard,
+    sqlite_errors: sqliteErrors,
   };
 }
 

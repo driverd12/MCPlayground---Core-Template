@@ -300,6 +300,61 @@ test("storage guard large-db probe quarantines and recovers when a critical star
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
+test("storage guard reports evidence_present with attention_required=false when historical quarantine evidence exists but current boot is clean", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-storage-guard-evidence-present-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+
+  const sessionOne = await openClient(dbPath, {
+    ANAMNESIS_HUB_ALLOW_FRESH_DB_ON_CORRUPTION: "1",
+    ANAMNESIS_HUB_STARTUP_BACKUP: "0",
+  });
+  try {
+    const health = await callTool(sessionOne.client, "health.storage", {});
+    assert.equal(health.ok, true);
+    assert.equal(health.guard.status, "healthy");
+    assert.equal(health.guard.attention_required, false);
+    assert.equal(health.guard.current_boot_clean, true);
+  } finally {
+    await sessionOne.client.close().catch(() => {});
+  }
+
+  const quarantineDir = path.join(tempDir, "corrupt");
+  fs.mkdirSync(quarantineDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(quarantineDir, "hub.sqlite.2024-01-01T00-00-00-000Z.large-db-startup-probe"),
+    "historical quarantine evidence"
+  );
+
+  const sessionTwo = await openClient(dbPath, {
+    ANAMNESIS_HUB_STARTUP_BACKUP: "0",
+  });
+  try {
+    const health = await callTool(sessionTwo.client, "health.storage", {});
+    assert.equal(health.ok, true);
+    assert.equal(health.guard.status, "evidence_present");
+    assert.equal(health.guard.attention_required, false);
+    assert.equal(health.guard.current_boot_clean, true);
+    assert.equal(health.guard.quarantine_artifact_count, 1);
+    assert.equal(health.guard.current_boot_quarantined_paths.length, 0);
+
+    const kernel = await callTool(sessionTwo.client, "kernel.summary", {
+      session_limit: 1,
+      event_limit: 1,
+      task_running_limit: 1,
+    });
+    assert.ok(kernel);
+
+    const officeSnap = await callTool(sessionTwo.client, "office.snapshot", {
+      thread_id: "ring-leader-main",
+    });
+    assert.ok(officeSnap);
+  } finally {
+    await sessionTwo.client.close().catch(() => {});
+  }
+
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
 async function openClient(dbPath, extraEnv) {
   const transport = new StdioClientTransport({
     command: "node",

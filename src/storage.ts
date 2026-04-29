@@ -1587,6 +1587,8 @@ export class Storage {
   private db: Database.Database;
   private readonly guardOptions: StorageGuardOptions;
   private readonly guardOutcome: StorageGuardOutcome;
+  private sqliteErrorCount = 0;
+  private lastSqliteError: { message: string; at: string } | null = null;
 
   constructor(private dbPath: string) {
     const dir = path.dirname(dbPath);
@@ -1598,6 +1600,49 @@ export class Storage {
 
   getDatabasePath(): string {
     return this.dbPath;
+  }
+
+  isSqliteCorruptionError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    const msg = error.message;
+    return (
+      msg.includes("database disk image is malformed") ||
+      msg.includes("SQLITE_CORRUPT") ||
+      msg.includes("SQLITE_NOTADB") ||
+      msg.includes("file is not a database")
+    );
+  }
+
+  recordSqliteError(error: unknown): void {
+    this.sqliteErrorCount++;
+    const msg = error instanceof Error ? error.message : String(error);
+    this.lastSqliteError = { message: msg, at: new Date().toISOString() };
+    writeStorageGuardLog(`[storage] SQLite error #${this.sqliteErrorCount}: ${msg}`);
+  }
+
+  getSqliteErrorState() {
+    return {
+      error_count: this.sqliteErrorCount,
+      last_error: this.lastSqliteError,
+    };
+  }
+
+  reopenDatabase(): { ok: boolean; error: string | null } {
+    try {
+      safeCloseDatabase(this.db);
+      this.db = openDatabaseWithGuard(this.dbPath, this.guardOptions);
+      const probe = runStartupIntegrityProbe(this.db, this.dbPath, this.guardOptions);
+      if (!probe.ok) {
+        writeStorageGuardLog(`[storage] reopen integrity probe failed: ${probe.reason}`);
+        return { ok: false, error: `integrity probe failed after reopen: ${probe.reason}` };
+      }
+      writeStorageGuardLog(`[storage] database handle reopened successfully`);
+      return { ok: true, error: null };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      writeStorageGuardLog(`[storage] reopen failed: ${msg}`);
+      return { ok: false, error: msg };
+    }
   }
 
   getStorageBackupStatus(params?: { recent_limit?: number }) {
@@ -1664,15 +1709,17 @@ export class Storage {
     const recentLimit = Math.max(1, Math.min(100, params?.recent_limit ?? 12));
     const quarantineArtifacts = listStorageGuardQuarantineArtifacts(this.guardOptions.quarantine_dir);
     const recoveryArtifacts = listStorageGuardRecoveryArtifacts(this.dbPath);
+    const currentBootActed = this.guardOutcome.quarantined_paths.length > 0 || this.guardOutcome.restored_from_backup !== null;
     const status: StorageGuardStatusRecord["status"] =
-      this.guardOutcome.quarantined_paths.length > 0 || this.guardOutcome.restored_from_backup
+      currentBootActed
         ? "recovered"
         : quarantineArtifacts.length > 0 || recoveryArtifacts.length > 0
           ? "evidence_present"
           : "healthy";
     return {
       status,
-      attention_required: status !== "healthy",
+      attention_required: currentBootActed,
+      current_boot_clean: !currentBootActed,
       backup_dir: this.guardOptions.backup_dir,
       quarantine_dir: this.guardOptions.quarantine_dir,
       recovery_root: this.dbPath === ":memory:" ? "" : path.dirname(this.dbPath),

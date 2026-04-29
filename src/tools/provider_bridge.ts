@@ -116,6 +116,8 @@ type ProviderBridgeDiagnostic = {
   notes: string[];
   command: string | null;
   config_path: string | null;
+  last_probe_at?: string;
+  intermittent?: boolean;
 };
 
 function resolveClientTransportConfig(
@@ -2057,6 +2059,7 @@ function runProviderDiagnostics(
         } satisfies ProviderBridgeDiagnostic;
       }
       if (configSummary.valid) {
+        const oauthRenewable = oauth.connected || oauth.available;
         return {
           client_id: status.client_id,
           display_name: status.display_name,
@@ -2066,11 +2069,15 @@ function runProviderDiagnostics(
           connected: false,
           status: oauth.connected ? "configured" : oauth.available ? "disconnected" : "configured",
           detail: oauth.connected
-            ? `${configSummary.detail} ${oauth.detail} Gemini runtime is not currently observed.`
+            ? `${configSummary.detail} ${oauth.detail} Gemini runtime is not currently observed — this is normal when the CLI is idle and does not indicate a missing install.`
             : oauth.detail,
-          notes,
+          notes: oauthRenewable
+            ? [...notes, "Gemini intermittently shows configured vs connected depending on whether the CLI process is active. This does not indicate a missing install."]
+            : notes,
           command: "stateful config + oauth heartbeat + runtime probe",
           config_path: status.config_path,
+          last_probe_at: new Date().toISOString(),
+          intermittent: oauthRenewable,
         } satisfies ProviderBridgeDiagnostic;
       }
       return {

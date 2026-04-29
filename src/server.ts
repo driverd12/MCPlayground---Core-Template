@@ -3621,6 +3621,17 @@ function createServerInstance() {
         content: [{ type: "text", text: JSON.stringify(result) }],
       };
     } catch (error) {
+      if (storage.isSqliteCorruptionError(error)) {
+        storage.recordSqliteError(error);
+        const reopen = storage.reopenDatabase();
+        const detail = reopen.ok
+          ? "SQLite corruption detected; database handle recycled successfully. Retry the request."
+          : `SQLite corruption detected; reopen failed: ${reopen.error}. Manual remediation may be needed.`;
+        return {
+          content: [{ type: "text", text: JSON.stringify({ error: detail, tool: name, reopen_ok: reopen.ok }) }],
+          isError: true,
+        };
+      }
       const message = truncate(error instanceof Error ? error.message : String(error));
       return {
         content: [{ type: "text", text: message }],
