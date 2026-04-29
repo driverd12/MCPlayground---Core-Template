@@ -434,7 +434,9 @@ type SetupDiagnosticsSummary = {
     attention_required: boolean;
     current_boot_quarantine_count: number;
     quarantine_artifact_count: number;
+    quarantine_total_bytes: number;
     recovery_artifact_count: number;
+    recovery_total_bytes: number;
     restored_from_backup: string | null;
   };
   desktop_lane: {
@@ -489,7 +491,9 @@ type StorageHealthSummary = {
   attention_required: boolean;
   current_boot_quarantine_count: number;
   quarantine_artifact_count: number;
+  quarantine_total_bytes: number;
   recovery_artifact_count: number;
+  recovery_total_bytes: number;
   latest_quarantine_at: string | null;
   latest_recovery_at: string | null;
   restored_from_backup: string | null;
@@ -849,7 +853,9 @@ function summarizeStorageHealth(storage: Storage): StorageHealthSummary {
     attention_required: guard.attention_required,
     current_boot_quarantine_count: guard.current_boot_quarantined_paths.length,
     quarantine_artifact_count: guard.quarantine_artifact_count,
+    quarantine_total_bytes: guard.quarantine_total_bytes,
     recovery_artifact_count: guard.recovery_artifact_count,
+    recovery_total_bytes: guard.recovery_total_bytes,
     latest_quarantine_at: guard.latest_quarantine_at,
     latest_recovery_at: guard.latest_recovery_at,
     restored_from_backup: guard.restored_from_backup,
@@ -986,6 +992,21 @@ function readFiniteNumber(value: unknown): number | null {
 
 function readStringList(value: unknown): string[] {
   return Array.isArray(value) ? value.map((entry) => readString(entry)).filter((entry): entry is string => Boolean(entry)) : [];
+}
+
+function formatBytesForOperator(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const precision = unitIndex === 0 || value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(precision)} ${units[unitIndex]}`;
 }
 
 function summarizeRemoteHostMetadata(host: WorkerFabricHostRecord) {
@@ -1899,7 +1920,9 @@ function summarizeSetupDiagnostics(params: {
       attention_required: params.storage.attention_required,
       current_boot_quarantine_count: params.storage.current_boot_quarantine_count,
       quarantine_artifact_count: params.storage.quarantine_artifact_count,
+      quarantine_total_bytes: params.storage.quarantine_total_bytes,
       recovery_artifact_count: params.storage.recovery_artifact_count,
+      recovery_total_bytes: params.storage.recovery_total_bytes,
       restored_from_backup: params.storage.restored_from_backup,
     },
     desktop_lane: {
@@ -2725,9 +2748,17 @@ export function kernelSummary(
     attention.push("Cluster topology exists, but no nodes are marked active.");
   }
   if (storageHealth.status === "recovered") {
-    attention.push("Storage guard recovered the database on this boot; review quarantine and recovery evidence before treating thread state as clean.");
+    attention.push(
+      `Storage guard recovered the database on this boot; review ${formatBytesForOperator(
+        storageHealth.quarantine_total_bytes + storageHealth.recovery_total_bytes
+      )} of quarantine/recovery evidence before treating thread state as clean.`
+    );
   } else if (storageHealth.attention_required) {
-    attention.push("Storage guard evidence artifacts are present on disk; review or archive them so database health stays explicit across threads.");
+    attention.push(
+      `Storage guard evidence artifacts are present on disk (${formatBytesForOperator(
+        storageHealth.quarantine_total_bytes + storageHealth.recovery_total_bytes
+      )}); review or archive them so database health stays explicit across threads.`
+    );
   }
   if (modelRouterSummary.backend_count === 0) {
     attention.push("No model router backends are configured yet.");
@@ -2946,7 +2977,9 @@ export function kernelSummary(
         attention_required: storageHealth.attention_required,
         current_boot_quarantine_count: storageHealth.current_boot_quarantine_count,
         quarantine_artifact_count: storageHealth.quarantine_artifact_count,
+        quarantine_total_bytes: storageHealth.quarantine_total_bytes,
         recovery_artifact_count: storageHealth.recovery_artifact_count,
+        recovery_total_bytes: storageHealth.recovery_total_bytes,
       },
       desktop_control: {
         enabled: desktopControlSummary.enabled,

@@ -985,7 +985,30 @@ test("provider.bridge over HTTP: /health stays responsive during status calls an
     const statusParsed = JSON.parse(statusResult.stdout);
     assert.equal(statusParsed.ok, true);
 
-    // Verify force_live is rejected over HTTP
+    // Verify force_live is rejected over HTTP for both status and diagnose so
+    // operators do not get a misleading non-live status response.
+    const forceLiveStatusResult = await execFileAsync(
+      "node",
+      [
+        "./scripts/mcp_tool_call.mjs",
+        "--tool", "provider.bridge",
+        "--args", JSON.stringify({ action: "status", force_live: true }),
+        "--transport", "http",
+        "--url", `http://127.0.0.1:${httpPort}/`,
+        "--origin", "http://127.0.0.1",
+        "--cwd", REPO_ROOT,
+      ],
+      {
+        cwd: REPO_ROOT,
+        env: inheritedEnv({ MCP_HTTP_BEARER_TOKEN: bearerToken }),
+        maxBuffer: 8 * 1024 * 1024,
+        timeout: 20_000,
+      }
+    );
+    const forceLiveStatusParsed = JSON.parse(forceLiveStatusResult.stdout);
+    assert.equal(forceLiveStatusParsed.ok, false);
+    assert.match(forceLiveStatusParsed.error, /force_live.*not available.*HTTP/i);
+
     const forceLiveResult = await execFileAsync(
       "node",
       [

@@ -391,10 +391,14 @@ function buildWorkbenchSummary(params: {
   }
   if (Boolean(kernelStorage.attention_required)) {
     const storageStatus = String(kernelStorage.status ?? "evidence_present").trim().toLowerCase();
+    const evidenceBytes =
+      (finiteNumberOrNull(kernelStorage.quarantine_total_bytes) ?? 0) +
+      (finiteNumberOrNull(kernelStorage.recovery_total_bytes) ?? 0);
+    const evidenceText = evidenceBytes > 0 ? ` ${formatBytesForOffice(evidenceBytes)} of` : "";
     const detail =
       storageStatus === "recovered"
-        ? "The database layer was quarantined or restored on this boot. Review recovery evidence before treating thread state as clean."
-        : "Quarantine or recovery evidence is still present on disk. Review or archive it so database health stays explicit across threads.";
+        ? `The database layer was quarantined or restored on this boot. Review${evidenceText} recovery evidence before treating thread state as clean.`
+        : `Quarantine or recovery evidence is still present on disk. Review or archive${evidenceText} evidence so database health stays explicit across threads.`;
     blockers.push({
       kind: "storage_health",
       title: storageStatus === "recovered" ? "Storage guard recovered database state" : "Storage guard evidence needs review",
@@ -1030,6 +1034,21 @@ function readSidecarStateRecord(filePath: string) {
 function finiteNumberOrNull(value: unknown) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatBytesForOffice(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const precision = unitIndex === 0 || value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(precision)} ${units[unitIndex]}`;
 }
 
 function sidecarAgeSeconds(isoValue: unknown) {

@@ -31,6 +31,8 @@ test("storage guard quarantines non-sqlite file and allows fresh bootstrap when 
   assert.equal(health.guard.status, "recovered");
   assert.ok(health.guard.current_boot_quarantined_paths.length >= 1);
   assert.ok(health.guard.quarantine_artifact_count >= 1);
+  assert.ok(health.guard.quarantine_total_bytes >= "<script>not a sqlite file</script>\nwal-bytesshm-bytes".length);
+  assert.equal(health.guard.recovery_total_bytes, 0);
 
   const header = fs.readFileSync(dbPath).subarray(0, 16).toString("utf8");
   assert.equal(header, "SQLite format 3\u0000");

@@ -80,7 +80,9 @@ export type StorageGuardStatusRecord = {
   current_boot_quarantined_paths: string[];
   restored_from_backup: string | null;
   quarantine_artifact_count: number;
+  quarantine_total_bytes: number;
   recovery_artifact_count: number;
+  recovery_total_bytes: number;
   latest_quarantine_at: string | null;
   latest_recovery_at: string | null;
   recent_quarantine_artifacts: StorageGuardArtifactRecord[];
@@ -1677,7 +1679,9 @@ export class Storage {
       current_boot_quarantined_paths: [...this.guardOutcome.quarantined_paths],
       restored_from_backup: this.guardOutcome.restored_from_backup,
       quarantine_artifact_count: quarantineArtifacts.length,
+      quarantine_total_bytes: quarantineArtifacts.reduce((sum, entry) => sum + entry.size_bytes, 0),
       recovery_artifact_count: recoveryArtifacts.length,
+      recovery_total_bytes: recoveryArtifacts.reduce((sum, entry) => sum + entry.size_bytes, 0),
       latest_quarantine_at: quarantineArtifacts[0]?.mtime_iso ?? null,
       latest_recovery_at: recoveryArtifacts[0]?.mtime_iso ?? null,
       recent_quarantine_artifacts: quarantineArtifacts.slice(0, recentLimit),

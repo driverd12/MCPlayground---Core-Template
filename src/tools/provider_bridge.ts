@@ -2548,20 +2548,42 @@ export async function providerBridge(
     const status = snapshot.clients;
     const selectedStatus = status.filter((entry) => clients.includes(entry.client_id));
     const selectedRouterBackends = snapshot.router_backend_candidates.filter((entry) => clients.includes(entry.client_id));
+    const forceLive = input.force_live === true;
+    const forceLiveHttpRejection = () => ({
+      ok: false,
+      error: "force_live is not available over HTTP transport. Use the default cached diagnostics, or run force_live over stdio.",
+      hint: "Remove force_live or connect via stdio to run live probes without blocking the HTTP server.",
+    });
 
     if (input.action === "status") {
-      let diagnostics = resolveProviderBridgeDiagnosticsCached({
-        workspace_root: input.workspace_root,
-        transport: input.transport,
-        http_url: input.http_url,
-        http_origin: input.http_origin,
-        stdio_command: input.stdio_command,
-        stdio_args: input.stdio_args,
-        db_path: input.db_path,
-        server_name: input.server_name,
-        probe_timeout_ms: input.probe_timeout_ms,
-      });
-      if (allowSyncCliProbe() && (diagnostics.stale === true || diagnostics.diagnostics.length === 0)) {
+      if (forceLive && isHttpServing()) {
+        return forceLiveHttpRejection();
+      }
+      let diagnostics = forceLive
+        ? resolveProviderBridgeDiagnostics({
+            workspace_root: input.workspace_root,
+            transport: input.transport,
+            http_url: input.http_url,
+            http_origin: input.http_origin,
+            stdio_command: input.stdio_command,
+            stdio_args: input.stdio_args,
+            db_path: input.db_path,
+            server_name: input.server_name,
+            probe_timeout_ms: input.probe_timeout_ms,
+            bypass_cache: true,
+          })
+        : resolveProviderBridgeDiagnosticsCached({
+            workspace_root: input.workspace_root,
+            transport: input.transport,
+            http_url: input.http_url,
+            http_origin: input.http_origin,
+            stdio_command: input.stdio_command,
+            stdio_args: input.stdio_args,
+            db_path: input.db_path,
+            server_name: input.server_name,
+            probe_timeout_ms: input.probe_timeout_ms,
+          });
+      if (!forceLive && allowSyncCliProbe() && (diagnostics.stale === true || diagnostics.diagnostics.length === 0)) {
         diagnostics = resolveProviderBridgeDiagnostics({
           workspace_root: input.workspace_root,
           transport: input.transport,
@@ -2617,13 +2639,8 @@ export async function providerBridge(
       // wedging the single-threaded HTTP server (/health, /ready, other MCP
       // sessions).  Callers should use the default cached path or run
       // force_live over stdio where blocking is acceptable.
-      const forceLive = input.force_live === true;
       if (forceLive && isHttpServing()) {
-        return {
-          ok: false,
-          error: "force_live is not available over HTTP transport. Use the default cached diagnostics, or run force_live over stdio.",
-          hint: "Remove force_live or connect via stdio to run live probes without blocking the HTTP server.",
-        };
+        return forceLiveHttpRejection();
       }
       const diagnostics = resolveProviderBridgeDiagnostics({
         workspace_root: input.workspace_root,
