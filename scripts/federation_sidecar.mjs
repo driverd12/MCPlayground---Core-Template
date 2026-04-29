@@ -956,7 +956,7 @@ function parseOptions() {
     includeDesktopContext: boolArg("desktop-context", process.env.MASTER_MOLD_FEDERATION_DESKTOP_CONTEXT !== "0"),
     desktopMaxFreshnessSeconds: Math.max(
       1,
-      numberArg("desktop-max-freshness-seconds", Number(process.env.MASTER_MOLD_FEDERATION_DESKTOP_MAX_FRESHNESS_SECONDS || 120))
+      numberArg("desktop-max-freshness-seconds", Number(process.env.MASTER_MOLD_FEDERATION_DESKTOP_MAX_FRESHNESS_SECONDS || 300))
     ),
     localTransport: String(argValue("local-transport", process.env.MASTER_MOLD_FEDERATION_LOCAL_TRANSPORT || "http")).trim(),
     localUrl: String(argValue("local-url", process.env.MCP_TOOL_CALL_URL || "http://127.0.0.1:8787/")).trim(),

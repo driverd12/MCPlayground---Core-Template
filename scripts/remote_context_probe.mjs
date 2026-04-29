@@ -232,6 +232,7 @@ function renderHuman(payload) {
   console.log(`Chronicle desktop capture: ${payload.status}`);
   console.log(`Recorder pid: ${payload.recorder_pid_path || "not found"}`);
   console.log(`Fresh displays: ${freshCount}/${displays.length}`);
+  console.log(`Freshness budget: ${formatAge(Number(payload.max_freshness_seconds))}`);
   console.log(`Freshness: ${payload.freshness_seconds == null ? "unknown" : formatAge(Number(payload.freshness_seconds))}`);
   console.log(`Latest frame: ${latest}`);
   if (payload.stale_reason) console.log(`Stale reason: ${payload.stale_reason}`);
@@ -317,8 +318,9 @@ function main() {
     return;
   }
   const generatedAt = new Date().toISOString();
+  const maxFreshnessSeconds = numberArg("max-freshness-seconds", 300);
   const context = listDisplays({
-    maxFreshnessSeconds: numberArg("max-freshness-seconds", 120),
+    maxFreshnessSeconds,
     displayId: stringArg("display-id"),
   });
   const freshDisplays = context.displays.filter((display) => !display.stale);
@@ -339,6 +341,7 @@ function main() {
     source: status === "unavailable" ? "none" : "chronicle",
     generated_at: generatedAt,
     current_utc: generatedAt,
+    max_freshness_seconds: maxFreshnessSeconds,
     freshness_seconds: selectedDisplay?.freshness_seconds ?? null,
     displays: context.displays,
     latest_frame_path: selectedDisplay?.latest_frame_path ?? null,

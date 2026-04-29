@@ -18,6 +18,8 @@ test("remote context probe uses default freshness budget when max freshness is o
 
     const framePath = path.join(recordingDir, "2026-04-21T15-00-00.000000+00-00-display-1-latest.jpg");
     fs.writeFileSync(framePath, "jpeg");
+    const activeButSparseTime = new Date(Date.now() - 4 * 60 * 1000);
+    fs.utimesSync(framePath, activeButSparseTime, activeButSparseTime);
     const oldFramePath = path.join(recordingDir, "2026-04-21T14-00-00.000000+00-00-display-1-latest.jpg");
     fs.writeFileSync(oldFramePath, "old-jpeg");
     const oldTime = new Date(Date.now() - 10 * 60 * 1000);
@@ -31,6 +33,7 @@ test("remote context probe uses default freshness budget when max freshness is o
     const parsed = JSON.parse(output);
     assert.equal(parsed.status, "available");
     assert.equal(parsed.stale_reason, null);
+    assert.equal(parsed.max_freshness_seconds, 300);
     assert.equal(parsed.recorder_pid_path, path.join(pidDir, "chronicle-started.pid"));
     assert.equal(parsed.displays.length, 1);
     assert.equal(parsed.latest_frame_path, framePath);
