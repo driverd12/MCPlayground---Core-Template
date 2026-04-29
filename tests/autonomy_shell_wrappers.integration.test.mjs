@@ -429,7 +429,7 @@ esac
     HOME: fakeHome,
     PATH: `${fakeBin}:${process.env.PATH || ""}`,
     DOTENV_CONFIG_PATH: path.join(tempDir, "missing.env"),
-    MCP_HTTP_BEARER_TOKEN: "test-agents-switch-repair-token",
+    MCP_HTTP_BEARER_TOKEN: currentBearerToken(),
     TRICHAT_MCP_URL: "http://127.0.0.1:8787/",
     TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
     AGENTS_STATUS_DEEP_RUNTIME: "0",
@@ -1075,6 +1075,14 @@ function inheritedEnv(extra) {
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function currentBearerToken() {
+  try {
+    return fs.readFileSync(path.join(REPO_ROOT, "data", "imprint", "http_bearer_token"), "utf8").trim();
+  } catch {
+    return "";
+  }
 }
 
 async function runShellJson(command, env) {
