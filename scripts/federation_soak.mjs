@@ -127,12 +127,15 @@ export function sidecarStepAcceptedAllPeers(step, peers) {
   if (!peers.length || sends.length < peers.length) {
     return false;
   }
-  const sendsByPeer = new Map(
-    sends.map((send) => [
-      normalizePeerUrl(send.target_peer || send.peer),
-      send,
-    ])
-  );
+  const sendsByPeer = new Map();
+  for (const send of sends) {
+    for (const candidate of [send.peer, send.target_peer]) {
+      const normalized = normalizePeerUrl(candidate);
+      if (normalized) {
+        sendsByPeer.set(normalized, send);
+      }
+    }
+  }
   return peers.every((peer) => {
     const send = sendsByPeer.get(normalizePeerUrl(peer));
     return (

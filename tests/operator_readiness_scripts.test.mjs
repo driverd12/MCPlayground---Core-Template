@@ -4,8 +4,33 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { sidecarStepAcceptedAllPeers } from "../scripts/federation_soak.mjs";
 
 const REPO_ROOT = process.cwd();
+
+test("federation soak live validation matches configured peer after locator resolution", () => {
+  const step = {
+    json: {
+      sends: [
+        {
+          peer: "http://Dans-MBP.local:8787",
+          target_peer: "http://10.1.2.76:8787",
+          ok: true,
+          status: 202,
+          response: {
+            accepted: true,
+            result: {
+              worker_fabric_heartbeat_ok: true,
+            },
+          },
+        },
+      ],
+    },
+  };
+
+  assert.equal(sidecarStepAcceptedAllPeers(step, ["http://Dans-MBP.local:8787"]), true);
+  assert.equal(sidecarStepAcceptedAllPeers(step, ["http://10.1.2.76:8787"]), true);
+});
 
 test("storage guard review is read-only and prepares archive/delete plans", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-storage-review-"));
