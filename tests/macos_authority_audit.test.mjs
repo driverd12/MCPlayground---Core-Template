@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   classifyAppleEventsProbe,
+  desktopControlStatusTransportOrder,
   extractBundlePathFromCommand,
   parseTccRows,
   summarizeAuthorityReadiness,
@@ -104,4 +105,21 @@ test("upgradeStatusWithDesktopProof accepts recent live desktop lane evidence", 
   assert.equal(screenWithoutScreenshot.status, "unknown");
   assert.equal(screenWithScreenshot.status, "granted");
   assert.match(screenWithScreenshot.detail, /screenshot proof succeeded/);
+});
+
+test("desktop control status avoids HTTP re-entry when authority audit is spawned by the server", () => {
+  assert.deepEqual(
+    desktopControlStatusTransportOrder({
+      env: { MCP_MACOS_AUTHORITY_DESKTOP_STATUS_TRANSPORT: "stdio" },
+      bearerTokenPresent: true,
+    }),
+    ["stdio"]
+  );
+  assert.deepEqual(
+    desktopControlStatusTransportOrder({
+      env: {},
+      bearerTokenPresent: true,
+    }),
+    ["http", "stdio"]
+  );
 });

@@ -286,6 +286,20 @@ function summarizeMicrophoneListenLane(params) {
   };
 }
 
+export function desktopControlStatusTransportOrder(options = {}) {
+  const env = options.env || process.env;
+  const forced = String(env.MCP_MACOS_AUTHORITY_DESKTOP_STATUS_TRANSPORT || "").trim().toLowerCase();
+  const bearerTokenPresent =
+    typeof options.bearerTokenPresent === "boolean" ? options.bearerTokenPresent : fs.existsSync(HTTP_BEARER_TOKEN_PATH);
+  if (forced === "stdio") {
+    return ["stdio"];
+  }
+  if (forced === "http") {
+    return bearerTokenPresent ? ["http", "stdio"] : ["stdio"];
+  }
+  return bearerTokenPresent ? ["http", "stdio"] : ["stdio"];
+}
+
 function readDesktopControlStatus() {
   const commonArgs = [
     path.join(REPO_ROOT, "scripts", "mcp_tool_call.mjs"),
@@ -297,9 +311,12 @@ function readDesktopControlStatus() {
     REPO_ROOT,
   ];
   const attempts = [];
-  if (fs.existsSync(HTTP_BEARER_TOKEN_PATH)) {
-    const token = String(fs.readFileSync(HTTP_BEARER_TOKEN_PATH, "utf8") || "").trim();
-    if (token) {
+  for (const transport of desktopControlStatusTransportOrder()) {
+    if (transport === "http" && fs.existsSync(HTTP_BEARER_TOKEN_PATH)) {
+      const token = String(fs.readFileSync(HTTP_BEARER_TOKEN_PATH, "utf8") || "").trim();
+      if (!token) {
+        continue;
+      }
       attempts.push(
         runCapture(
           process.execPath,
@@ -321,28 +338,31 @@ function readDesktopControlStatus() {
           }
         )
       );
+      continue;
+    }
+    if (transport === "stdio") {
+      attempts.push(
+        runCapture(
+          process.execPath,
+          [
+            ...commonArgs,
+            "--transport",
+            "stdio",
+            "--stdio-command",
+            process.env.TRICHAT_MCP_STDIO_COMMAND || "node",
+            "--stdio-args",
+            process.env.TRICHAT_MCP_STDIO_ARGS || "dist/server.js",
+          ],
+          {
+            env: {
+              ...process.env,
+              MCP_TOOL_CALL_TIMEOUT_MS: "5000",
+            },
+          }
+        )
+      );
     }
   }
-  attempts.push(
-    runCapture(
-      process.execPath,
-      [
-        ...commonArgs,
-        "--transport",
-        "stdio",
-        "--stdio-command",
-        process.env.TRICHAT_MCP_STDIO_COMMAND || "node",
-        "--stdio-args",
-        process.env.TRICHAT_MCP_STDIO_ARGS || "dist/server.js",
-      ],
-      {
-        env: {
-          ...process.env,
-          MCP_TOOL_CALL_TIMEOUT_MS: "5000",
-        },
-      }
-    )
-  );
   for (const result of attempts) {
     if (!result.ok) {
       continue;

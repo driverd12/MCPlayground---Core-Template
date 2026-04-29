@@ -184,6 +184,10 @@ function readMacosAuthorityAudit() {
   const result = spawnSync(process.execPath, [MACOS_AUTHORITY_AUDIT_SCRIPT_PATH, "--json"], {
     cwd: REPO_ROOT,
     encoding: "utf8",
+    env: {
+      ...process.env,
+      MCP_MACOS_AUTHORITY_DESKTOP_STATUS_TRANSPORT: "stdio",
+    },
     timeout: 15_000,
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 4 * 1024 * 1024,
