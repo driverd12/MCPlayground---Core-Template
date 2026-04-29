@@ -107,13 +107,17 @@ test("desktop.context surfaces fresh Chronicle screen frames with noisy OCR tria
   const dbPath = path.join(tempDir, "hub.sqlite");
   const tmpDir = path.join(tempDir, "tmp");
   const chronicleRoot = path.join(tmpDir, "chronicle", "screen_recording");
-  const recorderRoot = path.join(tmpDir, "codex_tape_recorder");
+  const recorderRoot = path.join(tmpDir, "codex_chronicle");
   fs.mkdirSync(chronicleRoot, { recursive: true });
   fs.mkdirSync(recorderRoot, { recursive: true });
   fs.writeFileSync(path.join(recorderRoot, "chronicle-started.pid"), String(process.pid));
   const segmentId = "2026-04-21T14-00-00Z-display-main";
   const latestFrame = path.join(chronicleRoot, `${segmentId}-latest.jpg`);
   fs.writeFileSync(latestFrame, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+  const staleFrame = path.join(chronicleRoot, "2026-04-21T13-00-00Z-display-main-latest.jpg");
+  fs.writeFileSync(staleFrame, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+  const staleTime = new Date(Date.now() - 10 * 60 * 1000);
+  fs.utimesSync(staleFrame, staleTime, staleTime);
   fs.writeFileSync(
     path.join(chronicleRoot, `${segmentId}.capture.json`),
     JSON.stringify({ segment_id: segmentId, display_id: "main" })
@@ -145,6 +149,7 @@ test("desktop.context surfaces fresh Chronicle screen frames with noisy OCR tria
     assert.equal(context.status, "available");
     assert.equal(context.source, "chronicle");
     assert.equal(context.latest_frame_path, latestFrame);
+    assert.equal(context.recorder_pid_path, path.join(recorderRoot, "chronicle-started.pid"));
     assert.equal(context.displays.length, 1);
     assert.equal(context.displays[0].display_id, "main");
     assert.equal(context.displays[0].stale, false);
@@ -157,6 +162,48 @@ test("desktop.context surfaces fresh Chronicle screen frames with noisy OCR tria
       limit: 5,
     });
     assert.ok(events.events.some((event) => event.event_id === context.event_id));
+  } finally {
+    await closeClient(client);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("desktop.context accepts legacy Chronicle recorder pid locations", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-desktop-context-chronicle-legacy-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const tmpDir = path.join(tempDir, "tmp");
+  const chronicleRoot = path.join(tmpDir, "chronicle", "screen_recording");
+  const recorderRoot = path.join(tmpDir, "codex_tape_recorder");
+  fs.mkdirSync(chronicleRoot, { recursive: true });
+  fs.mkdirSync(recorderRoot, { recursive: true });
+  fs.writeFileSync(path.join(recorderRoot, "chronicle-started.pid"), String(process.pid));
+  const segmentId = "2026-04-21T14-05-00Z-display-main";
+  const latestFrame = path.join(chronicleRoot, `${segmentId}-latest.jpg`);
+  fs.writeFileSync(latestFrame, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+
+  let mutationCounter = 0;
+  const { client } = await openClient(tempDir, dbPath, {
+    TMPDIR: tmpDir,
+  });
+  try {
+    await callTool(client, "desktop.control", {
+      action: "set",
+      mutation: nextMutation("desktop-context-chronicle-legacy", "desktop.control.set", () => mutationCounter++),
+      enabled: true,
+      allow_observe: true,
+      screenshot_dir: tempDir,
+    });
+
+    const context = await callTool(client, "desktop.context", {
+      action: "status",
+      prefer_source: "chronicle",
+      source_client: "test",
+      source_agent: "codex-test",
+    });
+    assert.equal(context.status, "available");
+    assert.equal(context.source, "chronicle");
+    assert.equal(context.latest_frame_path, latestFrame);
+    assert.equal(context.recorder_pid_path, path.join(recorderRoot, "chronicle-started.pid"));
   } finally {
     await closeClient(client);
     fs.rmSync(tempDir, { recursive: true, force: true });

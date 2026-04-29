@@ -100,6 +100,8 @@
     "doctor": "node ./scripts/bootstrap_doctor.mjs",
     "doctor:bootstrap": "node ./scripts/bootstrap_doctor.mjs",
     "doctor:macos:authority": "node ./scripts/macos_authority_audit.mjs",
+    "doctor:chronicle": "node ./scripts/remote_context_probe.mjs --action=status --human",
+    "doctor:chronicle:json": "node ./scripts/remote_context_probe.mjs --action=status",
     "local:training:status": "node ./scripts/local_adapter_lane.mjs status",
     "local:training:verify": "node ./scripts/local_adapter_lane.mjs verify",
     "local:training:bootstrap": "node ./scripts/local_adapter_lane.mjs bootstrap",

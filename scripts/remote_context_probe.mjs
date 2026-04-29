@@ -25,6 +25,10 @@ function stringArg(name) {
   return value.trim() || null;
 }
 
+function hasFlag(name) {
+  return process.argv.includes(`--${name}`);
+}
+
 function tmpRoot() {
   const envTmp = process.env.TMPDIR?.trim();
   if (envTmp) return envTmp;
@@ -36,22 +40,46 @@ function recordingRoot() {
   return path.join(tmpRoot(), "chronicle", "screen_recording");
 }
 
+function uniquePaths(paths) {
+  return [...new Set(paths.filter(Boolean))];
+}
+
+function recorderPidPaths() {
+  const root = tmpRoot();
+  return uniquePaths([
+    process.env.CHRONICLE_PID_PATH,
+    path.join(root, "codex_chronicle", "chronicle-started.pid"),
+    path.join(root, "codex_tape_recorder", "chronicle-started.pid"),
+  ]);
+}
+
 function recorderStatus() {
-  const pidPath = path.join(tmpRoot(), "codex_tape_recorder", "chronicle-started.pid");
-  try {
-    const pid = Number(fs.readFileSync(pidPath, "utf8").trim());
-    if (!Number.isInteger(pid) || pid <= 0) return { live: false, unavailable_reason: "chronicle_recorder_not_running" };
+  const pidPathsChecked = recorderPidPaths();
+  let firstExistingPidPath = null;
+  for (const pidPath of pidPathsChecked) {
+    let pid = null;
+    try {
+      pid = Number(fs.readFileSync(pidPath, "utf8").trim());
+      firstExistingPidPath = firstExistingPidPath ?? pidPath;
+    } catch {
+      continue;
+    }
+    if (!Number.isInteger(pid) || pid <= 0) continue;
     try {
       process.kill(pid, 0);
-      return { live: true, unavailable_reason: null };
+      return { live: true, unavailable_reason: null, pid_path: pidPath, pid_paths_checked: pidPathsChecked };
     } catch (error) {
-      return error?.code === "EPERM"
-        ? { live: true, unavailable_reason: null }
-        : { live: false, unavailable_reason: "chronicle_recorder_not_running" };
+      if (error?.code === "EPERM") {
+        return { live: true, unavailable_reason: null, pid_path: pidPath, pid_paths_checked: pidPathsChecked };
+      }
     }
-  } catch {
-    return { live: false, unavailable_reason: "chronicle_recorder_not_running" };
   }
+  return {
+    live: false,
+    unavailable_reason: "chronicle_recorder_not_running",
+    pid_path: firstExistingPidPath,
+    pid_paths_checked: pidPathsChecked,
+  };
 }
 
 function safeStat(filePath) {
@@ -84,13 +112,29 @@ function listDisplays({ maxFreshnessSeconds, displayId }) {
   const recorder = recorderStatus();
   const root = recordingRoot();
   if (!recorder.live) {
-    return { ok: false, root, displays: [], unavailable_reason: recorder.unavailable_reason, stale_reason: null };
+    return {
+      ok: false,
+      root,
+      displays: [],
+      unavailable_reason: recorder.unavailable_reason,
+      stale_reason: null,
+      recorder_pid_path: recorder.pid_path,
+      recorder_pid_paths_checked: recorder.pid_paths_checked,
+    };
   }
   if (!fs.existsSync(root)) {
-    return { ok: false, root, displays: [], unavailable_reason: "chronicle_recording_root_missing", stale_reason: null };
+    return {
+      ok: false,
+      root,
+      displays: [],
+      unavailable_reason: "chronicle_recording_root_missing",
+      stale_reason: null,
+      recorder_pid_path: recorder.pid_path,
+      recorder_pid_paths_checked: recorder.pid_paths_checked,
+    };
   }
   const nowMs = Date.now();
-  const displays = fs
+  const observedDisplays = fs
     .readdirSync(root)
     .filter((filename) => filename.endsWith("-latest.jpg"))
     .map((filename) => {
@@ -117,8 +161,15 @@ function listDisplays({ maxFreshnessSeconds, displayId }) {
         sparse_history_dir: fs.existsSync(sparseHistoryDir) ? sparseHistoryDir : null,
       };
     })
-    .filter(Boolean)
-    .sort((left, right) => left.display_id.localeCompare(right.display_id));
+    .filter(Boolean);
+  const newestByDisplay = new Map();
+  for (const display of observedDisplays) {
+    const existing = newestByDisplay.get(display.display_id);
+    if (!existing || Date.parse(display.latest_frame_mtime) > Date.parse(existing.latest_frame_mtime)) {
+      newestByDisplay.set(display.display_id, display);
+    }
+  }
+  const displays = [...newestByDisplay.values()].sort((left, right) => left.display_id.localeCompare(right.display_id));
   const staleReason = displays.length > 0 && displays.every((display) => display.stale) ? "chronicle_latest_frames_stale" : null;
   return {
     ok: displays.length > 0 && !staleReason,
@@ -126,6 +177,8 @@ function listDisplays({ maxFreshnessSeconds, displayId }) {
     displays,
     unavailable_reason: displays.length <= 0 ? "chronicle_latest_frame_missing" : null,
     stale_reason: staleReason,
+    recorder_pid_path: recorder.pid_path,
+    recorder_pid_paths_checked: recorder.pid_paths_checked,
   };
 }
 
@@ -163,6 +216,27 @@ function collectStrings(value, output = [], depth = 0) {
 function compactText(value, maxLength) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function formatAge(seconds) {
+  if (!Number.isFinite(seconds)) return "unknown";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${(seconds / 3600).toFixed(1)}h`;
+}
+
+function renderHuman(payload) {
+  const displays = Array.isArray(payload.displays) ? payload.displays : [];
+  const freshCount = displays.filter((display) => display && display.stale === false).length;
+  const latest = payload.latest_frame_path ? String(payload.latest_frame_path) : "none";
+  console.log(`Chronicle desktop capture: ${payload.status}`);
+  console.log(`Recorder pid: ${payload.recorder_pid_path || "not found"}`);
+  console.log(`Fresh displays: ${freshCount}/${displays.length}`);
+  console.log(`Freshness: ${payload.freshness_seconds == null ? "unknown" : formatAge(Number(payload.freshness_seconds))}`);
+  console.log(`Latest frame: ${latest}`);
+  if (payload.stale_reason) console.log(`Stale reason: ${payload.stale_reason}`);
+  if (payload.unavailable_reason) console.log(`Unavailable reason: ${payload.unavailable_reason}`);
+  console.log(`Next action: ${payload.recommended_next_action}`);
 }
 
 function ocrHits(displays, query, maxHits) {
@@ -253,7 +327,13 @@ function main() {
     ? ocrHits(context.displays, stringArg("query"), numberArg("ocr-max-hits", 10)) ?? []
     : undefined;
   const status = freshDisplays.length > 0 ? "available" : context.displays.length > 0 ? "degraded" : "unavailable";
-  console.log(JSON.stringify({
+  const recommendedNextAction =
+    status === "available"
+      ? "Use latest_frame_path for visual triage, then switch to app, file, or connector data for authoritative extraction."
+      : context.stale_reason
+        ? "Refresh the Codex/Chronicle desktop capture lane and retry, or use desktop.context screenshot fallback when allowed."
+        : "Start or restart the Codex/Chronicle desktop capture lane and confirm macOS Screen Recording permission.";
+  const payload = {
     ok: status !== "unavailable",
     status,
     source: status === "unavailable" ? "none" : "chronicle",
@@ -263,12 +343,21 @@ function main() {
     displays: context.displays,
     latest_frame_path: selectedDisplay?.latest_frame_path ?? null,
     screenshot_path: null,
+    recorder_pid_path: context.recorder_pid_path,
+    recorder_pid_paths_checked: context.recorder_pid_paths_checked,
     ocr_hits: hits,
     ocr_note: hits ? "OCR hits are noisy triage hints only; use app/file/connectors for authoritative extraction." : undefined,
     stale_reason: context.stale_reason,
     unavailable_reason: context.unavailable_reason,
+    recommended_next_action: recommendedNextAction,
     host: hostSummary(),
-  }));
+  };
+  if (hasFlag("human")) {
+    renderHuman(payload);
+    process.exitCode = status === "available" ? 0 : 1;
+    return;
+  }
+  console.log(JSON.stringify(payload));
 }
 
 function hostSummary() {

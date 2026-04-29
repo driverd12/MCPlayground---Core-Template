@@ -334,27 +334,50 @@ function chronicleRecordingRoot() {
   return path.join(currentTmpDir(), "chronicle", "screen_recording");
 }
 
+function uniquePaths(paths: Array<string | null>) {
+  return [...new Set(paths.filter((entry): entry is string => Boolean(readString(entry))))];
+}
+
+function chronicleRecorderPidPaths() {
+  const root = currentTmpDir();
+  return uniquePaths([
+    readString(process.env.CHRONICLE_PID_PATH),
+    path.join(root, "codex_chronicle", "chronicle-started.pid"),
+    path.join(root, "codex_tape_recorder", "chronicle-started.pid"),
+  ]);
+}
+
 function chronicleRecorderStatus() {
-  const pidPath = path.join(currentTmpDir(), "codex_tape_recorder", "chronicle-started.pid");
-  try {
-    const rawPid = fs.readFileSync(pidPath, "utf8").trim();
+  const pidPathsChecked = chronicleRecorderPidPaths();
+  let firstExistingPidPath: string | null = null;
+  for (const pidPath of pidPathsChecked) {
+    let rawPid = "";
+    try {
+      rawPid = fs.readFileSync(pidPath, "utf8").trim();
+      firstExistingPidPath = firstExistingPidPath ?? pidPath;
+    } catch {
+      continue;
+    }
     const pid = Number(rawPid);
     if (!Number.isInteger(pid) || pid <= 0) {
-      return { live: false, unavailable_reason: "chronicle_recorder_not_running" };
+      continue;
     }
     try {
       process.kill(pid, 0);
-      return { live: true, unavailable_reason: null };
+      return { live: true, unavailable_reason: null as string | null, pid_path: pidPath, pid_paths_checked: pidPathsChecked };
     } catch (error) {
       const code = typeof error === "object" && error !== null ? String((error as { code?: unknown }).code ?? "") : "";
       if (code === "EPERM") {
-        return { live: true, unavailable_reason: null };
+        return { live: true, unavailable_reason: null as string | null, pid_path: pidPath, pid_paths_checked: pidPathsChecked };
       }
-      return { live: false, unavailable_reason: "chronicle_recorder_not_running" };
     }
-  } catch {
-    return { live: false, unavailable_reason: "chronicle_recorder_not_running" };
   }
+  return {
+    live: false,
+    unavailable_reason: "chronicle_recorder_not_running",
+    pid_path: firstExistingPidPath,
+    pid_paths_checked: pidPathsChecked,
+  };
 }
 
 function safeStat(filePath: string) {
@@ -396,6 +419,19 @@ type ChronicleDisplayContext = {
   sparse_history_dir: string | null;
 };
 
+function chronicleNextAction(params: { status: string; stale_reason?: string | null; unavailable_reason?: string | null }) {
+  if (params.status === "available") {
+    return "Use the frame path for visual context, then switch to app, file, or connector data once the target is identified.";
+  }
+  if (params.stale_reason) {
+    return "Refresh the Codex/Chronicle desktop capture lane or call desktop.context with fallback_screenshot=true and a mutation to capture a fresh screenshot.";
+  }
+  if (params.unavailable_reason === "chronicle_recorder_not_running") {
+    return "Start or restart the Codex/Chronicle desktop capture lane and confirm macOS Screen Recording permission.";
+  }
+  return "Refresh Chronicle or call desktop.context with fallback_screenshot=true and a mutation to capture a fresh screenshot.";
+}
+
 function listChronicleDisplays(input: { max_freshness_seconds: number; display_id?: string }) {
   const recorder = chronicleRecorderStatus();
   const root = chronicleRecordingRoot();
@@ -406,6 +442,8 @@ function listChronicleDisplays(input: { max_freshness_seconds: number; display_i
       displays: [] as ChronicleDisplayContext[],
       unavailable_reason: recorder.unavailable_reason ?? "chronicle_recorder_not_running",
       stale_reason: null as string | null,
+      recorder_pid_path: recorder.pid_path,
+      recorder_pid_paths_checked: recorder.pid_paths_checked,
     };
   }
   if (!fs.existsSync(root)) {
@@ -415,12 +453,14 @@ function listChronicleDisplays(input: { max_freshness_seconds: number; display_i
       displays: [] as ChronicleDisplayContext[],
       unavailable_reason: "chronicle_recording_root_missing",
       stale_reason: null as string | null,
+      recorder_pid_path: recorder.pid_path,
+      recorder_pid_paths_checked: recorder.pid_paths_checked,
     };
   }
 
   const nowMs = Date.now();
   const displayFilter = readString(input.display_id);
-  const displays = fs
+  const observedDisplays = fs
     .readdirSync(root)
     .filter((filename) => filename.endsWith("-latest.jpg"))
     .map((filename) => {
@@ -451,8 +491,15 @@ function listChronicleDisplays(input: { max_freshness_seconds: number; display_i
         sparse_history_dir: fs.existsSync(sparseHistoryDir) ? sparseHistoryDir : null,
       };
     })
-    .filter((entry): entry is ChronicleDisplayContext => entry !== null)
-    .sort((left, right) => left.display_id.localeCompare(right.display_id));
+    .filter((entry): entry is ChronicleDisplayContext => entry !== null);
+  const newestByDisplay = new Map<string, ChronicleDisplayContext>();
+  for (const display of observedDisplays) {
+    const existing = newestByDisplay.get(display.display_id);
+    if (!existing || Date.parse(display.latest_frame_mtime) > Date.parse(existing.latest_frame_mtime)) {
+      newestByDisplay.set(display.display_id, display);
+    }
+  }
+  const displays = [...newestByDisplay.values()].sort((left, right) => left.display_id.localeCompare(right.display_id));
 
   const unavailableReason = displays.length <= 0 ? "chronicle_latest_frame_missing" : null;
   const staleReason =
@@ -463,6 +510,8 @@ function listChronicleDisplays(input: { max_freshness_seconds: number; display_i
     displays,
     unavailable_reason: unavailableReason,
     stale_reason: staleReason,
+    recorder_pid_path: recorder.pid_path,
+    recorder_pid_paths_checked: recorder.pid_paths_checked,
   };
 }
 
@@ -1631,6 +1680,7 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
                 fresh_display_count: freshDisplays.length,
                 latest_frame_path: selectedDisplay?.latest_frame_path ?? null,
                 freshness_seconds: selectedDisplay?.freshness_seconds ?? null,
+                recorder_pid_path: chronicle.recorder_pid_path,
                 stale_reason: chronicle.stale_reason,
                 unavailable_reason: chronicle.unavailable_reason,
                 ocr_hit_count: ocrHits?.length ?? 0,
@@ -1650,15 +1700,18 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
         displays: chronicle.displays,
         latest_frame_path: selectedDisplay?.latest_frame_path ?? null,
         screenshot_path: null,
+        recorder_pid_path: chronicle.recorder_pid_path,
+        recorder_pid_paths_checked: chronicle.recorder_pid_paths_checked,
         ocr_hits: ocrHits,
         ocr_note: ocrHits ? "OCR hits are noisy triage hints only; use app/file/connectors for authoritative extraction." : undefined,
         stale_reason: chronicle.stale_reason,
         unavailable_reason: chronicle.unavailable_reason,
         authority_summary: authoritySummary,
-        recommended_next_action:
-          status === "available"
-            ? "Use the frame path for visual context, then switch to app, file, or connector data once the target is identified."
-            : "Refresh Chronicle or call desktop.context with fallback_screenshot=true and a mutation to capture a fresh screenshot.",
+        recommended_next_action: chronicleNextAction({
+          status,
+          stale_reason: chronicle.stale_reason,
+          unavailable_reason: chronicle.unavailable_reason,
+        }),
         event_id: event?.event_id ?? null,
         ...identity,
       };
@@ -1679,6 +1732,7 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
               source: "none",
               action: input.action,
               unavailable_reason: reason,
+              recorder_pid_path: chronicle?.recorder_pid_path ?? null,
             },
             source_client: input.source_client,
             source_model: input.source_model,
@@ -1694,11 +1748,17 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
       displays: chronicle?.displays ?? [],
       latest_frame_path: null,
       screenshot_path: null,
+      recorder_pid_path: chronicle?.recorder_pid_path ?? null,
+      recorder_pid_paths_checked: chronicle?.recorder_pid_paths_checked ?? [],
       ocr_hits: input.query ? [] : undefined,
       stale_reason: chronicle?.stale_reason ?? null,
       unavailable_reason: reason,
       authority_summary: authoritySummary,
-      recommended_next_action: "Enable fallback_screenshot or restore Chronicle before requesting screen context.",
+      recommended_next_action: chronicleNextAction({
+        status: "unavailable",
+        stale_reason: chronicle?.stale_reason,
+        unavailable_reason: chronicle?.unavailable_reason ?? reason,
+      }),
       event_id: event?.event_id ?? null,
       ...identity,
     };
@@ -1719,6 +1779,7 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
               action: input.action,
               unavailable_reason: reason,
               fallback_screenshot: true,
+              recorder_pid_path: chronicle?.recorder_pid_path ?? null,
             },
             source_client: input.source_client,
             source_model: input.source_model,
@@ -1734,6 +1795,8 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
       displays: chronicle?.displays ?? [],
       latest_frame_path: null,
       screenshot_path: null,
+      recorder_pid_path: chronicle?.recorder_pid_path ?? null,
+      recorder_pid_paths_checked: chronicle?.recorder_pid_paths_checked ?? [],
       ocr_hits: input.query ? [] : undefined,
       stale_reason: chronicle?.stale_reason ?? null,
       unavailable_reason: "desktop_context_screenshot_requires_mutation",
@@ -1774,6 +1837,7 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
           screenshot_path: outputPath,
           dry_run: screenshot.dry_run,
           size_bytes: screenshot.size_bytes,
+          recorder_pid_path: chronicle?.recorder_pid_path ?? null,
           fallback_from: chronicle?.stale_reason ?? chronicle?.unavailable_reason ?? null,
           screen_recording_proven: !screenshot.dry_run,
         },
@@ -1791,6 +1855,8 @@ export function desktopContext(storage: Storage, input: z.infer<typeof desktopCo
         displays: chronicle?.displays ?? [],
         latest_frame_path: null,
         screenshot_path: outputPath,
+        recorder_pid_path: chronicle?.recorder_pid_path ?? null,
+        recorder_pid_paths_checked: chronicle?.recorder_pid_paths_checked ?? [],
         screenshot: {
           ...screenshot,
           format: "png",
