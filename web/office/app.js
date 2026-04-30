@@ -189,17 +189,139 @@
     }
   }
 
+  function entryAgentId(entry) {
+    var agent = entry && entry.agent ? entry.agent : {};
+    return String(agent.agent_id || agent.display_name || "").toLowerCase();
+  }
+
+  function entryHasAction(entry, action) {
+    var actions = entry && Array.isArray(entry.actions) ? entry.actions : [];
+    return actions.indexOf(action) >= 0;
+  }
+
+  function agentPersona(entry) {
+    var id = entryAgentId(entry);
+    if (/codex/.test(id)) return "codex";
+    if (/claude/.test(id)) return "claude";
+    if (/gemini/.test(id)) return "gemini";
+    if (/cursor/.test(id)) return "cursor";
+    if (/copilot/.test(id)) return "copilot";
+    if (/research/.test(id)) return "research";
+    if (/implementation|build|worker/.test(id)) return "builder";
+    return "agent";
+  }
+
+  function agentPersonaClass(entry) {
+    return "agent-tile--" + agentPersona(entry);
+  }
+
+  function isAgentUnavailable(entry) {
+    var stateName = String(entry && entry.state ? entry.state : "").toLowerCase();
+    return stateName === "offline" || stateName === "blocked" || entryHasAction(entry, "offline") || entryHasAction(entry, "blocked");
+  }
+
+  function agentRoleLine(entry) {
+    var persona = agentPersona(entry);
+    if (persona === "codex") return "current orchestrator";
+    if (persona === "gemini") return "quota-aware research lane";
+    if (persona === "copilot") return isAgentUnavailable(entry) ? "configured, unavailable" : "IDE assist lane";
+    if (persona === "cursor") return "IDE implementation lane";
+    if (persona === "claude") return "review and critique lane";
+    if (persona === "research") return "planning and evidence lane";
+    if (persona === "builder") return "execution lane";
+    return "MCP participant";
+  }
+
+  function roomTitle(roomKey) {
+    return {
+      command: "Command Deck",
+      lounge: "Water Cooler",
+      build: "Build Bay",
+      ops: "Ops Rack",
+    }[roomKey] || roomKey;
+  }
+
+  function roomDescription(roomKey) {
+    return {
+      command: "Lead agents and orchestrators that decide order, scope, and review pressure.",
+      lounge: "Advisory or low-pressure agents used for discussion, comparison, and cooling down noisy lanes.",
+      build: "Online execution-capable agents that can help implement or dispatch bounded work.",
+      ops: "Configured, sleeping, blocked, offline, or infrastructure-facing lanes that need operator attention.",
+    }[roomKey] || "Office room.";
+  }
+
+  function roomAgentsFor(roomKey, rooms) {
+    var roomMap = rooms || {};
+    var roomIds = Array.isArray(roomMap[roomKey]) ? roomMap[roomKey] : [];
+    var movedToOps = [];
+    ["command", "lounge", "build"].forEach(function (sourceKey) {
+      var sourceIds = Array.isArray(roomMap[sourceKey]) ? roomMap[sourceKey] : [];
+      sourceIds.forEach(function (agentId) {
+        var entry = findAgent(agentId);
+        if (entry && isAgentUnavailable(entry)) {
+          movedToOps.push(agentId);
+        }
+      });
+    });
+    if (roomKey === "ops") {
+      roomIds = roomIds.concat(movedToOps);
+    } else {
+      roomIds = roomIds.filter(function (agentId) {
+        var entry = findAgent(agentId);
+        return !entry || !isAgentUnavailable(entry);
+      });
+    }
+    var seen = {};
+    return roomIds.map(findAgent).filter(function (entry) {
+      var id = entry && entry.agent ? String(entry.agent.agent_id || "") : "";
+      if (!entry || !id || seen[id]) return false;
+      seen[id] = true;
+      return true;
+    });
+  }
+
   function spriteSvg(agent) {
     var stateName = agent && agent.state ? agent.state : "idle";
     var fill = toneForState(stateName);
-    var eye = stateName === "sleeping" ? "#1e2430" : "#111317";
-    var accent = stateName === "blocked" ? "#d96c6c" : "#1e2430";
+    var persona = agentPersona(agent);
+    var personaAccent = {
+      codex: "#7fc99c",
+      claude: "#d78e58",
+      gemini: "#8da0d6",
+      cursor: "#6db5ae",
+      copilot: "#9fc36b",
+      research: "#c883c8",
+      builder: "#d9b35f",
+      agent: "#f2f1e8",
+    }[persona] || "#f2f1e8";
+    var eye = stateName === "sleeping" ? "#1e2430" : persona === "codex" ? "#72ff9c" : "#111317";
+    var accent = stateName === "blocked" ? "#d96c6c" : personaAccent;
     var motion = stateName === "working" ? 1 : stateName === "talking" ? 2 : 0;
     var blink = stateName === "idle" ? 7 : 10;
+    var crown =
+      persona === "codex"
+        ? '<rect x="25" y="14" width="10" height="10" fill="' + accent + '" /><rect x="43" y="10" width="10" height="14" fill="' + accent + '" /><rect x="61" y="14" width="10" height="10" fill="' + accent + '" />'
+        : "";
+    var gem =
+      persona === "gemini"
+        ? '<path d="M48 12 L58 24 L48 36 L38 24 Z" fill="' + accent + '" opacity="0.9" />'
+        : "";
+    var visor =
+      persona === "cursor"
+        ? '<rect x="24" y="39" width="48" height="14" fill="rgba(0,0,0,0.28)" />'
+        : "";
+    var dish =
+      persona === "copilot"
+        ? '<path d="M68 24 Q80 16 86 28" stroke="' + accent + '" stroke-width="4" fill="none" />'
+        : "";
     return (
       '<svg viewBox="0 0 96 96" aria-hidden="true">' +
+      crown +
+      gem +
+      dish +
       '<rect x="28" y="22" width="40" height="8" fill="' + accent + '" />' +
       '<rect x="18" y="30" width="60" height="22" fill="' + fill + '" />' +
+      visor +
       '<rect x="12" y="52" width="72" height="14" fill="' + fill + '" />' +
       '<rect x="18" y="66" width="10" height="16" fill="' + fill + '" />' +
       '<rect x="40" y="66" width="10" height="16" fill="' + fill + '" />' +
@@ -287,6 +409,11 @@
     if (els.intakeResult) {
       els.intakeResult.textContent = String(value == null ? "" : value);
     }
+  }
+
+  function isPatientZeroNoteFocused() {
+    var active = document.activeElement;
+    return !!(active && active.matches && active.matches("[data-patient-zero-note]"));
   }
 
   function compactIntakeText(value, limit) {
@@ -643,6 +770,16 @@
       ? state.snapshot.router_suppression_decisions.slice(0, 1)
       : [];
     var latestRouterSuppression = providers.latest_router_suppression || recentRouterSuppressionDecisions[0] || null;
+    var routerSuppressionHasSignal = !!(
+      latestRouterSuppression &&
+      (
+        latestRouterSuppression.observed_at ||
+        latestRouterSuppression.selected_backend_id ||
+        latestRouterSuppression.backend_id ||
+        latestRouterSuppression.pressure_level ||
+        (Array.isArray(latestRouterSuppression.suppressed_agent_ids) && latestRouterSuppression.suppressed_agent_ids.length)
+      )
+    );
     var providerResourceGate = providers.resource_gate || {};
     var providerResourceGateActive = !!providerResourceGate.active;
     var providerResourceGateLevel = providerResourceGateActive
@@ -722,16 +859,26 @@
       ["Providers", "connected " + String(providers.connected_count || 0) + " | disconnected " + String(providers.disconnected_count || 0)],
       [
         "Router Hold",
-        latestRouterSuppression
+        routerSuppressionHasSignal
           ? String(latestRouterSuppression.reason || "suppressed").replace(/_/g, " ") +
             " | " +
-            String(latestRouterSuppression.selected_backend_id || "n/a") +
+            String(latestRouterSuppression.selected_backend_id || latestRouterSuppression.backend_id || "backend n/a") +
             " | " +
-            (latestRouterSuppression.observed_at ? relativeTime(latestRouterSuppression.observed_at) + " ago" : "n/a")
-          : "none recent"
+            (latestRouterSuppression.observed_at ? relativeTime(latestRouterSuppression.observed_at) + " ago" : "time n/a")
+          : "none recent",
+        routerSuppressionHasSignal ? "warn" : "good",
+        "Router Hold appears only when the model router deliberately suppresses a bridge or backend because local-first, resource, or evidence gates are active."
       ],
       ["Bridge Gate", providerResourceGateLevel + " | " + providerResourceGateDetail],
-      ["Desktop", (desktop.enabled ? "enabled" : "disabled") + " | eyes " + (desktop.observe_ready ? "yes" : "no") + " | hands " + (desktop.act_ready ? "yes" : "no") + " | ears " + (desktop.listen_ready ? "yes" : "no")],
+      [
+        "Desktop",
+        (desktop.enabled ? "enabled" : "disabled") +
+          " | observe " + (desktop.observe_ready ? "ready" : "off") +
+          " | act " + (desktop.act_ready ? "ready" : "off") +
+          " | audio " + (desktop.listen_ready ? "ready" : "off"),
+        desktop.enabled && desktop.observe_ready && desktop.act_ready ? "good" : desktop.enabled ? "warn" : "bad",
+        "Observe means screen context is available. Act/hands and audio/ears are separate permissions and can remain off even when desktop observation is enabled."
+      ],
       [
         MASTER_MOLD_MODE_LABEL,
         masterMoldModeState(patientZero.enabled) +
@@ -744,12 +891,14 @@
         (privilegedAccess.root_execution_ready ? "ready" : "not-ready") +
           " | account " + String(privilegedAccess.account || "mcagent") +
           " | secret " + (privilegedAccess.secret_present ? "yes" : "no") +
-          " | verified " + (privilegedAccess.credential_verified ? "yes" : "no")
+          " | verified " + (privilegedAccess.credential_verified ? "yes" : "no"),
+        privilegedAccess.root_execution_ready ? "good" : privilegedAccess.secret_present ? "warn" : "bad",
+        "Root Lane requires both a configured secret and a recent credential verification before the Office marks privileged execution ready."
       ]
     );
     els.statusStrip.innerHTML = chips
       .map(function (entry) {
-        return '<div class="chip' + chipToneClass(entry[2]) + '"><strong>' + escapeHtml(entry[0]) + "</strong><span>" + escapeHtml(entry[1]) + "</span></div>";
+        return '<div class="chip' + chipToneClass(entry[2]) + '"' + (entry[3] ? ' title="' + escapeHtml(entry[3]) + '"' : "") + '><strong>' + escapeHtml(entry[0]) + "</strong><span>" + escapeHtml(entry[1]) + "</span></div>";
       })
       .join("");
   }
@@ -761,12 +910,6 @@
       return;
     }
     var rooms = state.snapshot.rooms || {};
-    var titleMap = {
-      command: "Command Deck",
-      lounge: "Lounge + Water",
-      build: "Build Bay",
-      ops: "Ops Rack",
-    };
     var roomKeys = ["command", "lounge", "build", "ops"];
     var errors = (state.snapshot.errors || []).slice(0, 3);
     var alertHtml = "";
@@ -778,14 +921,14 @@
     }
     var grid = roomKeys
       .map(function (roomKey) {
-        var agentIds = Array.isArray(rooms[roomKey]) ? rooms[roomKey] : [];
-        var roomAgents = agentIds.map(findAgent).filter(Boolean);
+        var roomAgents = roomAgentsFor(roomKey, rooms);
         return (
           '<section class="room room--' + escapeHtml(roomKey) + '">' +
-          '<div class="room__header"><div class="room__title">' + escapeHtml(titleMap[roomKey]) + '</div><div class="room__meta">' + roomAgents.length + ' agents</div></div>' +
+          '<div class="room__header"><div><div class="room__title">' + escapeHtml(roomTitle(roomKey)) + '</div><div class="room__purpose">' + escapeHtml(roomDescription(roomKey)) + '</div></div><div class="room__meta">' + roomAgents.length + ' agents</div></div>' +
           '<div class="room__agents">' +
           roomAgents.map(function (entry) {
             var agent = entry.agent || {};
+            var isCodex = agentPersona(entry) === "codex";
             var tags = (entry.actions || []).map(function (tag) {
               var cls = "";
               if (tag === "blocked" || tag === "offline") cls = " tag--block";
@@ -794,9 +937,10 @@
               return '<span class="tag' + cls + '">' + escapeHtml(tag) + "</span>";
             }).join("");
             return (
-              '<article class="agent-tile ' + (agent.agent_id === state.selectedAgentId ? "is-selected" : "") + '" data-agent-id="' + escapeHtml(agent.agent_id || "") + '">' +
-              '<div class="agent-tile__top"><div><div class="agent-tile__name">' + escapeHtml(agent.display_name || agent.agent_id || "Agent") + '</div><div class="agent-tile__state">' + escapeHtml(String(entry.state || "idle").toUpperCase()) + " · " + escapeHtml(agent.tier || "agent") + '</div></div><div class="agent-tile__state">' + escapeHtml(agent.token || "") + "</div></div>" +
+              '<article class="agent-tile ' + agentPersonaClass(entry) + (isAgentUnavailable(entry) ? " agent-tile--unavailable" : "") + (isCodex ? " agent-tile--lead" : "") + (agent.agent_id === state.selectedAgentId ? " is-selected" : "") + '" data-agent-id="' + escapeHtml(agent.agent_id || "") + '" title="' + escapeHtml(agentRoleLine(entry)) + '">' +
+              '<div class="agent-tile__top"><div><div class="agent-tile__name">' + escapeHtml(agent.display_name || agent.agent_id || "Agent") + '</div><div class="agent-tile__state">' + escapeHtml(String(entry.state || "idle").toUpperCase()) + " · " + escapeHtml(agentRoleLine(entry)) + '</div></div><div class="agent-tile__state">' + escapeHtml(agent.token || "") + "</div></div>" +
               '<div class="sprite">' + spriteSvg(entry) + "</div>" +
+              (isCodex ? '<div class="agent-tile__badge">Ring leader</div>' : "") +
               '<div class="agent-tile__tags">' + tags + "</div>" +
               "</article>"
             );
@@ -805,7 +949,20 @@
         );
       })
       .join("");
-    els.officeView.innerHTML = alertHtml + '<div class="office-grid">' + grid + "</div>";
+    var legendHtml =
+      '<details class="office-legend">' +
+      '<summary>Room and status legend</summary>' +
+      '<div class="office-legend__grid">' +
+      roomKeys.map(function (roomKey) {
+        return '<article><strong>' + escapeHtml(roomTitle(roomKey)) + '</strong><span>' + escapeHtml(roomDescription(roomKey)) + "</span></article>";
+      }).join("") +
+      '<article><strong>READY / WORKING</strong><span>Available for review, orchestration, or bounded execution depending on role.</span></article>' +
+      '<article><strong>SLEEPING</strong><span>Configured but idle, rate-limited, logged out, or intentionally cooled down.</span></article>' +
+      '<article><strong>OFFLINE / BLOCKED</strong><span>Shown in Ops Rack so it is visible as configured infrastructure, not as usable build capacity.</span></article>' +
+      '<article><strong>desk / code / ops</strong><span>Capability tags from the MCP snapshot; click any tile to inspect the selected agent panel.</span></article>' +
+      '</div>' +
+      '</details>';
+    els.officeView.innerHTML = alertHtml + legendHtml + '<div class="office-grid">' + grid + "</div>";
     Array.prototype.slice.call(els.officeView.querySelectorAll("[data-agent-id]")).forEach(function (node) {
       node.addEventListener("click", function () {
         state.selectedAgentId = node.getAttribute("data-agent-id") || "";
@@ -832,6 +989,15 @@
     var desktop = summary.desktop_control || {};
     var confidence = current.confidence_method || {};
     var checks = confidence.checks || {};
+    var executionTaskIds = Array.isArray(current.execution_task_ids) ? current.execution_task_ids : [];
+    var confidenceScore = Number(confidence.score);
+    var confidenceLabel = Number.isFinite(confidenceScore)
+      ? fmt(confidenceScore, 2) + (confidenceScore < 0.7 ? " low" : confidenceScore < 0.85 ? " moderate" : " strong")
+      : "n/a";
+    var antiEchoScore = Number(checks.anti_echo);
+    var antiEchoLabel = Number.isFinite(antiEchoScore)
+      ? fmt(antiEchoScore, 2) + (antiEchoScore < 0.35 ? " low" : antiEchoScore < 0.7 ? " moderate" : " strong")
+      : "n/a";
     els.briefingView.innerHTML =
       '<div class="briefing-grid">' +
       '<section class="brief-card"><div class="section-title">Current Objective</div><pre>' + escapeHtml(current.current_objective || "No active objective.") + '</pre><div class="metric-list">' +
@@ -839,16 +1005,16 @@
       '<div class="metric"><span>Selected agent</span><strong>' + escapeHtml(current.selected_agent || "n/a") + '</strong></div>' +
       '<div class="metric"><span>Execution mode</span><strong>' + escapeHtml(current.execution_mode || "none") + '</strong></div>' +
       '<div class="metric"><span>Council</span><strong>' + escapeHtml(((current.council_agent_ids || []).join(", ")) || "n/a") + '</strong></div>' +
-      '<div class="metric"><span>Execution tasks</span><strong>' + escapeHtml(((current.execution_task_ids || []).join(", ")) || "n/a") + "</strong></div>" +
+      '<div class="metric"><span>Execution tasks</span><strong>' + escapeHtml(executionTaskIds.join(", ") || "none assigned") + '</strong><small>Local and LLM agents only receive work after intake or dispatch creates task IDs.</small></div>' +
       "</div></section>" +
       '<section class="brief-card"><div class="section-title">Confidence</div><div class="metric-list">' +
       '<div class="metric"><span>Mode</span><strong>' + escapeHtml(confidence.mode || "n/a") + '</strong></div>' +
-      '<div class="metric"><span>Score</span><strong>' + fmt(confidence.score, 2) + '</strong></div>' +
+      '<div class="metric"><span>Score</span><strong>' + escapeHtml(confidenceLabel) + '</strong><small>Below 0.70 is intentionally conservative; it should prompt more evidence or clearer ownership before autonomous dispatch.</small></div>' +
       '<div class="metric"><span>Owner clarity</span><strong>' + fmt(checks.owner_clarity, 2) + '</strong></div>' +
       '<div class="metric"><span>Actionability</span><strong>' + fmt(checks.actionability, 2) + '</strong></div>' +
       '<div class="metric"><span>Evidence bar</span><strong>' + fmt(checks.evidence_bar, 2) + '</strong></div>' +
       '<div class="metric"><span>Rollback ready</span><strong>' + fmt(checks.rollback_ready, 2) + '</strong></div>' +
-      '<div class="metric"><span>Anti-echo</span><strong>' + fmt(checks.anti_echo, 2) + "</strong></div>" +
+      '<div class="metric"><span>Novelty / anti-echo</span><strong>' + escapeHtml(antiEchoLabel) + '</strong><small>Low anti-echo means the current plan may be repeating old context instead of adding fresh evidence or a new decision.</small></div>' +
       "</div></section>" +
       '<section class="brief-card"><div class="section-title">Infrastructure</div><div class="metric-list">' +
       '<div class="metric"><span>Autopilot</span><strong class="' + statusClass(autopilot.running) + '">' + (autopilot.running ? "running" : "idle") + '</strong></div>' +
@@ -970,6 +1136,8 @@
     var runningTasks = Array.isArray(queue.running_tasks) ? queue.running_tasks : [];
     var pendingTasks = Array.isArray(queue.pending_tasks) ? queue.pending_tasks : [];
     var failedTasks = Array.isArray(queue.failed_tasks) ? queue.failed_tasks : [];
+    var failedQueueCount = Number(queue.failed || 0);
+    var failedTaskCount = Math.max(Number.isFinite(failedQueueCount) ? failedQueueCount : 0, failedTasks.length);
     var quickActions = workbench.quick_actions || {};
     var controlPlane = state.snapshot.summary || {};
     var maintain = controlPlane.maintain || {};
@@ -1081,7 +1249,9 @@
         label: "Desktop",
         value: desktop.enabled ? "enabled" : "disabled",
         tone: desktop.enabled && desktop.observe_ready && desktop.act_ready ? "good" : desktop.enabled ? "warn" : "bad",
-        detail: (desktop.observe_ready ? "eyes" : "no-eyes") + " / " + (desktop.act_ready ? "hands" : "no-hands"),
+        detail: "observe " + (desktop.observe_ready ? "ready" : "off") +
+          " · act " + (desktop.act_ready ? "ready" : "off") +
+          " · audio " + (desktop.listen_ready ? "ready" : "off"),
       },
       {
         label: MASTER_MOLD_MODE_LABEL,
@@ -1106,7 +1276,7 @@
             : "",
       };
       schedulerReasons.push("Blockers outrank new work because the runtime is already carrying unresolved risk.");
-      if (failedTasks.length) {
+      if (failedTaskCount) {
         schedulerReasons.push("Failed tasks are consuming execution budget; recover them before opening new surface area.");
       }
       schedulerReasons.push("The office should restore control-plane confidence before dispatching fresh work.");
@@ -1191,10 +1361,10 @@
     if (!schedulerReasons.length) {
       schedulerReasons.push("The scheduler defaults to the smallest reviewable slice that improves control-plane confidence or execution flow.");
     }
-    if (failedTasks.length) {
+    if (failedTaskCount) {
       queuePressure.push({
-        title: failedTasks.length + " failed",
-        detail: "Recovery work is already queued.",
+        title: failedTaskCount + " failed task" + (failedTaskCount === 1 ? "" : "s"),
+        detail: "Action needed: retry, cancel, or inspect before expanding the queue.",
       });
     }
     if (reasoningReviewCount) {
@@ -1295,7 +1465,7 @@
       '<div class="workbench-stats">' +
       '<article><span>Running</span><strong>' + String(queue.running || 0) + '</strong></article>' +
       '<article><span>Pending</span><strong>' + String(queue.pending || 0) + '</strong></article>' +
-      '<article><span>Failed</span><strong>' + String(queue.failed || 0) + '</strong></article>' +
+      '<article><span>Failed</span><strong>' + String(failedTaskCount || 0) + '</strong></article>' +
       '<article><span>Completed</span><strong>' + String(queue.completed || 0) + "</strong></article>" +
       '<article><span>Review</span><strong>' + String(reasoningReviewCount || 0) + "</strong></article>" +
       "</div>" +
@@ -1331,7 +1501,7 @@
           '<h3>' + escapeHtml(entry.title || ("Suggestion " + (index + 1))) + '</h3>' +
           '<p>' + escapeHtml(entry.objective || "") + '</p>' +
           '<div class="workbench-suggestion__why">' + escapeHtml(entry.why || "") + '</div>' +
-          '<div class="workbench-suggestion__actions"><button class="button button--primary" data-dispatch-suggestion="' + String(index) + '">Dispatch Now</button><button class="button" data-intake-seed="' + String(index) + '">Seed Intake</button></div>' +
+          '<div class="workbench-suggestion__actions"><button class="button button--primary" data-dispatch-suggestion="' + String(index) + '" title="Creates and dispatches this suggested objective through the live MCP action lane.">Create + Dispatch</button><button class="button" data-intake-seed="' + String(index) + '" title="Copies this suggestion into the intake desk so you can edit before sending.">Draft in Intake</button></div>' +
           "</article>"
         );
       }).join("") +
@@ -1352,9 +1522,11 @@
       '<div class="workbench-list">' +
       (failedTasks.length
         ? failedTasks.map(function (entry) {
-            return '<article class="workbench-list__item workbench-list__item--warn"><strong>' + escapeHtml(entry.objective || entry.task_id || "failed task") + '</strong><span>' + escapeHtml((entry.task_id || "task") + " · " + (entry.last_error || "error unavailable")) + '</span><button class="button" data-retry-task-id="' + escapeHtml(entry.task_id || "") + '">Retry</button></article>';
+            return '<article class="workbench-list__item workbench-list__item--warn"><strong>Action needed: ' + escapeHtml(entry.objective || entry.task_id || "failed task") + '</strong><span>' + escapeHtml((entry.task_id || "task") + " · " + (entry.last_error || "error unavailable")) + '</span><button class="button" data-retry-task-id="' + escapeHtml(entry.task_id || "") + '" title="Requeues this failed task through the MCP workbench action lane.">Retry this task</button></article>';
           }).join("")
-        : '<article class="workbench-list__item"><strong>No failed tasks</strong><span>Nothing is currently blocked in the failed queue.</span></article>') +
+        : failedTaskCount
+          ? '<article class="workbench-list__item workbench-list__item--warn"><strong>' + String(failedTaskCount) + ' failed task' + (failedTaskCount === 1 ? "" : "s") + ' reported</strong><span>The queue summary reports failure, but no detailed failed-task rows were included in this snapshot. Run Maintain or Refresh, then inspect the task store before dispatching more work.</span></article>'
+          : '<article class="workbench-list__item"><strong>No failed tasks</strong><span>The detailed failed-task list and queue summary both report clear.</span></article>') +
       "</div>" +
       "</section>" +
       '<section class="workbench-card">' +
@@ -1840,7 +2012,7 @@
     els.hostsView.innerHTML =
       '<div class="hosts-grid">' +
       '<section class="hosts-hero">' +
-      '<div><div class="section-title">Host Pairing</div><h2>Approve many remote Macs without opening the whole LAN.</h2><p>Pairing adds a durable device identity, allowed address, runtime label, and task-worker scope for each approved host before it can use the local MCP surface.</p></div>' +
+      '<div><div class="section-title">Host Pairing</div><h2>Ad-hoc federated sidecars, not a central MCP server.</h2><p>Each approved Mac keeps its own MCP control plane and exchanges bounded signed sidecar state with trusted peers. Pairing records durable device identity, current locator, runtime label, and task-worker scope without treating the LAN or one host as the source of truth.</p></div>' +
       '<div class="hosts-hero__stats">' +
       '<article><span>Total hosts</span><strong>' + String(fabric.host_count || hosts.length || 0) + '</strong></article>' +
       '<article><span>Approved remote</span><strong>' + String(approvedCount) + '</strong></article>' +
@@ -2127,20 +2299,56 @@
     }
   }
 
+  function eventText(event) {
+    if (!event) return "";
+    if (event.content) return String(event.content);
+    return JSON.stringify(event);
+  }
+
+  function isRoutineExecutionEvent(event) {
+    var type = String(event && event.event_type ? event.event_type : "").toLowerCase();
+    var text = eventText(event).toLowerCase();
+    return (
+      (type.indexOf("task") >= 0 || type.indexOf("plan") >= 0 || type.indexOf("tmux") >= 0) &&
+      (/tmux-[0-9a-f-]+/.test(text) || text.indexOf("sent to local--worker") >= 0 || text.indexOf("priority=") >= 0)
+    );
+  }
+
+  function eventOperatorLabel(event) {
+    var type = String(event && event.event_type ? event.event_type : "event");
+    var text = eventText(event);
+    if (/federation|sidecar|ingest/i.test(type + " " + text)) return "Federation signal";
+    if (/provider|bridge|router/i.test(type + " " + text)) return "Provider/router signal";
+    if (/health|storage|quarantine|recovery/i.test(type + " " + text)) return "Reliability signal";
+    if (/task|plan|dispatch|worker/i.test(type + " " + text)) return "Execution signal";
+    return "Control-plane event";
+  }
+
   function renderEventsView() {
     if (!state.snapshot) {
       els.eventsView.innerHTML = "";
       return;
     }
-    var events = Array.isArray(state.snapshot.events) ? state.snapshot.events.slice(0, 20) : [];
+    var events = Array.isArray(state.snapshot.events) ? state.snapshot.events.slice(0, 40) : [];
+    var routineCount = 0;
+    var visibleEvents = events.filter(function (event) {
+      if (isRoutineExecutionEvent(event)) {
+        routineCount += 1;
+        return false;
+      }
+      return true;
+    }).slice(0, 20);
     els.eventsView.innerHTML =
+      '<section class="events-help"><div class="section-title">Events</div><p>Events show meaningful MCP control-plane changes: federation ingest, provider/router gates, health warnings, task failures, recovery actions, and operator commands. Routine tmux worker dispatch lines are hidden here because they are execution plumbing; use Workbench or Workers for raw task/run details.</p>' +
+      (routineCount ? '<span class="chip chip--good"><strong>Hidden routine dispatches</strong><span>' + String(routineCount) + '</span></span>' : "") +
+      "</section>" +
       '<div class="events-list">' +
-      (events.length
-        ? events.map(function (event) {
-            var content = event && event.content ? event.content : JSON.stringify(event);
-            return '<article class="event-row"><div class="event-row__meta">' + escapeHtml((event.event_type || "event") + " · " + (event.source_agent || event.role || "n/a") + " · " + relativeTime(event.created_at)) + '</div><div>' + escapeHtml(content) + "</div></article>";
+      (visibleEvents.length
+        ? visibleEvents.map(function (event) {
+            var content = eventText(event);
+            return '<article class="event-row"><div class="event-row__meta">' + escapeHtml(eventOperatorLabel(event) + " · " + (event.event_type || "event") + " · " + (event.source_agent || event.role || "n/a") + " · " + relativeTime(event.created_at)) + '</div><div>' + escapeHtml(content) + "</div></article>";
           }).join("")
-        : '<article class="event-row"><div>No recent bus events.</div></article>') +
+        : '<article class="event-row"><div>No recent operator-relevant bus events. Routine dispatch chatter may still be happening in the execution lane.</div></article>') +
       "</div>";
   }
 
@@ -2163,9 +2371,11 @@
     els.agentDetail.innerHTML =
       '<div class="agent-detail__header"><div><div class="section-title">' + escapeHtml((agent.tier || "agent") + " · " + (agent.role || "n/a")) + '</div><div><strong>' + escapeHtml(agent.display_name || agent.agent_id || "Agent") + '</strong></div></div><div>' + escapeHtml(String(selected.state || "idle").toUpperCase()) + "</div></div>" +
       '<div class="sprite">' + spriteSvg(selected) + "</div>" +
+      '<p class="agent-detail__hint">Click any Office tile to inspect that agent here. This selection is local to the browser and does not change routing or agent assignment.</p>' +
       '<div class="metric-list">' +
       '<div class="metric"><span>Activity</span><strong>' + escapeHtml(selected.activity || "n/a") + '</strong></div>' +
       '<div class="metric"><span>Location</span><strong>' + escapeHtml(selected.location || "n/a") + '</strong></div>' +
+      '<div class="metric"><span>Role</span><strong>' + escapeHtml(agentRoleLine(selected)) + '</strong></div>' +
       '<div class="metric"><span>Evidence</span><strong>' + escapeHtml((selected.evidence_source || "n/a") + " · " + (selected.evidence_detail || "n/a")) + '</strong></div>' +
       '<div class="metric"><span>Children</span><strong>' + escapeHtml((agent.managed_agent_ids || []).join(", ") || "none") + "</strong></div>" +
       "</div>";
@@ -2432,7 +2642,7 @@
         } else {
           setResultText("Ready.");
         }
-        if (shouldRenderAll) {
+        if (shouldRenderAll && !isPatientZeroNoteFocused()) {
           renderAll();
         } else {
           renderSubtitle();
@@ -2478,7 +2688,7 @@
         }
         renderSubtitle();
         renderStatusStrip();
-        if (shouldRenderActive) {
+        if (shouldRenderActive && !isPatientZeroNoteFocused()) {
           renderActiveTabPanel();
         }
         return payload;
