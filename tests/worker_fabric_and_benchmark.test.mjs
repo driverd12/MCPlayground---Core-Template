@@ -444,13 +444,13 @@ test("benchmark.run isolated MCP smoke commands can self-heal missing dist outpu
           case_id: "storage-health",
           title: "Storage health is reachable inside isolation",
           command:
-            "([ -f dist/server.js ] || npm run build >/dev/null) && node ./scripts/mcp_tool_call.mjs --tool health.storage --args '{}' --transport stdio --stdio-command node --stdio-args 'dist/server.js' --cwd . >/dev/null",
+            "NODE_BIN=\"${MASTER_MOLD_NODE_BIN:-node}\"; ([ -f dist/server.js ] || npm run build >/dev/null) && \"$NODE_BIN\" ./scripts/mcp_tool_call.mjs --tool health.storage --args '{}' --transport stdio --stdio-command \"$NODE_BIN\" --stdio-args 'dist/server.js' --cwd . >/dev/null",
         },
         {
           case_id: "roster-health",
           title: "TriChat roster is reachable inside isolation",
           command:
-            "([ -f dist/server.js ] || npm run build >/dev/null) && node ./scripts/mcp_tool_call.mjs --tool trichat.roster --args '{}' --transport stdio --stdio-command node --stdio-args 'dist/server.js' --cwd . >/dev/null",
+            "NODE_BIN=\"${MASTER_MOLD_NODE_BIN:-node}\"; ([ -f dist/server.js ] || npm run build >/dev/null) && \"$NODE_BIN\" ./scripts/mcp_tool_call.mjs --tool trichat.roster --args '{}' --transport stdio --stdio-command \"$NODE_BIN\" --stdio-args 'dist/server.js' --cwd . >/dev/null",
         },
       ],
       tags: ["benchmark", "mcp", "stdio", "isolation"],

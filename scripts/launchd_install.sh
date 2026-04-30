@@ -81,11 +81,44 @@ MLX_HOST="${MLX_HOST#https://}"
 MLX_PYTHON="${TRICHAT_MLX_PYTHON:-}"
 MLX_MODEL="${TRICHAT_MLX_MODEL:-}"
 MLX_ADAPTER_PATH="${TRICHAT_MLX_ADAPTER_PATH:-}"
-NODE_BIN="$(command -v node || true)"
-if [[ -z "${NODE_BIN}" ]]; then
-  echo "error: node not found in PATH" >&2
+node_major() {
+  local candidate="$1"
+  "${candidate}" -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/' || true
+}
+is_supported_node_bin() {
+  local candidate="${1:-}"
+  local major=""
+  [[ -n "${candidate}" && -x "${candidate}" ]] || return 1
+  major="$(node_major "${candidate}")"
+  [[ "${major}" =~ ^[0-9]+$ ]] || return 1
+  (( major >= 20 && major < 23 ))
+}
+resolve_node_bin() {
+  local candidate=""
+  if is_supported_node_bin "${MASTER_MOLD_NODE_BIN:-}"; then
+    printf '%s\n' "${MASTER_MOLD_NODE_BIN}"
+    return 0
+  fi
+  for candidate in \
+    "/opt/homebrew/opt/node@22/bin/node" \
+    "/usr/local/opt/node@22/bin/node" \
+    "/opt/homebrew/opt/node@20/bin/node" \
+    "/usr/local/opt/node@20/bin/node" \
+    "$(command -v node 2>/dev/null || true)"; do
+    if is_supported_node_bin "${candidate}"; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  echo "error: MASTER-MOLD requires Node >=20 <23; set MASTER_MOLD_NODE_BIN to a supported Node binary" >&2
   exit 2
+}
+NODE_BIN="$(resolve_node_bin)"
+NODE_BIN_DIR="$(cd "$(dirname "${NODE_BIN}")" && pwd)"
+if [[ ":${PATH}:" != *":${NODE_BIN_DIR}:"* ]]; then
+  PATH="${NODE_BIN_DIR}:${PATH}"
 fi
+export MASTER_MOLD_NODE_BIN="${NODE_BIN}"
 PYTHON_BIN="$(command -v python3 || true)"
 if [[ -z "${PYTHON_BIN}" ]]; then
   echo "error: python3 not found in PATH" >&2
@@ -233,6 +266,8 @@ cat >"${MCP_PLIST}" <<PLIST
       <string>${HTTP_BEARER_TOKEN}</string>
       <key>TRICHAT_BUS_SOCKET_PATH</key>
       <string>${BUS_SOCKET_PATH}</string>
+      <key>MASTER_MOLD_NODE_BIN</key>
+      <string>${NODE_BIN}</string>
       <key>MCP_AUTONOMY_BOOTSTRAP_ON_START</key>
       <string>0</string>
       <key>MCP_AUTONOMY_MAINTAIN_ON_START</key>
@@ -281,6 +316,8 @@ cat >"${AUTO_PLIST}" <<PLIST
     <dict>
       <key>MASTER_MOLD_REPO_ROOT</key>
       <string>${REPO_ROOT}</string>
+      <key>MASTER_MOLD_NODE_BIN</key>
+      <string>${NODE_BIN}</string>
       <key>PATH</key>
       <string>${PATH}</string>
     </dict>
@@ -333,6 +370,8 @@ cat >"${WORKER_PLIST}" <<PLIST
     <dict>
       <key>MASTER_MOLD_REPO_ROOT</key>
       <string>${REPO_ROOT}</string>
+      <key>MASTER_MOLD_NODE_BIN</key>
+      <string>${NODE_BIN}</string>
       <key>PATH</key>
       <string>${PATH}</string>
       <key>PYTHONUNBUFFERED</key>
@@ -385,7 +424,9 @@ cat >"${KEEPALIVE_PLIST}" <<PLIST
 
     <key>EnvironmentVariables</key>
     <dict>
-    <key>PATH</key>
+      <key>MASTER_MOLD_NODE_BIN</key>
+      <string>${NODE_BIN}</string>
+      <key>PATH</key>
       <string>${PATH}</string>
       <key>MCP_HTTP_BEARER_TOKEN</key>
       <string>${HTTP_BEARER_TOKEN}</string>
@@ -456,6 +497,8 @@ cat >"${WATCHDOG_PLIST}" <<PLIST
     <dict>
       <key>MASTER_MOLD_REPO_ROOT</key>
       <string>${REPO_ROOT}</string>
+      <key>MASTER_MOLD_NODE_BIN</key>
+      <string>${NODE_BIN}</string>
       <key>PATH</key>
       <string>${PATH}</string>
       <key>MCP_HTTP_BEARER_TOKEN</key>
@@ -508,6 +551,8 @@ cat >"${OFFICE_GUI_PLIST}" <<PLIST
     <dict>
       <key>MASTER_MOLD_REPO_ROOT</key>
       <string>${REPO_ROOT}</string>
+      <key>MASTER_MOLD_NODE_BIN</key>
+      <string>${NODE_BIN}</string>
       <key>PATH</key>
       <string>${PATH}</string>
       <key>MCP_HTTP_BEARER_TOKEN</key>
@@ -560,6 +605,8 @@ cat >"${AUTO_OPEN_PLIST}" <<PLIST
     <dict>
       <key>MASTER_MOLD_REPO_ROOT</key>
       <string>${REPO_ROOT}</string>
+      <key>MASTER_MOLD_NODE_BIN</key>
+      <string>${NODE_BIN}</string>
       <key>PATH</key>
       <string>${PATH}</string>
       <key>MCP_HTTP_BEARER_TOKEN</key>
@@ -631,6 +678,8 @@ ${MLX_ADAPTER_ARGUMENTS}
     <dict>
       <key>MASTER_MOLD_REPO_ROOT</key>
       <string>${REPO_ROOT}</string>
+      <key>MASTER_MOLD_NODE_BIN</key>
+      <string>${NODE_BIN}</string>
       <key>PATH</key>
       <string>${PATH}</string>
       <key>PYTHONUNBUFFERED</key>

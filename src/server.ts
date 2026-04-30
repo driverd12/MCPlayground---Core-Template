@@ -375,7 +375,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const envPath = process.env.DOTENV_CONFIG_PATH
   ? path.resolve(process.env.DOTENV_CONFIG_PATH)
   : path.join(repoRoot, ".env");
-dotenv.config({ path: envPath });
+dotenv.config({ path: envPath, quiet: true });
 
 const storagePathEnv = process.env.ANAMNESIS_HUB_DB_PATH ?? process.env.MCP_HUB_DB_PATH;
 const storagePath = storagePathEnv

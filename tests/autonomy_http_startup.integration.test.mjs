@@ -915,6 +915,81 @@ test("http daemon exposes fast unauthenticated root and health routes", async ()
   }
 });
 
+test("office api toggles MASTER-MOLD mode through the local stdio lane", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-patient-zero-action-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const busPath = path.join(tempDir, "trichat.bus.sock");
+  const bearerToken = "test-office-patient-zero-action-token";
+  const httpPort = await reservePort();
+  const origin = `http://127.0.0.1:${httpPort}`;
+  const child = spawn("node", ["dist/server.js", "--http", "--http-port", String(httpPort)], {
+    cwd: REPO_ROOT,
+    env: inheritedEnv({
+      MCP_HTTP: "1",
+      MCP_HTTP_PORT: String(httpPort),
+      MCP_HTTP_HOST: "127.0.0.1",
+      MCP_HTTP_BEARER_TOKEN: bearerToken,
+      ANAMNESIS_HUB_DB_PATH: dbPath,
+      TRICHAT_BUS_SOCKET_PATH: busPath,
+      TRICHAT_RING_LEADER_AUTOSTART: "0",
+      MCP_AUTONOMY_BOOTSTRAP_ON_START: "0",
+      MCP_AUTONOMY_MAINTAIN_ON_START: "0",
+      MCP_PATIENT_ZERO_AUTHORITY_AUDIT_JSON: JSON.stringify({
+        platform: "darwin",
+        ready_for_patient_zero_full_authority: false,
+        blockers: ["test_authority_not_ready"],
+      }),
+    }),
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  try {
+    const health = JSON.parse(await waitForHttpText(`${origin}/health`));
+    assert.equal(health.ok, true);
+
+    const enableResponse = await postHttpJson(
+      `${origin}/office/api/action`,
+      {
+        action: "patient_zero_enable",
+        operator_note: "integration test enable",
+      },
+      {
+        Authorization: `Bearer ${bearerToken}`,
+        Origin: origin,
+        "Content-Type": "application/json",
+      }
+    );
+    assert.equal(enableResponse.statusCode, 200);
+    const enablePayload = JSON.parse(enableResponse.body);
+    assert.equal(enablePayload.ok, true);
+    assert.equal(enablePayload.action, "patient_zero_enable");
+    assert.equal(enablePayload.result.state.enabled, true);
+    assert.equal(enablePayload.result.summary.enabled, true);
+
+    const disableResponse = await postHttpJson(
+      `${origin}/office/api/action`,
+      {
+        action: "patient_zero_disable",
+        operator_note: "integration test disable",
+      },
+      {
+        Authorization: `Bearer ${bearerToken}`,
+        Origin: origin,
+        "Content-Type": "application/json",
+      }
+    );
+    assert.equal(disableResponse.statusCode, 200);
+    const disablePayload = JSON.parse(disableResponse.body);
+    assert.equal(disablePayload.ok, true);
+    assert.equal(disablePayload.action, "patient_zero_disable");
+    assert.equal(disablePayload.result.state.enabled, false);
+    assert.equal(disablePayload.result.summary.enabled, false);
+  } finally {
+    await stopChildProcess(child);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 async function waitForAutonomyStatus({ url, origin, bearerToken }) {
   const deadline = Date.now() + 90000;
   let lastError = null;

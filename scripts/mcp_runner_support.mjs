@@ -14,7 +14,7 @@ export function repoRootFromMeta(importMetaUrl) {
 }
 
 export function loadRunnerEnv(repoRoot) {
-  dotenv.config({ path: path.join(repoRoot, ".env") });
+  dotenv.config({ path: path.join(repoRoot, ".env"), quiet: true });
   const tokenFile = path.join(repoRoot, "data", "imprint", "http_bearer_token");
   if (!("MCP_HTTP_BEARER_TOKEN" in process.env) && fs.existsSync(tokenFile)) {
     process.env.MCP_HTTP_BEARER_TOKEN = fs.readFileSync(tokenFile, "utf8").trim();
@@ -166,6 +166,7 @@ function readProcessStartTimeMs(pid) {
   }
   try {
     const output = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
+      cwd: "/",
       encoding: "utf8",
       env: {
         ...process.env,
@@ -253,6 +254,7 @@ function liveProcessStartedAfterLockWrite(pidFile, lockDir, liveIdentity) {
 function commandExists(name) {
   try {
     execFileSync(process.platform === "win32" ? "where" : "which", [String(name)], {
+      cwd: "/",
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
@@ -272,6 +274,7 @@ function readProcessCwd(pid) {
   }
   try {
     const output = execFileSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
+      cwd: "/",
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });
@@ -309,6 +312,7 @@ export function listRepoServerProcesses(repoRoot) {
   const absoluteServerPath = path.join(repoRoot, "dist", "server.js");
   try {
     output = execFileSync("ps", ["-Ao", "pid=,ppid=,command="], {
+      cwd: "/",
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     });

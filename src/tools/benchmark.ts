@@ -183,6 +183,12 @@ async function runBenchmarkCommand(input: {
   command: string;
   timeout_seconds: number;
 }) {
+  const runtimeDir = path.dirname(process.execPath);
+  const env = {
+    ...process.env,
+    MASTER_MOLD_NODE_BIN: process.env.MASTER_MOLD_NODE_BIN || process.execPath,
+    PATH: [runtimeDir, process.env.PATH || ""].filter(Boolean).join(path.delimiter),
+  };
   return await new Promise<{
     stdout: string;
     stderr: string;
@@ -191,7 +197,7 @@ async function runBenchmarkCommand(input: {
     error: Error | null;
   }>((resolve) => {
     const child = spawn("/bin/sh", ["-lc", input.command], {
-      env: process.env,
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     const maxBuffer = 4 * 1024 * 1024;

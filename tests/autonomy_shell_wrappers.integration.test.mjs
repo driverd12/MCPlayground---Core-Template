@@ -584,6 +584,17 @@ exit 0
     "#!/usr/bin/env bash\nexit 0\n",
     { mode: 0o755 }
   );
+  const fakeNode22 = path.join(fakeBin, "node22");
+  fs.writeFileSync(
+    fakeNode22,
+    "#!/usr/bin/env bash\nprintf 'v22.22.1\\n'\n",
+    { mode: 0o755 }
+  );
+  fs.writeFileSync(
+    path.join(fakeBin, "node"),
+    "#!/usr/bin/env bash\nprintf 'v25.9.0\\n'\n",
+    { mode: 0o755 }
+  );
   fs.writeFileSync(
     path.join(fakeBin, "curl"),
     `#!/usr/bin/env bash
@@ -609,6 +620,7 @@ printf '{"ok":true,"ready":true}\\n'
     MCP_HTTP_ALLOW_LAN: "1",
     TRICHAT_RING_LEADER_TRANSPORT: "stdio",
     MCP_HTTP_BEARER_TOKEN: "",
+    MASTER_MOLD_NODE_BIN: fakeNode22,
   });
 
   await execFileAsync("./scripts/launchd_install.sh", [], {
@@ -678,6 +690,14 @@ printf '{"ok":true,"ready":true}\\n'
   assert.match(mcpPlist, /<key>MCP_AUTONOMY_MAINTAIN_RUN_IMMEDIATELY_ON_START<\/key>\s*<string>0<\/string>/);
   assert.match(mcpPlist, /<key>MCP_HTTP_HOST<\/key>\s*<string>0\.0\.0\.0<\/string>/);
   assert.match(mcpPlist, /<key>MCP_HTTP_ALLOW_LAN<\/key>\s*<string>1<\/string>/);
+  assert.match(
+    mcpPlist,
+    new RegExp(`<key>MASTER_MOLD_NODE_BIN<\\/key>\\s*<string>${escapeRegExp(fakeNode22)}<\\/string>`)
+  );
+  assert.match(
+    keepalivePlist,
+    new RegExp(`<key>MASTER_MOLD_NODE_BIN<\\/key>\\s*<string>${escapeRegExp(fakeNode22)}<\\/string>`)
+  );
 
   const launchLog = fs.readFileSync(launchctlLog, "utf8");
   const mcpKickstartIndex = launchLog.indexOf(`launchctl kickstart -k gui/${process.getuid()}/com.master-mold.mcp.server`);

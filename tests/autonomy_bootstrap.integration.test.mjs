@@ -82,11 +82,11 @@ test("autonomy.bootstrap seeds a cold control plane and starts a self-starting r
     assert.ok(smokeSuite);
     assert.equal(
       smokeSuite.cases.find((entry) => entry.case_id === "storage-health").command,
-      "([ -f dist/server.js ] || npm run build >/dev/null) && node ./scripts/mcp_tool_call.mjs --tool health.storage --args '{}' --transport stdio --stdio-command node --stdio-args 'dist/server.js' --cwd . >/dev/null"
+      "NODE_BIN=\"${MASTER_MOLD_NODE_BIN:-node}\"; ([ -f dist/server.js ] || npm run build >/dev/null) && \"$NODE_BIN\" ./scripts/mcp_tool_call.mjs --tool health.storage --args '{}' --transport stdio --stdio-command \"$NODE_BIN\" --stdio-args 'dist/server.js' --cwd . >/dev/null"
     );
     assert.equal(
       smokeSuite.cases.find((entry) => entry.case_id === "roster-health").command,
-      "([ -f dist/server.js ] || npm run build >/dev/null) && node ./scripts/mcp_tool_call.mjs --tool trichat.roster --args '{}' --transport stdio --stdio-command node --stdio-args 'dist/server.js' --cwd . >/dev/null"
+      "NODE_BIN=\"${MASTER_MOLD_NODE_BIN:-node}\"; ([ -f dist/server.js ] || npm run build >/dev/null) && \"$NODE_BIN\" ./scripts/mcp_tool_call.mjs --tool trichat.roster --args '{}' --transport stdio --stdio-command \"$NODE_BIN\" --stdio-args 'dist/server.js' --cwd . >/dev/null"
     );
     assert.equal(smokeSuite.isolation_mode, "git_worktree");
     assert.equal(smokeSuite.metadata.cleanup_workspaces, true);

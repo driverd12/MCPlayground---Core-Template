@@ -93,9 +93,9 @@ const DEFAULT_BENCHMARK_SUITE_ID = "autonomy.smoke.local";
 const DEFAULT_EVAL_SUITE_ID = "autonomy.control-plane";
 const HEARTBEAT_FRESHNESS_MS = 10 * 60 * 1000;
 const DEFAULT_ISOLATED_STDIO_HEALTH_COMMAND =
-  "([ -f dist/server.js ] || npm run build >/dev/null) && node ./scripts/mcp_tool_call.mjs --tool health.storage --args '{}' --transport stdio --stdio-command node --stdio-args 'dist/server.js' --cwd . >/dev/null";
+  "NODE_BIN=\"${MASTER_MOLD_NODE_BIN:-node}\"; ([ -f dist/server.js ] || npm run build >/dev/null) && \"$NODE_BIN\" ./scripts/mcp_tool_call.mjs --tool health.storage --args '{}' --transport stdio --stdio-command \"$NODE_BIN\" --stdio-args 'dist/server.js' --cwd . >/dev/null";
 const DEFAULT_ISOLATED_STDIO_ROSTER_COMMAND =
-  "([ -f dist/server.js ] || npm run build >/dev/null) && node ./scripts/mcp_tool_call.mjs --tool trichat.roster --args '{}' --transport stdio --stdio-command node --stdio-args 'dist/server.js' --cwd . >/dev/null";
+  "NODE_BIN=\"${MASTER_MOLD_NODE_BIN:-node}\"; ([ -f dist/server.js ] || npm run build >/dev/null) && \"$NODE_BIN\" ./scripts/mcp_tool_call.mjs --tool trichat.roster --args '{}' --transport stdio --stdio-command \"$NODE_BIN\" --stdio-args 'dist/server.js' --cwd . >/dev/null";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

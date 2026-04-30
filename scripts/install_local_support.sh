@@ -31,6 +31,41 @@ SUPPORT_ROOT="${SUPPORT_ROOT}"
 STATE_FILE="${STATE_FILE}"
 FALLBACK_REPO_ROOT="${REPO_ROOT}"
 
+node_major() {
+  local candidate="\$1"
+  "\${candidate}" -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/' || true
+}
+
+is_supported_node_bin() {
+  local candidate="\${1:-}"
+  local major=""
+  [[ -n "\${candidate}" && -x "\${candidate}" ]] || return 1
+  major="\$(node_major "\${candidate}")"
+  [[ "\${major}" =~ ^[0-9]+$ ]] || return 1
+  (( major >= 20 && major < 23 ))
+}
+
+resolve_node_bin() {
+  local candidate=""
+  if is_supported_node_bin "\${MASTER_MOLD_NODE_BIN:-}"; then
+    printf '%s\n' "\${MASTER_MOLD_NODE_BIN}"
+    return 0
+  fi
+  for candidate in \
+    "/opt/homebrew/opt/node@22/bin/node" \
+    "/usr/local/opt/node@22/bin/node" \
+    "/opt/homebrew/opt/node@20/bin/node" \
+    "/usr/local/opt/node@20/bin/node" \
+    "\$(command -v node 2>/dev/null || true)"; do
+    if is_supported_node_bin "\${candidate}"; then
+      printf '%s\n' "\${candidate}"
+      return 0
+    fi
+  done
+  echo "error: MASTER-MOLD requires Node >=20 <23; set MASTER_MOLD_NODE_BIN to a supported Node binary" >&2
+  exit 2
+}
+
 is_valid_repo_root() {
   local candidate="\${1:-}"
   [[ -n "\${candidate}" ]] || return 1
@@ -158,8 +193,7 @@ case "\${MODE}" in
     SCRIPT_REL="\${1:-}"
     [[ -n "\${SCRIPT_REL}" ]] || { echo "error: node-script requires a repo-relative script path" >&2; exit 2; }
     shift
-    NODE_BIN="\$(command -v node || true)"
-    [[ -n "\${NODE_BIN}" ]] || { echo "error: node not found in PATH" >&2; exit 2; }
+    NODE_BIN="\$(resolve_node_bin)"
     EXPANDED_ARGS=()
     for arg in "\$@"; do
       EXPANDED_ARGS+=("\$(resolve_existing_path "\$(expand_arg "\${arg}")")")
