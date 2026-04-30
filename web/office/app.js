@@ -24,6 +24,7 @@
     snapshotFingerprint: "",
     snapshotMeta: null,
     selectedAgentId: "",
+    selectedAgentTouched: false,
     refreshHandle: null,
     realtimeHandle: null,
     snapshotRequest: false,
@@ -342,6 +343,22 @@
     return state.snapshot && Array.isArray(state.snapshot.agents) ? state.snapshot.agents : [];
   }
 
+  function preferredAgent(agents) {
+    var list = Array.isArray(agents) ? agents : getSnapshotAgents();
+    for (var index = 0; index < list.length; index += 1) {
+      if (agentPersona(list[index]) === "codex") return list[index];
+    }
+    for (var ringIndex = 0; ringIndex < list.length; ringIndex += 1) {
+      if (/ring-leader|orchestrator/i.test(entryAgentId(list[ringIndex]))) return list[ringIndex];
+    }
+    return list.length ? list[0] : null;
+  }
+
+  function defaultAgentId(agents) {
+    var entry = preferredAgent(agents);
+    return entry && entry.agent ? entry.agent.agent_id || "" : "";
+  }
+
   function snapshotFingerprint(payload) {
     return JSON.stringify(payload, function (key, value) {
       if (key === "fetched_at" || key === "fetched_at_iso") return undefined;
@@ -507,6 +524,36 @@
     return "bad";
   }
 
+  function reactionEngineRuntimeDetail(reactionEngine) {
+    if (!reactionEngine || typeof reactionEngine !== "object" || !Object.keys(reactionEngine).length) return "state unavailable";
+    if (reactionEngine.runtime_running) return "notifier loop running";
+    if (reactionEngine.enabled === false) return "disabled in storage";
+    if (reactionEngine.stale) return "enabled; last run stale";
+    return "enabled in storage; notifier loop not running";
+  }
+
+  function workbenchHeadline(workbench, summary) {
+    var snapshotWorkbench = workbench || {};
+    var blockers = Array.isArray(snapshotWorkbench.blockers) ? snapshotWorkbench.blockers : [];
+    var queue = snapshotWorkbench.queue || {};
+    var failedQueueCount = Number(queue.failed || 0);
+    var failedTasks = Array.isArray(queue.failed_tasks) ? queue.failed_tasks : [];
+    var failedTaskCount = Math.max(Number.isFinite(failedQueueCount) ? failedQueueCount : 0, failedTasks.length);
+    var reactionEngine = (summary && summary.reaction_engine) || {};
+    var reactionKnown = !!(reactionEngine && Object.keys(reactionEngine).length);
+    var reactionNeedsRecovery = reactionKnown && reactionEngine.enabled !== false && reactionEngine.runtime_running !== true;
+    if (blockers.length) {
+      return blockers.length + " runtime blocker" + (blockers.length === 1 ? "" : "s") + " need recovery before fresh dispatch.";
+    }
+    if (failedTaskCount) {
+      return failedTaskCount + " failed task" + (failedTaskCount === 1 ? "" : "s") + " need review before fresh dispatch.";
+    }
+    if (reactionNeedsRecovery) {
+      return "Reaction notifier needs recovery before fresh dispatch.";
+    }
+    return snapshotWorkbench.headline || "No workbench headline available.";
+  }
+
   function renderIntakeDesk() {
     var host = ensureIntakeConsole();
     if (!host) return;
@@ -545,18 +592,27 @@
     draft.trichatAgentIds = state.intakeTargetAgentIds.slice();
     var focusArea = compactIntakeText(workbench.focus_area || "intake", 24);
     var statusLabel = compactIntakeText(workbench.status || (dispatchReady ? "ready" : "draft"), 24);
+    var draftStarted = !!draft.title || !!draft.objective;
     var headline = compactIntakeText(
-      workbench.headline || "Compile one bounded objective, review runtime gates, and dispatch through the MCP core.",
+      workbenchHeadline(workbench, summary) || "Compile one bounded objective, review runtime gates, and dispatch through the MCP core.",
       180
     );
-    var activeLabel =
-      compactIntakeText(
-        (activeExecution.step && activeExecution.step.title) ||
-          (activeExecution.task && activeExecution.task.objective) ||
-          (activeExecution.goal && activeExecution.goal.title) ||
-          "",
-        110
-      ) || "No active execution summary from the workbench yet.";
+    var activeStepStatus = String((activeExecution.step && activeExecution.step.status) || "").toLowerCase();
+    var activeExecutionActionable =
+      activeExecution.actionable !== false &&
+      (!!activeExecution.current_objective ||
+        !!(activeExecution.task && activeExecution.task.task_id) ||
+        ["ready", "running", "blocked"].indexOf(activeStepStatus) >= 0);
+    var activeLabel = activeExecutionActionable
+      ? compactIntakeText(
+          activeExecution.current_objective ||
+            (activeExecution.task && activeExecution.task.objective) ||
+            (activeExecution.step && activeExecution.step.title) ||
+            (activeExecution.goal && activeExecution.goal.title) ||
+            "",
+          110
+        )
+      : "No active execution summary from the workbench yet.";
 
     var gates = [
       {
@@ -582,10 +638,10 @@
           (patientZero.autonomous_control_enabled ? "enabled" : "bounded"),
       },
       {
-        label: "Dispatch",
-        tone: gateTone(dispatchReady, !!draft.title || !!draft.objective),
+        label: dispatchReady ? "Dispatch" : "Draft",
+        tone: dispatchReady ? "good" : "warn",
         detail:
-          (draft.dryRun ? "dry run" : "live dispatch") +
+          (dispatchReady ? (draft.dryRun ? "dry run" : "live dispatch") : (draftStarted ? "objective incomplete" : "objective required")) +
           " · mode " +
           modeLabel +
           " · risk " +
@@ -966,6 +1022,7 @@
     Array.prototype.slice.call(els.officeView.querySelectorAll("[data-agent-id]")).forEach(function (node) {
       node.addEventListener("click", function () {
         state.selectedAgentId = node.getAttribute("data-agent-id") || "";
+        state.selectedAgentTouched = true;
         renderAll();
       });
     });
@@ -1143,6 +1200,7 @@
     var maintain = controlPlane.maintain || {};
     var runtimeWorkers = controlPlane.runtime_workers || {};
     var reactionEngine = controlPlane.reaction_engine || {};
+    var reactionDetail = reactionEngineRuntimeDetail(reactionEngine);
     var autopilot = controlPlane.autopilot || {};
     var providers = controlPlane.provider_bridge || {};
     var providerResourceGate = providers.resource_gate || {};
@@ -1216,7 +1274,7 @@
         label: "Reaction",
         value: reactionEngine.runtime_running ? "running" : "down",
         tone: reactionEngine.runtime_running ? "good" : "bad",
-        detail: "runtime engine",
+        detail: reactionDetail,
       },
       {
         label: "Workers",
@@ -1396,7 +1454,7 @@
     els.workbenchView.innerHTML =
       '<div class="workbench-grid">' +
       '<section class="workbench-hero">' +
-      '<div><div class="section-title">Scheduler / Control Plane</div><h2>' + escapeHtml(workbench.headline || "No workbench headline available.") + '</h2><p>This view explains what should run next, what is being held back, and why the control plane picked that order.</p></div>' +
+      '<div><div class="section-title">Scheduler / Control Plane</div><h2>' + escapeHtml(workbenchHeadline(workbench, controlPlane)) + '</h2><p>This view explains what should run next, what is being held back, and why the control plane picked that order.</p></div>' +
       '<div class="workbench-hero__meta">' +
       '<div class="workbench-status ' + statusClassName + '">' + escapeHtml(String(workbench.status || "ready").toUpperCase()) + '</div>' +
       '<div class="metric"><span>Focus</span><strong>' + escapeHtml(workbench.focus_area || "intake") + '</strong></div>' +
@@ -1569,6 +1627,8 @@
         if (action === "retry_failed_tasks") {
           triggerWorkbenchAction("retry_failed_tasks", {
             task_ids: failedTasks.map(function (entry) { return entry.task_id; }).filter(Boolean),
+            force: true,
+            reason: "Operator requested retry from Office Workbench.",
           }).catch(function (error) {
             setResultText(String(error));
           });
@@ -1584,6 +1644,8 @@
         var taskId = button.getAttribute("data-retry-task-id") || "";
         triggerWorkbenchAction("retry_failed_tasks", {
           task_ids: [taskId],
+          force: true,
+          reason: "Operator requested retry from Office Workbench.",
         }).catch(function (error) {
           setResultText(String(error));
         });
@@ -2331,16 +2393,35 @@
     }
     var events = Array.isArray(state.snapshot.events) ? state.snapshot.events.slice(0, 40) : [];
     var routineCount = 0;
+    var routineSamples = [];
     var visibleEvents = events.filter(function (event) {
       if (isRoutineExecutionEvent(event)) {
         routineCount += 1;
+        if (routineSamples.length < 3) routineSamples.push(event);
         return false;
       }
       return true;
     }).slice(0, 20);
+    var routineSummary = routineCount
+      ? '<details class="events-noise"><summary><strong>Hidden tmux dispatch plumbing</strong><span>' +
+        String(routineCount) +
+        ' routine worker handoff' +
+        (routineCount === 1 ? "" : "s") +
+        " hidden</span></summary>" +
+        '<p>These are expected task-routing lines, not operator incidents. They are hidden so federation, provider, health, recovery, and task-failure signals stay readable.</p>' +
+        (routineSamples.length
+          ? '<div class="events-noise__samples">' +
+            routineSamples.map(function (event) {
+              return '<code>' + escapeHtml(compactIntakeText(eventText(event), 120)) + "</code>";
+            }).join("") +
+            "</div>"
+          : "") +
+        "</details>"
+      : "";
     els.eventsView.innerHTML =
       '<section class="events-help"><div class="section-title">Events</div><p>Events show meaningful MCP control-plane changes: federation ingest, provider/router gates, health warnings, task failures, recovery actions, and operator commands. Routine tmux worker dispatch lines are hidden here because they are execution plumbing; use Workbench or Workers for raw task/run details.</p>' +
       (routineCount ? '<span class="chip chip--good"><strong>Hidden routine dispatches</strong><span>' + String(routineCount) + '</span></span>' : "") +
+      routineSummary +
       "</section>" +
       '<div class="events-list">' +
       (visibleEvents.length
@@ -2348,7 +2429,11 @@
             var content = eventText(event);
             return '<article class="event-row"><div class="event-row__meta">' + escapeHtml(eventOperatorLabel(event) + " · " + (event.event_type || "event") + " · " + (event.source_agent || event.role || "n/a") + " · " + relativeTime(event.created_at)) + '</div><div>' + escapeHtml(content) + "</div></article>";
           }).join("")
-        : '<article class="event-row"><div>No recent operator-relevant bus events. Routine dispatch chatter may still be happening in the execution lane.</div></article>') +
+        : '<article class="event-row event-row--empty"><div>' +
+          escapeHtml(routineCount
+            ? "Only routine tmux dispatch traffic appeared in the latest sample. No federation, provider, health, recovery, or task-failure event changed in this window."
+            : "No recent operator-relevant bus events in the latest sample.") +
+          "</div></article>") +
       "</div>";
   }
 
@@ -2360,7 +2445,7 @@
     var selected = findAgent(state.selectedAgentId);
     if (!selected) {
       var agents = getSnapshotAgents();
-      selected = agents.length ? agents[0] : null;
+      selected = preferredAgent(agents);
     }
     if (!selected || !selected.agent) {
       els.agentDetail.innerHTML = "<div>No agent selected.</div>";
@@ -2368,10 +2453,27 @@
     }
     state.selectedAgentId = selected.agent.agent_id || "";
     var agent = selected.agent;
+    var agentButtons = getSnapshotAgents().slice(0, 10).map(function (entry) {
+      var entryAgent = entry.agent || {};
+      var entryId = entryAgent.agent_id || "";
+      return (
+        '<button type="button" class="agent-detail__select' +
+        (entryId === state.selectedAgentId ? " is-selected" : "") +
+        '" data-agent-detail-select="' +
+        escapeHtml(entryId) +
+        '">' +
+        escapeHtml(entryAgent.display_name || entryId || "Agent") +
+        "</button>"
+      );
+    }).join("");
+    var selectionHint = state.selectedAgentTouched
+      ? "Selected locally in this browser. This does not change routing or agent assignment."
+      : "Defaulting to Codex/current orchestrator. Use the picker below or click any Office tile to inspect another agent.";
     els.agentDetail.innerHTML =
       '<div class="agent-detail__header"><div><div class="section-title">' + escapeHtml((agent.tier || "agent") + " · " + (agent.role || "n/a")) + '</div><div><strong>' + escapeHtml(agent.display_name || agent.agent_id || "Agent") + '</strong></div></div><div>' + escapeHtml(String(selected.state || "idle").toUpperCase()) + "</div></div>" +
       '<div class="sprite">' + spriteSvg(selected) + "</div>" +
-      '<p class="agent-detail__hint">Click any Office tile to inspect that agent here. This selection is local to the browser and does not change routing or agent assignment.</p>' +
+      '<p class="agent-detail__hint">' + escapeHtml(selectionHint) + "</p>" +
+      (agentButtons ? '<div class="agent-detail__picker">' + agentButtons + "</div>" : "") +
       '<div class="metric-list">' +
       '<div class="metric"><span>Activity</span><strong>' + escapeHtml(selected.activity || "n/a") + '</strong></div>' +
       '<div class="metric"><span>Location</span><strong>' + escapeHtml(selected.location || "n/a") + '</strong></div>' +
@@ -2379,6 +2481,13 @@
       '<div class="metric"><span>Evidence</span><strong>' + escapeHtml((selected.evidence_source || "n/a") + " · " + (selected.evidence_detail || "n/a")) + '</strong></div>' +
       '<div class="metric"><span>Children</span><strong>' + escapeHtml((agent.managed_agent_ids || []).join(", ") || "none") + "</strong></div>" +
       "</div>";
+    Array.prototype.slice.call(els.agentDetail.querySelectorAll("[data-agent-detail-select]")).forEach(function (button) {
+      button.addEventListener("click", function () {
+        state.selectedAgentId = button.getAttribute("data-agent-detail-select") || "";
+        state.selectedAgentTouched = true;
+        renderAll();
+      });
+    });
   }
 
   function renderAll() {
@@ -2630,8 +2739,8 @@
         if (!state.patientZeroNoteDirty) {
           state.patientZeroNoteDraft = patientZeroNote;
         }
-        if (!state.selectedAgentId && mergedPayload.agents && mergedPayload.agents.length && mergedPayload.agents[0].agent) {
-          state.selectedAgentId = mergedPayload.agents[0].agent.agent_id || "";
+        if (!state.selectedAgentId && mergedPayload.agents && mergedPayload.agents.length) {
+          state.selectedAgentId = defaultAgentId(mergedPayload.agents);
         }
         if (meta.refreshState === "pending") {
           setResultText(forceLive ? "Live refresh started; the status lane stays current." : "Snapshot refresh started; the status lane stays current.");
@@ -2683,8 +2792,8 @@
         var shouldRenderActive = nextFingerprint !== state.snapshotFingerprint;
         state.snapshot = mergedSnapshot;
         state.snapshotFingerprint = nextFingerprint;
-        if (!state.selectedAgentId && mergedSnapshot && mergedSnapshot.agents && mergedSnapshot.agents.length && mergedSnapshot.agents[0].agent) {
-          state.selectedAgentId = mergedSnapshot.agents[0].agent.agent_id || "";
+        if (!state.selectedAgentId && mergedSnapshot && mergedSnapshot.agents && mergedSnapshot.agents.length) {
+          state.selectedAgentId = defaultAgentId(mergedSnapshot.agents);
         }
         renderSubtitle();
         renderStatusStrip();

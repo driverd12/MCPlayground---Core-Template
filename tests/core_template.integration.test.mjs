@@ -31,6 +31,7 @@ test("server starts with default agentic workflow hooks and exposes core + TriCh
     assert.equal(names.has("goal.execute"), true);
     assert.equal(names.has("goal.get"), true);
     assert.equal(names.has("goal.list"), true);
+    assert.equal(names.has("goal.update"), true);
     assert.equal(names.has("goal.plan_generate"), true);
     assert.equal(names.has("pack.hooks.list"), true);
     assert.equal(names.has("pack.plan.generate"), true);
@@ -178,6 +179,17 @@ test("server starts with default agentic workflow hooks and exposes core + TriCh
     });
     assert.equal(fetchedGoal.found, true);
     assert.equal(fetchedGoal.goal.goal_id, createdGoal.goal.goal_id);
+
+    const updatedGoal = await callTool(client, "goal.update", {
+      mutation: nextMutation(testId, "goal.update", () => mutationCounter++),
+      goal_id: createdGoal.goal.goal_id,
+      metadata: {
+        operator_note: "goal.update preserves durable lifecycle edits through the MCP control plane",
+      },
+      event_summary: "Recorded operator note through goal.update.",
+    });
+    assert.equal(updatedGoal.goal.goal_id, createdGoal.goal.goal_id);
+    assert.equal(updatedGoal.goal.metadata.operator_note, "goal.update preserves durable lifecycle edits through the MCP control plane");
 
     const createdPlan = await callTool(client, "plan.create", {
       mutation: nextMutation(testId, "plan.create", () => mutationCounter++),

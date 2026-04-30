@@ -312,6 +312,16 @@ function normalizeWorkbenchMode(value: unknown) {
   return normalized || "";
 }
 
+function isInformationalKernelAttention(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized === "no actionable work is currently queued." ||
+    normalized === "no actionable work is currently queued" ||
+    normalized === "kernel is progressing normally." ||
+    normalized === "kernel is progressing normally"
+  );
+}
+
 function buildWorkbenchTaskCards(tasks: unknown) {
   const taskList = Array.isArray(tasks) ? (tasks as TaskRecord[]) : [];
   return taskList.slice(0, 5).map((task) => ({
@@ -361,7 +371,16 @@ function buildWorkbenchSummary(params: {
   const failedCount = Number(counts.failed ?? 0);
   const completedCount = Number(counts.completed ?? 0);
   const currentObjective = compactWorkbenchText(operatorBriefRecord.current_objective, 220);
-  const attention = dedupeText(asList(kernelRecord.attention));
+  const stepStatus = String(stepSummary.status ?? "").trim().toLowerCase();
+  const taskId = String(taskSummary.task_id ?? "").trim();
+  const taskStatus = String(taskSummary.status ?? "").trim().toLowerCase();
+  const activeStepIsActionable = ["ready", "running", "blocked"].includes(stepStatus);
+  const activeTaskIsActionable =
+    Boolean(taskId) && !["completed", "cancelled", "failed", "archived"].includes(taskStatus);
+  const hasActionableActiveExecution =
+    activeTaskIsActionable || activeStepIsActionable || runningCount > 0 || pendingCount > 0;
+  const actionableCurrentObjective = hasActionableActiveExecution ? currentObjective : "";
+  const attention = dedupeText(asList(kernelRecord.attention)).filter((entry) => !isInformationalKernelAttention(entry));
   const patientZeroAuthority = resolvePatientZeroAuthoritySnapshot(params.patientZero);
   const blockers: Array<{
     kind: string;
@@ -515,7 +534,7 @@ function buildWorkbenchSummary(params: {
     focusArea = "stabilize";
     status = "attention";
     headline = "Stabilize the runtime before taking on more work.";
-  } else if (currentObjective && (runningCount > 0 || String(stepSummary.status ?? "").trim().toLowerCase() === "running")) {
+  } else if (actionableCurrentObjective && (runningCount > 0 || stepStatus === "running")) {
     focusArea = "execute";
     status = "active";
     headline = "Push the current execution forward and keep the active lane moving.";
@@ -532,10 +551,10 @@ function buildWorkbenchSummary(params: {
       detail: blockers.map((entry) => entry.title).slice(0, 2).join(" · "),
     });
   }
-  if (currentObjective) {
+  if (actionableCurrentObjective) {
     nextActions.push({
       label: "Advance current objective",
-      detail: currentObjective,
+      detail: actionableCurrentObjective,
     });
   }
   if (pendingCount > 0) {
@@ -568,9 +587,9 @@ function buildWorkbenchSummary(params: {
       why: "The core already has failed work. Clearing it improves reliability faster than opening new work.",
     });
   }
-  if (String(stepSummary.title ?? "").trim()) {
+  if (hasActionableActiveExecution && String(stepSummary.title ?? "").trim()) {
     const stepTitle = compactWorkbenchText(stepSummary.title, 90);
-    const goalTitle = compactWorkbenchText(goalSummary.title || currentObjective || "the active goal", 90);
+    const goalTitle = compactWorkbenchText(goalSummary.title || actionableCurrentObjective || "the active goal", 90);
     suggestedObjectives.push({
       title: `Advance ${stepTitle}`,
       objective: `Advance the current plan step "${stepTitle}" for ${goalTitle}. Produce the minimum concrete outcome needed to move the plan into the next executable state, including evidence and rollback notes if applicable.`,
@@ -606,7 +625,8 @@ function buildWorkbenchSummary(params: {
     status,
     headline,
     active_execution: {
-      current_objective: currentObjective || null,
+      current_objective: actionableCurrentObjective || null,
+      actionable: hasActionableActiveExecution,
       goal: {
         goal_id: String(goalSummary.goal_id ?? "").trim() || null,
         title: compactWorkbenchText(goalSummary.title, 120) || null,

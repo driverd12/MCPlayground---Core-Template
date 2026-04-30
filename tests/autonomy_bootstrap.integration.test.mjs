@@ -9,9 +9,22 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { Storage } from "../dist/storage.js";
-import { computeEvalDependencyFingerprint } from "../dist/tools/autonomy_maintain.js";
+import {
+  computeEvalDependencyFingerprint,
+  isTransientModelRouterResidencyAttention,
+} from "../dist/tools/autonomy_maintain.js";
 
 const REPO_ROOT = process.cwd();
+
+test("autonomy.maintain treats model residency churn as telemetry, not self-drive repair debt", () => {
+  assert.equal(
+    isTransientModelRouterResidencyAttention("model.router.ollama-qwen3-5-35b-a3b-coding-nvfp4.prewarm_failed"),
+    true
+  );
+  assert.equal(isTransientModelRouterResidencyAttention("model.router.local-qwen.unload_failed"), true);
+  assert.equal(isTransientModelRouterResidencyAttention("model.router.local-qwen.probe_failed"), false);
+  assert.equal(isTransientModelRouterResidencyAttention("reaction.engine.not_running"), false);
+});
 
 test("autonomy.bootstrap seeds a cold control plane and starts a self-starting ring leader without fake router scores", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-autonomy-bootstrap-"));

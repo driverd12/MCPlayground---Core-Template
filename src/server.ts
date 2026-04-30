@@ -152,6 +152,8 @@ import {
   initializeGoalAutorunDaemon,
   goalList,
   goalListSchema,
+  goalUpdate,
+  goalUpdateSchema,
 } from "./tools/goal.js";
 import { kernelSummary, kernelSummarySchema } from "./tools/kernel.js";
 import {
@@ -2387,6 +2389,10 @@ registerTool("goal.create", "Create a durable goal with acceptance criteria and 
 
 registerTool("goal.get", "Fetch a durable goal by id.", goalGetSchema, (input) =>
   goalGet(storage, input)
+);
+
+registerTool("goal.update", "Update durable goal status, active plan, result, and metadata with an audited mutation.", goalUpdateSchema, (input) =>
+  goalUpdate(storage, input)
 );
 
 registerTool("goal.list", "List durable goals by status or target filters.", goalListSchema, (input) =>

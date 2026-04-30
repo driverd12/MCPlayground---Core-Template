@@ -10,6 +10,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { buildOfficeGuiSnapshot } from "../office_gui_snapshot.js";
 import { getAutonomyMaintainRuntimeStatus } from "../tools/autonomy_maintain.js";
+import { getReactionEngineRuntimeStatus } from "../tools/reaction_engine.js";
 import { logEvent } from "../utils.js";
 
 export type HttpOptions = {
@@ -513,6 +514,126 @@ function buildOfficeRealtimePayload(snapshot: OfficeSnapshotPayload | null, sour
   };
 }
 
+function isInformationalOfficeAttention(value: unknown) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return (
+    normalized === "no actionable work is currently queued." ||
+    normalized === "no actionable work is currently queued" ||
+    normalized === "kernel is progressing normally." ||
+    normalized === "kernel is progressing normally"
+  );
+}
+
+function isStaleRuntimeWorkbenchBlocker(value: unknown, reactionRunning: boolean) {
+  const record = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const detail = String(record.detail ?? "").trim().toLowerCase();
+  const kind = String(record.kind ?? "").trim().toLowerCase();
+  if (isInformationalOfficeAttention(detail)) {
+    return true;
+  }
+  return reactionRunning && kind === "kernel_attention" && detail.includes("live notifier loop is not running");
+}
+
+async function applyLiveRuntimeSignalsToOfficeGuiSnapshot(payload: unknown, options: HttpOptions) {
+  const record =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? ({ ...(payload as Record<string, unknown>) } as Record<string, unknown>)
+      : null;
+  if (!record) {
+    return payload;
+  }
+
+  const reactionRuntime = getReactionEngineRuntimeStatus();
+  const reactionRunning = reactionRuntime.running === true;
+  const maintainSnapshot = options.autonomyMaintainSnapshot
+    ? await Promise.resolve(options.autonomyMaintainSnapshot()).catch(() => null)
+    : null;
+
+  const summary =
+    record.summary && typeof record.summary === "object" && !Array.isArray(record.summary)
+      ? ({ ...(record.summary as Record<string, unknown>) } as Record<string, unknown>)
+      : {};
+  const summaryReaction =
+    summary.reaction_engine && typeof summary.reaction_engine === "object" && !Array.isArray(summary.reaction_engine)
+      ? ({ ...(summary.reaction_engine as Record<string, unknown>) } as Record<string, unknown>)
+      : {};
+  summary.reaction_engine = {
+    ...summaryReaction,
+    runtime_running: reactionRunning,
+  };
+  if (maintainSnapshot) {
+    const summaryMaintain =
+      summary.maintain && typeof summary.maintain === "object" && !Array.isArray(summary.maintain)
+        ? ({ ...(summary.maintain as Record<string, unknown>) } as Record<string, unknown>)
+        : {};
+    summary.maintain = {
+      ...summaryMaintain,
+      enabled: maintainSnapshot.enabled,
+      running: maintainSnapshot.runtime_running,
+    };
+  }
+
+  const kernel =
+    record.kernel && typeof record.kernel === "object" && !Array.isArray(record.kernel)
+      ? ({ ...(record.kernel as Record<string, unknown>) } as Record<string, unknown>)
+      : {};
+  if (Array.isArray(kernel.attention)) {
+    kernel.attention = kernel.attention.filter((entry) => {
+      const text = String(entry ?? "").trim().toLowerCase();
+      if (isInformationalOfficeAttention(text)) return false;
+      if (reactionRunning && text.includes("live notifier loop is not running")) return false;
+      return true;
+    });
+  }
+
+  const workbench =
+    record.workbench && typeof record.workbench === "object" && !Array.isArray(record.workbench)
+      ? ({ ...(record.workbench as Record<string, unknown>) } as Record<string, unknown>)
+      : {};
+  if (Array.isArray(workbench.blockers)) {
+    const blockers = workbench.blockers.filter((entry) => !isStaleRuntimeWorkbenchBlocker(entry, reactionRunning));
+    if (blockers.length !== workbench.blockers.length) {
+      workbench.blockers = blockers;
+      const queue =
+        workbench.queue && typeof workbench.queue === "object" && !Array.isArray(workbench.queue)
+          ? (workbench.queue as Record<string, unknown>)
+          : {};
+      const pendingCount = Number(queue.pending ?? 0);
+      if (blockers.length === 0) {
+        workbench.status = "ready";
+        workbench.focus_area = pendingCount > 0 ? "queue" : "intake";
+        workbench.headline =
+          pendingCount > 0
+            ? "Turn pending queue into owned execution instead of adding fresh surface area."
+            : "Define the next bounded objective and dispatch it through the MCP core.";
+        if (Array.isArray(workbench.next_actions)) {
+          workbench.next_actions = workbench.next_actions.filter((entry) => {
+            const action = entry && typeof entry === "object" && !Array.isArray(entry) ? (entry as Record<string, unknown>) : {};
+            return String(action.label ?? "").trim().toLowerCase() !== "clear blockers";
+          });
+        }
+      }
+    }
+  }
+
+  const summaryWorkbench =
+    summary.workbench && typeof summary.workbench === "object" && !Array.isArray(summary.workbench)
+      ? ({ ...(summary.workbench as Record<string, unknown>) } as Record<string, unknown>)
+      : {};
+  summary.workbench = {
+    ...summaryWorkbench,
+    focus_area: String(workbench.focus_area ?? summaryWorkbench.focus_area ?? "intake"),
+    status: String(workbench.status ?? summaryWorkbench.status ?? "ready"),
+    headline: String(workbench.headline ?? summaryWorkbench.headline ?? ""),
+    blocker_count: Array.isArray(workbench.blockers) ? workbench.blockers.length : Number(summaryWorkbench.blocker_count ?? 0),
+  };
+
+  record.summary = summary;
+  record.kernel = kernel;
+  record.workbench = workbench;
+  return record;
+}
+
 function applyRealtimeSignalsToOfficeSnapshot(
   snapshot: OfficeSnapshotPayload | null,
   input: {
@@ -888,8 +1009,9 @@ function startOfficeNodeSnapshotRefresh(
           officeSnapshotNodeTimeoutMs(),
           "office snapshot"
         )
-          .then((directPayload) => {
-            const body = JSON.stringify(directPayload);
+          .then(async (directPayload) => {
+            const patchedPayload = await applyLiveRuntimeSignalsToOfficeGuiSnapshot(directPayload, options);
+            const body = JSON.stringify(patchedPayload);
             const parsed = parseOfficeSnapshotPayload(body);
             if (parsed && (!Array.isArray(parsed.errors) || parsed.errors.length === 0)) {
               writeOfficeSnapshotCache(parsed);

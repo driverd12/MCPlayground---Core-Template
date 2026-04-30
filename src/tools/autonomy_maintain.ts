@@ -758,14 +758,20 @@ type SelfDriveCandidate = {
   constraints?: string[];
 };
 
+export function isTransientModelRouterResidencyAttention(entry: string) {
+  return /^model\.router\..+\.(prewarm|unload)_failed$/.test(entry.trim());
+}
+
 function buildSelfDriveCandidate(params: {
   attention: string[];
   providerBridgeEntries: Array<Record<string, unknown>>;
   patientZeroSummary: Record<string, unknown>;
 }): SelfDriveCandidate | null {
-  const repairableAttention = [...new Set(params.attention.map((entry) => String(entry ?? "").trim()).filter(Boolean))].filter(
+  const rawAttention = [...new Set(params.attention.map((entry) => String(entry ?? "").trim()).filter(Boolean))].filter(
     (entry) => entry !== "agent.learning.no_active_entries"
   );
+  const transientResidencyAttention = rawAttention.filter(isTransientModelRouterResidencyAttention);
+  const repairableAttention = rawAttention.filter((entry) => !isTransientModelRouterResidencyAttention(entry));
   const disconnectedProviders = params.providerBridgeEntries
     .filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "disconnected")
     .map((entry) => ({
@@ -840,7 +846,7 @@ function buildSelfDriveCandidate(params: {
       permission_profile: "bounded_execute",
     };
   }
-  if (repairableAttention.length <= 0 && patientZeroExplorationReady) {
+  if (repairableAttention.length <= 0 && transientResidencyAttention.length <= 0 && patientZeroExplorationReady) {
     return {
       title: "[self-drive] Explore local agentic ecosystem",
       objective:

@@ -71,6 +71,39 @@ export const goalGetSchema = z.object({
   goal_id: z.string().min(1),
 });
 
+export const goalUpdateSchema = z
+  .object({
+    mutation: mutationSchema,
+    goal_id: z.string().min(1),
+    status: goalStatusSchema.optional(),
+    active_plan_id: z.string().min(1).nullable().optional(),
+    result_summary: z.string().min(1).nullable().optional(),
+    result: z.record(z.unknown()).nullable().optional(),
+    metadata: z.record(z.unknown()).optional(),
+    event_type: z.string().min(1).optional(),
+    event_summary: z.string().min(1).optional(),
+    event_details: z.record(z.unknown()).optional(),
+    ...sourceSchema.shape,
+  })
+  .superRefine((value, ctx) => {
+    const hasPatchField =
+      value.status !== undefined ||
+      value.active_plan_id !== undefined ||
+      value.result_summary !== undefined ||
+      value.result !== undefined ||
+      value.metadata !== undefined ||
+      value.event_type !== undefined ||
+      value.event_summary !== undefined ||
+      value.event_details !== undefined;
+    if (!hasPatchField) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "at least one goal field must be provided",
+        path: ["goal_id"],
+      });
+    }
+  });
+
 export const goalExecuteSchema = z.object({
   mutation: mutationSchema,
   goal_id: z.string().min(1),
@@ -1796,6 +1829,30 @@ export function goalGet(storage: Storage, input: z.infer<typeof goalGetSchema>) 
     found: true,
     goal,
   };
+}
+
+export function goalUpdate(storage: Storage, input: z.infer<typeof goalUpdateSchema>) {
+  return runIdempotentMutation({
+    storage,
+    tool_name: "goal.update",
+    mutation: input.mutation,
+    payload: input,
+    execute: () =>
+      storage.updateGoal({
+        goal_id: input.goal_id,
+        status: input.status,
+        active_plan_id: input.active_plan_id,
+        result_summary: input.result_summary,
+        result: input.result,
+        metadata: input.metadata,
+        event_type: input.event_type,
+        event_summary: input.event_summary,
+        event_details: input.event_details,
+        source_client: input.source_client,
+        source_model: input.source_model,
+        source_agent: input.source_agent,
+      }),
+  });
 }
 
 export function goalList(storage: Storage, input: z.infer<typeof goalListSchema>) {

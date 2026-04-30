@@ -799,6 +799,78 @@ test("office.snapshot direct reads demote warmed provider agents when bridge dia
   }
 });
 
+test("office.snapshot does not push idle plan-only context as active Workbench action", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-snapshot-idle-plan-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  let mutationCounter = 0;
+
+  const client = await openClient({
+    ANAMNESIS_HUB_DB_PATH: dbPath,
+    TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
+  });
+
+  try {
+    const goal = await callTool(client, "goal.create", {
+      mutation: nextMutation("office-snapshot-idle-plan", "goal.create", () => mutationCounter++),
+      title: "Stale eval repair context",
+      objective: "Investigate the failing control-plane eval posture after the failure has already been closed.",
+      status: "active",
+      priority: 70,
+      risk_tier: "low",
+      autonomy_mode: "execute_bounded",
+      acceptance_criteria: ["The stale repair context is preserved without paging the operator as active work."],
+      tags: ["autonomy", "eval", "control-plane"],
+      metadata: {
+        thread_id: "ring-leader-main",
+      },
+    });
+
+    await callTool(client, "plan.create", {
+      mutation: nextMutation("office-snapshot-idle-plan", "plan.create", () => mutationCounter++),
+      goal_id: goal.goal.goal_id,
+      title: "Verify repaired eval baseline",
+      summary: "Historical verification plan with no live task bound to it.",
+      status: "in_progress",
+      selected: true,
+      confidence: 0.8,
+      metadata: {
+        thread_id: "ring-leader-main",
+      },
+      steps: [
+        {
+          step_id: "verify-eval",
+          seq: 1,
+          title: "Verify behavior, evidence, and release confidence",
+          step_kind: "verification",
+          status: "pending",
+          executor_kind: "task",
+        },
+      ],
+    });
+
+    const snapshot = await callTool(client, "office.snapshot", {
+      thread_id: "ring-leader-main",
+    });
+
+    assert.equal(snapshot.task_summary.counts.pending, 0);
+    assert.equal(snapshot.task_summary.counts.running, 0);
+    assert.equal(snapshot.task_summary.counts.failed, 0);
+    assert.equal(snapshot.workbench.active_execution.actionable, false);
+    assert.equal(snapshot.workbench.active_execution.current_objective, null);
+    assert.equal(
+      snapshot.workbench.next_actions.some((entry) => entry.label === "Advance current objective"),
+      false
+    );
+    assert.equal(
+      snapshot.workbench.suggested_objectives.some((entry) => /^Advance /.test(entry.title)),
+      false
+    );
+  } finally {
+    await client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("office.snapshot does not create a workbench blocker for historical storage guard evidence when current boot is clean", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-office-snapshot-storage-health-"));
   const dbPath = path.join(tempDir, "hub.sqlite");
@@ -833,6 +905,10 @@ test("office.snapshot does not create a workbench blocker for historical storage
     assert.equal(snapshot.kernel.storage.current_boot_clean, true);
     const blocker = snapshot.workbench.blockers.find((entry) => entry.kind === "storage_health");
     assert.equal(blocker, undefined, "historical evidence should not create a workbench blocker when current boot is clean");
+    const idleAttentionBlocker = snapshot.workbench.blockers.find(
+      (entry) => entry.kind === "kernel_attention" && /No actionable work is currently queued/i.test(entry.detail || "")
+    );
+    assert.equal(idleAttentionBlocker, undefined, "idle queue status should not create a workbench blocker");
   } finally {
     await client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
