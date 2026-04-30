@@ -337,6 +337,77 @@ export function resolveProviderBridgeDiagnosticsCached(
   };
 }
 
+function normalizePersistedProviderBridgeDiagnostic(value: unknown): ProviderBridgeDiagnostic | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const entry = value as Record<string, unknown>;
+  const clientId = String(entry.client_id ?? "").trim();
+  if (!defaultProviderClients.includes(clientId as ProviderBridgeClientId)) {
+    return null;
+  }
+  const status = String(entry.status ?? "").trim();
+  if (!["connected", "disconnected", "configured", "unavailable"].includes(status)) {
+    return null;
+  }
+  return {
+    client_id: clientId as ProviderBridgeClientId,
+    display_name: String(entry.display_name ?? clientId).trim() || clientId,
+    office_agent_id: typeof entry.office_agent_id === "string" && entry.office_agent_id.trim() ? entry.office_agent_id.trim() : null,
+    available: entry.available === true,
+    runtime_probed: entry.runtime_probed === true,
+    connected: typeof entry.connected === "boolean" ? entry.connected : null,
+    status: status as ProviderBridgeDiagnostic["status"],
+    detail: String(entry.detail ?? "").trim(),
+    notes: Array.isArray(entry.notes) ? entry.notes.map((note) => String(note ?? "").trim()).filter(Boolean) : [],
+    command: typeof entry.command === "string" && entry.command.trim() ? entry.command.trim() : null,
+    config_path: typeof entry.config_path === "string" && entry.config_path.trim() ? entry.config_path.trim() : null,
+  };
+}
+
+function resolvePersistedProviderBridgeDiagnostics(storage: Storage | null | undefined): CachedProviderBridgeDiagnostics | null {
+  if (!storage) {
+    return null;
+  }
+  try {
+    const state = storage.getAutonomyMaintainState();
+    const diagnostics = Array.isArray(state?.provider_bridge_diagnostics)
+      ? state.provider_bridge_diagnostics
+          .map((entry) => normalizePersistedProviderBridgeDiagnostic(entry))
+          .filter((entry): entry is ProviderBridgeDiagnostic => entry !== null)
+      : [];
+    if (diagnostics.length === 0) {
+      return null;
+    }
+    const generatedAt = state?.last_provider_bridge_check_at || state?.updated_at || new Date().toISOString();
+    const generatedAtMs = Date.parse(generatedAt);
+    return {
+      generated_at: generatedAt,
+      cached: true,
+      stale: !Number.isFinite(generatedAtMs) || Date.now() - generatedAtMs > providerBridgeDiagnosticsCacheTtlMs(),
+      diagnostics,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function preferProviderBridgeDiagnostics(
+  current: CachedProviderBridgeDiagnostics,
+  persisted: CachedProviderBridgeDiagnostics | null
+): CachedProviderBridgeDiagnostics {
+  if (!persisted) {
+    return current;
+  }
+  if (current.diagnostics.length === 0) {
+    return persisted;
+  }
+  if (current.stale && !persisted.stale) {
+    return persisted;
+  }
+  return current;
+}
+
 function resolveDiagnosticsRuntimeReady(
   candidate: { client_id: ProviderBridgeClientId },
   diagnosticsByClient: Map<ProviderBridgeClientId, ProviderBridgeDiagnostic>,
@@ -2590,6 +2661,7 @@ export async function providerBridge(
             server_name: input.server_name,
             probe_timeout_ms: input.probe_timeout_ms,
           });
+      diagnostics = preferProviderBridgeDiagnostics(diagnostics, resolvePersistedProviderBridgeDiagnostics(_storage));
       if (!forceLive && allowSyncCliProbe() && (diagnostics.stale === true || diagnostics.diagnostics.length === 0)) {
         diagnostics = resolveProviderBridgeDiagnostics({
           workspace_root: input.workspace_root,
@@ -2602,6 +2674,7 @@ export async function providerBridge(
           server_name: input.server_name,
           probe_timeout_ms: input.probe_timeout_ms,
         });
+        diagnostics = preferProviderBridgeDiagnostics(diagnostics, resolvePersistedProviderBridgeDiagnostics(_storage));
         snapshot = resolveProviderBridgeSnapshot({
           storage: _storage,
           workspace_root: input.workspace_root,

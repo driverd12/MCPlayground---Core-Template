@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   buildLocalFindings,
+  desktopContextFindingSeverity,
   parseLaunchctlDisabled,
   parseLaunchctlPrint,
   summarizeUnstagedVerifiedPeers,
@@ -89,6 +90,30 @@ test("buildLocalFindings surfaces failed sidecar cycles and aged outbox", () => 
   assert.equal(findings[0].severity, "warn");
   assert.match(findings[0].detail, /failing=1/);
   assert.match(findings[1].detail, /oldest pending publish is 3m old/);
+});
+
+test("desktop context findings are non-blocking when signed federation ingest is fresh", () => {
+  assert.equal(
+    desktopContextFindingSeverity({
+      signature_status: "verified",
+      last_ingest_age_seconds: 30,
+    }),
+    "info"
+  );
+  assert.equal(
+    desktopContextFindingSeverity({
+      signature_status: "verified",
+      last_ingest_age_seconds: 3601,
+    }),
+    "warn"
+  );
+  assert.equal(
+    desktopContextFindingSeverity({
+      signature_status: "missing",
+      last_ingest_age_seconds: 30,
+    }),
+    "warn"
+  );
 });
 
 test("summarizeUnstagedVerifiedPeers keeps only latest unstaged verified peers outside the current fabric", () => {

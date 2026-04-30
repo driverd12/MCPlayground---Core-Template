@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { runCommandProbe } from "../dist/tools/provider_bridge.js";
+import { Storage } from "../dist/storage.js";
 import { getTriChatBridgeCandidates, getTriChatBridgeEnvVar } from "../dist/trichat_roster.js";
 import { fetchHttpText, reservePort, stopChildProcess } from "./test_process_helpers.mjs";
 
@@ -918,6 +919,100 @@ test("provider.bridge status self-heals stale runtime truth over stdio after liv
     assert.equal(healedStatus.onboarding.entries[0].ready, true);
   } finally {
     await session.client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("provider.bridge over HTTP reuses persisted diagnostics when process cache is cold", { concurrency: false, timeout: 60_000 }, async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-provider-bridge-http-persisted-diagnostics-"));
+  const homeDir = path.join(tempDir, "home");
+  const binDir = path.join(tempDir, "bin");
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const busPath = path.join(tempDir, "trichat.bus.sock");
+  const bearerToken = "provider-bridge-http-persisted-token";
+  fs.mkdirSync(path.join(homeDir, ".codex"), { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(homeDir, ".codex", "config.toml"), "[mcp_servers.master-mold]\ncommand = \"node\"\n");
+  fs.writeFileSync(path.join(binDir, "codex"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  fs.chmodSync(path.join(binDir, "codex"), 0o755);
+
+  const storage = new Storage(dbPath);
+  storage.init();
+  storage.setAutonomyMaintainState({
+    enabled: true,
+    interval_seconds: 120,
+    learning_review_interval_seconds: 300,
+    eval_interval_seconds: 21600,
+    last_provider_bridge_check_at: new Date().toISOString(),
+    provider_bridge_diagnostics: [
+      {
+        client_id: "codex",
+        display_name: "Codex",
+        office_agent_id: "codex",
+        available: true,
+        runtime_probed: true,
+        connected: true,
+        status: "connected",
+        detail: "persisted codex runtime",
+        notes: [],
+        command: null,
+        config_path: path.join(homeDir, ".codex", "config.toml"),
+      },
+    ],
+    last_actions: [],
+    last_attention: [],
+    last_error: null,
+  });
+
+  const httpPort = await reservePort();
+  const child = spawn("node", ["dist/server.js", "--http", "--http-port", String(httpPort)], {
+    cwd: REPO_ROOT,
+    env: inheritedEnv({
+      MCP_HTTP: "1",
+      MCP_HTTP_PORT: String(httpPort),
+      MCP_HTTP_HOST: "127.0.0.1",
+      MCP_HTTP_BEARER_TOKEN: bearerToken,
+      ANAMNESIS_HUB_DB_PATH: dbPath,
+      TRICHAT_BUS_SOCKET_PATH: busPath,
+      TRICHAT_MCP_URL: `http://127.0.0.1:${httpPort}/`,
+      TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
+      HOME: homeDir,
+      PATH: `${binDir}:${process.env.PATH || ""}`,
+      TRICHAT_RING_LEADER_AUTOSTART: "0",
+      MCP_AUTONOMY_BOOTSTRAP_ON_START: "0",
+      MCP_AUTONOMY_MAINTAIN_ON_START: "0",
+    }),
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  try {
+    await waitForHealth(`http://127.0.0.1:${httpPort}/health`, 15_000);
+    const result = await execFileAsync(
+      "node",
+      [
+        "./scripts/mcp_tool_call.mjs",
+        "--tool", "provider.bridge",
+        "--args", JSON.stringify({ action: "status", clients: ["codex"] }),
+        "--transport", "http",
+        "--url", `http://127.0.0.1:${httpPort}/`,
+        "--origin", "http://127.0.0.1",
+        "--cwd", REPO_ROOT,
+      ],
+      {
+        cwd: REPO_ROOT,
+        env: inheritedEnv({ MCP_HTTP_BEARER_TOKEN: bearerToken }),
+        maxBuffer: 8 * 1024 * 1024,
+        timeout: 20_000,
+      }
+    );
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.outbound_council_agents[0].runtime_ready, true);
+    assert.equal(parsed.router_backend_candidates[0].eligible, true);
+    assert.equal(parsed.onboarding.entries[0].runtime_status, "connected");
+    assert.equal(parsed.onboarding.entries[0].ready, true);
+  } finally {
+    await stopChildProcess(child);
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

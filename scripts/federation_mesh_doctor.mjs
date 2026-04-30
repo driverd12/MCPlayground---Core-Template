@@ -435,6 +435,17 @@ function latestFederationIdentity(latestFederationEvent) {
   return readRecord(details.federation_identity);
 }
 
+export function desktopContextFindingSeverity(input = {}) {
+  const signatureStatus = readString(input.signature_status);
+  const lastIngestAgeSeconds =
+    typeof input.last_ingest_age_seconds === "number" && Number.isFinite(input.last_ingest_age_seconds)
+      ? input.last_ingest_age_seconds
+      : null;
+  const signedIngestFresh =
+    signatureStatus === "verified" && lastIngestAgeSeconds !== null && lastIngestAgeSeconds <= FEDERATION_STALE_SECONDS;
+  return signedIngestFresh ? "info" : "warn";
+}
+
 async function inspectHost(host, options, latestFederationEvent = null, sidecarState = null) {
   const metadata = readRecord(host.metadata);
   const remoteAccess = remoteAccessFromHost(host);
@@ -509,8 +520,24 @@ async function inspectHost(host, options, latestFederationEvent = null, sidecarS
   }
   if (approved && capabilities.desktop_context === true) {
     const desktopStatus = readString(desktopContext.status) || readString(readRecord(federation.desktop_context).status);
+    const desktopStaleReason =
+      readString(desktopContext.stale_reason) ||
+      readString(readRecord(federation.desktop_context).stale_reason) ||
+      readString(readRecord(eventDetails.desktop_context).stale_reason);
+    const desktopUnavailableReason =
+      readString(desktopContext.unavailable_reason) ||
+      readString(readRecord(federation.desktop_context).unavailable_reason) ||
+      readString(readRecord(eventDetails.desktop_context).unavailable_reason);
     if (desktopStatus && desktopStatus !== "available") {
-      findings.push({ severity: "warn", code: "desktop_context_unavailable", detail: `desktop context status is ${desktopStatus}` });
+      const reason = desktopStaleReason || desktopUnavailableReason;
+      findings.push({
+        severity: desktopContextFindingSeverity({
+          signature_status: signatureStatus,
+          last_ingest_age_seconds: lastIngestAgeSeconds,
+        }),
+        code: "desktop_context_unavailable",
+        detail: `desktop context status is ${desktopStatus}${reason ? ` (${reason})` : ""}`,
+      });
     }
     if (desktopAgeSeconds !== null && desktopAgeSeconds > DESKTOP_STALE_SECONDS) {
       findings.push({ severity: "info", code: "desktop_context_stale", detail: `desktop context is ${formatAge(desktopAgeSeconds)} old` });
