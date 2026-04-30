@@ -1636,6 +1636,11 @@ export class Storage {
         writeStorageGuardLog(`[storage] reopen integrity probe failed: ${probe.reason}`);
         return { ok: false, error: `integrity probe failed after reopen: ${probe.reason}` };
       }
+      const runtimeProbe = runQuickCheck(this.db);
+      if (!runtimeProbe.ok) {
+        writeStorageGuardLog(`[storage] reopen runtime quick_check failed: ${runtimeProbe.reason}`);
+        return { ok: false, error: `runtime quick_check failed after reopen: ${runtimeProbe.reason}` };
+      }
       writeStorageGuardLog(`[storage] database handle reopened successfully`);
       return { ok: true, error: null };
     } catch (err) {

@@ -300,6 +300,57 @@ test("storage guard large-db probe quarantines and recovers when a critical star
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
+test("runtime corruption reopen fails closed when quick_check still fails", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-storage-runtime-corruption-reopen-"));
+  const dbPath = path.join(tempDir, "hub.sqlite");
+  const originalQuickCheckMax = process.env.ANAMNESIS_HUB_RUN_QUICK_CHECK_MAX_BYTES;
+  const originalStartupBackup = process.env.ANAMNESIS_HUB_STARTUP_BACKUP;
+  const originalPragma = Database.prototype.pragma;
+  let runtimeQuickCheckCalled = false;
+
+  process.env.ANAMNESIS_HUB_RUN_QUICK_CHECK_MAX_BYTES = "1";
+  process.env.ANAMNESIS_HUB_STARTUP_BACKUP = "0";
+
+  const initial = new Storage(dbPath);
+  try {
+    initial.init();
+  } finally {
+    initial["db"]?.close?.();
+  }
+
+  Database.prototype.pragma = function patchedPragma(source, options) {
+    if (String(source) === "quick_check") {
+      runtimeQuickCheckCalled = true;
+      return "database disk image is malformed";
+    }
+    return originalPragma.call(this, source, options);
+  };
+
+  const storage = new Storage(dbPath);
+  try {
+    storage.init();
+    storage.recordSqliteError(new Error("database disk image is malformed"));
+    const reopen = storage.reopenDatabase();
+    assert.equal(runtimeQuickCheckCalled, true);
+    assert.equal(reopen.ok, false);
+    assert.match(reopen.error ?? "", /runtime quick_check failed after reopen/i);
+  } finally {
+    storage["db"]?.close?.();
+    Database.prototype.pragma = originalPragma;
+    if (originalQuickCheckMax === undefined) {
+      delete process.env.ANAMNESIS_HUB_RUN_QUICK_CHECK_MAX_BYTES;
+    } else {
+      process.env.ANAMNESIS_HUB_RUN_QUICK_CHECK_MAX_BYTES = originalQuickCheckMax;
+    }
+    if (originalStartupBackup === undefined) {
+      delete process.env.ANAMNESIS_HUB_STARTUP_BACKUP;
+    } else {
+      process.env.ANAMNESIS_HUB_STARTUP_BACKUP = originalStartupBackup;
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("storage guard reports evidence_present with attention_required=false when historical quarantine evidence exists but current boot is clean", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-storage-guard-evidence-present-"));
   const dbPath = path.join(tempDir, "hub.sqlite");

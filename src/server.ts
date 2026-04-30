@@ -3626,9 +3626,19 @@ function createServerInstance() {
         const reopen = storage.reopenDatabase();
         const detail = reopen.ok
           ? "SQLite corruption detected; database handle recycled successfully. Retry the request."
-          : `SQLite corruption detected; reopen failed: ${reopen.error}. Manual remediation may be needed.`;
+          : `SQLite corruption detected; reopen failed: ${reopen.error}. Stop the MCP writer, preserve the current database, restore a healthy backup or validated recovered copy, then restart.`;
         return {
-          content: [{ type: "text", text: JSON.stringify({ error: detail, tool: name, reopen_ok: reopen.ok }) }],
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: detail,
+                tool: name,
+                reopen_ok: reopen.ok,
+                recovery_required: !reopen.ok,
+              }),
+            },
+          ],
           isError: true,
         };
       }
