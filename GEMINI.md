@@ -77,6 +77,30 @@ data/hub.sqlite         → Primary durable state store (SQLite)
 - **Operator Surface**: Prefer the visible office launchers (`npm run trichat:office:web`, `npm run agentic:suite`) when humans need reassurance about live agent activity.
 - **Visible Claude Mirror**: On macOS, explicit Claude-targeted ingress may mirror into the visible Claude terminal when `TRICHAT_VISIBLE_CLAUDE_MIRROR_ON_INGRESS=1`, but that mirror is still non-canonical.
 
+## Infrastructure: LiteLLM Proxy & Vertex AI ADC
+
+Gemini routes through a per-workstation LiteLLM proxy for keyless auth and regional failover:
+
+- **Proxy**: `http://127.0.0.1:4000` (persistent via launchd `com.litellm.proxy`)
+- **Auth**: Google ADC (Application Default Credentials) — keyless, browser-based OAuth
+- **Project**: supplied by each operator through `GOOGLE_CLOUD_PROJECT` or their local LiteLLM config
+- **Config**: per-user `~/.gemini/proxy/config.yaml`; do not commit local project IDs or generated configs
+- **Credentials**: per-user ADC at `~/.config/gcloud/application_default_credentials.json`; never commit credential files
+
+**Available models through the proxy:**
+
+| Model Name | Backend | Failover Regions |
+|---|---|---|
+| `gemini-2.5-pro` | Vertex AI | us-central1, europe-west4 |
+| `gemini-2.5-flash` | Vertex AI | us-central1, europe-west4, asia-southeast1 |
+| `gemini-router` | Vertex AI (2.5 Flash) | us-central1, europe-west4, asia-southeast1 |
+| `gemma-local-4b` | Ollama (Apple Silicon) | local |
+| `gemma-local-12b` | Ollama (Apple Silicon) | local |
+
+**Gemma Local** is a sibling agent in the roster (`gemma-local`), providing zero-latency first-pass inference on Apple Silicon via Ollama. The ring leader can route bounded tasks to Gemma when speed matters more than frontier capability.
+
+**Gemini CLI settings** (`~/.gemini/settings.json`) enforce `vertex-ai` auth and route traffic through the proxy via `GOOGLE_VERTEX_BASE_URL`.
+
 ## Setup Validation Checklist
 
 Run these tools to verify environment readiness:
@@ -86,8 +110,12 @@ Run these tools to verify environment readiness:
 4. `pack.hooks.list`
 5. `trichat.summary`
 
+Verify proxy health: `curl -s http://127.0.0.1:4000/health | python3 -m json.tool`
+
 ## Breadcrumbs
 
 - See `AGENTS.md` for the full mission and agent roster strategy.
 - See `README.md` for high-level project overview.
 - See `docs/COWORKER_QUICKSTART_CURSOR_CODEX.md` for environment setup.
+- See `~/.gemini/proxy/config.yaml` for LiteLLM proxy model routing.
+- See `config/trichat_agents.json` for the full agent roster (now 16 agents including Gemma Local).

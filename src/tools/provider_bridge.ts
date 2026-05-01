@@ -118,6 +118,7 @@ type ProviderBridgeDiagnostic = {
   config_path: string | null;
   last_probe_at?: string;
   intermittent?: boolean;
+  metadata?: Record<string, unknown>;
 };
 
 function resolveClientTransportConfig(
@@ -362,6 +363,10 @@ function normalizePersistedProviderBridgeDiagnostic(value: unknown): ProviderBri
     notes: Array.isArray(entry.notes) ? entry.notes.map((note) => String(note ?? "").trim()).filter(Boolean) : [],
     command: typeof entry.command === "string" && entry.command.trim() ? entry.command.trim() : null,
     config_path: typeof entry.config_path === "string" && entry.config_path.trim() ? entry.config_path.trim() : null,
+    metadata:
+      entry.metadata && typeof entry.metadata === "object" && !Array.isArray(entry.metadata)
+        ? (entry.metadata as Record<string, unknown>)
+        : undefined,
   };
 }
 
@@ -717,6 +722,129 @@ function readEnvString(name: string) {
   return value.length > 0 ? value : null;
 }
 
+function normalizeBaseUrl(value: string) {
+  return value.replace(/\/+$/, "");
+}
+
+function resolveGeminiAdcCredentialsPath() {
+  return (
+    readEnvString("GOOGLE_APPLICATION_CREDENTIALS") ??
+    path.join(resolveProviderHome(), ".config", "gcloud", "application_default_credentials.json")
+  );
+}
+
+function readGeminiAdcState() {
+  const credentialsPath = resolveGeminiAdcCredentialsPath();
+  const adcPresent = fs.existsSync(credentialsPath);
+  return {
+    auth_mode: "vertex-ai-adc",
+    adc_present: adcPresent,
+    credentials_path_configured: Boolean(readEnvString("GOOGLE_APPLICATION_CREDENTIALS")),
+    google_cloud_project_present: Boolean(readEnvString("GOOGLE_CLOUD_PROJECT")),
+    quota_project_present: Boolean(readEnvString("GOOGLE_CLOUD_QUOTA_PROJECT")),
+  };
+}
+
+function resolveGeminiProxyEndpoint() {
+  return normalizeBaseUrl(
+    readEnvString("TRICHAT_GEMINI_PROXY_ENDPOINT") ??
+      readEnvString("GOOGLE_VERTEX_BASE_URL") ??
+      readEnvString("GOOGLE_GEMINI_BASE_URL") ??
+      "http://127.0.0.1:4000"
+  );
+}
+
+function parseLiteLlmHealthBody(body: string) {
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    return {
+      readiness_status: typeof parsed.status === "string" ? parsed.status : null,
+      healthy_count: Array.isArray(parsed.healthy_endpoints) ? parsed.healthy_endpoints.length : null,
+      unhealthy_count: Array.isArray(parsed.unhealthy_endpoints) ? parsed.unhealthy_endpoints.length : null,
+    };
+  } catch {
+    return {
+      readiness_status: null,
+      healthy_count: null,
+      unhealthy_count: null,
+    };
+  }
+}
+
+function geminiLiteLlmEndpointAuditTimeoutMs() {
+  const override = Number(process.env.TRICHAT_GEMINI_PROXY_ENDPOINT_AUDIT_TIMEOUT_MS || "");
+  if (Number.isFinite(override) && override > 0) {
+    return Math.max(250, Math.min(override, 15000));
+  }
+  return 750;
+}
+
+function runLiteLlmHealthCurl(endpoint: string, pathSuffix: string, timeoutMs: number) {
+  const boundedTimeoutMs = Math.max(250, Math.min(timeoutMs, 15000));
+  const maxTimeSeconds = (boundedTimeoutMs / 1000).toFixed(3);
+  const result = spawnSync("curl", ["-sS", "--max-time", maxTimeSeconds, "-w", "\n%{http_code}", `${endpoint}${pathSuffix}`], {
+    encoding: "utf8",
+    env: process.env,
+    timeout: boundedTimeoutMs + 500,
+    maxBuffer: 1024 * 1024,
+  });
+  const stdout = String(result.stdout ?? "").trimEnd();
+  const lines = stdout.split(/\r?\n/);
+  const httpStatusLine = lines.pop() ?? "";
+  const body = lines.join("\n").trim();
+  const httpStatus = Number.parseInt(httpStatusLine.trim(), 10);
+  const healthy = result.status === 0 && Number.isFinite(httpStatus) && httpStatus >= 200 && httpStatus < 300;
+  const error = healthy
+    ? null
+    : compactProbeDetail(
+        `${String(result.stderr ?? "").trim()} ${body}`.trim(),
+        result.error?.message || `LiteLLM proxy ${pathSuffix} check failed.`
+      );
+  return {
+    body,
+    error,
+    healthy,
+    httpStatus: Number.isFinite(httpStatus) ? httpStatus : 0,
+    path: pathSuffix,
+  };
+}
+
+function probeGeminiLiteLlmProxy(timeoutMs: number) {
+  const endpoint = resolveGeminiProxyEndpoint();
+  const readinessTimeoutMs = Math.max(250, Math.min(timeoutMs, 3000));
+  const endpointAuditTimeoutMs = Math.max(250, Math.min(timeoutMs, geminiLiteLlmEndpointAuditTimeoutMs()));
+  const readiness = runLiteLlmHealthCurl(endpoint, "/health/readiness", readinessTimeoutMs);
+  const endpointAudit = runLiteLlmHealthCurl(endpoint, "/health", endpointAuditTimeoutMs);
+  const readinessBody = parseLiteLlmHealthBody(readiness.body);
+  const endpointBody = parseLiteLlmHealthBody(endpointAudit.body);
+  const readinessHealthy =
+    readiness.healthy &&
+    (readinessBody.readiness_status === null || readinessBody.readiness_status.toLowerCase() === "healthy");
+  const endpointAuditHealthy = endpointAudit.healthy;
+  const healthy = readinessHealthy || (!readiness.healthy && endpointAuditHealthy);
+  const degraded = healthy && !endpointAuditHealthy;
+  const healthHttp = readiness.healthy ? readiness.httpStatus : endpointAudit.httpStatus;
+  const healthPath = readiness.healthy ? readiness.path : endpointAudit.path;
+  const error = healthy
+    ? null
+    : readiness.error ?? endpointAudit.error ?? "LiteLLM proxy health check failed.";
+  return {
+    endpoint,
+    healthy,
+    degraded,
+    health_http: healthHttp,
+    health_path: healthPath,
+    service_http: readiness.httpStatus,
+    service_healthy: readinessHealthy,
+    endpoint_health_http: endpointAudit.httpStatus,
+    endpoint_health_error: endpointAuditHealthy ? null : endpointAudit.error,
+    checked_at: new Date().toISOString(),
+    error,
+    healthy_count: endpointBody.healthy_count,
+    unhealthy_count: endpointBody.unhealthy_count,
+  };
+}
+
 function resolveLocalFirstAgents() {
   const envAgents = String(process.env.TRICHAT_IDE_LOCAL_FIRST_AGENT_IDS ?? "")
     .split(",")
@@ -726,7 +854,13 @@ function resolveLocalFirstAgents() {
 }
 
 function hasGeminiApiAccess() {
-  return Boolean(readEnvString("GEMINI_API_KEY") || readEnvString("GOOGLE_API_KEY"));
+  return Boolean(
+    readEnvString("GEMINI_API_KEY") ||
+    readEnvString("GOOGLE_API_KEY") ||
+    readEnvString("GOOGLE_CLOUD_PROJECT") ||
+    readEnvString("GOOGLE_APPLICATION_CREDENTIALS") ||
+    readGeminiAdcState().adc_present
+  );
 }
 
 function resolveTransportConfig(
@@ -1040,7 +1174,7 @@ function resolveBridgeModelId(clientId: ProviderBridgeClientId) {
     case "cursor":
       return readEnvString("TRICHAT_CURSOR_MODEL") ?? "cursor-agent";
     case "gemini-cli":
-      return readEnvString("TRICHAT_GEMINI_MODEL") ?? (hasGeminiApiAccess() ? "gemini-2.0-flash" : "gemini-cli");
+      return readEnvString("TRICHAT_GEMINI_MODEL") ?? (hasGeminiApiAccess() ? "gemini-2.5-flash" : "gemini-cli");
     case "github-copilot-cli":
     case "github-copilot-vscode":
       return "copilot";
@@ -1049,6 +1183,10 @@ function resolveBridgeModelId(clientId: ProviderBridgeClientId) {
     default:
       return clientId;
   }
+}
+
+function resolveBridgeEndpoint(clientId: ProviderBridgeClientId) {
+  return clientId === "gemini-cli" ? resolveGeminiProxyEndpoint() : null;
 }
 
 function isRuntimeReadyClient(status: ProviderBridgeClientStatus) {
@@ -1072,12 +1210,13 @@ function buildRouterBackendCandidates(statuses: ProviderBridgeClientStatus[]): P
           : runtimeReady
           ? null
           : status.client_id === "gemini-cli" && status.outbound_bridge_ready
-            ? "missing gemini CLI binary and API key"
+            ? "missing Gemini CLI binary or Vertex/API credentials"
             : !status.outbound_bridge_ready
               ? "bridge adapter is not ready"
               : "required client runtime is missing";
       const agent = status.outbound_agent_id ? getTriChatAgent(status.outbound_agent_id) : null;
       const taskKinds = inferTaskKindsForBridgeAgent(status.outbound_agent_id);
+      const geminiAdc = status.client_id === "gemini-cli" ? readGeminiAdcState() : null;
       return {
         client_id: status.client_id,
         eligible: runtimeReady,
@@ -1086,7 +1225,7 @@ function buildRouterBackendCandidates(statuses: ProviderBridgeClientStatus[]): P
           backend_id: `bridge-${status.client_id}`,
           provider: resolveBridgeBackendProvider(status.client_id),
           model_id: resolveBridgeModelId(status.client_id),
-          endpoint: null,
+          endpoint: resolveBridgeEndpoint(status.client_id),
           host_id: null,
           locality: "remote",
           tags: inferTagsForBridgeAgent(status.outbound_agent_id, status.client_id),
@@ -1110,6 +1249,14 @@ function buildRouterBackendCandidates(statuses: ProviderBridgeClientStatus[]): P
             resource_gate_blocked: status.resource_gate_blocked,
             resource_gate_reason: status.resource_gate_reason,
             requires_internet_for_model: status.requires_internet_for_model,
+            ...(status.client_id === "gemini-cli"
+              ? {
+                  auth_mode: "vertex-ai-adc",
+                  proxy_endpoint: resolveGeminiProxyEndpoint(),
+                  adc_present: geminiAdc?.adc_present === true,
+                  google_cloud_project_present: geminiAdc?.google_cloud_project_present === true,
+                }
+              : {}),
           },
         },
       } satisfies ProviderBridgeRouterBackendCandidate;
@@ -2109,10 +2256,67 @@ function runProviderDiagnostics(
       const entry = readGeminiConfigEntry(status.config_path, serverName);
       const configSummary = summarizeGeminiConfigEntry(entry);
       const oauth = readGeminiOauthState();
+      const adc = readGeminiAdcState();
+      const vertexModeRequested = Boolean(
+        adc.adc_present ||
+          adc.credentials_path_configured ||
+          readEnvString("TRICHAT_GEMINI_PROXY_ENDPOINT") ||
+          readEnvString("GOOGLE_VERTEX_BASE_URL")
+      );
+      const litellmProxy = vertexModeRequested ? probeGeminiLiteLlmProxy(probeTimeoutMs) : null;
+      const vertexMetadata = vertexModeRequested
+        ? {
+            ...adc,
+            litellm_proxy: litellmProxy,
+          }
+        : undefined;
       const observed = status.installed && isGeminiRuntimeObserved(workspaceRoot);
       const notes = [...status.notes];
       if (configSummary.mode === "http" && hasHttpConfiguredServer(status.config_path ?? "", serverName)) {
         notes.push("Gemini CLI is configured over HTTP here; this repo prefers stdio for Gemini because it is more reliable.");
+      }
+      if (vertexModeRequested) {
+        notes.push("Gemini is configured for Vertex AI ADC through LiteLLM; readiness follows ADC and proxy health, not GEMINI_API_KEY.");
+      }
+      if (litellmProxy?.degraded === true) {
+        notes.push("LiteLLM proxy service is ready; the full endpoint inventory health check did not complete inside the operator timeout.");
+      }
+      if (configSummary.valid && vertexMetadata && adc.adc_present && litellmProxy?.healthy === true) {
+        return {
+          client_id: status.client_id,
+          display_name: status.display_name,
+          office_agent_id: status.office_agent_id,
+          available: true,
+          runtime_probed: true,
+          connected: true,
+          status: "connected",
+          detail: `${configSummary.detail} Vertex AI ADC is present and the LiteLLM proxy is healthy at ${litellmProxy.endpoint}.`,
+          notes,
+          command: "stateful config + Vertex ADC + LiteLLM proxy health",
+          config_path: status.config_path,
+          last_probe_at: new Date().toISOString(),
+          metadata: vertexMetadata,
+        } satisfies ProviderBridgeDiagnostic;
+      }
+      if (configSummary.valid && vertexMetadata && (!adc.adc_present || litellmProxy?.healthy === false)) {
+        const blocker = !adc.adc_present
+          ? "Vertex AI ADC credentials are missing."
+          : `LiteLLM proxy is not healthy at ${litellmProxy?.endpoint ?? resolveGeminiProxyEndpoint()}.`;
+        return {
+          client_id: status.client_id,
+          display_name: status.display_name,
+          office_agent_id: status.office_agent_id,
+          available: true,
+          runtime_probed: true,
+          connected: false,
+          status: "disconnected",
+          detail: `${configSummary.detail} ${blocker}`,
+          notes,
+          command: "stateful config + Vertex ADC + LiteLLM proxy health",
+          config_path: status.config_path,
+          last_probe_at: new Date().toISOString(),
+          metadata: vertexMetadata,
+        } satisfies ProviderBridgeDiagnostic;
       }
       if (configSummary.valid && oauth.connected && observed) {
         return {

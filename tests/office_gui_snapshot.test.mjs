@@ -2,6 +2,38 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildOfficeGuiSnapshot } from "../dist/office_gui_snapshot.js";
 
+function buildMinimalOfficeRaw(overrides = {}) {
+  return {
+    roster: { active_agent_ids: [], agents: [] },
+    workboard: {},
+    tmux: {},
+    task_summary: { counts: {} },
+    task_running: {},
+    task_pending: {},
+    agent_sessions: { sessions: [] },
+    adapter: {},
+    bus_tail: {},
+    trichat_summary: {},
+    learning: {},
+    autopilot: {},
+    runtime_workers: { summary: {}, sessions: [] },
+    kernel: {
+      overview: {},
+      worker_fabric: { hosts: [] },
+      model_router: { backends: [] },
+      runtime_workers: {},
+      autonomy_maintain: {},
+      reaction_engine: {},
+      observability: {},
+      swarm: {},
+      workflow_exports: {},
+    },
+    autonomy_maintain: { state: {}, runtime: {}, due: {} },
+    provider_bridge: { diagnostics: { generated_at: new Date().toISOString(), cached: true, diagnostics: [] } },
+    ...overrides,
+  };
+}
+
 test("office gui snapshot reflects provider heartbeat states and self-drive summary", () => {
   const snapshot = buildOfficeGuiSnapshot(
     {
@@ -1859,6 +1891,223 @@ test("office gui snapshot keeps configured bridges sleeping even for active agen
   assert.equal(gemini.state, "sleeping");
   assert.equal(gemini.evidence_source, "provider_bridge");
   assert.match(gemini.activity, /armed/i);
+});
+
+test("office gui snapshot marks gemma-local ready only when Ollama reports a Gemma model available", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    buildMinimalOfficeRaw({
+      roster: {
+        active_agent_ids: ["gemma-local"],
+        agents: [
+          {
+            agent_id: "gemma-local",
+            display_name: "Gemma Local",
+            provider: "local",
+            coordination_tier: "leaf",
+            role_lane: "fast-local",
+            ollama_models: ["gemma3:4b", "gemma3:12b"],
+          },
+        ],
+      },
+      kernel: {
+        overview: {},
+        worker_fabric: { hosts: [] },
+        model_router: {
+          backends: [
+            {
+              backend_id: "ollama-gemma3-4b",
+              provider: "ollama",
+              model_id: "gemma3:4b",
+              endpoint: "http://127.0.0.1:11434",
+              capabilities: {
+                probe_healthy: true,
+                probe_model_known: true,
+              },
+            },
+          ],
+        },
+        runtime_workers: {},
+        autonomy_maintain: {},
+        reaction_engine: {},
+        observability: {},
+        swarm: {},
+        workflow_exports: {},
+      },
+    }),
+    { theme: "dark" }
+  );
+
+  const gemma = snapshot.agents.find((entry) => entry.agent.agent_id === "gemma-local");
+  assert.ok(gemma);
+  assert.equal(gemma.state, "ready");
+  assert.equal(gemma.evidence_source, "local_backend");
+  assert.match(gemma.activity, /Ollama/i);
+  assert.match(gemma.evidence_detail, /gemma3:4b/i);
+});
+
+test("office gui snapshot marks gemma-local ready from live Ollama tag snapshot data", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    buildMinimalOfficeRaw({
+      roster: {
+        active_agent_ids: ["gemma-local"],
+        agents: [
+          {
+            agent_id: "gemma-local",
+            display_name: "Gemma Local",
+            provider: "local",
+            coordination_tier: "leaf",
+            role_lane: "fast-local",
+            ollama_models: ["gemma3:4b", "gemma3:12b"],
+          },
+        ],
+      },
+      local_backend_probe: {
+        ollama: {
+          endpoint: "http://127.0.0.1:11434",
+          service_ok: true,
+          tags_ok: true,
+          known_models: ["gemma3:12b", "gemma3:4b"],
+        },
+      },
+    }),
+    { theme: "dark" }
+  );
+
+  const gemma = snapshot.agents.find((entry) => entry.agent.agent_id === "gemma-local");
+  assert.ok(gemma);
+  assert.equal(gemma.state, "ready");
+  assert.equal(gemma.evidence_source, "local_backend");
+  assert.match(gemma.evidence_detail, /gemma3:12b/i);
+});
+
+test("office gui snapshot keeps gemma-local sleeping when Ollama readiness is unknown", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    buildMinimalOfficeRaw({
+      roster: {
+        active_agent_ids: ["gemma-local"],
+        agents: [
+          {
+            agent_id: "gemma-local",
+            display_name: "Gemma Local",
+            provider: "local",
+            coordination_tier: "leaf",
+            role_lane: "fast-local",
+            ollama_models: ["gemma3:4b", "gemma3:12b"],
+          },
+        ],
+      },
+    }),
+    { theme: "dark" }
+  );
+
+  const gemma = snapshot.agents.find((entry) => entry.agent.agent_id === "gemma-local");
+  assert.ok(gemma);
+  assert.equal(gemma.state, "sleeping");
+  assert.equal(gemma.evidence_source, "local_backend");
+  assert.match(gemma.activity, /Ollama/i);
+});
+
+test("office gui snapshot marks Vertex-backed Gemini ready when ADC and LiteLLM proxy are healthy", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    buildMinimalOfficeRaw({
+      roster: {
+        active_agent_ids: ["gemini"],
+        agents: [
+          {
+            agent_id: "gemini",
+            display_name: "Gemini",
+            provider: "google",
+            coordination_tier: "support",
+            role_lane: "analyst",
+            auth_mode: "vertex-ai-adc",
+            proxy_endpoint: "http://127.0.0.1:4000",
+          },
+        ],
+      },
+      provider_bridge: {
+        diagnostics: {
+          generated_at: new Date().toISOString(),
+          cached: true,
+          diagnostics: [
+            {
+              client_id: "gemini-cli",
+              display_name: "Gemini CLI",
+              status: "configured",
+              detail: "Vertex AI ADC configured through LiteLLM proxy.",
+              metadata: {
+                auth_mode: "vertex-ai-adc",
+                adc_present: true,
+                litellm_proxy: {
+                  endpoint: "http://127.0.0.1:4000",
+                  healthy: true,
+                  health_http: 200,
+                },
+              },
+            },
+          ],
+        },
+      },
+    }),
+    { theme: "dark" }
+  );
+
+  const gemini = snapshot.agents.find((entry) => entry.agent.agent_id === "gemini");
+  assert.ok(gemini);
+  assert.equal(gemini.state, "ready");
+  assert.equal(gemini.evidence_source, "provider_bridge");
+  assert.match(gemini.activity, /LiteLLM proxy/i);
+});
+
+test("office gui snapshot does not mark Vertex-backed Gemini ready when the proxy is down", () => {
+  const snapshot = buildOfficeGuiSnapshot(
+    buildMinimalOfficeRaw({
+      roster: {
+        active_agent_ids: ["gemini"],
+        agents: [
+          {
+            agent_id: "gemini",
+            display_name: "Gemini",
+            provider: "google",
+            coordination_tier: "support",
+            role_lane: "analyst",
+            auth_mode: "vertex-ai-adc",
+            proxy_endpoint: "http://127.0.0.1:4000",
+          },
+        ],
+      },
+      provider_bridge: {
+        diagnostics: {
+          generated_at: new Date().toISOString(),
+          cached: true,
+          diagnostics: [
+            {
+              client_id: "gemini-cli",
+              display_name: "Gemini CLI",
+              status: "configured",
+              detail: "Vertex AI ADC present but LiteLLM proxy is not healthy.",
+              metadata: {
+                auth_mode: "vertex-ai-adc",
+                adc_present: true,
+                litellm_proxy: {
+                  endpoint: "http://127.0.0.1:4000",
+                  healthy: false,
+                  health_http: 0,
+                },
+              },
+            },
+          ],
+        },
+      },
+    }),
+    { theme: "dark" }
+  );
+
+  const gemini = snapshot.agents.find((entry) => entry.agent.agent_id === "gemini");
+  assert.ok(gemini);
+  assert.notEqual(gemini.state, "ready");
+  assert.equal(gemini.state, "blocked");
+  assert.equal(gemini.evidence_source, "provider_bridge");
+  assert.match(gemini.activity, /proxy/i);
 });
 
 test("office gui snapshot keeps blocked provider signals blocked even for active agents", () => {

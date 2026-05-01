@@ -3814,6 +3814,68 @@ function buildHttpHealthSnapshot() {
   };
 }
 
+function normalizeOfficeOllamaEndpoint(value: string | undefined | null) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return "http://127.0.0.1:11434";
+  }
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+  return withProtocol.replace(/\/+$/, "");
+}
+
+function probeOfficeLocalBackends() {
+  const endpoint = normalizeOfficeOllamaEndpoint(process.env.TRICHAT_OLLAMA_URL || process.env.OLLAMA_HOST);
+  const result = spawnSync("curl", ["-sS", "--max-time", "3", `${endpoint}/api/tags`], {
+    encoding: "utf8",
+    env: process.env,
+    timeout: 3500,
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.status !== 0) {
+    return {
+      ollama: {
+        endpoint,
+        service_ok: false,
+        tags_ok: false,
+        known_models: [],
+        error: String(result.stderr || result.error?.message || "Ollama tag probe failed").trim().slice(0, 240),
+      },
+    };
+  }
+  try {
+    const parsed = JSON.parse(String(result.stdout || "{}")) as Record<string, unknown>;
+    const models = Array.isArray(parsed.models)
+      ? parsed.models
+          .map((entry) => (entry && typeof entry === "object" && !Array.isArray(entry) ? (entry as Record<string, unknown>) : {}))
+          .map((entry) => ({
+            name: String(entry.name ?? entry.model ?? "").trim(),
+            model: String(entry.model ?? entry.name ?? "").trim(),
+          }))
+          .filter((entry) => entry.name || entry.model)
+      : [];
+    const knownModels = [...new Set(models.flatMap((entry) => [entry.name, entry.model]).filter(Boolean))];
+    return {
+      ollama: {
+        endpoint,
+        service_ok: true,
+        tags_ok: true,
+        known_models: knownModels,
+        models,
+      },
+    };
+  } catch (error) {
+    return {
+      ollama: {
+        endpoint,
+        service_ok: true,
+        tags_ok: false,
+        known_models: [],
+        error: error instanceof Error ? error.message.slice(0, 240) : String(error).slice(0, 240),
+      },
+    };
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const httpEnabled = args.includes("--http") || process.env.MCP_HTTP === "1";
@@ -3954,9 +4016,8 @@ async function main() {
           }),
         };
       },
-      officeSnapshot: ({ threadId, theme, forceLive }) =>
-        buildOfficeGuiSnapshot(
-          officeSnapshot(storage, {
+      officeSnapshot: ({ threadId, theme, forceLive }) => {
+        const rawOfficeSnapshot = officeSnapshot(storage, {
             thread_id: threadId,
             turn_limit: 12,
             task_limit: 24,
@@ -3970,9 +4031,10 @@ async function main() {
             include_adapter: true,
             include_runtime_workers: true,
             metadata: forceLive ? { source: "http.live" } : undefined,
-          }) as Record<string, unknown>,
-          { theme }
-        ),
+          }) as Record<string, unknown>;
+        rawOfficeSnapshot.local_backend_probe = probeOfficeLocalBackends();
+        return buildOfficeGuiSnapshot(rawOfficeSnapshot, { theme });
+      },
       officeRawSnapshot: ({ threadId }) =>
         officeSnapshot(storage, {
           thread_id: threadId,

@@ -200,6 +200,8 @@ function submitObjective(repoRoot, objective, options = {}) {
       "research-director",
       "verification-director",
       "local-imprint",
+      "gemini",
+      "gemma-local",
     ],
   });
 }

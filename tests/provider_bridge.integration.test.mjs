@@ -7,7 +7,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { runCommandProbe } from "../dist/tools/provider_bridge.js";
+import { resolveProviderBridgeDiagnostics, runCommandProbe } from "../dist/tools/provider_bridge.js";
 import { Storage } from "../dist/storage.js";
 import { getTriChatBridgeCandidates, getTriChatBridgeEnvVar } from "../dist/trichat_roster.js";
 import { fetchHttpText, reservePort, stopChildProcess } from "./test_process_helpers.mjs";
@@ -444,6 +444,189 @@ test("provider.bridge diagnose keeps Gemini configured until runtime is actually
     assert.match(gemini.command, /runtime probe/i);
   } finally {
     await session.client.close().catch(() => {});
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("provider.bridge diagnose marks Gemini connected when Vertex ADC and LiteLLM proxy are healthy", { concurrency: false }, async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-provider-bridge-gemini-vertex-"));
+  const homeDir = path.join(tempDir, "home");
+  const binDir = path.join(tempDir, "bin");
+  fs.mkdirSync(homeDir, { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(binDir, "gemini"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  fs.chmodSync(path.join(binDir, "gemini"), 0o755);
+  fs.writeFileSync(path.join(binDir, "pgrep"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  fs.chmodSync(path.join(binDir, "pgrep"), 0o755);
+  fs.writeFileSync(
+    path.join(binDir, "curl"),
+    "#!/bin/sh\nprintf '%s\\n%s\\n' '{\"healthy_endpoints\":[{\"model\":\"gemini-2.5-flash\"}],\"unhealthy_endpoints\":[]}' '200'\n",
+    { mode: 0o755 }
+  );
+  fs.chmodSync(path.join(binDir, "curl"), 0o755);
+
+  const geminiDir = path.join(homeDir, ".gemini");
+  fs.mkdirSync(geminiDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(geminiDir, "settings.json"),
+    JSON.stringify(
+      {
+        mcpServers: {
+          "master-mold": {
+            type: "stdio",
+            command: "node",
+            args: ["/tmp/provider_stdio_bridge.mjs"],
+            cwd: tempDir,
+            timeout: 600000,
+            trust: true,
+          },
+        },
+      },
+      null,
+      2
+    )
+  );
+  const gcloudDir = path.join(homeDir, ".config", "gcloud");
+  fs.mkdirSync(gcloudDir, { recursive: true });
+  const adcPath = path.join(gcloudDir, "application_default_credentials.json");
+  fs.writeFileSync(adcPath, JSON.stringify({ type: "authorized_user", client_id: "test" }, null, 2));
+
+  const envPatch = {
+    ANAMNESIS_HUB_DB_PATH: path.join(tempDir, "hub.sqlite"),
+    HOME: homeDir,
+    PATH: `${binDir}:${process.env.PATH || ""}`,
+    TRICHAT_MCP_URL: "http://127.0.0.1:8787/",
+    TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
+    GOOGLE_APPLICATION_CREDENTIALS: adcPath,
+    GOOGLE_CLOUD_PROJECT: "test-project",
+    GOOGLE_VERTEX_BASE_URL: "http://127.0.0.1:4000",
+    GEMINI_API_KEY: "",
+    GOOGLE_API_KEY: "",
+  };
+  const previousEnv = {};
+  for (const key of Object.keys(envPatch)) {
+    previousEnv[key] = process.env[key];
+    process.env[key] = envPatch[key];
+  }
+
+  try {
+    const diagnose = resolveProviderBridgeDiagnostics({
+      bypass_cache: true,
+      probe_timeout_ms: 1000,
+      workspace_root: tempDir,
+    });
+    const gemini = diagnose.diagnostics.find((entry) => entry.client_id === "gemini-cli");
+    assert.ok(gemini);
+    assert.equal(gemini.client_id, "gemini-cli");
+    assert.equal(gemini.status, "connected");
+    assert.equal(gemini.connected, true);
+    assert.match(gemini.detail, /LiteLLM proxy/i);
+    assert.equal(gemini.metadata?.auth_mode, "vertex-ai-adc");
+    assert.equal(gemini.metadata?.adc_present, true);
+    assert.equal(gemini.metadata?.litellm_proxy?.healthy, true);
+  } finally {
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (typeof value === "string") {
+        process.env[key] = value;
+      } else {
+        delete process.env[key];
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("provider.bridge diagnose trusts LiteLLM readiness when endpoint inventory is slow", { concurrency: false }, async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-provider-bridge-gemini-readiness-"));
+  const homeDir = path.join(tempDir, "home");
+  const binDir = path.join(tempDir, "bin");
+  fs.mkdirSync(homeDir, { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(binDir, "gemini"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  fs.chmodSync(path.join(binDir, "gemini"), 0o755);
+  fs.writeFileSync(path.join(binDir, "pgrep"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  fs.chmodSync(path.join(binDir, "pgrep"), 0o755);
+  fs.writeFileSync(
+    path.join(binDir, "curl"),
+    [
+      "#!/bin/sh",
+      "case \"$*\" in",
+      "  *\"/health/readiness\"*) printf '%s\\n%s\\n' '{\"status\":\"healthy\"}' '200' ;;",
+      "  *\"/health\"*) printf '%s\\n' 'endpoint inventory timed out' >&2; exit 28 ;;",
+      "  *) exit 1 ;;",
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 }
+  );
+  fs.chmodSync(path.join(binDir, "curl"), 0o755);
+
+  const geminiDir = path.join(homeDir, ".gemini");
+  fs.mkdirSync(geminiDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(geminiDir, "settings.json"),
+    JSON.stringify(
+      {
+        mcpServers: {
+          "master-mold": {
+            type: "stdio",
+            command: "node",
+            args: ["/tmp/provider_stdio_bridge.mjs"],
+            cwd: tempDir,
+            timeout: 600000,
+            trust: true,
+          },
+        },
+      },
+      null,
+      2
+    )
+  );
+  const gcloudDir = path.join(homeDir, ".config", "gcloud");
+  fs.mkdirSync(gcloudDir, { recursive: true });
+  const adcPath = path.join(gcloudDir, "application_default_credentials.json");
+  fs.writeFileSync(adcPath, JSON.stringify({ type: "authorized_user", client_id: "test" }, null, 2));
+
+  const envPatch = {
+    ANAMNESIS_HUB_DB_PATH: path.join(tempDir, "hub.sqlite"),
+    HOME: homeDir,
+    PATH: `${binDir}:${process.env.PATH || ""}`,
+    TRICHAT_MCP_URL: "http://127.0.0.1:8787/",
+    TRICHAT_MCP_ORIGIN: "http://127.0.0.1",
+    GOOGLE_APPLICATION_CREDENTIALS: adcPath,
+    GOOGLE_CLOUD_PROJECT: "test-project",
+    GOOGLE_VERTEX_BASE_URL: "http://127.0.0.1:4000",
+    GEMINI_API_KEY: "",
+    GOOGLE_API_KEY: "",
+  };
+  const previousEnv = {};
+  for (const key of Object.keys(envPatch)) {
+    previousEnv[key] = process.env[key];
+    process.env[key] = envPatch[key];
+  }
+
+  try {
+    const diagnose = resolveProviderBridgeDiagnostics({
+      bypass_cache: true,
+      probe_timeout_ms: 1000,
+      workspace_root: tempDir,
+    });
+    const gemini = diagnose.diagnostics.find((entry) => entry.client_id === "gemini-cli");
+    assert.ok(gemini);
+    assert.equal(gemini.status, "connected");
+    assert.equal(gemini.connected, true);
+    assert.equal(gemini.metadata?.litellm_proxy?.healthy, true);
+    assert.equal(gemini.metadata?.litellm_proxy?.service_healthy, true);
+    assert.equal(gemini.metadata?.litellm_proxy?.degraded, true);
+    assert.match(gemini.notes.join(" "), /endpoint inventory health check/i);
+  } finally {
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (typeof value === "string") {
+        process.env[key] = value;
+      } else {
+        delete process.env[key];
+      }
+    }
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

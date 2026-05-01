@@ -12,6 +12,12 @@ export type TriChatAgentDefinition = {
   parent_agent_id?: string;
   managed_agent_ids?: string[];
   accent_color?: string;
+  proxy_endpoint?: string;
+  available_models?: string[];
+  default_model?: string;
+  failover_regions?: string[];
+  vertex_project_env_var?: string;
+  ollama_models?: string[];
   bridge_env_var?: string;
   bridge_script_names?: string[];
   outbound_council_supported?: boolean;
@@ -33,7 +39,7 @@ const rosterConfigPath =
 
 const fallbackConfig: TriChatRosterConfig = {
   version: 1,
-  default_agent_ids: ["codex", "cursor", "github-copilot", "local-imprint"],
+  default_agent_ids: ["codex", "cursor", "github-copilot", "local-imprint", "gemini", "gemma-local"],
   agents: [
     {
       agent_id: "codex",
@@ -68,15 +74,40 @@ const fallbackConfig: TriChatRosterConfig = {
       agent_id: "gemini",
       display_name: "Gemini",
       provider: "google",
-      auth_mode: "cli-or-env",
+      auth_mode: "vertex-ai-adc",
       role_lane: "analyst",
       accent_color: "#32c26b",
       bridge_env_var: "TRICHAT_GEMINI_CMD",
       bridge_script_names: ["gemini_bridge.py"],
+      proxy_endpoint: "http://127.0.0.1:4000",
+      available_models: ["gemini-2.5-pro", "gemini-2.5-flash"],
+      default_model: "gemini-2.5-flash",
+      vertex_project_env_var: "GOOGLE_CLOUD_PROJECT",
+      failover_regions: ["us-central1", "europe-west4", "asia-southeast1"],
       description: "Cross-check analyst tuned for synthesis, summarization, and alternative implementation framing.",
       supports_local_model_fallback: true,
       system_prompt:
         "You are Gemini in tri-chat mode. Respond with concise analysis, synthesis, and practical alternatives. Keep replies to max 6 lines unless asked for detail. Avoid recap sections and stay implementation-relevant.",
+    },
+    {
+      agent_id: "gemma-local",
+      display_name: "Gemma Local",
+      provider: "local",
+      auth_mode: "local-model",
+      role_lane: "fast-local",
+      coordination_tier: "leaf",
+      parent_agent_id: "ring-leader",
+      accent_color: "#4285f4",
+      bridge_env_var: "TRICHAT_GEMMA_CMD",
+      bridge_script_names: ["local-imprint_bridge.py", "local_imprint_bridge.py"],
+      proxy_endpoint: "http://127.0.0.1:11434",
+      available_models: ["gemma-local-4b", "gemma-local-12b"],
+      default_model: "gemma-local-12b",
+      ollama_models: ["gemma3:4b", "gemma3:12b"],
+      description: "Local Google Gemma models via Ollama on Apple Silicon.",
+      supports_local_model_fallback: true,
+      system_prompt:
+        "You are Gemma, a local-first Google model running on Apple Silicon via Ollama. Favor fast, bounded, deterministic responses. Keep replies concise: max 6 lines unless asked for depth. Focus on actionable output over explanation.",
     },
     {
       agent_id: "claude",
@@ -138,6 +169,8 @@ const fallbackConfig: TriChatRosterConfig = {
         "local-imprint",
         "codex",
         "github-copilot",
+        "gemini",
+        "gemma-local",
       ],
       accent_color: "#f25f5c",
       bridge_env_var: "TRICHAT_RING_LEADER_CMD",
@@ -323,6 +356,18 @@ function sanitizeAgent(value: unknown): TriChatAgentDefinition | null {
           .filter((entry) => entry.length > 0)
       : undefined,
     accent_color: String(candidate.accent_color ?? "").trim() || undefined,
+    proxy_endpoint: String(candidate.proxy_endpoint ?? "").trim() || undefined,
+    available_models: Array.isArray(candidate.available_models)
+      ? candidate.available_models.map((entry) => String(entry ?? "").trim()).filter(Boolean)
+      : undefined,
+    default_model: String(candidate.default_model ?? "").trim() || undefined,
+    failover_regions: Array.isArray(candidate.failover_regions)
+      ? candidate.failover_regions.map((entry) => String(entry ?? "").trim()).filter(Boolean)
+      : undefined,
+    vertex_project_env_var: String(candidate.vertex_project_env_var ?? "").trim() || undefined,
+    ollama_models: Array.isArray(candidate.ollama_models)
+      ? candidate.ollama_models.map((entry) => String(entry ?? "").trim()).filter(Boolean)
+      : undefined,
     bridge_env_var: String(candidate.bridge_env_var ?? "").trim() || undefined,
     bridge_script_names: Array.isArray(candidate.bridge_script_names)
       ? candidate.bridge_script_names

@@ -157,7 +157,7 @@ function officeSnapshotNodeTimeoutMs() {
   if (Number.isFinite(override) && override >= 50) {
     return Math.min(60_000, Math.max(50, Math.round(override)));
   }
-  return 5_000;
+  return 15_000;
 }
 
 function officeRawSnapshotNodeTimeoutMs() {
@@ -165,7 +165,7 @@ function officeRawSnapshotNodeTimeoutMs() {
   if (Number.isFinite(override) && override >= 50) {
     return Math.min(60_000, Math.max(50, Math.round(override)));
   }
-  return 4_000;
+  return 10_000;
 }
 
 function readySnapshotCacheMaxAgeMs() {
@@ -687,6 +687,19 @@ function applyRealtimeSignalsToOfficeSnapshot(
     const displayName = String(entry.display_name ?? (clientId || "provider")).trim() || "provider";
     const status = String(entry.status ?? "").trim().toLowerCase();
     const detail = String(entry.detail ?? (status || "provider bridge")).trim() || "provider bridge";
+    const metadata =
+      entry.metadata && typeof entry.metadata === "object" && !Array.isArray(entry.metadata)
+        ? (entry.metadata as Record<string, unknown>)
+        : {};
+    const litellmProxy =
+      metadata.litellm_proxy && typeof metadata.litellm_proxy === "object" && !Array.isArray(metadata.litellm_proxy)
+        ? (metadata.litellm_proxy as Record<string, unknown>)
+        : {};
+    const vertexAdcMode =
+      clientId === "gemini-cli" &&
+      (String(metadata.auth_mode ?? "").trim().toLowerCase() === "vertex-ai-adc" ||
+        metadata.adc_present === true ||
+        Object.keys(litellmProxy).length > 0);
     if (status === "connected") counts.connected += 1;
     else if (status === "configured") counts.configured += 1;
     else if (status === "disconnected") counts.disconnected += 1;
@@ -712,6 +725,26 @@ function applyRealtimeSignalsToOfficeSnapshot(
         detail: detail || "runtime verification is stale",
         location: "sofa",
         actions: ["ops", "configured"],
+      };
+    } else if (vertexAdcMode && metadata.adc_present === true && litellmProxy.healthy === true) {
+      const endpoint = String(litellmProxy.endpoint ?? "LiteLLM proxy").trim() || "LiteLLM proxy";
+      signal = {
+        state: "ready",
+        activity: `${displayName} LiteLLM proxy ready`,
+        detail: `${endpoint}; Vertex AI ADC present`,
+        location: "ops",
+        actions: ["ops", "ready"],
+      };
+    } else if (vertexAdcMode && (metadata.adc_present !== true || litellmProxy.healthy === false)) {
+      signal = {
+        state: "blocked",
+        activity:
+          metadata.adc_present !== true
+            ? `${displayName} ADC credentials missing`
+            : `${displayName} LiteLLM proxy down`,
+        detail,
+        location: "ops",
+        actions: ["ops", "blocked"],
       };
     } else if (status === "connected") {
       signal = {
@@ -1074,6 +1107,13 @@ async function readOfficeSnapshotForRefresh(
   };
 
   if (refreshMode === "inline") {
+    if (input.forceLive && options.officeSnapshot) {
+      return options.officeSnapshot({
+        threadId: input.threadId,
+        theme: input.theme,
+        forceLive: input.forceLive,
+      });
+    }
     const rawPreferred = await readRawFallbackSnapshot();
     if (rawPreferred) {
       return rawPreferred;

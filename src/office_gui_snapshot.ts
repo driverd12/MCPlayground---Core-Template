@@ -34,6 +34,12 @@ function dedupe(values: unknown[]): string[] {
   return ordered;
 }
 
+function stringList(value: unknown): string[] {
+  return asList(value)
+    .map((entry) => String(entry ?? "").trim())
+    .filter(Boolean);
+}
+
 function parseAnyInt(value: unknown, fallback = 0): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
@@ -64,6 +70,11 @@ function ageSeconds(value: unknown, nowSeconds: number): number {
 type GuiAgent = {
   agent_id: string;
   display_name: string;
+  provider: string;
+  auth_mode: string;
+  proxy_endpoint: string;
+  available_models: string[];
+  ollama_models: string[];
   tier: string;
   role: string;
   parent_agent_id: string;
@@ -106,6 +117,11 @@ function buildCatalog(raw: Record<string, unknown>) {
     catalog.set(agentId, {
       agent_id: agentId,
       display_name: String(item.display_name ?? agentId).trim() || agentId,
+      provider: String(item.provider ?? "").trim().toLowerCase(),
+      auth_mode: String(item.auth_mode ?? "").trim().toLowerCase(),
+      proxy_endpoint: String(item.proxy_endpoint ?? "").trim(),
+      available_models: stringList(item.available_models),
+      ollama_models: stringList(item.ollama_models),
       tier: String(item.coordination_tier ?? "support").trim().toLowerCase() || "support",
       role: String(item.role_lane ?? "support").trim().toLowerCase() || "support",
       parent_agent_id: normalizeAgentId(item.parent_agent_id),
@@ -130,6 +146,10 @@ function buildRoster(raw: Record<string, unknown>) {
         provider: String(item.provider ?? "").trim(),
         role_lane: String(item.role_lane ?? "").trim(),
         coordination_tier: String(item.coordination_tier ?? "").trim(),
+        auth_mode: String(item.auth_mode ?? "").trim(),
+        proxy_endpoint: String(item.proxy_endpoint ?? "").trim(),
+        available_models: stringList(item.available_models),
+        ollama_models: stringList(item.ollama_models),
         parent_agent_id: normalizeAgentId(item.parent_agent_id),
         managed_agent_ids: dedupe(asList(item.managed_agent_ids)),
         accent_color: String(item.accent_color ?? "").trim(),
@@ -151,7 +171,7 @@ function buildBridgeTargets(rosterRaw: Record<string, unknown>, providerBridgeRa
   }
   const providerBridgeSnapshot = asDict(providerBridgeRaw.snapshot);
   const outboundCouncilAgents = asList(providerBridgeSnapshot.outbound_council_agents);
-  const preferredOrder = ["codex", "claude", "cursor", "gemini"];
+  const preferredOrder = ["codex", "claude", "cursor", "gemini", "gemma-local"];
   const targets = new Map<
     string,
     {
@@ -181,6 +201,29 @@ function buildBridgeTargets(rosterRaw: Record<string, unknown>, providerBridgeRa
       client_id: String(item.client_id ?? "").trim(),
       bridge_ready: item.bridge_ready === true,
       runtime_ready: item.runtime_ready === true,
+    });
+  }
+  for (const agentId of preferredOrder) {
+    if (targets.has(agentId)) {
+      continue;
+    }
+    const rosterAgent = asDict(rosterAgents.get(agentId));
+    if (!Object.keys(rosterAgent).length || rosterAgent.enabled === false) {
+      continue;
+    }
+    const provider = String(rosterAgent.provider ?? "").trim();
+    if (provider !== "local") {
+      continue;
+    }
+    targets.set(agentId, {
+      agent_id: agentId,
+      display_name: String(rosterAgent.display_name ?? agentId).trim() || agentId,
+      role_lane: String(rosterAgent.role_lane ?? provider ?? agentId).trim() || agentId,
+      provider,
+      coordination_tier: String(rosterAgent.coordination_tier ?? "").trim(),
+      client_id: "local-ollama",
+      bridge_ready: true,
+      runtime_ready: false,
     });
   }
   return preferredOrder
@@ -343,7 +386,40 @@ function buildProviderSignals(raw: Record<string, unknown>) {
     let signal:
       | { state: string; activity: string; detail: string; location: string; priority: number }
       | null = null;
-    if (status === "connected") {
+    const metadata = asDict(entry.metadata);
+    const litellmProxy = asDict(metadata.litellm_proxy);
+    const vertexAdcMode =
+      clientId === "gemini-cli" &&
+      (String(metadata.auth_mode ?? "").trim().toLowerCase() === "vertex-ai-adc" ||
+        metadata.adc_present === true ||
+        Object.keys(litellmProxy).length > 0);
+    if (vertexAdcMode && metadata.adc_present === true && litellmProxy.healthy === true) {
+      const endpoint = String(litellmProxy.endpoint ?? "LiteLLM proxy").trim() || "LiteLLM proxy";
+      signal = {
+        state: "ready",
+        activity: `${displayName} LiteLLM proxy ready`,
+        detail: `${endpoint}; Vertex AI ADC present`,
+        location: "ops",
+        priority: 5,
+      };
+    } else if (vertexAdcMode && metadata.adc_present !== true) {
+      signal = {
+        state: "blocked",
+        activity: `${displayName} ADC credentials missing`,
+        detail: detail || "Vertex AI ADC credentials are not available",
+        location: "ops",
+        priority: 4,
+      };
+    } else if (vertexAdcMode && litellmProxy.healthy === false) {
+      const endpoint = String(litellmProxy.endpoint ?? "LiteLLM proxy").trim() || "LiteLLM proxy";
+      signal = {
+        state: "blocked",
+        activity: `${displayName} LiteLLM proxy down`,
+        detail: `${endpoint}; ${detail}`,
+        location: "ops",
+        priority: 4,
+      };
+    } else if (status === "connected") {
       signal = {
         state: "ready",
         activity: `${displayName} bridge connected`,
@@ -397,6 +473,135 @@ function buildProviderSignals(raw: Record<string, unknown>) {
       },
     ])
   );
+}
+
+function readBackendProbeBoolean(backend: Record<string, unknown>, key: string): boolean | null {
+  if (typeof backend[key] === "boolean") {
+    return Boolean(backend[key]);
+  }
+  const capabilities = asDict(backend.capabilities);
+  if (typeof capabilities[key] === "boolean") {
+    return Boolean(capabilities[key]);
+  }
+  const metadata = asDict(backend.metadata);
+  const lastProbe = asDict(metadata.last_probe);
+  const lastProbeKey = key.replace(/^probe_/, "");
+  if (typeof lastProbe[lastProbeKey] === "boolean") {
+    return Boolean(lastProbe[lastProbeKey]);
+  }
+  return null;
+}
+
+function localBackendKnownModels(backend: Record<string, unknown>) {
+  const metadata = asDict(backend.metadata);
+  const lastProbe = asDict(metadata.last_probe);
+  return stringList(lastProbe.known_models).map((entry) => entry.toLowerCase());
+}
+
+function readOllamaProbeModels(raw: Record<string, unknown>) {
+  const localBackendProbe = asDict(raw.local_backend_probe);
+  const ollama = asDict(localBackendProbe.ollama);
+  const models = [
+    ...stringList(ollama.known_models),
+    ...asList(ollama.models)
+      .map((entry) => asDict(entry))
+      .flatMap((entry) => stringList([entry.name, entry.model])),
+  ];
+  return {
+    service_ok: ollama.service_ok === true || ollama.tags_ok === true,
+    service_down: ollama.service_ok === false || ollama.tags_ok === false,
+    endpoint: String(ollama.endpoint ?? "http://127.0.0.1:11434").trim() || "http://127.0.0.1:11434",
+    known_models: [...new Set(models.map((entry) => entry.toLowerCase()).filter(Boolean))],
+  };
+}
+
+function buildLocalBackendSignals(raw: Record<string, unknown>, catalog: Map<string, GuiAgent>) {
+  const kernel = asDict(raw.kernel);
+  const modelRouter = asDict(kernel.model_router);
+  const backends = asList(modelRouter.backends).map((entry) => asDict(entry));
+  const ollamaProbe = readOllamaProbeModels(raw);
+  const ollamaBackends = backends.filter((backend) => {
+    const provider = String(backend.provider ?? "").trim().toLowerCase();
+    const endpoint = String(backend.endpoint ?? "").trim().toLowerCase();
+    const tags = stringList(backend.tags).map((entry) => entry.toLowerCase());
+    return provider === "ollama" || tags.includes("ollama") || endpoint.includes(":11434");
+  });
+  const signals = new Map<string, { state: string; activity: string; detail: string; location: string }>();
+  for (const agent of catalog.values()) {
+    const candidateModels = [...agent.ollama_models, ...agent.available_models]
+      .map((entry) => entry.toLowerCase())
+      .filter(Boolean);
+    if (agent.provider !== "local" && candidateModels.length === 0) {
+      continue;
+    }
+    if (agent.agent_id !== "gemma-local" && !candidateModels.some((entry) => entry.startsWith("gemma"))) {
+      continue;
+    }
+    const modelSet = new Set(candidateModels);
+    const matched = ollamaBackends
+      .map((backend) => {
+        const modelId = String(backend.model_id ?? "").trim();
+        const normalizedModelId = modelId.toLowerCase();
+        const knownModels = localBackendKnownModels(backend);
+        const directMatch = modelSet.has(normalizedModelId);
+        const knownModelMatch = knownModels.some((entry) => modelSet.has(entry));
+        if (!directMatch && !knownModelMatch) {
+          return null;
+        }
+        const probeHealthy = readBackendProbeBoolean(backend, "probe_healthy");
+        const probeModelKnown = directMatch
+          ? readBackendProbeBoolean(backend, "probe_model_known") ?? true
+          : knownModelMatch
+            ? true
+            : null;
+        return {
+          backend,
+          model_id: directMatch ? modelId : knownModels.find((entry) => modelSet.has(entry)) ?? candidateModels[0] ?? modelId,
+          probe_healthy: probeHealthy,
+          probe_model_known: probeModelKnown,
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+    const ready = matched.find((entry) => entry.probe_healthy === true && entry.probe_model_known === true);
+    if (ready) {
+      const endpoint = String(ready.backend.endpoint ?? "http://127.0.0.1:11434").trim();
+      signals.set(agent.agent_id, {
+        state: "ready",
+        activity: "Ollama Gemma model ready",
+        detail: `${ready.model_id} via ${endpoint}`,
+        location: "desk",
+      });
+      continue;
+    }
+    const liveModel = ollamaProbe.known_models.find((entry) => modelSet.has(entry));
+    if (ollamaProbe.service_ok && liveModel) {
+      signals.set(agent.agent_id, {
+        state: "ready",
+        activity: "Ollama Gemma model ready",
+        detail: `${liveModel} via ${ollamaProbe.endpoint}`,
+        location: "desk",
+      });
+      continue;
+    }
+    const explicitDown = matched.find((entry) => entry.probe_healthy === false || entry.probe_model_known === false);
+    if (explicitDown || (ollamaProbe.service_down && !liveModel)) {
+      const endpoint = String(explicitDown?.backend.endpoint ?? "http://127.0.0.1:11434").trim();
+      signals.set(agent.agent_id, {
+        state: "offline",
+        activity: "Ollama Gemma model unavailable",
+        detail: explicitDown ? `${explicitDown.model_id} via ${endpoint}` : `Ollama tags unavailable via ${ollamaProbe.endpoint}`,
+        location: "ops",
+      });
+      continue;
+    }
+    signals.set(agent.agent_id, {
+      state: "sleeping",
+      activity: "Ollama Gemma readiness not yet observed",
+      detail: ollamaBackends.length > 0 ? "Gemma model availability is not confirmed" : "Ollama probe is not present",
+      location: "sofa",
+    });
+  }
+  return signals;
 }
 
 function buildTaskSignals(
@@ -585,6 +790,7 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const blockedSignals = buildAdapterBlocks(adapter, nowSeconds);
   const chatSignals = buildChatSignals(busTail, nowSeconds);
   const providerSignals = buildProviderSignals(raw);
+  const localBackendSignals = buildLocalBackendSignals(raw, catalog);
   const turnRecent =
     Boolean(String(latestTurn.turn_id ?? "").trim() || String(latestTurn.updated_at ?? "").trim()) &&
     ageSeconds(latestTurn.updated_at, nowSeconds) <= 300;
@@ -603,9 +809,11 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
     const session = sessionSignals.get(agent.agent_id);
     const chat = chatSignals.get(agent.agent_id);
     const provider = providerSignals.get(agent.agent_id);
+    const localBackend = localBackendSignals.get(agent.agent_id);
     const providerRuntimeReady = !provider || provider.state === "ready";
-    const directPresenceAllowed = providerRuntimeReady;
-    const turnPresenceAllowed = !blocked && providerRuntimeReady;
+    const localBackendReady = !localBackend || localBackend.state === "ready";
+    const directPresenceAllowed = providerRuntimeReady && localBackendReady;
+    const turnPresenceAllowed = !blocked && providerRuntimeReady && localBackendReady;
 
     if (directPresenceAllowed && owner?.state === "running") {
       state = "working";
@@ -627,6 +835,18 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
       activity = compactSingleLine(latestTurn.selected_strategy || latestTurn.user_prompt || "active turn", 56);
       evidenceSource = "turn";
       evidenceDetail = String(latestTurn.turn_id ?? "active-turn");
+    } else if (!blocked && provider?.state === "ready") {
+      state = provider.state;
+      location = provider.location;
+      activity = provider.activity;
+      evidenceSource = "provider_bridge";
+      evidenceDetail = provider.detail;
+    } else if (!blocked && localBackend?.state === "ready") {
+      state = localBackend.state;
+      location = localBackend.location;
+      activity = localBackend.activity;
+      evidenceSource = "local_backend";
+      evidenceDetail = localBackend.detail;
     } else if (turnPresenceAllowed && turnRecent && expectedAgents.has(agent.agent_id)) {
       state = "idle";
       activity = "waiting on the next turn";
@@ -645,6 +865,12 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         : provider.activity;
       evidenceSource = "provider_bridge";
       evidenceDetail = provider.detail;
+    } else if (localBackend && ["ready", "sleeping"].includes(localBackend.state)) {
+      state = localBackend.state;
+      location = localBackend.location;
+      activity = localBackend.activity;
+      evidenceSource = "local_backend";
+      evidenceDetail = localBackend.detail;
     } else if (blocked) {
       state = blocked.state;
       activity = blocked.detail;
@@ -656,6 +882,12 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
       activity = provider.activity;
       evidenceSource = "provider_bridge";
       evidenceDetail = provider.detail;
+    } else if (localBackend) {
+      state = localBackend.state;
+      location = localBackend.location;
+      activity = localBackend.activity;
+      evidenceSource = "local_backend";
+      evidenceDetail = localBackend.detail;
     } else if (directPresenceAllowed && chat) {
       state = chat.state;
       location = chat.state === "talking" ? "cooler" : "lounge";

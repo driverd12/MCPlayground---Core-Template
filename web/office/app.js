@@ -204,6 +204,7 @@
     var id = entryAgentId(entry);
     if (/codex/.test(id)) return "codex";
     if (/claude/.test(id)) return "claude";
+    if (/gemma/.test(id)) return "gemma";
     if (/gemini/.test(id)) return "gemini";
     if (/cursor/.test(id)) return "cursor";
     if (/copilot/.test(id)) return "copilot";
@@ -225,6 +226,7 @@
     var persona = agentPersona(entry);
     if (persona === "codex") return "current orchestrator";
     if (persona === "gemini") return "quota-aware research lane";
+    if (persona === "gemma") return "fast local Ollama lane";
     if (persona === "copilot") return isAgentUnavailable(entry) ? "configured, unavailable" : "IDE assist lane";
     if (persona === "cursor") return "IDE implementation lane";
     if (persona === "claude") return "review and critique lane";
@@ -285,16 +287,19 @@
     var stateName = agent && agent.state ? agent.state : "idle";
     var fill = toneForState(stateName);
     var persona = agentPersona(agent);
+    var rosterAccent = agent && agent.agent ? String(agent.agent.accent_color || "").trim() : "";
     var personaAccent = {
       codex: "#7fc99c",
       claude: "#d78e58",
-      gemini: "#8da0d6",
+      gemini: "#32c26b",
+      gemma: "#4285f4",
       cursor: "#6db5ae",
       copilot: "#9fc36b",
       research: "#c883c8",
       builder: "#d9b35f",
       agent: "#f2f1e8",
-    }[persona] || "#f2f1e8";
+    }[persona] || rosterAccent || "#f2f1e8";
+    if (rosterAccent) personaAccent = rosterAccent;
     var eye = stateName === "sleeping" ? "#1e2430" : persona === "codex" ? "#72ff9c" : "#111317";
     var accent = stateName === "blocked" ? "#d96c6c" : personaAccent;
     var motion = stateName === "working" ? 1 : stateName === "talking" ? 2 : 0;
@@ -306,6 +311,10 @@
     var gem =
       persona === "gemini"
         ? '<path d="M48 12 L58 24 L48 36 L38 24 Z" fill="' + accent + '" opacity="0.9" />'
+        : "";
+    var localCore =
+      persona === "gemma"
+        ? '<circle cx="48" cy="24" r="12" fill="' + accent + '" opacity="0.9" /><circle cx="48" cy="24" r="5" fill="#f2f1e8" opacity="0.85" />'
         : "";
     var visor =
       persona === "cursor"
@@ -319,6 +328,7 @@
       '<svg viewBox="0 0 96 96" aria-hidden="true">' +
       crown +
       gem +
+      localCore +
       dish +
       '<rect x="28" y="22" width="40" height="8" fill="' + accent + '" />' +
       '<rect x="18" y="30" width="60" height="22" fill="' + fill + '" />' +
@@ -477,7 +487,7 @@
         .filter(Boolean);
     }
     var roster = state.snapshot && state.snapshot.roster && Array.isArray(state.snapshot.roster.agents) ? state.snapshot.roster.agents : [];
-    var preferredIds = ["codex", "claude", "cursor", "gemini"];
+    var preferredIds = ["codex", "claude", "cursor", "gemini", "gemma-local"];
     var byId = {};
     roster.forEach(function (entry) {
       if (!entry || typeof entry !== "object") return;
@@ -2232,7 +2242,7 @@
       [
         "CLI Toolkit",
         (toolkit.terminal_toolkit_ready
-          ? "codex / cursor / gemini / gh available for autonomous terminal execution."
+          ? "codex / cursor / gemini / gemma-local / gh available for autonomous terminal execution."
           : "CLI toolkit is not fully enabled yet.")
       ],
       [

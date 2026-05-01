@@ -71,6 +71,18 @@ function loadRosterConfig() {
             provider: String(entry.provider ?? "").trim() || undefined,
             auth_mode: String(entry.auth_mode ?? "").trim() || undefined,
             role_lane: String(entry.role_lane ?? "").trim() || undefined,
+            proxy_endpoint: String(entry.proxy_endpoint ?? "").trim() || undefined,
+            available_models: Array.isArray(entry.available_models)
+              ? entry.available_models.map((name) => String(name).trim()).filter(Boolean)
+              : undefined,
+            default_model: String(entry.default_model ?? "").trim() || undefined,
+            failover_regions: Array.isArray(entry.failover_regions)
+              ? entry.failover_regions.map((name) => String(name).trim()).filter(Boolean)
+              : undefined,
+            vertex_project_env_var: String(entry.vertex_project_env_var ?? "").trim() || undefined,
+            ollama_models: Array.isArray(entry.ollama_models)
+              ? entry.ollama_models.map((name) => String(name).trim()).filter(Boolean)
+              : undefined,
             bridge_env_var: String(entry.bridge_env_var ?? "").trim() || undefined,
             bridge_script_names: Array.isArray(entry.bridge_script_names)
               ? entry.bridge_script_names.map((name) => String(name).trim()).filter(Boolean)

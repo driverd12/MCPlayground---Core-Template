@@ -723,6 +723,35 @@ function buildPersistedProviderBridgeDiagnostics(autonomyMaintainState: Record<s
   };
 }
 
+function shouldRefreshProviderBridgeDiagnosticsForOffice(
+  input: z.infer<typeof officeSnapshotSchema>,
+  diagnostics: ReturnType<typeof buildPersistedProviderBridgeDiagnostics>
+) {
+  const metadata = asRecord(input.metadata);
+  const source = String(metadata.source ?? "").trim().toLowerCase();
+  return diagnostics.stale === true || source === "http.live";
+}
+
+function buildOfficeProviderBridgeDiagnostics(
+  autonomyMaintainState: Record<string, unknown>,
+  input: z.infer<typeof officeSnapshotSchema>
+) {
+  const persisted = buildPersistedProviderBridgeDiagnostics(autonomyMaintainState);
+  if (!shouldRefreshProviderBridgeDiagnosticsForOffice(input, persisted)) {
+    return persisted;
+  }
+  try {
+    const live = resolveProviderBridgeDiagnostics({
+      workspace_root: process.cwd(),
+      bypass_cache: true,
+      probe_timeout_ms: 3000,
+    });
+    return live.diagnostics.length > 0 ? live : persisted;
+  } catch {
+    return persisted;
+  }
+}
+
 function buildOfficeSetupDiagnostics(params: {
   kernel: Record<string, unknown>;
   providerBridge: {
@@ -919,14 +948,21 @@ function buildRosterPayload(
     agents: getTriChatAgentCatalog().map((agent) => ({
       agent_id: agent.agent_id,
       display_name: agent.display_name,
-      provider: agent.provider ?? null,
-      role_lane: agent.role_lane ?? "support",
-      coordination_tier: agent.coordination_tier ?? "support",
-      parent_agent_id: agent.parent_agent_id ?? "",
-      managed_agent_ids: agent.managed_agent_ids ?? [],
-      accent_color: agent.accent_color ?? "",
-      enabled: agent.enabled !== false,
-    })),
+	      provider: agent.provider ?? null,
+	      auth_mode: agent.auth_mode ?? null,
+	      role_lane: agent.role_lane ?? "support",
+	      coordination_tier: agent.coordination_tier ?? "support",
+	      parent_agent_id: agent.parent_agent_id ?? "",
+	      managed_agent_ids: agent.managed_agent_ids ?? [],
+	      accent_color: agent.accent_color ?? "",
+	      proxy_endpoint: agent.proxy_endpoint ?? "",
+	      available_models: agent.available_models ?? [],
+	      default_model: agent.default_model ?? "",
+	      failover_regions: agent.failover_regions ?? [],
+	      vertex_project_env_var: agent.vertex_project_env_var ?? "",
+	      ollama_models: agent.ollama_models ?? [],
+	      enabled: agent.enabled !== false,
+	    })),
     source: "office.snapshot",
   };
 }
@@ -1334,14 +1370,21 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     agents: getTriChatAgentCatalog().map((agent) => ({
       agent_id: agent.agent_id,
       display_name: agent.display_name,
-      provider: agent.provider ?? null,
-      role_lane: agent.role_lane ?? "support",
-      coordination_tier: agent.coordination_tier ?? "support",
-      parent_agent_id: agent.parent_agent_id ?? "",
-      managed_agent_ids: agent.managed_agent_ids ?? [],
-      accent_color: agent.accent_color ?? "",
-      enabled: agent.enabled !== false,
-    })),
+	      provider: agent.provider ?? null,
+	      auth_mode: agent.auth_mode ?? null,
+	      role_lane: agent.role_lane ?? "support",
+	      coordination_tier: agent.coordination_tier ?? "support",
+	      parent_agent_id: agent.parent_agent_id ?? "",
+	      managed_agent_ids: agent.managed_agent_ids ?? [],
+	      accent_color: agent.accent_color ?? "",
+	      proxy_endpoint: agent.proxy_endpoint ?? "",
+	      available_models: agent.available_models ?? [],
+	      default_model: agent.default_model ?? "",
+	      failover_regions: agent.failover_regions ?? [],
+	      vertex_project_env_var: agent.vertex_project_env_var ?? "",
+	      ollama_models: agent.ollama_models ?? [],
+	      enabled: agent.enabled !== false,
+	    })),
     source: "office.snapshot",
   }), () =>
     buildRosterPayload(workboard, agentSessions, learning, autopilot)
@@ -1467,7 +1510,11 @@ export function computeOfficeSnapshot(storage: Storage, input: z.infer<typeof of
     summarizeAutonomyMaintainState(storage)
   );
   const autonomyMaintainState = asRecord(autonomyMaintain.state);
-  const selectedProviderBridgeDiagnostics = buildPersistedProviderBridgeDiagnostics(autonomyMaintainState);
+  const selectedProviderBridgeDiagnostics = safe(
+    "provider_bridge_diagnostics",
+    () => buildPersistedProviderBridgeDiagnostics(autonomyMaintainState),
+    () => buildOfficeProviderBridgeDiagnostics(autonomyMaintainState, input)
+  );
   const providerBridge = safe<ProviderBridgePayload>(
     "provider_bridge",
     () => ({
