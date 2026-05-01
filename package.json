@@ -91,6 +91,8 @@
     "providers:diagnose": "node ./scripts/run_sh.mjs ./scripts/provider_bridge.sh diagnose",
     "providers:export": "node ./scripts/run_sh.mjs ./scripts/provider_bridge.sh export",
     "providers:install": "node ./scripts/run_sh.mjs ./scripts/provider_bridge.sh install",
+    "gemini:litellm:install": "node ./scripts/run_sh.mjs ./scripts/gemini_litellm_install.sh",
+    "gemini:litellm:doctor": "node ./scripts/run_sh.mjs ./scripts/gemini_litellm_doctor.sh",
     "storage:review": "node ./scripts/storage_guard_review.mjs",
     "claude:terminal": "node ./scripts/run_sh.mjs ./scripts/claude_code_terminal_open.sh",
     "claude:terminal:send": "node ./scripts/run_sh.mjs ./scripts/claude_code_terminal_send.sh",

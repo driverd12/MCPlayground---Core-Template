@@ -1,0 +1,15 @@
+model_list:
+__VERTEX_REGION_MODEL_LIST__
+
+router_settings:
+  routing_strategy: usage-based-routing
+  num_retries: 3
+  allowed_fails: 2
+  cooldown_time: 60
+  enable_health_check_routing: true
+
+# Render with:
+#   scripts/gemini_litellm_install.sh --project-id __GCP_PROJECT_ID__ --regions __VERTEX_REGIONS__
+#
+# Credentials are intentionally not embedded in this file. LiteLLM reads ADC via
+# GOOGLE_APPLICATION_CREDENTIALS=__ADC_PATH__ from the launchd environment.

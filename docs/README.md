@@ -15,6 +15,7 @@ This is the centralized human-facing docs hub for MASTER MOLD.
 - [System Interconnects](./SYSTEM_INTERCONNECTS.md)
 - [Architecture Pitch](./ARCHITECTURE_PITCH.md)
 - [Provider Bridge Matrix](./PROVIDER_BRIDGE_MATRIX.md)
+- [Gemini Vertex LiteLLM Framework](./GEMINI_VERTEX_LITELLM.md)
 - [Ring Leader MCP Ops](./RING_LEADER_MCP_OPS.md)
 
 ## Operations and Runbooks

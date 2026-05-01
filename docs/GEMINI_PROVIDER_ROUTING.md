@@ -42,6 +42,10 @@ GEMINI_ROUTER_FALLBACK_PROVIDERS=codex,claude-cli,ollama
 ## Operator Checklist
 
 - Confirm which path is intended: AI Studio API key, Vertex AI, or CLI-only/manual.
+- For Vertex AI with regional failover, use the repo-owned LiteLLM framework in
+  [Gemini Vertex LiteLLM Framework](./GEMINI_VERTEX_LITELLM.md). It renders
+  local-only config from templates and does not commit project IDs, ADC JSON, or
+  OAuth material.
 - Add non-secret backend metadata to provider config.
 - Store keys/service-account material only through the provider secret bridge.
 - Probe each configured backend with a tiny request before marking it ready.
