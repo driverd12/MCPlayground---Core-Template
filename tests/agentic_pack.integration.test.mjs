@@ -162,7 +162,7 @@ async function openClient(dbPath, extraEnv) {
       ANAMNESIS_HUB_DB_PATH: dbPath,
       ...extraEnv,
     }),
-    stderr: "pipe",
+    stderr: "inherit",
   });
 
   const client = new Client(

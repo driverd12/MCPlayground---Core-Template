@@ -901,9 +901,9 @@ function resolveLocalBridgeResourceGateFromState(state: WorkerFabricStateRecord)
   }
   if (telemetry.cpu_utilization !== null && telemetry.cpu_utilization >= 0.92) {
     triggers.push({
-      severity: "high",
+      severity: "moderate",
       reason: "cpu_saturated",
-      detail: "CPU utilization is saturated on the local host; suppress outbound bridges until load drops.",
+      detail: "CPU utilization is saturated on the local host; avoid expanding visible local sidecars until load drops.",
     });
   }
   if (ramFreeRatio !== null && ramFreeRatio < 0.12) {
@@ -936,9 +936,9 @@ function resolveLocalBridgeResourceGateFromState(state: WorkerFabricStateRecord)
   }
   if (healthScore < 0.45) {
     triggers.push({
-      severity: "high",
+      severity: "moderate",
       reason: "host_health_degraded",
-      detail: "The computed local host health score is below the minimum safe threshold for bridge escalation.",
+      detail: "The computed local host health score is below the preferred threshold for bridge escalation.",
     });
   }
 

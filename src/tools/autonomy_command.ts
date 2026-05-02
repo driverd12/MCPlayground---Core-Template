@@ -577,10 +577,10 @@ export async function autonomyCommand(
           matched_specialist_domains: matchedDomains,
           specialist_agent_ids: specialistAgentIds,
           support_agent_ids: bridgeReadySupportAgentIds,
+          ...intakeMetadata,
           ...modelRouterMetadata,
           swarm_profile: effectiveSwarmProfile,
           memory_preflight: memoryPreflight,
-          ...intakeMetadata,
         },
         ...source,
       })) as { goal: GoalRecord };
@@ -635,10 +635,10 @@ export async function autonomyCommand(
             matched_specialist_domains: matchedDomains,
             specialist_agent_ids: specialistAgentIds,
             support_agent_ids: bridgeReadySupportAgentIds,
+            ...intakeMetadata,
             ...modelRouterMetadata,
             swarm_profile: effectiveSwarmProfile,
             memory_preflight: memoryPreflight,
-            ...intakeMetadata,
           },
           ...source,
         })) as Record<string, unknown>;

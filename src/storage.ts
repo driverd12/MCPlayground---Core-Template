@@ -1403,6 +1403,7 @@ export type ProviderBridgeDiagnosticSnapshotRecord = {
   notes: string[];
   command: string | null;
   config_path: string | null;
+  metadata?: Record<string, unknown>;
 };
 
 export type ReactionEngineNotificationRecord = {
@@ -16847,6 +16848,10 @@ function normalizeProviderBridgeDiagnosticSnapshot(value: unknown): ProviderBrid
     notes: dedupeNonEmpty(Array.isArray(record.notes) ? record.notes.map((entry: unknown) => String(entry ?? "")) : []),
     command: asNullableString(record.command)?.trim() || null,
     config_path: asNullableString(record.config_path)?.trim() || null,
+    metadata:
+      record.metadata && typeof record.metadata === "object" && !Array.isArray(record.metadata)
+        ? parseLooseObject(record.metadata)
+        : undefined,
   };
 }
 

@@ -1709,7 +1709,7 @@ async function openClient(extraEnv) {
     args: ["dist/server.js"],
     cwd: REPO_ROOT,
     env: inheritedEnv(extraEnv),
-    stderr: "pipe",
+    stderr: "inherit",
   });
   const client = new Client(
     { name: "mcp-autonomy-bootstrap-test", version: "0.1.0" },
@@ -1733,6 +1733,13 @@ function inheritedEnv(extra) {
       env[key] = value;
     }
   }
+  Object.assign(env, {
+    ANAMNESIS_HUB_STARTUP_BACKUP: "0",
+    MCP_AUTONOMY_BOOTSTRAP_ON_START: "0",
+    MCP_AUTONOMY_MAINTAIN_ON_START: "0",
+    TRICHAT_BUS_AUTOSTART: "0",
+    TRICHAT_RING_LEADER_AUTOSTART: "0",
+  });
   for (const [key, value] of Object.entries(extra)) {
     env[key] = value;
   }

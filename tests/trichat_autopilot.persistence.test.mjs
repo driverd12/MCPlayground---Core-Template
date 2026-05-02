@@ -680,7 +680,7 @@ async function openClient(dbPath, extraEnv = {}) {
       TRICHAT_BUS_SOCKET_PATH: path.join(path.dirname(dbPath), "trichat.bus.sock"),
       ...extraEnv,
     }),
-    stderr: "pipe",
+    stderr: "inherit",
   });
   const client = new Client(
     { name: "mcp-trichat-autopilot-persistence-test", version: "0.1.0" },

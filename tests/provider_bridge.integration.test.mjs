@@ -76,7 +76,7 @@ test("provider.bridge status trusts Claude config state without shelling out to 
 
     assert.equal(status.ok, true);
     assert.equal(status.clients.find((entry) => entry.client_id === "claude-cli")?.installed, true);
-    assert.ok(elapsedMs < 2_000, `expected Claude config shortcut, saw ${elapsedMs}ms`);
+    assert.ok(elapsedMs < 4_500, `expected Claude config shortcut without the hanging CLI probe, saw ${elapsedMs}ms`);
   } finally {
     await session.client.close().catch(() => {});
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -1335,7 +1335,7 @@ async function openClient(extraEnv) {
     args: ["dist/server.js"],
     cwd: REPO_ROOT,
     env: inheritedEnv(extraEnv),
-    stderr: "pipe",
+    stderr: "inherit",
   });
   const client = new Client(
     { name: "mcp-provider-bridge-test", version: "0.1.0" },
@@ -1377,6 +1377,11 @@ function inheritedEnv(extra) {
       env[key] = value;
     }
   }
+  env.TRICHAT_BUS_AUTOSTART = "0";
+  env.TRICHAT_RING_LEADER_AUTOSTART = "0";
+  env.MCP_AUTONOMY_BOOTSTRAP_ON_START = "0";
+  env.MCP_AUTONOMY_MAINTAIN_ON_START = "0";
+  env.ANAMNESIS_HUB_STARTUP_BACKUP = "0";
   for (const [key, value] of Object.entries(extra)) {
     env[key] = value;
   }

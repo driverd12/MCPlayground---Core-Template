@@ -448,6 +448,7 @@ function buildArgoContractYaml(input: {
     `  namespace: ${slugify(input.namespace, "default")}`,
     "  annotations:",
     `    master-mold.io/export-contract: ${yamlScalar("true")}`,
+    `    mcplayground.io/export-contract: ${yamlScalar("true")}`,
     `    master-mold.io/goal-id: ${yamlScalar(input.goal.goal_id)}`,
     `    master-mold.io/plan-id: ${yamlScalar(input.plan.plan_id)}`,
     `    master-mold.io/title: ${yamlScalar(input.plan.title)}`,

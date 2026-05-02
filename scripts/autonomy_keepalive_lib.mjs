@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from "node:crypto";
 import {
   acquireRunnerSingletonLock,
   callTool,
@@ -10,6 +11,15 @@ import {
 const SOURCE_CLIENT = "autonomy.keepalive.launchd";
 const LOCK_NAME = "autonomy-keepalive-runner";
 const KEEPALIVE_TEMPFAIL_EXIT_CODE = 75;
+
+function resolveKeepaliveLockName(env) {
+  const dbPath = String(env.ANAMNESIS_HUB_DB_PATH || "").trim();
+  if (!dbPath || /\/data\/hub\.sqlite$/.test(dbPath)) {
+    return LOCK_NAME;
+  }
+  const digest = crypto.createHash("sha256").update(dbPath).digest("hex").slice(0, 12);
+  return `${LOCK_NAME}-${digest}`;
+}
 
 export function buildKeepaliveArgs({ env, now, pid }) {
   return {
@@ -114,7 +124,26 @@ export async function runAutonomyKeepaliveOnce({
   acquireLockFn = acquireRunnerSingletonLock,
 }) {
   const lockTimeoutMs = parseIntValue(env.AUTONOMY_KEEPALIVE_SINGLETON_TIMEOUT_MS, 15000, 1000, 120000);
-  const lock = await acquireLockFn(repoRoot, LOCK_NAME, lockTimeoutMs);
+  const lockName = resolveKeepaliveLockName(env);
+  if (transport === "http") {
+    const ready = await waitForHttpReadyFn(repoRoot, {
+      timeoutMs: parseIntValue(env.AUTONOMY_KEEPALIVE_HTTP_READY_TIMEOUT_MS, 20000, 1000, 120000),
+      intervalMs: 500,
+    });
+    if (!ready) {
+      return buildRetryableKeepaliveFailure({
+        reason: "http_not_ready",
+        transport,
+        singletonLock: {
+          name: lockName,
+          acquired: false,
+          timeout_ms: lockTimeoutMs,
+        },
+      });
+    }
+  }
+
+  const lock = await acquireLockFn(repoRoot, lockName, lockTimeoutMs);
   if (!lock?.ok) {
     return {
       ok: true,
@@ -123,7 +152,7 @@ export async function runAutonomyKeepaliveOnce({
       source_client: SOURCE_CLIENT,
       transport,
       singleton_lock: {
-        name: LOCK_NAME,
+        name: lockName,
         acquired: false,
         timeout_ms: lockTimeoutMs,
       },
@@ -132,24 +161,6 @@ export async function runAutonomyKeepaliveOnce({
 
   const release = typeof lock.release === "function" ? lock.release : () => {};
   try {
-    if (transport === "http") {
-      const ready = await waitForHttpReadyFn(repoRoot, {
-        timeoutMs: parseIntValue(env.AUTONOMY_KEEPALIVE_HTTP_READY_TIMEOUT_MS, 20000, 1000, 120000),
-        intervalMs: 500,
-      });
-      if (!ready) {
-        return buildRetryableKeepaliveFailure({
-          reason: "http_not_ready",
-          transport,
-          singletonLock: {
-            name: LOCK_NAME,
-            acquired: true,
-            timeout_ms: lockTimeoutMs,
-          },
-        });
-      }
-    }
-
     const args = buildKeepaliveArgs({ env, now, pid });
     let result;
     try {

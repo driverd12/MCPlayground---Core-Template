@@ -82,7 +82,7 @@ async function openClient(dbPath) {
       ANAMNESIS_HUB_DB_PATH: dbPath,
       TRICHAT_BUS_SOCKET_PATH: path.join(path.dirname(dbPath), "trichat.bus.sock"),
     }),
-    stderr: "pipe",
+    stderr: "inherit",
   });
   const client = new Client(
     { name: "mcp-trichat-retention-persistence-test", version: "0.1.0" },

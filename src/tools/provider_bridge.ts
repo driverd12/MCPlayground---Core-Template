@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { probeLiteLlmProxyHealth, resolveLiteLlmProxyEndpoint } from "../litellm_proxy_probe.js";
 import { Storage } from "../storage.js";
 import { getTriChatAgent, getTriChatBridgeCandidates } from "../trichat_roster.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
@@ -466,6 +467,11 @@ export function applyProviderBridgeDiagnosticsToSnapshot(
   const routerBackendCandidates = snapshot.router_backend_candidates.map((entry) => {
     const runtimeReady = resolveDiagnosticsRuntimeReady(entry, diagnosticsByClient, diagnosticsState.stale === true);
     const reason = resolveDiagnosticsRuntimeReason(entry, diagnosticsByClient, diagnosticsState.stale === true);
+    const diagnostic = diagnosticsByClient.get(entry.client_id);
+    const diagnosticMetadata =
+      diagnostic?.metadata && typeof diagnostic.metadata === "object" && !Array.isArray(diagnostic.metadata)
+        ? (diagnostic.metadata as Record<string, unknown>)
+        : null;
     return {
       ...entry,
       eligible: entry.eligible && runtimeReady,
@@ -474,6 +480,7 @@ export function applyProviderBridgeDiagnosticsToSnapshot(
         ...entry.backend,
         metadata: {
           ...entry.backend.metadata,
+          ...(diagnosticMetadata ? diagnosticMetadata : {}),
           runtime_ready: runtimeReady,
           runtime_ready_source:
             diagnosticsState.diagnostics.length > 0
@@ -632,7 +639,7 @@ function listProcessLines(pattern: string) {
   const result = spawnSync("pgrep", ["-fal", pattern], {
     encoding: "utf8",
     env: process.env,
-    timeout: 5000,
+    timeout: 500,
   });
   if (result.status !== 0) {
     return [];
@@ -746,12 +753,7 @@ function readGeminiAdcState() {
 }
 
 function resolveGeminiProxyEndpoint() {
-  return normalizeBaseUrl(
-    readEnvString("TRICHAT_GEMINI_PROXY_ENDPOINT") ??
-      readEnvString("GOOGLE_VERTEX_BASE_URL") ??
-      readEnvString("GOOGLE_GEMINI_BASE_URL") ??
-      "http://127.0.0.1:4000"
-  );
+  return resolveLiteLlmProxyEndpoint();
 }
 
 function parseLiteLlmHealthBody(body: string) {
@@ -810,39 +812,13 @@ function runLiteLlmHealthCurl(endpoint: string, pathSuffix: string, timeoutMs: n
 }
 
 function probeGeminiLiteLlmProxy(timeoutMs: number) {
-  const endpoint = resolveGeminiProxyEndpoint();
-  const readinessTimeoutMs = Math.max(250, Math.min(timeoutMs, 3000));
-  const endpointAuditTimeoutMs = Math.max(250, Math.min(timeoutMs, geminiLiteLlmEndpointAuditTimeoutMs()));
-  const readiness = runLiteLlmHealthCurl(endpoint, "/health/readiness", readinessTimeoutMs);
-  const endpointAudit = runLiteLlmHealthCurl(endpoint, "/health", endpointAuditTimeoutMs);
-  const readinessBody = parseLiteLlmHealthBody(readiness.body);
-  const endpointBody = parseLiteLlmHealthBody(endpointAudit.body);
-  const readinessHealthy =
-    readiness.healthy &&
-    (readinessBody.readiness_status === null || readinessBody.readiness_status.toLowerCase() === "healthy");
-  const endpointAuditHealthy = endpointAudit.healthy;
-  const healthy = readinessHealthy || (!readiness.healthy && endpointAuditHealthy);
-  const degraded = healthy && !endpointAuditHealthy;
-  const healthHttp = readiness.healthy ? readiness.httpStatus : endpointAudit.httpStatus;
-  const healthPath = readiness.healthy ? readiness.path : endpointAudit.path;
-  const error = healthy
-    ? null
-    : readiness.error ?? endpointAudit.error ?? "LiteLLM proxy health check failed.";
-  return {
-    endpoint,
-    healthy,
-    degraded,
-    health_http: healthHttp,
-    health_path: healthPath,
-    service_http: readiness.httpStatus,
-    service_healthy: readinessHealthy,
-    endpoint_health_http: endpointAudit.httpStatus,
-    endpoint_health_error: endpointAuditHealthy ? null : endpointAudit.error,
-    checked_at: new Date().toISOString(),
-    error,
-    healthy_count: endpointBody.healthy_count,
-    unhealthy_count: endpointBody.unhealthy_count,
-  };
+  // Provider status is an operator overview path; keep it lightweight and let
+  // health.litellm_proxy perform the deeper endpoint inventory probe.
+  const readinessTimeoutMs = Math.max(250, Math.min(timeoutMs, 500));
+  return probeLiteLlmProxyHealth({
+    timeout_ms: readinessTimeoutMs,
+    endpoint_audit_timeout_ms: Math.max(250, Math.min(readinessTimeoutMs, geminiLiteLlmEndpointAuditTimeoutMs(), 250)),
+  });
 }
 
 function resolveLocalFirstAgents() {
@@ -2914,6 +2890,9 @@ export async function providerBridge(
         router_backend_candidates: selectedRouterBackends,
         eligible_router_backends: selectedRouterBackends.filter((entry) => entry.eligible).map((entry) => entry.backend),
         clients: selectedStatus,
+        diagnostics: selectedDiagnostics,
+        diagnostics_generated_at: diagnostics.generated_at,
+        diagnostics_stale: diagnostics.stale ?? false,
         onboarding,
       };
     }

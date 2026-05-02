@@ -26,7 +26,7 @@ test("trichat.bus streams message_post events over Unix socket while persisting 
       TRICHAT_BUS_SOCKET_PATH: busSocketPath,
       MCP_BACKGROUND_OWNER: "1",
     }),
-    stderr: "pipe",
+    stderr: "inherit",
   });
   const client = new Client(
     { name: "mcp-trichat-bus-test-client", version: "0.1.0" },
@@ -144,7 +144,7 @@ test("trichat.bus self-heals stale socket artifacts on startup", async () => {
       TRICHAT_BUS_SOCKET_PATH: busSocketPath,
       MCP_BACKGROUND_OWNER: "1",
     }),
-    stderr: "pipe",
+    stderr: "inherit",
   });
   const client = new Client(
     { name: "mcp-trichat-bus-stale-socket-test-client", version: "0.1.0" },

@@ -727,7 +727,9 @@ Key variables:
 - `TRICHAT_CLAUDE_EXECUTABLE` / `TRICHAT_CLAUDE_ARGS` provider CLI override
 - `TRICHAT_CODEX_EXECUTABLE` / `TRICHAT_CURSOR_EXECUTABLE` override the provider binary inside the wrapper
 - `TRICHAT_GEMINI_MODE` select `auto`, `cli`, or `api`
-- `TRICHAT_GEMINI_MODEL` override Gemini API model (`gemini-2.0-flash` default)
+- `TRICHAT_GEMINI_MODEL` override Gemini model (`gemini-2.5-flash` default)
+- `TRICHAT_GEMINI_PROXY_ENDPOINT` override the local LiteLLM proxy endpoint; default `http://127.0.0.1:4000`
+- `TRICHAT_LITELLM_CONFIG_PATH` override the local proxy config path; default `~/.gemini/proxy/config.yaml`
 - `TRICHAT_IMPRINT_MODEL` / `TRICHAT_OLLAMA_URL` control the local imprint lane
 - `TRICHAT_LOCAL_INFERENCE_PROVIDER` selects `auto`, `ollama`, or `mlx` for the local bridge lane
 - `TRICHAT_MLX_PYTHON` / `TRICHAT_MLX_MODEL` / `TRICHAT_MLX_ENDPOINT` define the optional Metal-backed MLX lane
@@ -737,9 +739,16 @@ Key variables:
 - `TRICHAT_MLX_SERVER_ENABLED=1` enables a managed local `mlx_lm.server` launch agent; leave it `0` to keep MLX installed but not auto-served
 - `TRICHAT_BRIDGE_TIMEOUT_SECONDS` bound per-bridge request time
 - `TRICHAT_BRIDGE_MAX_RETRIES` / `TRICHAT_BRIDGE_RETRY_BASE_MS` control wrapper-level transient retry behavior
-- `GEMINI_API_KEY` or `GOOGLE_API_KEY` enable direct Gemini API fallback
+- `GOOGLE_APPLICATION_CREDENTIALS` / Google ADC enable keyless Vertex AI access for the local Gemini proxy; `GEMINI_API_KEY` or `GOOGLE_API_KEY` remain direct API fallback only
 
 The runtime now quarantines non-SQLite/corrupted artifacts into `corrupt/` before recovery attempts so startup failures do not silently overwrite evidence.
+
+Gemini/Gemma proxy infrastructure:
+
+- Gemini CLI and MASTER-MOLD route Gemini models through a local LiteLLM proxy at `http://127.0.0.1:4000`. The proxy is persistent under macOS launchd and uses the operator's own Google ADC/browser OAuth credentials, not committed API keys.
+- The local proxy config is `~/.gemini/proxy/config.yaml`; keep that file and `~/.config/gcloud/application_default_credentials.json` outside the repo.
+- Health check: `curl -s http://127.0.0.1:4000/health | python3 -m json.tool`
+- `health.litellm_proxy`, `provider.bridge`, `kernel.summary`, and `office.snapshot` expose proxy health, region counts, and `gemma-local` Ollama availability. The router bootstrap helper is `node scripts/litellm_router_bootstrap.mjs --apply`.
 
 Local Metal setup:
 

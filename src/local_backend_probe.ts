@@ -32,6 +32,8 @@ type OllamaPsResponse = {
   }>;
 };
 
+export const EXPECTED_LOCAL_OLLAMA_MODELS = ["gemma3:4b", "gemma3:12b"];
+
 export type LocalBackendProbeResult = {
   provider: "ollama";
   generated_at: string;
@@ -50,6 +52,9 @@ export type LocalBackendProbeResult = {
   resident_vram_gb: number | null;
   resident_context_length: number | null;
   resident_expires_at: string | null;
+  expected_models: string[];
+  available_expected_models: string[];
+  missing_expected_models: string[];
   processor_summary: string | null;
   gpu_offload_ratio: number | null;
   known_models: string[];
@@ -329,6 +334,11 @@ export async function probeLocalOllamaBackend(input: {
     }
   }
 
+  const normalizedKnownModels = new Set(knownModels.map((entry) => entry.trim().toLowerCase()).filter(Boolean));
+  const availableExpectedModels = EXPECTED_LOCAL_OLLAMA_MODELS.filter((entry) =>
+    normalizedKnownModels.has(entry.toLowerCase())
+  );
+
   return {
     provider: "ollama",
     generated_at: generatedAt,
@@ -347,6 +357,9 @@ export async function probeLocalOllamaBackend(input: {
     resident_vram_gb: residentVramGb,
     resident_context_length: residentContextLength,
     resident_expires_at: residentExpiresAt,
+    expected_models: EXPECTED_LOCAL_OLLAMA_MODELS,
+    available_expected_models: availableExpectedModels,
+    missing_expected_models: EXPECTED_LOCAL_OLLAMA_MODELS.filter((entry) => !availableExpectedModels.includes(entry)),
     processor_summary: processorSummary,
     gpu_offload_ratio: gpuOffloadRatio,
     known_models: [...new Set(knownModels)],

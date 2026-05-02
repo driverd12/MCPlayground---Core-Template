@@ -1,10 +1,12 @@
 import fs from "node:fs";
 import { z } from "zod";
 import { Storage } from "../storage.js";
+import { probeLiteLlmProxyHealth, type LiteLlmProxyHealth } from "../litellm_proxy_probe.js";
 
 export const healthToolsSchema = z.object({});
 export const healthStorageSchema = z.object({});
 export const healthPolicySchema = z.object({});
+export const healthLiteLlmProxySchema = z.object({});
 
 export function healthTools(toolNames: string[]) {
   return {
@@ -44,5 +46,33 @@ export function healthPolicy() {
       "idempotency key and side effect fingerprint required for mutating tools",
       "destructive lifecycle actions default to safe mode unless explicitly execute",
     ],
+  };
+}
+
+export function healthLiteLlmProxy(
+  options: {
+    probe?: () => LiteLlmProxyHealth;
+  } = {}
+) {
+  const health = options.probe ? options.probe() : probeLiteLlmProxyHealth({ timeout_ms: 2500 });
+  const healthyCount = typeof health.healthy_count === "number" ? health.healthy_count : null;
+  const unhealthyCount = typeof health.unhealthy_count === "number" ? health.unhealthy_count : null;
+  const noHealthyEndpoints = healthyCount !== null && healthyCount <= 0;
+  const ok = health.healthy === true && !noHealthyEndpoints;
+  return {
+    ok,
+    status: ok ? (health.degraded || (unhealthyCount ?? 0) > 0 ? "degraded" : "up") : "down",
+    endpoint: health.endpoint,
+    checked_at: health.checked_at,
+    error: health.error,
+    healthy_count: healthyCount,
+    unhealthy_count: unhealthyCount,
+    total_endpoint_count: health.total_endpoint_count,
+    routing_strategy: health.routing_strategy,
+    model_region_counts: health.model_region_counts,
+    inventory_available: health.inventory_available === true,
+    service_healthy: health.service_healthy === true,
+    health_http: health.health_http ?? null,
+    health_path: health.health_path ?? null,
   };
 }

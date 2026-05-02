@@ -85,7 +85,7 @@ async function openClient(dbPath) {
     env: inheritedEnv({
       ANAMNESIS_HUB_DB_PATH: dbPath,
     }),
-    stderr: "pipe",
+    stderr: "inherit",
   });
   const client = new Client(
     { name: "mcp-auto-squish-persistence-test", version: "0.1.0" },

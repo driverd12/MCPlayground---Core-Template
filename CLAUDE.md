@@ -44,7 +44,7 @@ This repository uses the local MCP server as its **primary control plane**. Alwa
 Do not invent a second ingress path for shell, office, or external clients.
 
 **Health checks (call these before assuming something is broken):**
-- `health.tools`, `health.storage`, `migration.status`
+- `health.tools`, `health.storage`, `health.litellm_proxy`, `migration.status`
 - `trichat.autopilot` `{"action":"status"}`, `trichat.tmux_controller` `{"action":"status"}`
 
 **Desktop-control fallback:**
@@ -146,6 +146,7 @@ bridges/                   → IDE and CLI bridge adapters (Python + Node)
 scripts/                   → Launcher, validation, and operational helpers
 web/office/ + ui/          → GUI and terminal operator surfaces (Agent Office)
 config/trichat_agents.json → Agent roster definitions (14 agents)
+~/.gemini/proxy/config.yaml → LiteLLM proxy on port 4000 (51 Vertex AI endpoints + 2 Ollama entries, 53 total)
 data/hub.sqlite            → Primary durable state store — route all writes through MCP tools only
 ```
 

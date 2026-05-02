@@ -737,7 +737,7 @@ export function routeObjectiveBackends(
     fallback_worker_count: input.fallback_worker_count ?? 1,
     fallback_shell: input.fallback_shell ?? "/bin/zsh",
   });
-  const route = routeModelBackends(storage, {
+  let route = routeModelBackends(storage, {
     task_kind: taskKind,
     preferred_tags: preferredTags,
     required_tags: input.required_tags,
@@ -747,6 +747,28 @@ export function routeObjectiveBackends(
     fallback_worker_count: input.fallback_worker_count,
     fallback_shell: input.fallback_shell,
   });
+  const localFirstObjective =
+    preferredTags.some((tag) => tag.toLowerCase() === "local") &&
+    !objectiveExplicitlyRequestsHostedBridge(preferredTags);
+  if (
+    localFirstObjective &&
+    route.selected_backend &&
+    !isSelectableLocalBackend(route.selected_backend)
+  ) {
+    const localRoute = routeModelBackends(storage, {
+      task_kind: taskKind,
+      preferred_tags: preferredTags,
+      required_tags: [...new Set([...normalizeStringArray(input.required_tags), "local"])],
+      required_backend_ids: input.required_backend_ids,
+      quality_preference: input.quality_preference ?? "balanced",
+      fallback_workspace_root: input.fallback_workspace_root,
+      fallback_worker_count: input.fallback_worker_count,
+      fallback_shell: input.fallback_shell,
+    });
+    if (localRoute.selected_backend) {
+      route = localRoute;
+    }
+  }
   const topScore = typeof route.ranked_backends[0]?.score === "number" ? route.ranked_backends[0].score : null;
   const bridgeMargin =
     typeof input.bridge_margin === "number" && Number.isFinite(input.bridge_margin) ? Math.max(0, input.bridge_margin) : 0.08;

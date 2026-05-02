@@ -209,7 +209,16 @@ import { acquireLock, lockAcquireSchema, lockReleaseSchema, releaseLock } from "
 import { knowledgeDecay, knowledgeDecaySchema, knowledgePromote, knowledgePromoteSchema, retrievalHybrid, retrievalHybridSchema } from "./tools/knowledge.js";
 import { decisionLink, decisionLinkSchema } from "./tools/decision.js";
 import { simulateWorkflow, simulateWorkflowSchema } from "./tools/simulate.js";
-import { healthPolicy, healthPolicySchema, healthStorage, healthStorageSchema, healthTools, healthToolsSchema } from "./tools/health.js";
+import {
+  healthLiteLlmProxy,
+  healthLiteLlmProxySchema,
+  healthPolicy,
+  healthPolicySchema,
+  healthStorage,
+  healthStorageSchema,
+  healthTools,
+  healthToolsSchema,
+} from "./tools/health.js";
 import { storageBackups, storageBackupsSchema } from "./tools/storage_maintenance.js";
 import { incidentOpen, incidentOpenSchema, incidentTimeline, incidentTimelineSchema } from "./tools/incident.js";
 import { goldenCaseCapture, goldenCaseCaptureSchema } from "./tools/golden_case.js";
@@ -3532,6 +3541,10 @@ registerTool("health.storage", "Check local storage health.", healthStorageSchem
   healthStorage(storage)
 );
 
+registerTool("health.litellm_proxy", "Check the local LiteLLM Gemini proxy and endpoint inventory health.", healthLiteLlmProxySchema, () =>
+  healthLiteLlmProxy()
+);
+
 registerTool("storage.backups", "Inspect and prune local storage backup artifacts.", storageBackupsSchema, (input) =>
   storageBackups(storage, input)
 );
@@ -3825,6 +3838,7 @@ function normalizeOfficeOllamaEndpoint(value: string | undefined | null) {
 
 function probeOfficeLocalBackends() {
   const endpoint = normalizeOfficeOllamaEndpoint(process.env.TRICHAT_OLLAMA_URL || process.env.OLLAMA_HOST);
+  const expectedModels = ["gemma3:4b", "gemma3:12b"];
   const result = spawnSync("curl", ["-sS", "--max-time", "3", `${endpoint}/api/tags`], {
     encoding: "utf8",
     env: process.env,
@@ -3837,6 +3851,10 @@ function probeOfficeLocalBackends() {
         endpoint,
         service_ok: false,
         tags_ok: false,
+        expected_models: expectedModels,
+        available_expected_models: [],
+        missing_expected_models: expectedModels,
+        gemma_available: false,
         known_models: [],
         error: String(result.stderr || result.error?.message || "Ollama tag probe failed").trim().slice(0, 240),
       },
@@ -3854,11 +3872,17 @@ function probeOfficeLocalBackends() {
           .filter((entry) => entry.name || entry.model)
       : [];
     const knownModels = [...new Set(models.flatMap((entry) => [entry.name, entry.model]).filter(Boolean))];
+    const normalizedKnownModels = new Set(knownModels.map((entry) => entry.toLowerCase()));
+    const availableExpectedModels = expectedModels.filter((entry) => normalizedKnownModels.has(entry.toLowerCase()));
     return {
       ollama: {
         endpoint,
         service_ok: true,
         tags_ok: true,
+        expected_models: expectedModels,
+        available_expected_models: availableExpectedModels,
+        missing_expected_models: expectedModels.filter((entry) => !availableExpectedModels.includes(entry)),
+        gemma_available: availableExpectedModels.length > 0,
         known_models: knownModels,
         models,
       },
@@ -3869,6 +3893,10 @@ function probeOfficeLocalBackends() {
         endpoint,
         service_ok: true,
         tags_ok: false,
+        expected_models: expectedModels,
+        available_expected_models: [],
+        missing_expected_models: expectedModels,
+        gemma_available: false,
         known_models: [],
         error: error instanceof Error ? error.message.slice(0, 240) : String(error).slice(0, 240),
       },

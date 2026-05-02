@@ -465,7 +465,7 @@ async function openClient(tempDir, dbPath, extraEnv = {}) {
       TRICHAT_BUS_SOCKET_PATH: path.join(tempDir, "trichat.bus.sock"),
       ...extraEnv,
     }),
-    stderr: "pipe",
+    stderr: "inherit",
   });
   const client = new Client(
     { name: "mcp-desktop-control-integration-test", version: "0.1.0" },

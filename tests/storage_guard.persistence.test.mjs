@@ -415,7 +415,7 @@ async function openClient(dbPath, extraEnv) {
       ANAMNESIS_HUB_DB_PATH: dbPath,
       ...extraEnv,
     }),
-    stderr: "pipe",
+    stderr: "inherit",
   });
   const client = new Client({ name: "mcp-storage-guard-test", version: "0.1.0" }, { capabilities: {} });
   await client.connect(transport);

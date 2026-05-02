@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { z } from "zod";
 import { probeLocalOllamaBackend, setLocalOllamaModelResidency } from "../local_backend_probe.js";
+import { probeLiteLlmProxyHealth } from "../litellm_proxy_probe.js";
 import { probeLocalMlxBackend } from "../local_mlx_backend_probe.js";
 import { captureLocalHostProfile, deriveLocalExecutionBudget, isLocalHostSafeForAutonomyEval } from "../local_host_profile.js";
 import { summarizeDesktopControlState } from "../desktop_control_plane.js";
@@ -31,6 +32,13 @@ function dedupeStrings(value: unknown): string[] {
     return [];
   }
   return [...new Set(value.map((entry) => String(entry ?? "").trim()).filter(Boolean))];
+}
+
+function hasRetainedSwapHeadroom(profile: {
+  memory_available_gb: number;
+  memory_free_percent: number;
+}) {
+  return profile.memory_available_gb >= 24 && profile.memory_free_percent >= 35;
 }
 
 export const autonomyMaintainSchema = z
@@ -772,18 +780,6 @@ function buildSelfDriveCandidate(params: {
   );
   const transientResidencyAttention = rawAttention.filter(isTransientModelRouterResidencyAttention);
   const repairableAttention = rawAttention.filter((entry) => !isTransientModelRouterResidencyAttention(entry));
-  const disconnectedProviders = params.providerBridgeEntries
-    .filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "disconnected")
-    .map((entry) => ({
-      client_id: String(entry.client_id ?? "").trim(),
-      display_name: String(entry.display_name ?? "").trim() || String(entry.client_id ?? "").trim(),
-    }))
-    .filter((entry) => entry.client_id.length > 0);
-  const evalIssues = repairableAttention.filter((entry) => entry.startsWith("eval."));
-  const subsystemIssues = repairableAttention.filter((entry) => /\.(not_running|stale|error)$/.test(entry));
-  const providerIssues = repairableAttention.filter((entry) => entry.startsWith("provider.bridge."));
-  const localIssues = repairableAttention.filter((entry) => entry.startsWith("local."));
-  const topAttention = repairableAttention.slice(0, 3);
   const patientZeroEnabled = readBoolean(params.patientZeroSummary.enabled) === true;
   const patientZeroAutonomyEnabled = readBoolean(params.patientZeroSummary.autonomy_enabled) === true;
   const patientZeroObserveReady = readBoolean(params.patientZeroSummary.observe_ready) === true;
@@ -793,6 +789,28 @@ function buildSelfDriveCandidate(params: {
     patientZeroEnabled &&
     patientZeroAutonomyEnabled &&
     ((patientZeroObserveReady && patientZeroActReady) || patientZeroBrowserReady);
+  const nonBlockingExplorationAttention = patientZeroExplorationReady
+    ? repairableAttention.filter(
+        (entry) =>
+          entry.startsWith("provider.bridge.") ||
+          entry.startsWith("litellm_proxy.degraded_endpoints:")
+      )
+    : [];
+  const blockingRepairableAttention = patientZeroExplorationReady
+    ? repairableAttention.filter((entry) => !nonBlockingExplorationAttention.includes(entry))
+    : repairableAttention;
+  const disconnectedProviders = params.providerBridgeEntries
+    .filter((entry) => String(entry.status ?? "").trim().toLowerCase() === "disconnected")
+    .map((entry) => ({
+      client_id: String(entry.client_id ?? "").trim(),
+      display_name: String(entry.display_name ?? "").trim() || String(entry.client_id ?? "").trim(),
+    }))
+    .filter((entry) => entry.client_id.length > 0);
+  const evalIssues = blockingRepairableAttention.filter((entry) => entry.startsWith("eval."));
+  const subsystemIssues = blockingRepairableAttention.filter((entry) => /\.(not_running|stale|error)$/.test(entry));
+  const providerIssues = blockingRepairableAttention.filter((entry) => entry.startsWith("provider.bridge."));
+  const localIssues = blockingRepairableAttention.filter((entry) => entry.startsWith("local."));
+  const topAttention = blockingRepairableAttention.slice(0, 3);
   if (evalIssues.length > 0) {
     return {
       title: "[self-drive] Restore eval health",
@@ -846,7 +864,7 @@ function buildSelfDriveCandidate(params: {
       permission_profile: "bounded_execute",
     };
   }
-  if (repairableAttention.length <= 0 && transientResidencyAttention.length <= 0 && patientZeroExplorationReady) {
+  if (blockingRepairableAttention.length <= 0 && patientZeroExplorationReady) {
     return {
       title: "[self-drive] Explore local agentic ecosystem",
       objective:
@@ -856,6 +874,7 @@ function buildSelfDriveCandidate(params: {
       metadata: {
         attention: [],
         exploration_theme: "local-agentic-ecosystem",
+        non_blocking_attention: [...new Set([...transientResidencyAttention, ...nonBlockingExplorationAttention])],
         patient_zero_required: true,
       },
       dry_run: false,
@@ -868,7 +887,7 @@ function buildSelfDriveCandidate(params: {
       ],
     };
   }
-  if (repairableAttention.length <= 0) {
+  if (blockingRepairableAttention.length <= 0) {
     return null;
   }
   return {
@@ -1698,7 +1717,7 @@ async function executeAutonomyMaintainPass(
     ? providerBridgeDiagnostics.diagnostics
     : [];
   const providerBridgeHeartbeatEntries = providerBridgeEntries
-    .map((entry) => ({
+    .map((entry): ProviderBridgeDiagnosticSnapshotRecord => ({
       client_id: String(entry.client_id ?? "").trim(),
       display_name: String(entry.display_name ?? "").trim(),
       office_agent_id: readString(entry.office_agent_id),
@@ -1726,10 +1745,31 @@ async function executeAutonomyMaintainPass(
       notes: Array.isArray(entry.notes) ? entry.notes.map((value) => String(value ?? "")) : [],
       command: readString(entry.command),
       config_path: readString(entry.config_path),
-    } satisfies ProviderBridgeDiagnosticSnapshotRecord))
-    .filter((entry): entry is ProviderBridgeDiagnosticSnapshotRecord => entry.client_id.length > 0 && entry.display_name.length > 0);
+      metadata: Object.keys(asRecord(entry.metadata)).length > 0 ? asRecord(entry.metadata) : undefined,
+    }))
+    .filter((entry) => entry.client_id.length > 0 && entry.display_name.length > 0);
   const recentRouterSuppression = buildRecentRouterSuppressionSummary(storage);
   actions.push("provider.bridge.heartbeat");
+  try {
+    const liteLlmProxyHealth = probeLiteLlmProxyHealth({
+      timeout_ms: input.fast === true ? 1500 : 2500,
+      endpoint_audit_timeout_ms: input.fast === true ? 1500 : 2500,
+    });
+    actions.push("litellm.proxy.health");
+    if (liteLlmProxyHealth.healthy !== true) {
+      attention.push(`litellm_proxy.down:${liteLlmProxyHealth.error ?? "proxy unreachable"}`);
+    } else if (typeof liteLlmProxyHealth.unhealthy_count === "number" && liteLlmProxyHealth.unhealthy_count > 0) {
+      const degradedModels = Object.entries(liteLlmProxyHealth.unhealthy_model_region_counts ?? {})
+        .filter(([, count]) => typeof count === "number" && count > 0)
+        .map(([model, count]) => `${model}:${count}`)
+        .join(",");
+      attention.push(
+        `litellm_proxy.degraded_endpoints:${liteLlmProxyHealth.unhealthy_count}${degradedModels ? `:${degradedModels}` : ""}`
+      );
+    }
+  } catch (error) {
+    attention.push(`litellm_proxy.probe_failed:${error instanceof Error ? error.message : String(error)}`);
+  }
   const desktopControlState = storage.getDesktopControlState();
   let desktopControlHeartbeat: Record<string, unknown> | null = null;
   if (desktopControlState.enabled) {
@@ -2316,20 +2356,23 @@ async function executeAutonomyMaintainPass(
         model_id: backend.model_id,
         benchmark: probeBenchmarkDue,
       });
+      const retainedSwapHeadroom = hasRetainedSwapHeadroom(localProfile);
+      const activeSwapPressure = localProfile.swap_used_gb >= 4 && !retainedSwapHeadroom;
       const shouldUnload =
         probe.model_loaded === true &&
         (localProfile.thermal_pressure === "serious" ||
           localProfile.thermal_pressure === "critical" ||
           localProfile.memory_free_percent < 18 ||
-          localProfile.swap_used_gb >= 4);
+          activeSwapPressure);
       const shouldPrewarm =
         probe.model_loaded !== true &&
         probe.service_ok &&
         probe.model_known &&
         localProfile.health_state === "healthy" &&
-        localProfile.thermal_pressure === "nominal" &&
-        localProfile.memory_free_percent >= 28 &&
-        localProfile.swap_used_gb < 2 &&
+        localProfile.thermal_pressure !== "serious" &&
+        localProfile.thermal_pressure !== "critical" &&
+        localProfile.memory_free_percent >= 18 &&
+        (localProfile.swap_used_gb < 2 || retainedSwapHeadroom) &&
         (tmuxQueueDepth > 0 || effectiveActiveTasks > 0 || fabricQueueDepth > 0);
       if (shouldUnload || shouldPrewarm) {
         const residencyAction = await setLocalOllamaModelResidency({
@@ -2578,6 +2621,12 @@ async function executeAutonomyMaintainPass(
     attention.push(`eval.${input.eval_suite_id}.below_threshold`);
   }
   const safeForEval = runtimeWorkerActiveCount <= 0 && isLocalHostSafeForAutonomyEval(localProfile);
+  const safeForOptimizer =
+    runtimeWorkerActiveCount <= 0 &&
+    localProfile.health_state === "healthy" &&
+    localProfile.thermal_pressure !== "serious" &&
+    localProfile.thermal_pressure !== "critical" &&
+    localProfile.memory_free_percent >= 15;
 
   const learning = buildAgentLearningOverview(storage, {
     limit: 250,
@@ -2636,7 +2685,7 @@ async function executeAutonomyMaintainPass(
     optimizerPlan.selected_role_id &&
     optimizerPlan.focus_areas.length > 0 &&
     optimizerPlan.objectives.length > 0 &&
-    safeForEval &&
+    safeForOptimizer &&
     startupPass !== true;
   if (shouldRunOptimizer) {
     try {
@@ -2666,7 +2715,7 @@ async function executeAutonomyMaintainPass(
     }
   } else if (input.run_optimizer_if_due !== false && startupPass) {
     actions.push("optimizer.deferred_startup");
-  } else if (input.run_optimizer_if_due !== false && !safeForEval) {
+  } else if (input.run_optimizer_if_due !== false && !safeForOptimizer) {
     actions.push("optimizer.deferred_busy");
   }
 
@@ -2909,11 +2958,7 @@ async function executeAutonomyMaintainPass(
   }
 
   const status = await buildStatus(storage, invokeTool, input, nextState);
-  const evalReady =
-    readBoolean(asRecord(status.eval_health).healthy) === true ||
-    actions.includes("eval.deferred_busy") ||
-    actions.includes("eval.deferred_startup") ||
-    actions.includes("eval.deferred_cold_start");
+  const evalReady = readBoolean(asRecord(status.eval_health).healthy) === true;
   return {
     ok:
       readBoolean(asRecord(status.bootstrap).self_start_ready) === true &&

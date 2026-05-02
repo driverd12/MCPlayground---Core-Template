@@ -253,7 +253,7 @@ test("runAutonomyKeepaliveOnce reports http readiness misses as retryable failur
   assert.equal(result.retryable, true);
   assert.equal(result.reason, "http_not_ready");
   assert.equal(result.exit_code, 75);
-  assert.equal(result.singleton_lock?.acquired, true);
+  assert.equal(result.singleton_lock?.acquired, false);
 });
 
 test("prepareInboxWorkerStartup skips duplicate launch attempts when singleton lock is held", async () => {

@@ -4203,35 +4203,39 @@ function resolveSingleAutopilotDelegationSelection(input: {
   const sourceDelegateAgentId = normalizeConsensusAgentId(input.source_delegation_brief?.delegate_agent_id);
   const sourceTaskObjective = compactConsensusText(String(input.source_delegation_brief?.task_objective ?? ""), 800) || null;
   if (!selectedAgentId) {
+    const fallbackPreservedDelegateAgentId = preserveAutopilotLeafDelegate(
+      input.storage,
+      sourceDelegateAgentId,
+      explicitDelegateAgentId
+    );
+    const fallbackResolvedDelegateAgentId = fallbackPreservedDelegateAgentId || explicitDelegateAgentId || sourceDelegateAgentId;
+    const fallbackPreferSourceObjective = shouldPreferSourceDelegationTaskObjective({
+      resolved_delegate_agent_id: fallbackResolvedDelegateAgentId,
+      explicit_task_objective: explicitTaskObjective,
+      source_task_objective: sourceTaskObjective,
+    });
+    const fallbackPreserveSourceDetails = Boolean(fallbackPreservedDelegateAgentId) || fallbackPreferSourceObjective;
     const fallbackBrief = finalizeAutopilotDelegationBrief({
-      delegate_agent_id:
-        preserveAutopilotLeafDelegate(input.storage, sourceDelegateAgentId, explicitDelegateAgentId) ||
-        explicitDelegateAgentId ||
-        sourceDelegateAgentId ||
-        null,
-      task_objective:
-        shouldPreferSourceDelegationTaskObjective({
-          resolved_delegate_agent_id:
-            preserveAutopilotLeafDelegate(input.storage, sourceDelegateAgentId, explicitDelegateAgentId) ||
-            explicitDelegateAgentId ||
-            sourceDelegateAgentId,
-          explicit_task_objective: explicitTaskObjective,
-          source_task_objective: sourceTaskObjective,
-        })
-          ? sourceTaskObjective
-          : explicitTaskObjective || sourceTaskObjective || null,
+      delegate_agent_id: fallbackResolvedDelegateAgentId || null,
+      task_objective: fallbackPreferSourceObjective ? sourceTaskObjective : explicitTaskObjective || sourceTaskObjective || null,
       success_criteria:
-        explicitSuccessCriteria.length > 0
-          ? explicitSuccessCriteria
-          : (input.source_delegation_brief?.success_criteria ?? []),
+        fallbackPreserveSourceDetails
+          ? dedupeNonEmptyCommands([...(input.source_delegation_brief?.success_criteria ?? []), ...explicitSuccessCriteria])
+          : explicitSuccessCriteria.length > 0
+            ? explicitSuccessCriteria
+            : (input.source_delegation_brief?.success_criteria ?? []),
       evidence_requirements:
-        explicitEvidenceRequirements.length > 0
-          ? explicitEvidenceRequirements
-          : (input.source_delegation_brief?.evidence_requirements ?? []),
+        fallbackPreserveSourceDetails
+          ? dedupeNonEmptyCommands([...(input.source_delegation_brief?.evidence_requirements ?? []), ...explicitEvidenceRequirements])
+          : explicitEvidenceRequirements.length > 0
+            ? explicitEvidenceRequirements
+            : (input.source_delegation_brief?.evidence_requirements ?? []),
       rollback_notes:
-        explicitRollbackNotes.length > 0
-          ? explicitRollbackNotes
-          : (input.source_delegation_brief?.rollback_notes ?? []),
+        fallbackPreserveSourceDetails
+          ? dedupeNonEmptyCommands([...(input.source_delegation_brief?.rollback_notes ?? []), ...explicitRollbackNotes])
+          : explicitRollbackNotes.length > 0
+            ? explicitRollbackNotes
+            : (input.source_delegation_brief?.rollback_notes ?? []),
     });
     return {
       delegate_agent_id: fallbackBrief?.delegate_agent_id ?? explicitDelegateAgentId ?? null,
@@ -4255,6 +4259,7 @@ function resolveSingleAutopilotDelegationSelection(input: {
     explicit_task_objective: explicitTaskObjective,
     source_task_objective: sourceTaskObjective,
   });
+  const preserveSourceDetails = Boolean(preservedSourceDelegateAgentId) || preferredSourceObjective;
   const resolvedTaskObjective =
     (preferredSourceObjective ? sourceTaskObjective : explicitTaskObjective) ||
     sourceTaskObjective ||
@@ -4270,13 +4275,23 @@ function resolveSingleAutopilotDelegationSelection(input: {
     delegate_agent_id: inferredDelegateAgentId || null,
     task_objective: resolvedTaskObjective,
     success_criteria:
-      explicitSuccessCriteria.length > 0 ? explicitSuccessCriteria : (input.source_delegation_brief?.success_criteria ?? []),
+      preserveSourceDetails
+        ? dedupeNonEmptyCommands([...(input.source_delegation_brief?.success_criteria ?? []), ...explicitSuccessCriteria])
+        : explicitSuccessCriteria.length > 0
+          ? explicitSuccessCriteria
+          : (input.source_delegation_brief?.success_criteria ?? []),
     evidence_requirements:
-      explicitEvidenceRequirements.length > 0
-        ? explicitEvidenceRequirements
-        : (input.source_delegation_brief?.evidence_requirements ?? []),
+      preserveSourceDetails
+        ? dedupeNonEmptyCommands([...(input.source_delegation_brief?.evidence_requirements ?? []), ...explicitEvidenceRequirements])
+        : explicitEvidenceRequirements.length > 0
+          ? explicitEvidenceRequirements
+          : (input.source_delegation_brief?.evidence_requirements ?? []),
     rollback_notes:
-      explicitRollbackNotes.length > 0 ? explicitRollbackNotes : (input.source_delegation_brief?.rollback_notes ?? []),
+      preserveSourceDetails
+        ? dedupeNonEmptyCommands([...(input.source_delegation_brief?.rollback_notes ?? []), ...explicitRollbackNotes])
+        : explicitRollbackNotes.length > 0
+          ? explicitRollbackNotes
+          : (input.source_delegation_brief?.rollback_notes ?? []),
   });
   return {
     delegate_agent_id: delegationBrief?.delegate_agent_id ?? inferredDelegateAgentId ?? null,
@@ -7456,8 +7471,8 @@ function resolveAutopilotAgentPool(
   const configuredAgentIds = dedupeNonEmptyCommands(
     [
       normalizeConsensusAgentId(config.lead_agent_id),
-      ...normalizeConsensusAgentIds(config.specialist_agent_ids ?? []),
       ...bridgeReadySupportAgentIds,
+      ...normalizeConsensusAgentIds(config.specialist_agent_ids ?? []),
       ...matchedSpecialistAgentIds,
     ].filter((value): value is string => Boolean(value))
   );

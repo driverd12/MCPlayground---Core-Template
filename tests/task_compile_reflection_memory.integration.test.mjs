@@ -210,7 +210,7 @@ async function openClient(dbPath, extraEnv) {
       TRICHAT_AGENT_IDS: "",
       ...extraEnv,
     }),
-    stderr: "pipe",
+    stderr: "inherit",
   });
   const client = new Client({ name: "mcp-task-compile-reflection-test", version: "0.1.0" }, { capabilities: {} });
   await client.connect(transport);

@@ -236,7 +236,7 @@ async function openClient(extraEnv) {
     args: ["dist/server.js"],
     cwd: REPO_ROOT,
     env: inheritedEnv(extraEnv),
-    stderr: "pipe",
+    stderr: "inherit",
   });
   const client = new Client(
     { name: "mcp-trichat-tmux-controller-test", version: "0.1.0" },

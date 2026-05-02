@@ -198,11 +198,12 @@ export function resolveLocalHostHealthState(input: {
     return "degraded" as const;
   }
   const retainedSwapPressure = input.swap_used_gb >= 4 && !hasRetainedSwapHeadroom(input);
+  const highSwapPressure = input.swap_used_gb >= 8 && !hasRetainedSwapHeadroom(input);
   if (
     input.thermal_pressure === "critical" ||
     input.memory_available_gb < 4 ||
     input.memory_free_percent < 10 ||
-    input.swap_used_gb >= 8
+    highSwapPressure
   ) {
     return "degraded" as const;
   }
@@ -243,7 +244,7 @@ export function isLocalHostSafeForAutonomyEval(
   if (profile.memory_available_gb < 12 || profile.memory_free_percent < 18) {
     return false;
   }
-  if (profile.swap_used_gb >= 8) {
+  if (profile.swap_used_gb >= 8 && !hasRetainedSwapHeadroom(profile)) {
     return false;
   }
   if (profile.swap_used_gb >= 4 && !hasRetainedSwapHeadroom(profile)) {

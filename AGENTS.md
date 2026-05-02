@@ -52,7 +52,7 @@ Do not invent a second ingress path for shell, office, or external clients.
 - Sidecar prompts and replies should stay short and structured so Codex can rehydrate critique and next actions back into MCP memory instead of leaving reasoning stranded in a terminal.
 
 **Health checks (call these before assuming something is broken):**
-- `health.tools`, `health.storage`, `migration.status`
+- `health.tools`, `health.storage`, `health.litellm_proxy`, `migration.status`
 - `trichat.autopilot` `{"action":"status"}`, `trichat.tmux_controller` `{"action":"status"}`
 - `pack.hooks.list`, `trichat.summary`
 
@@ -97,6 +97,13 @@ Try in this order before escalating to remote/hosted providers:
 4. `local-imprint`
 
 Local Ollama/MLX is the cheap first-pass lane. Escalate to hosted bridges only when an objective explicitly asks for them, an explicit bridge agent override is present, or the local lane cannot meet the evidence bar.
+
+**Gemini/Gemma infrastructure:**
+- Gemini routes through the local LiteLLM proxy at `http://127.0.0.1:4000`, with config at `~/.gemini/proxy/config.yaml`.
+- The proxy is host-local and authenticated with the operator's own Google ADC/browser OAuth credentials. Do not commit project IDs, ADC JSON, API keys, or personal quota settings.
+- Current roster support expects 53 proxy endpoints total: 15 `gemini-2.5-pro`, 22 `gemini-2.5-flash`, 14 `gemini-router`, and 2 Ollama Gemma entries. `health.litellm_proxy`, `provider.bridge`, `kernel.summary`, and `office.snapshot` should report live health instead of assuming readiness.
+- LiteLLM uses usage-based routing so Gemini can cut over to another healthy region when a region is rate-limited. MASTER-MOLD observes this state only; launchd owns restarting the proxy.
+- `gemma-local` is a default roster agent backed by Ollama models `gemma3:4b` and `gemma3:12b`; show it ready only when Ollama/model probes confirm availability.
 
 **Client role boundaries:**
 - **Claude** is both an inbound MCP client and an outbound council **critic** (safety review, tradeoff analysis, counterarguments). Routed via `claude_bridge.py`.

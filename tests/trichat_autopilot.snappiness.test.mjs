@@ -87,6 +87,8 @@ test("trichat.autopilot council uses parallel asks with quorum-first finalize", 
       thread_status: "archived",
       away_mode: "normal",
       max_rounds: 1,
+      lead_agent_id: "codex",
+      specialist_agent_ids: ["cursor", "local-imprint"],
       min_success_agents: 2,
       bridge_timeout_seconds: 8,
       bridge_dry_run: false,
@@ -126,7 +128,7 @@ async function openClient(dbPath, extraEnv = {}) {
       TRICHAT_BUS_SOCKET_PATH: path.join(path.dirname(dbPath), "trichat.bus.sock"),
       ...extraEnv,
     }),
-    stderr: "pipe",
+    stderr: "inherit",
   });
   const client = new Client(
     { name: "mcp-trichat-autopilot-snappy-test", version: "0.1.0" },

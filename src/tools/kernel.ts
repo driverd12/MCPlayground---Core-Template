@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { probeLiteLlmProxyHealth, readLiteLlmProxyConfigSummary } from "../litellm_proxy_probe.js";
 import {
   evaluateFeatureFlag,
   listToolCatalogEntries,
@@ -222,6 +223,7 @@ type ModelRouterSummary = {
     backend_id: string;
     provider: ModelRouterBackendRecord["provider"];
     model_id: string;
+    endpoint: string | null;
     host_id: string | null;
     locality: ModelRouterBackendRecord["locality"];
     enabled: boolean;
@@ -242,7 +244,41 @@ type ModelRouterSummary = {
     probe_resident_expires_at: string | null;
     probe_error: string | null;
     tags: string[];
+    metadata: Record<string, unknown>;
   }>;
+};
+
+type ModelInfrastructureSummary = {
+  litellm_proxy: {
+    status: "up" | "degraded" | "down" | "unknown";
+    endpoint: string | null;
+    healthy: boolean | null;
+    degraded: boolean;
+    healthy_count: number | null;
+    unhealthy_count: number | null;
+    total_endpoint_count: number | null;
+    routing_strategy: string | null;
+    inventory_available: boolean;
+    checked_at: string | null;
+    error: string | null;
+  };
+  gemini_models: Record<
+    string,
+    {
+      backend_id: string | null;
+      endpoint: string | null;
+      region_count: number | null;
+      context_window: number | null;
+      tags: string[];
+    }
+  >;
+  gemma_local: {
+    available: boolean;
+    status: "ready" | "missing" | "unknown";
+    endpoint: string | null;
+    models: string[];
+    backend_ids: string[];
+  };
 };
 
 function routingOutlookPreferredTags(taskKind: "planning" | "coding" | "research" | "verification") {
@@ -1508,6 +1544,7 @@ function summarizeModelRouter(storage: Storage, options?: { effective_worker_fab
       backend_id: backend.backend_id,
       provider: backend.provider,
       model_id: backend.model_id,
+      endpoint: backend.endpoint,
       host_id: backend.host_id,
       locality: backend.locality,
       enabled: backend.enabled,
@@ -1550,7 +1587,158 @@ function summarizeModelRouter(storage: Storage, options?: { effective_worker_fab
           ? String(backend.capabilities.probe_error)
           : null,
       tags: backend.tags,
+      metadata: isRecord(backend.metadata) ? backend.metadata : {},
     })),
+  };
+}
+
+function readInfrastructureNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readInfrastructureBoolean(value: unknown) {
+  return typeof value === "boolean" ? value : null;
+}
+
+function readInfrastructureRecord(value: unknown) {
+  return isRecord(value) ? value : {};
+}
+
+function readInfrastructureStringList(value: unknown) {
+  return Array.isArray(value)
+    ? [...new Set(value.map((entry) => String(entry ?? "").trim()).filter(Boolean))]
+    : [];
+}
+
+function mergeModelRegionCounts(...values: Array<Record<string, unknown> | undefined>) {
+  const merged: Record<string, number> = {};
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+    for (const [key, raw] of Object.entries(value)) {
+      const model = key.trim();
+      const count = readInfrastructureNumber(raw);
+      if (!model || count === null) {
+        continue;
+      }
+      merged[model] = Math.max(merged[model] ?? 0, Math.trunc(count));
+    }
+  }
+  return merged;
+}
+
+function summarizeModelInfrastructure(params: {
+  model_router: ModelRouterSummary;
+  provider_bridge_entries: Array<Record<string, unknown>>;
+}): ModelInfrastructureSummary {
+  const geminiDiagnostic = params.provider_bridge_entries.find(
+    (entry) => String(entry.client_id ?? "").trim() === "gemini-cli"
+  );
+  const geminiMetadata = readInfrastructureRecord(geminiDiagnostic?.metadata);
+  const proxyMetadata = readInfrastructureRecord(geminiMetadata.litellm_proxy);
+  const liveProxyEnabled = String(process.env.TRICHAT_LITELLM_SUMMARY_LIVE_PROBE ?? "1").trim() !== "0";
+  const liveProxyHealth = (() => {
+    if (!liveProxyEnabled) {
+      return null;
+    }
+    try {
+      return probeLiteLlmProxyHealth({ timeout_ms: 1500, endpoint_audit_timeout_ms: 1500 });
+    } catch {
+      return null;
+    }
+  })();
+  const proxySource = liveProxyHealth ? readInfrastructureRecord(liveProxyHealth) : proxyMetadata;
+  const proxyHealthy = readInfrastructureBoolean(proxySource.healthy);
+  const proxyDegraded = proxySource.degraded === true;
+  const healthyCount = readInfrastructureNumber(proxySource.healthy_count);
+  const unhealthyCount = readInfrastructureNumber(proxySource.unhealthy_count);
+  const proxyConfigSummary = (() => {
+    try {
+      return readLiteLlmProxyConfigSummary();
+    } catch {
+      return null;
+    }
+  })();
+  const proxyStatus: ModelInfrastructureSummary["litellm_proxy"]["status"] =
+    proxyHealthy === true && (proxyDegraded || (unhealthyCount ?? 0) > 0)
+      ? "degraded"
+      : proxyHealthy === true
+        ? "up"
+        : proxyHealthy === false
+          ? "down"
+          : "unknown";
+  const googleBackends = params.model_router.backends.filter((backend) => backend.provider === "google");
+  const modelRegionCounts = mergeModelRegionCounts(
+    readInfrastructureRecord(proxySource.model_region_counts),
+    proxyConfigSummary?.model_region_counts,
+    Object.fromEntries(
+      googleBackends
+        .map((backend) => [backend.model_id, readInfrastructureNumber(backend.metadata.region_count)] as const)
+        .filter((entry): entry is readonly [string, number] => entry[1] !== null)
+    )
+  );
+  const routerProxyEndpoint = googleBackends.find((backend) => backend.endpoint)?.endpoint ?? null;
+  const routerRoutingStrategy =
+    readString(proxyConfigSummary?.routing_strategy) ??
+    googleBackends.map((backend) => readString(backend.metadata.routing_strategy)).find(Boolean) ??
+    null;
+  const regionTotalFromRouter = Object.values(modelRegionCounts).reduce((sum, count) => sum + count, 0);
+  const geminiModels: ModelInfrastructureSummary["gemini_models"] = {};
+  for (const backend of googleBackends) {
+    geminiModels[backend.model_id] = {
+      backend_id: backend.backend_id,
+      endpoint: backend.endpoint,
+      region_count: modelRegionCounts[backend.model_id] ?? readInfrastructureNumber(backend.metadata.region_count),
+      context_window: backend.context_window,
+      tags: backend.tags,
+    };
+  }
+  for (const [model, regionCount] of Object.entries(modelRegionCounts)) {
+    if (!model.startsWith("gemini") || geminiModels[model]) {
+      continue;
+    }
+    geminiModels[model] = {
+      backend_id: null,
+      endpoint: readString(proxySource.endpoint),
+      region_count: regionCount,
+      context_window: null,
+      tags: [],
+    };
+  }
+
+  const gemmaBackends = params.model_router.backends.filter((backend) => {
+    const model = backend.model_id.toLowerCase();
+    return backend.provider === "ollama" && model.startsWith("gemma");
+  });
+  const readyGemmaBackends = gemmaBackends.filter((backend) => {
+    return backend.probe_healthy === true && backend.probe_model_known !== false;
+  });
+  const gemmaModels = readyGemmaBackends.length > 0 ? readyGemmaBackends : gemmaBackends;
+  const gemmaAvailable = readyGemmaBackends.length > 0;
+
+  return {
+    litellm_proxy: {
+      status: proxyStatus,
+      endpoint: readString(proxySource.endpoint) ?? routerProxyEndpoint,
+      healthy: proxyHealthy,
+      degraded: proxyDegraded,
+      healthy_count: healthyCount,
+      unhealthy_count: unhealthyCount,
+      total_endpoint_count: readInfrastructureNumber(proxySource.total_endpoint_count) ?? (regionTotalFromRouter > 0 ? regionTotalFromRouter : null),
+      routing_strategy: readString(proxySource.routing_strategy) ?? routerRoutingStrategy,
+      inventory_available: proxySource.inventory_available === true,
+      checked_at: readString(proxySource.checked_at),
+      error: readString(proxySource.error),
+    },
+    gemini_models: geminiModels,
+    gemma_local: {
+      available: gemmaAvailable,
+      status: gemmaAvailable ? "ready" : gemmaBackends.length > 0 ? "unknown" : "missing",
+      endpoint: gemmaBackends.find((backend) => backend.endpoint)?.endpoint ?? null,
+      models: readInfrastructureStringList(gemmaModels.map((backend) => backend.model_id)),
+      backend_ids: gemmaModels.map((backend) => backend.backend_id),
+    },
   };
 }
 
@@ -2496,6 +2684,10 @@ export function kernelSummary(
       : false) ||
     ((providerBridgeAgeSeconds ?? Number.POSITIVE_INFINITY) >
       Math.max((autonomyMaintainState?.interval_seconds ?? 120) * 3, 300));
+  const modelInfrastructureSummary = summarizeModelInfrastructure({
+    model_router: modelRouterSummary,
+    provider_bridge_entries: providerBridgeEntries as Array<Record<string, unknown>>,
+  });
   const latestRouterSuppression =
     buildRecentRouterSuppressionDecisions(signalOverview.recent_router_suppression_events, { limit: 1 })[0] ?? null;
   const desktopControlState = storage.getDesktopControlState();
@@ -2913,6 +3105,12 @@ export function kernelSummary(
           0
         ),
       },
+      model_infrastructure: {
+        litellm_proxy: modelInfrastructureSummary.litellm_proxy,
+        gemini_model_count: Object.keys(modelInfrastructureSummary.gemini_models).length,
+        gemini_models: modelInfrastructureSummary.gemini_models,
+        gemma_local: modelInfrastructureSummary.gemma_local,
+      },
       eval_suites: {
         suite_count: evalSummary.suite_count,
         total_case_count: evalSummary.total_case_count,
@@ -3080,6 +3278,7 @@ export function kernelSummary(
     worker_fabric: workerFabricSummary,
     cluster_topology: clusterTopologySummary,
     model_router: modelRouterSummary,
+    model_infrastructure: modelInfrastructureSummary,
     evals: evalSummary,
     observability: observabilitySummary,
     org_programs: orgProgramSummary,

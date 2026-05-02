@@ -6,7 +6,12 @@ import { retrievalHybrid } from "./knowledge.js";
 import { mutationSchema, runIdempotentMutation } from "./mutation.js";
 import { deriveOrgProgramSignals, getEffectiveOrgProgram } from "./org_program.js";
 import { matchDomainSpecialists } from "./specialist_catalog.js";
-import { resolveSwarmProfile, summarizeMemoryPreflight, type SwarmMemoryPreflightSummary } from "./swarm_profile.js";
+import {
+  resolveSwarmProfile,
+  summarizeMemoryPreflight,
+  type SwarmMemoryPreflightSummary,
+  type SwarmProfileRecord,
+} from "./swarm_profile.js";
 
 const recordSchema = z.record(z.unknown());
 
@@ -229,6 +234,14 @@ function readMetadataRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
+function readMetadataString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function readBudgetForcingOptIn(metadata: Record<string, unknown> | undefined) {
   const experiments = readMetadataRecord(metadata?.reasoning_experiments);
   return metadata?.budget_forcing === true || experiments?.budget_forcing === true;
@@ -296,6 +309,33 @@ function readMemoryPreflightSummary(value: unknown): SwarmMemoryPreflightSummary
       })
       .slice(0, 3),
   };
+}
+
+function readSwarmProfileRecord(value: unknown): SwarmProfileRecord | null {
+  const record = readMetadataRecord(value);
+  if (!record) {
+    return null;
+  }
+  const topology = readMetadataString(record.topology);
+  const consensusMode = readMetadataString(record.consensus_mode);
+  const queenMode = readMetadataString(record.queen_mode);
+  const executionMode = readMetadataString(record.execution_mode);
+  const memoryPreflight = readMetadataRecord(record.memory_preflight);
+  const checkpointPolicy = readMetadataRecord(record.checkpoint_policy);
+  if (
+    !topology ||
+    !["hierarchical", "mesh", "ring", "star", "adaptive"].includes(topology) ||
+    !consensusMode ||
+    !["majority", "weighted", "escalating"].includes(consensusMode) ||
+    !queenMode ||
+    !["strategic", "tactical", "adaptive"].includes(queenMode) ||
+    !executionMode ||
+    !memoryPreflight ||
+    !checkpointPolicy
+  ) {
+    return null;
+  }
+  return record as unknown as SwarmProfileRecord;
 }
 
 function uniqueStrings(values: Iterable<string | null | undefined>) {
@@ -819,18 +859,20 @@ export function compileObjectivePreview(
     source_model: input.source_model,
     source_agent: input.source_agent,
   });
-  const swarmProfile = resolveSwarmProfile({
-    objective: input.objective,
-    workstreams: streams,
-    matched_domains: readMetadataStringArray(input.metadata?.matched_specialist_domains),
-    routed_bridge_agent_ids: readMetadataStringArray(input.metadata?.routed_bridge_agent_ids),
-    trichat_agent_ids: readMetadataStringArray(input.metadata?.trichat_agent_ids),
-    risk_tier: input.risk_tier ?? "medium",
-    budget: input.budget ?? {},
-    source_client: input.source_client,
-    source_model: input.source_model,
-    source_agent: input.source_agent,
-  });
+  const swarmProfile =
+    readSwarmProfileRecord(input.metadata?.swarm_profile) ??
+    resolveSwarmProfile({
+      objective: input.objective,
+      workstreams: streams,
+      matched_domains: readMetadataStringArray(input.metadata?.matched_specialist_domains),
+      routed_bridge_agent_ids: readMetadataStringArray(input.metadata?.routed_bridge_agent_ids),
+      trichat_agent_ids: readMetadataStringArray(input.metadata?.trichat_agent_ids),
+      risk_tier: input.risk_tier ?? "medium",
+      budget: input.budget ?? {},
+      source_client: input.source_client,
+      source_model: input.source_model,
+      source_agent: input.source_agent,
+    });
   const memoryPreflight =
     readMemoryPreflightSummary(input.metadata?.memory_preflight) ??
     summarizeMemoryPreflight(

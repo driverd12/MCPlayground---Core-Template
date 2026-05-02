@@ -988,6 +988,10 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
   const providerBridgeDiagnostics = asDict(providerBridge.diagnostics);
   const providerBridgeResourceGate = asDict(providerBridge.resource_gate);
   const providerEntries = asList(providerBridgeDiagnostics.diagnostics);
+  const modelInfrastructure = asDict(raw.model_infrastructure || kernel.model_infrastructure);
+  const liteLlmProxy = asDict(modelInfrastructure.litellm_proxy);
+  const geminiModels = asDict(modelInfrastructure.gemini_models);
+  const gemmaLocal = asDict(modelInfrastructure.gemma_local);
   const federationIncomingPeers = asList(federation.incoming_peers).map((entry) => asDict(entry));
   const rawDesktopControl = asDict(raw.desktop_control);
   const desktopControlSummary = asDict(kernelDesktopControl.summary || rawDesktopControl.summary);
@@ -1378,6 +1382,36 @@ export function buildOfficeGuiSnapshot(raw: Record<string, unknown>, input: { th
         unavailable_count: providerEntries.filter((entry) => String(asDict(entry).status ?? "").trim().toLowerCase() === "unavailable").length,
         resource_gate: providerBridgeResourceGate,
         latest_router_suppression: asDict(providerBridge.latest_router_suppression),
+      },
+      model_infrastructure: {
+        litellm_proxy: {
+          status: String(liteLlmProxy.status ?? "unknown"),
+          endpoint: String(liteLlmProxy.endpoint ?? "").trim() || null,
+          healthy_count: parseAnyInt(liteLlmProxy.healthy_count),
+          unhealthy_count: parseAnyInt(liteLlmProxy.unhealthy_count),
+          total_endpoint_count: parseAnyInt(liteLlmProxy.total_endpoint_count),
+          routing_strategy: String(liteLlmProxy.routing_strategy ?? "").trim() || null,
+          inventory_available: liteLlmProxy.inventory_available === true,
+        },
+        gemini_models: Object.fromEntries(
+          Object.entries(geminiModels).map(([model, value]) => {
+            const entry = asDict(value);
+            return [
+              model,
+              {
+                region_count: parseAnyInt(entry.region_count),
+                endpoint: String(entry.endpoint ?? "").trim() || null,
+                backend_id: String(entry.backend_id ?? "").trim() || null,
+              },
+            ];
+          })
+        ),
+        gemma_local: {
+          available: gemmaLocal.available === true,
+          status: String(gemmaLocal.status ?? "unknown"),
+          endpoint: String(gemmaLocal.endpoint ?? "").trim() || null,
+          models: asList(gemmaLocal.models).map((entry) => String(entry ?? "").trim()).filter(Boolean),
+        },
       },
       desktop_control: {
         enabled: Boolean(desktopControlSummary.enabled),
