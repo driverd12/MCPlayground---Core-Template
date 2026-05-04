@@ -2,6 +2,8 @@
 
 GitHub repo: [driverd12/MASTER-MOLD](https://github.com/driverd12/MASTER-MOLD)
 
+Claude-first setup: [Coworker Claude Federation Handoff](./COWORKER_CLAUDE_FEDERATION_HANDOFF.md).
+
 ## 1. Install and Build
 
 ```bash
