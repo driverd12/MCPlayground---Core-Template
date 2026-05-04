@@ -89,13 +89,15 @@ Gemini routes through a per-workstation LiteLLM proxy for keyless auth and regio
 
 **Available models through the proxy:**
 
-| Model Name | Backend | Failover Regions |
+| Model Name | Backend | Region / endpoint coverage |
 |---|---|---|
-| `gemini-2.5-pro` | Vertex AI | us-central1, europe-west4 |
-| `gemini-2.5-flash` | Vertex AI | us-central1, europe-west4, asia-southeast1 |
-| `gemini-router` | Vertex AI (2.5 Flash) | us-central1, europe-west4, asia-southeast1 |
+| `gemini-2.5-pro` | Vertex AI | 15 configured regions |
+| `gemini-2.5-flash` | Vertex AI | 22 configured regions |
+| `gemini-router` | Vertex AI (2.5 Flash) | 14 configured regions |
 | `gemma-local-4b` | Ollama (Apple Silicon) | local |
 | `gemma-local-12b` | Ollama (Apple Silicon) | local |
+
+MASTER-MOLD expects 53 configured LiteLLM entries total on this host: 51 Vertex AI Gemini endpoints plus 2 local Ollama Gemma endpoints. The exact operator project, ADC credential file, and local proxy config stay outside the repo.
 
 **Gemma Local** is a sibling agent in the roster (`gemma-local`), providing zero-latency first-pass inference on Apple Silicon via Ollama. The ring leader can route bounded tasks to Gemma when speed matters more than frontier capability.
 
@@ -106,11 +108,16 @@ Gemini routes through a per-workstation LiteLLM proxy for keyless auth and regio
 Run these tools to verify environment readiness:
 1. `health.tools`
 2. `health.storage`
-3. `migration.status`
-4. `pack.hooks.list`
-5. `trichat.summary`
+3. `health.litellm_proxy`
+4. `provider.bridge`
+5. `kernel.summary`
+6. `office.snapshot`
+7. `migration.status`
+8. `pack.hooks.list`
+9. `trichat.summary`
 
-Verify proxy health: `curl -s http://127.0.0.1:4000/health | python3 -m json.tool`
+Verify proxy readiness: `curl -s http://127.0.0.1:4000/health/readiness | python3 -m json.tool`
+Verify full endpoint inventory: `curl -s http://127.0.0.1:4000/health | python3 -m json.tool`
 
 ## Breadcrumbs
 
@@ -118,4 +125,4 @@ Verify proxy health: `curl -s http://127.0.0.1:4000/health | python3 -m json.too
 - See `README.md` for high-level project overview.
 - See `docs/COWORKER_QUICKSTART_CURSOR_CODEX.md` for environment setup.
 - See `~/.gemini/proxy/config.yaml` for LiteLLM proxy model routing.
-- See `config/trichat_agents.json` for the full agent roster (now 16 agents including Gemma Local).
+- See `config/trichat_agents.json` for the full agent roster (currently 14 agents including Gemma Local).
